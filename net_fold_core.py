@@ -1,0 +1,161 @@
+"""
+Core engine for folding a polygonal net into a 3D solid.
+
+Model:
+- A "Net" is a set of flat polygonal faces defined in 2D "net space".
+- Faces that share an edge (matching endpoint coordinates) are glued.
+- The glue graph must be a TREE (no cycles) -- that's what makes a valid net.
+- Folding = walk the tree from a root face; at each hinge, rotate the
+  entire subtree beyond that hinge around the 3D line of the shared edge.
+"""
+
+import numpy as np
+from itertools import combinations
+from collections import defaultdict, deque
+
+TOL = 1e-6
+
+
+class Net:
+    def __init__(self):
+        self.faces = {}      # face_id -> list of 2D np.array points (ordered polygon)
+        self._next_id = 0
+
+    def add_face(self, points2d):
+        fid = self._next_id
+        self.faces[fid] = [np.array(p, dtype=float) for p in points2d]
+        self._next_id += 1
+        return fid
+
+    def find_shared_edges(self):
+        """Return list of (faceA, iA, faceB, iB): edge iA of A (verts iA,iA+1)
+        matches edge iB of B (possibly reversed)."""
+        found = []
+        ids = list(self.faces.keys())
+        for a, b in combinations(ids, 2):
+            pa, pb = self.faces[a], self.faces[b]
+            for i in range(len(pa)):
+                p1, p2 = pa[i], pa[(i + 1) % len(pa)]
+                for j in range(len(pb)):
+                    q1, q2 = pb[j], pb[(j + 1) % len(pb)]
+                    same = np.allclose(p1, q1, atol=TOL) and np.allclose(p2, q2, atol=TOL)
+                    rev = np.allclose(p1, q2, atol=TOL) and np.allclose(p2, q1, atol=TOL)
+                    if same or rev:
+                        found.append((a, i, b, j))
+        return found
+
+    def build_tree(self, root=None):
+        """Build a spanning tree of the glue graph via BFS.
+        Returns (root, list of hinges), each hinge =
+        dict(parent, child, parent_edge_idx, child_edge_idx)."""
+        edges = self.find_shared_edges()
+        adj = defaultdict(list)
+        for (a, i, b, j) in edges:
+            adj[a].append((b, i, j))
+            adj[b].append((a, j, i))
+
+        if root is None:
+            root = next(iter(self.faces))
+
+        visited = {root}
+        hinges = []
+        q = deque([root])
+        while q:
+            node = q.popleft()
+            for (nbr, my_idx, nbr_idx) in adj[node]:
+                if nbr not in visited:
+                    visited.add(nbr)
+                    hinges.append(dict(parent=node, child=nbr,
+                                        parent_edge_idx=my_idx, child_edge_idx=nbr_idx))
+                    q.append(nbr)
+
+        unreached = set(self.faces) - visited
+        if unreached:
+            raise ValueError(f"Net is disconnected or has a cycle; "
+                              f"faces {unreached} unreachable from root {root}.")
+        return root, hinges
+
+
+def rotate_points(points, axis_point, axis_dir, angle):
+    """Rotate an (N,3) array of points by `angle` radians around the 3D line
+    through axis_point with direction axis_dir (Rodrigues' formula)."""
+    axis_dir = axis_dir / np.linalg.norm(axis_dir)
+    K = np.array([[0, -axis_dir[2], axis_dir[1]],
+                  [axis_dir[2], 0, -axis_dir[0]],
+                  [-axis_dir[1], axis_dir[0], 0]])
+    R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+    return (points - axis_point) @ R.T + axis_point
+
+
+def subtree_members(root, hinges, node):
+    """All face ids in the subtree rooted at `node` (inclusive)."""
+    children = defaultdict(list)
+    for h in hinges:
+        children[h["parent"]].append(h["child"])
+    members = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        members.append(n)
+        stack.extend(children[n])
+    return members
+
+
+def fold(net, root, hinges, fold_angles, t, fold_signs=None):
+    """Return dict face_id -> (N,3) np.array of folded 3D coordinates,
+    at fold progress t in [0, 1].
+
+    fold_angles: dict child_face_id -> target rotation-from-flat, radians
+                 (e.g. pi/2 for a right-angle fold like a cube).
+    fold_signs:  optional dict child_face_id -> +1/-1 to flip fold direction.
+    """
+    fold_signs = fold_signs or {}
+    verts3d = {fid: np.array([[x, y, 0.0] for x, y in pts])
+               for fid, pts in net.faces.items()}
+
+    # BFS order guarantees a parent is fully positioned before its hinge is used
+    for h in hinges:
+        parent, child = h["parent"], h["child"]
+        pi = h["parent_edge_idx"]
+        pts_parent = net.faces[parent]
+        p1_local, p2_local = pts_parent[pi], pts_parent[(pi + 1) % len(pts_parent)]
+
+        # find those same two points in the parent's CURRENT (already-rotated) coords
+        # by matching against the parent's original 2D layout order/index.
+        axis_p1 = verts3d[parent][pi]
+        axis_p2 = verts3d[parent][(pi + 1) % len(pts_parent)]
+
+        sign = fold_signs.get(child, 1)
+        angle = fold_angles.get(child, np.pi / 2) * t * sign
+
+        for fid in subtree_members(root, hinges, child):
+            verts3d[fid] = rotate_points(verts3d[fid], axis_p1, axis_p2 - axis_p1, angle)
+
+    return verts3d
+
+
+# ---------------------------------------------------------------------------
+# Quick self-test: unfolded cube (cross-shaped net) should close into a cube
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    net = Net()
+    s = 1.0
+    # 6 unit squares in a cross layout
+    def sq(x0, y0):
+        return [(x0, y0), (x0 + s, y0), (x0 + s, y0 + s), (x0, y0 + s)]
+
+    bottom = net.add_face(sq(0, 0))
+    front  = net.add_face(sq(0, s))
+    top    = net.add_face(sq(0, 2 * s))
+    back   = net.add_face(sq(0, 3 * s))
+    left   = net.add_face(sq(-s, s))
+    right  = net.add_face(sq(s, s))
+
+    root, hinges = net.build_tree(root=front)
+    print("hinges:", hinges)
+
+    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
+    verts = fold(net, root, hinges, fold_angles, t=1.0)
+
+    for fid, pts in verts.items():
+        print(fid, np.round(pts, 3).tolist())
