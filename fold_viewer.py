@@ -1,62 +1,105 @@
 """
-Interactive viewer: drag a slider to fold a net from flat (t=0) to
-fully folded (t=1). Run this locally (needs a GUI backend, e.g. TkAgg/Qt5Agg).
+Interactive net-folding viewer with a dropdown to pick from .txt net files
+in the nets/ folder (5 Platonic solids included), plus a slider to fold
+from flat (0%) to fully closed (100%).
 
     python fold_viewer.py
+
+Add your own nets by dropping a new .txt file (same format, see any file
+in nets/ for reference) into the nets/ folder -- it'll show up in the
+dropdown automatically.
 """
+import os
+import glob
+import tkinter as tk
+from tkinter import ttk
+
 import numpy as np
+import matplotlib
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from net_fold_core import Net, fold
+from net_io import load_net_txt
+from net_fold_core import fold
+
+NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nets")
 
 
-def build_cube_net():
-    net = Net()
-    s = 1.0
+class FoldViewerApp:
+    def __init__(self, root):
+        self.root = root
+        root.title("Net Folder")
+        root.geometry("800x800")
 
-    def sq(x0, y0):
-        return [(x0, y0), (x0 + s, y0), (x0 + s, y0 + s), (x0, y0 + s)]
+        top = ttk.Frame(root, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
 
-    bottom = net.add_face(sq(0, 0))
-    front  = net.add_face(sq(0, s))
-    top    = net.add_face(sq(0, 2 * s))
-    back   = net.add_face(sq(0, 3 * s))
-    left   = net.add_face(sq(-s, s))
-    right  = net.add_face(sq(s, s))
+        ttk.Label(top, text="Net:").pack(side=tk.LEFT, padx=(0, 6))
+        self.net_files = self._scan_nets()
+        self.combo = ttk.Combobox(top, values=list(self.net_files.keys()),
+                                   state="readonly", width=30)
+        self.combo.pack(side=tk.LEFT)
+        self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
-    root, hinges = net.build_tree(root=front)
-    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    return net, root, hinges, fold_angles
+        self.fig = plt.figure(figsize=(6, 6))
+        self.ax = self.fig.add_subplot(111, projection="3d")
+        self.canvas = FigureCanvasTkAgg(self.fig, master=root)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        bottom = ttk.Frame(root, padding=8)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(bottom, text="Fold:").pack(side=tk.LEFT, padx=(0, 6))
+        self.slider = ttk.Scale(bottom, from_=0, to=100, orient=tk.HORIZONTAL,
+                                 command=self.on_slider)
+        self.slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.net = self.root_face = self.hinges = self.fold_angles = None
+        if self.net_files:
+            self.combo.current(0)
+            self.on_select_net()
+
+    def _scan_nets(self):
+        files = sorted(glob.glob(os.path.join(NETS_DIR, "*.txt")))
+        result = {}
+        for path in files:
+            label = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
+            result[label] = path
+        return result
+
+    def on_select_net(self, event=None):
+        path = self.net_files[self.combo.get()]
+        self.net, self.root_face, self.hinges, self.fold_angles, _ = load_net_txt(path)
+        self.colors = plt.cm.Set2(np.linspace(0, 1, len(self.net.faces)))
+        self.slider.set(0)
+        self.draw(0.0)
+
+    def on_slider(self, value):
+        if self.net is not None:
+            self.draw(float(value) / 100.0)
+
+    def draw(self, t):
+        self.ax.cla()
+        verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, t)
+        all_pts = np.vstack(list(verts.values()))
+        for (fid, pts), color in zip(verts.items(), self.colors):
+            poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
+            self.ax.add_collection3d(poly)
+        lo, hi = all_pts.min(), all_pts.max()
+        pad = (hi - lo) * 0.1 + 1e-6
+        self.ax.set_xlim(lo - pad, hi + pad)
+        self.ax.set_ylim(lo - pad, hi + pad)
+        self.ax.set_zlim(lo - pad, hi + pad)
+        self.ax.set_box_aspect([1, 1, 1])
+        self.ax.set_title(f"{self.combo.get()}  (fold {t*100:.0f}%)")
+        self.canvas.draw_idle()
 
 
 def main():
-    net, root, hinges, fold_angles = build_cube_net()
-
-    fig = plt.figure(figsize=(7, 7))
-    ax = fig.add_subplot(111, projection="3d")
-    plt.subplots_adjust(bottom=0.15)
-
-    colors = plt.cm.Set2(np.linspace(0, 1, len(net.faces)))
-
-    def draw(t):
-        ax.cla()
-        verts = fold(net, root, hinges, fold_angles, t)
-        for (fid, pts), color in zip(verts.items(), colors):
-            poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
-            ax.add_collection3d(poly)
-        ax.set_xlim(-1.5, 2.5); ax.set_ylim(-0.5, 3.5); ax.set_zlim(-2, 1.5)
-        ax.set_box_aspect([1, 1, 1])
-        ax.set_title(f"fold t = {t:.2f}")
-        fig.canvas.draw_idle()
-
-    ax_slider = plt.axes([0.2, 0.03, 0.6, 0.03])
-    slider = Slider(ax_slider, "fold", 0.0, 1.0, valinit=0.0)
-    slider.on_changed(draw)
-
-    draw(0.0)
-    plt.show()
+    root = tk.Tk()
+    app = FoldViewerApp(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
