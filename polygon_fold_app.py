@@ -1,14 +1,16 @@
 """
-Interactive net-folding viewer with a dropdown to pick from .txt net files
-in the nets/ folder (5 Platonic solids included), plus a slider to fold
-from flat (0%) to fully closed (100%).
+Interactive polyhedron-net folding app: a dropdown to pick from .poly net
+files in the nets/ folder (5 Platonic solids included), plus a slider to
+fold from flat (0%) to fully closed (100%).
 
-    python fold_viewer.py
+    python polygon_fold_app.py
 
 Add your own nets by dropping a new .poly file (see polyhedron_spec.py for
 the format, or any file in nets/ for reference) into the nets/ folder --
 it'll show up in the dropdown automatically. Legacy .txt files with explicit
 coordinates and fold angles (see net_io.load_net_txt) are also supported.
+Run build_fold_cache.py after adding/editing a .poly file to avoid solving
+it on first load.
 """
 import os
 import glob
@@ -22,12 +24,12 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from netfold import load_net, fold
+from net_fold_utils import load_net, fold
 
 NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nets")
 
 
-class FoldViewerApp:
+class PolygonFoldApp:
     def __init__(self, root):
         self.root = root
         root.title("Net Folder")
@@ -99,7 +101,7 @@ class FoldViewerApp:
 
 def main():
     root = tk.Tk()
-    app = FoldViewerApp(root)
+    app = PolygonFoldApp(root)
     root.mainloop()
 
 

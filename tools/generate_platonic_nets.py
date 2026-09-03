@@ -9,10 +9,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from netfold.solid_coords import SOLIDS
-from netfold.hull_to_spec import polyhedron_from_vertices
-from netfold.spanning_tree import split_spanning_tree
-from netfold.polyhedron_spec import write_polyhedron_spec
+from net_fold_utils.solid_coords import SOLIDS
+from net_fold_utils.hull_to_spec import polyhedron_from_vertices
+from net_fold_utils.spanning_tree import split_spanning_tree
+from net_fold_utils.polyhedron_spec import write_polyhedron_spec
 
 NETS_DIR = os.path.join(os.path.dirname(__file__), "..", "nets")
 
