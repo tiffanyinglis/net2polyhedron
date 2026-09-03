@@ -30,13 +30,37 @@ angle" concept to derive at all. JSON shape:
       ]
     }
 
-Each face is a CCW loop of vertex ids (ints, 0..N-1, referenced -- not
-separately declared; N is inferred as 1 + the largest id used). For a
-valid closed 2-manifold, every directed edge (v, w) appearing in some
-face's loop must be matched by exactly one other face's loop containing
-the reverse directed edge (w, v) -- same orientation convention as the
-rest of this project (net_layout.py: a shared edge is traversed in
-opposite directions by its two faces).
+WINDING CONVENTION: each face is a loop of vertex ids (ints, 0..N-1,
+referenced -- not separately declared; N is inferred as 1 + the largest
+id used) listed COUNTERCLOCKWISE as seen from OUTSIDE the finished
+solid -- the same convention as net_layout.py / polygon_geom.py (and,
+transitively, hull_to_spec.py's own CCW-outward face loops, which is
+where tools/generate_stretchy_platonic_nets.py's faces come from
+directly). Concretely, this means: for any edge (v, w) shared by two
+faces, one face's loop contains it as v -> w and the other's contains
+it as w -> v -- never the same direction twice. load_stretchy_mesh
+checks exactly that (every directed edge matched by exactly one reverse
+partner in some other face) and raises a clear error naming the
+offending edge(s) if it's violated, so a face listed backwards relative
+to its neighbors is caught immediately, before ever reaching the solver.
+
+That check alone can't catch every possible mistake, though: flipping
+EVERY face at once (a full mirror image) is just as valid a loop
+structure as the original -- reversing one face by itself is what
+breaks it, and that's what gets caught. A subtler problem can still
+reach the solver even so: solve_wireframe's plain edge-length fit has
+many solutions for a well-connected mesh, and some of them fold one
+face inside-out relative to the rest even though the abstract loops are
+perfectly consistent -- the exact same "collapsed branch" issue
+fold_solver._is_embeddable guards against for the rigid pipeline (see
+its docstring). solve_wireframe checks for this too (see
+_is_orientation_consistent) and specifically searches for a consistent
+embedding rather than accepting the first thing that satisfies the edge
+lengths; if it truly can't find one after many attempts, it raises
+ValueError with a suggestion to double check face winding -- and
+build_stretchy_cache.py surfaces that error per-net rather than caching
+a bad (or, as observed for two_pentagons_and_a_square.json before this
+check existed, suspiciously flat and uninflated) result.
 
 solve_wireframe() then finds SOME 3D position for every vertex that
 keeps every edge close to unit length, without requiring individual
@@ -68,7 +92,7 @@ EDGE_LENGTH = 1.0
 # Without this, stretchy_cache/ would keep silently serving results from
 # a since-replaced algorithm (e.g. pre-inflation, tangled/skewed ones)
 # forever, since its checksum only ever tracked the *source* .json.
-ALGORITHM_VERSION = 2
+ALGORITHM_VERSION = 5
 
 
 def _face_edges(face):
@@ -199,6 +223,40 @@ def _residual(flat, edge_ai, edge_bi, faces, idx, edge_length,
     return np.concatenate(parts)
 
 
+def _orientation_signs(pts, faces, idx):
+    """Sign of each face's own normal relative to "pointing outward from
+    the mesh's overall centroid" -- +1 or -1, or 0 for a degenerate face
+    (its first 3 points ~collinear, or coincident with the centroid).
+    For a genuinely embedded (non-self-intersecting) realization of a
+    consistently-oriented mesh (see this module's docstring: CCW as seen
+    from outside, matching every neighbor), every face agrees -- all +1
+    or all -1, an arbitrary global mirror choice that doesn't matter
+    either way. A MIX means this particular solution folds through
+    itself somewhere -- some face ended up facing inward relative to
+    the rest -- the exact "collapsed branch" phenomenon
+    fold_solver._is_embeddable guards against for the rigid pipeline
+    (see its module docstring): edge-length equations alone often admit
+    a smaller, self-intersecting solution alongside the intended one,
+    and nothing about a plain edge-length fit prefers the real one."""
+    centroid = pts.mean(axis=0)
+    signs = []
+    for face in faces:
+        face_pts = pts[[idx[v] for v in face]]
+        normal = np.cross(face_pts[1] - face_pts[0], face_pts[2] - face_pts[0])
+        normal_len = np.linalg.norm(normal)
+        outward = face_pts.mean(axis=0) - centroid
+        outward_len = np.linalg.norm(outward)
+        if normal_len < 1e-9 or outward_len < 1e-9:
+            signs.append(0)
+        else:
+            signs.append(float(np.sign(np.dot(normal / normal_len, outward / outward_len))))
+    return signs
+
+
+def _is_orientation_consistent(pts, faces, idx):
+    return len({s for s in _orientation_signs(pts, faces, idx) if s != 0}) <= 1
+
+
 def _min_pairwise_separation(pts):
     d = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
     np.fill_diagonal(d, np.inf)
@@ -215,6 +273,17 @@ def _overall_3d_extent(pts):
 CONVERGE_TOL = 1e-4  # max |edge length error| to call a plain edge-length solve "converged"
 STRETCH_CAP = 0.08  # max |edge length error| _inflate will tolerate before backing off
 MIN_3D_EXTENT = 0.1  # fraction of edge_length; below this, call the whole result "flat"
+
+# fraction of edge_length; a final result with two DISTINCT (non-shared)
+# vertices closer than this is rejected as degenerate even if
+# _is_orientation_consistent didn't happen to flag it -- that check only
+# looks at face-normal signs, so it's blind to two unrelated vertices
+# landing on (almost) the same point, which _mesh_volume's pressure term
+# has no reason to prevent on its own (observed empirically: two
+# non-adjacent vertices of a pentagons-and-square candidate collapsing
+# to within 1e-8 of each other, in an otherwise orientation-consistent,
+# nicely-inflated-looking result).
+MIN_SEPARATION_FRACTION = 0.15
 
 # A gradually increasing "pressure" -- each weight is tried as a small
 # step up from the last, not from scratch (see _inflate), so the mesh
@@ -262,12 +331,27 @@ def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length):
     conditioned) or all at once at full strength, this same term makes
     least_squares fail to converge at all rather than inflate cleanly
     (verified empirically -- see tests/test_stretchy_mesh.py). A step is
-    only kept if it stays within STRETCH_CAP of exact edge length;
-    the first step that would overshoot that just stops the ramp early
-    and keeps the last good result, rather than fighting an topology
-    that genuinely can't hold much pressure (e.g.
+    only kept if it stays within STRETCH_CAP of exact edge length; the
+    first step that would overshoot that just stops the ramp early and
+    keeps the last good result, rather than fighting a topology that
+    genuinely can't hold much pressure (e.g.
     stretchy_nets/two_pentagons_and_a_square.json) into a badly
     stretched mess.
+
+    Deliberately NOT gated on orientation consistency
+    (_is_orientation_consistent) at each individual step, even though
+    the caller cares about the FINAL result being consistent: tried that
+    first, and it made things worse, not better. For the icosahedron
+    specifically, the ramp reliably passes through a couple of
+    genuinely inconsistent intermediate weights before self-correcting
+    at higher pressure (e.g. steps at weight 0.1-0.4 come out
+    inconsistent, then 0.8 onward are all fine) -- stopping the ramp at
+    the first inconsistent step, as an earlier version of this function
+    did, meant it could never reach the weight where it actually
+    recovers. Consistency is instead only checked on the ramp's final
+    output, by the caller (solve_wireframe): if THAT isn't consistent,
+    the fix is to retry from a different stage-1 starting point
+    entirely, not to second-guess individual steps of this one.
 
     Returns (pts, edge_stretch, inflation_weight) -- the last of which
     the caller can reuse as-is for a final planarity pass, so that pass
@@ -289,41 +373,93 @@ def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length):
     return cur, cur_err, weight_used
 
 
-def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=5):
+MAX_ORIENTATION_ATTEMPTS = 60  # hard cap on stage-1 restarts spent seeking a usable one
+CANDIDATES_PER_ROUND = 8  # how many stage-1 starts to try inflating before giving up a round
+
+
+def _inflate_from(pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges):
+    """Run _inflate from one stage-1 starting point, then (if it
+    inflated at all) a light final planarity pass at the same pressure.
+    Returns (pts, edge_stretch, weight_reached) -- weight_reached is 0.0
+    if the very first pressure step was already rejected (see _inflate),
+    meaning this start never actually inflated."""
+    pts, residual, weight = _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length)
+    if weight:
+        target = _sphere_bound_volume(faces, edge_length)
+        sol = least_squares(_residual, pts.flatten(),
+                             args=(edge_ai, edge_bi, faces, idx, edge_length,
+                                   weight, target, PLANARITY_WEIGHT))
+        polished = sol.x.reshape(-1, 3)
+        err = _edge_stretch(sol.fun, n_edges)
+        if (err < STRETCH_CAP and _overall_3d_extent(polished) > MIN_3D_EXTENT * edge_length
+                and _is_orientation_consistent(polished, faces, idx)):
+            pts, residual = polished, err
+    return pts, residual, weight
+
+
+def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATES_PER_ROUND):
     """Find 3D positions for every vertex that make every mesh edge as
     close to `edge_length` as possible, inflated into a rounded, convex-
     ish shape rather than left as whatever arbitrary (possibly tangled,
-    possibly skewed) configuration a plain edge-length fit first finds.
+    possibly skewed, possibly self-intersecting) configuration a plain
+    edge-length fit first finds.
 
-    Two stages:
+    Two stages, retried over random stage-1 starts, one at a time, until
+    one actually works (see below for why it can take more than one):
 
-    1. Edge-length-only relaxation from a few random 3D starting
-       guesses (the system is underdetermined -- 3 coords x N vertices,
-       minus 6 for overall rotation/translation, usually well over the
-       number of edges -- so many valid solutions exist; which one
-       barely matters, since _inflate reliably rounds any of them out
-       to essentially the same result -- see below). The one with the
-       lowest edge-length error is kept.
-    2. _inflate (see its docstring): ramps up an outward "pressure"
-       term against the edge-length constraint until either it plateaus
-       or edge stretch would exceed STRETCH_CAP, then a final light
-       planarity pass (PLANARITY_WEIGHT) tidies up individual faces
-       without relaxing the pressure back down. Kept only if it's still
-       genuinely spatial (not collapsed flat) and within STRETCH_CAP;
-       otherwise falls back to the pre-planarity inflated result.
+    1. Edge-length-only relaxation from a random 3D starting guess (the
+       system is underdetermined -- 3 coords x N vertices, minus 6 for
+       overall rotation/translation, usually well over the number of
+       edges -- so many valid solutions exist).
+    2. _inflate (see its docstring) from that starting point, then a
+       light final planarity pass (PLANARITY_WEIGHT) at the same
+       pressure, kept only if it stays within STRETCH_CAP, genuinely
+       spatial (not collapsed flat), and orientation-consistent (see
+       _is_orientation_consistent). The overall result of stage 2 is
+       accepted as final only if it clears all of that AND has no two
+       DISTINCT vertices closer than MIN_SEPARATION_FRACTION *
+       edge_length -- orientation-consistency alone doesn't rule out two
+       unrelated vertices landing on (almost) the same point, which
+       _mesh_volume's pressure term has no particular reason to avoid
+       on its own.
 
-    Empirically (tests/test_stretchy_mesh.py), _inflate is a far more
-    reliable untangler than picking among many random restarts ever was
-    on its own: even deliberately picking a BADLY tangled stage-1 start
-    (minimum vertex separation as low as ~0.05 * edge_length, no
-    cherry-picking), the dodecahedron's 20 vertices / 30 edges
-    consistently inflate to the same ~1.03 * edge_length separation --
-    its true minimum (verified: no two vertices of a real unit-edge
-    dodecahedron are ever closer than one edge length) is 1.0, so this
-    is a genuinely untangled, close to fully regular embedding. That
-    means solve_wireframe no longer needs many top-level retries the
-    way it once did; n_restarts stays small and mostly guards against a
-    single unlucky stage-1 restart, not against a bad inflation.
+    Whether a given stage-1 start ends up producing a genuinely
+    inflated, non-self-intersecting result varies, in ways that aren't
+    safe to predict from the start alone, which is why this tries them
+    one at a time (up to MAX_ORIENTATION_ATTEMPTS total, in batches of
+    CANDIDATES_PER_ROUND before pausing to reconsider) and stops at the
+    FIRST one that succeeds, rather than picking one stage-1 candidate
+    up front by some simpler heuristic and committing to it -- or,
+    conversely, exhaustively comparing many successes against each
+    other, which repeated testing showed rarely helps (once a mesh
+    inflates at all, essentially every successful attempt lands on the
+    same result -- see tests/test_stretchy_mesh.py) and was, for a
+    slower mesh like the dodecahedron, a lot of wasted computation:
+
+    - Plain edge-length fitting has no opinion at all about orientation,
+      so a random stage-1 start is often already self-intersecting --
+      one face folded inside-out relative to the rest. That's NOT
+      automatically a lost cause, though: for a well-connected mesh like
+      the dodecahedron (20 vertices, 30 edges), _inflate's very first,
+      gentle pressure step reliably resolves it into a fully consistent,
+      well-separated shape regardless -- inflating IS the untangling
+      mechanism there, so requiring an already-consistent stage-1 start
+      would just throw away perfectly good candidates for no benefit
+      (and did, in an earlier version of this function).
+    - But for other meshes -- stretchy_nets/two_pentagons_and_a_square.json
+      is the sharpest example -- a stage-1 start can be a "fragile"
+      orientation-consistent embedding that _inflate's very first
+      pressure step immediately flips right back out of, backing off to
+      zero inflation for that particular start even though the mesh
+      overall clearly CAN inflate (observed empirically: roughly half of
+      even the already-consistent starting points get stuck this way,
+      while the others reliably reach the same well-inflated result). No
+      amount of retrying with the SAME start fixes this -- it needs a
+      different one, hence trying several.
+
+    If MAX_ORIENTATION_ATTEMPTS is exhausted with no success at all, it
+    raises ValueError rather than silently returning a self-intersecting
+    mess -- see the message for what to check.
 
     Returns (positions, stats): positions is {vertex_id: np.array([x, y,
     z])}, stats has "max_stretch_pct" and "rms_stretch_pct" (how far the
@@ -338,28 +474,42 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=5):
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
     n_edges = len(edges)
 
-    # -- stage 1: edge lengths only, a few random restarts --
     rng = np.random.default_rng(seed)
-    best = None
-    for _ in range(n_restarts):
-        x0 = rng.normal(scale=edge_length, size=3 * n)
-        sol = least_squares(_residual, x0, args=(edge_ai, edge_bi, faces, idx, edge_length))
-        err = _edge_stretch(sol.fun, n_edges)
-        if best is None or err < best[0]:
-            best = (err, sol.x.reshape(-1, 3))
-    _, pts = best
+    best = None  # (pts, residual)
+    attempted = 0
+    budget = n_restarts
+    while best is None and attempted < MAX_ORIENTATION_ATTEMPTS:
+        for _ in range(min(budget, MAX_ORIENTATION_ATTEMPTS - attempted)):
+            x0 = rng.normal(scale=edge_length, size=3 * n)
+            sol = least_squares(_residual, x0, args=(edge_ai, edge_bi, faces, idx, edge_length))
+            pts0 = sol.x.reshape(-1, 3)
+            attempted += 1
 
-    # -- stage 2: inflate, then a light planarity polish at the same pressure --
-    pts, residual, weight = _inflate(pts, faces, edge_ai, edge_bi, idx, edge_length)
-    if weight:
-        target = _sphere_bound_volume(faces, edge_length)
-        sol = least_squares(_residual, pts.flatten(),
-                             args=(edge_ai, edge_bi, faces, idx, edge_length,
-                                   weight, target, PLANARITY_WEIGHT))
-        polished = sol.x.reshape(-1, 3)
-        err = _edge_stretch(sol.fun, n_edges)
-        if err < STRETCH_CAP and _overall_3d_extent(polished) > MIN_3D_EXTENT * edge_length:
-            pts, residual = polished, err
+            pts, residual, weight = _inflate_from(
+                pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges)
+            if (weight and _is_orientation_consistent(pts, faces, idx)
+                    and _min_pairwise_separation(pts) > MIN_SEPARATION_FRACTION * edge_length):
+                # the first success is kept as-is, not compared against
+                # further candidates: repeated runs land on essentially
+                # the same result once one succeeds at all (see
+                # docstring), so searching further just costs time for
+                # no real gain -- stop immediately.
+                best = (pts, residual)
+                break
+        budget *= 2
+
+    if best is None:
+        raise ValueError(
+            f"could not find a non-self-intersecting, inflatable embedding in {attempted} "
+            f"attempts: every candidate either folded a face inside-out relative to the "
+            f"others (see _is_orientation_consistent) or couldn't inflate at all before "
+            f"hitting that. This usually means the mesh's faces aren't consistently "
+            f"wound -- every face's vertex list should go counterclockwise as seen from "
+            f"the outside of the solid, matching how its neighbors reference the same "
+            f"shared vertices (see this module's docstring for the convention and "
+            f"stretchy_nets/two_pentagons_and_a_square.json for a worked example); "
+            f"double-check each face's vertex order.")
+    pts, residual = best
 
     positions = {v: pts[i] for i, v in enumerate(vertex_ids)}
 

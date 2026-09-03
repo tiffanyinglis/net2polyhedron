@@ -6,9 +6,11 @@ import pytest
 from net_fold_utils.combinatorics import EdgeMap
 from net_fold_utils.hull_to_spec import polyhedron_from_vertices
 from net_fold_utils.solid_coords import tetrahedron as tetrahedron_coords
+from net_fold_utils import stretchy_mesh
 from net_fold_utils.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, solve_wireframe, STRETCH_CAP,
     _overall_3d_extent, _min_pairwise_separation, _mesh_volume, _sphere_bound_volume,
+    _orientation_signs, _is_orientation_consistent,
 )
 
 PENTAGONS_AND_SQUARE = "stretchy_nets/two_pentagons_and_a_square.json"
@@ -185,6 +187,39 @@ def test_solve_wireframe_on_small_platonic_solids_nearly_untangles_fully(name):
     # vertex separation of exactly 1 edge length (a real cube/octahedron
     # /tetrahedron never has two vertices closer than that)
     assert _min_pairwise_separation(pts) > 0.9
+
+
+# ---- winding convention (_orientation_signs / _is_orientation_consistent) ----
+
+def test_orientation_signs_agree_for_a_genuinely_convex_solid():
+    # a real regular tetrahedron: every face's normal should agree in
+    # sign with "pointing away from the centroid" -- no ambiguity for
+    # something this convex.
+    pts, faces = _unit_edge_tetrahedron_points()
+    idx = {i: i for i in range(len(pts))}
+    signs = _orientation_signs(pts, faces, idx)
+    assert signs == [1.0, 1.0, 1.0, 1.0] or signs == [-1.0, -1.0, -1.0, -1.0]
+    assert _is_orientation_consistent(pts, faces, idx)
+
+
+def test_is_orientation_consistent_false_when_one_face_is_flipped():
+    pts, faces = _unit_edge_tetrahedron_points()
+    idx = {i: i for i in range(len(pts))}
+    # same points, but one face's vertex order reversed -- flips just
+    # that face's computed normal without moving anything, simulating a
+    # solve that folded exactly that face inside-out relative to the rest.
+    flipped_faces = [list(reversed(faces[0]))] + faces[1:]
+    assert not _is_orientation_consistent(pts, flipped_faces, idx)
+
+
+def test_solve_wireframe_raises_a_helpful_error_when_no_embedding_is_found(monkeypatch):
+    # force every candidate to look inconsistent, regardless of the
+    # actual geometry, so solve_wireframe has to exhaust its attempts
+    # and raise -- verifies the failure path itself, not the (already
+    # well-covered) success path.
+    monkeypatch.setattr(stretchy_mesh, "_is_orientation_consistent", lambda *a, **k: False)
+    with pytest.raises(ValueError, match="counterclockwise"):
+        solve_wireframe(TETRAHEDRON_FACES, seed=0)
 
 
 def test_solve_wireframe_on_a_cube_rounds_out_the_skew_not_just_the_edges():
