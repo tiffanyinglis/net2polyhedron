@@ -57,6 +57,19 @@ PLOT_THEME = {
 }
 
 
+# A high-variety, fixed face-color palette (two named 8-color sets),
+# deliberately more visually distinct than a qualitative colormap like
+# Set2, which has only 8 base (fairly similar, muted) hues and blends
+# washed-out intermediate tones once a net has more faces than that.
+# Cycles (via modulo where it's used) for a net with more faces than
+# colors (16 here).
+_BRIGHT = ["#003a7d", "#008dff", "#ff73b6", "#c701ff",
+           "#4ecb8d", "#ff9d3a", "#f9e858", "#d83034"]
+_ALTERNATING_LIGHT_DARK = ["#8fd7d7", "#00b0be", "#ff8ca1", "#f45f74",
+                           "#bdd373", "#98c127", "#ffcd8e", "#ffb255"]
+FACE_COLORS = _BRIGHT + _ALTERNATING_LIGHT_DARK
+
+
 class _CullableFace(Poly3DCollection):
     """A single-face Poly3DCollection that hides itself when its outward
     normal points away from the camera, instead of relying on mplot3d's
@@ -290,7 +303,7 @@ class PolygonFoldApp:
         self.current_label = chosen
         path = self.label_to_path[chosen]
         self.net, self.root_face, self.hinges, self.fold_angles, _ = load_net(path)
-        self.colors = plt.cm.Set2(np.linspace(0, 1, len(self.net.faces)))
+        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.net.faces))]
         self.slider.set(0)
         self.draw(0.0)
 

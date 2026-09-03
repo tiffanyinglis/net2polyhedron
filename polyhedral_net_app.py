@@ -35,7 +35,7 @@ import sv_ttk
 from net_fold_utils import load_net, fold, is_cached, build_all, face_normal
 from tooltip import Tooltip
 from polygon_fold_app import (STATUS_COLORS, PLOT_THEME, NETS_DIR, DISABLED_SUFFIX,
-                               COMPUTE_TOOLTIP, _CullableFace)
+                               COMPUTE_TOOLTIP, FACE_COLORS, _CullableFace)
 
 
 class PolyhedralNetApp:
@@ -230,7 +230,7 @@ class PolyhedralNetApp:
         self.current_label = chosen
         path = self.label_to_path[chosen]
         self.net, self.root_face, self.hinges, self.fold_angles, _ = load_net(path)
-        self.colors = plt.cm.Set2(np.linspace(0, 1, len(self.net.faces)))
+        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.net.faces))]
         self.draw()
 
     # ---- compute cache ----
