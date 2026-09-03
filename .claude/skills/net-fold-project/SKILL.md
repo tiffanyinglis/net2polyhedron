@@ -33,8 +33,9 @@ points share pieces of this:
 - `polygon_subdivide.py` — 2D-only fine-triangle-mesh demo (see below); shares only `PLOT_THEME` with the fold apps
 - `stretchy_polyhedron_init.py` — the stretchy-mesh viewer (see below); imports `STATUS_COLORS`/`PLOT_THEME`/`FACE_COLORS`/`DISABLED_SUFFIX` from `polygon_fold_app.py`, everything else is its own pipeline
 - `tooltip.py` — small generic hover-tooltip helper for Tkinter (not net-fold-specific)
-- `net_fold_utils/` — the reusable library (see below)
-- `subdivision_utils/` — the (separate, simpler) fine-mesh library `polygon_subdivide.py` uses
+- `net_fold_utils/` — the reusable library (see below), including `mesh_subdivide.py` — builds a fine "fabric" triangulation of a stretchy net (see "Fabric subdivision" below)
+- `subdivision_utils/` — the (separate, simpler) fine-mesh library `polygon_subdivide.py` (and now `net_fold_utils/mesh_subdivide.py`) uses
+- `tools/generate_subdivided_stretchy_nets.py` — writes `stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below)
 - `nets/*.json` — **human-authored** RIGID net specs; the only files meant to be hand-edited (for that pipeline)
 - `fold_cache/*.fold` — **computed** cache, one per rigid `.json`, kept in a separate directory from `nets/` on purpose (disposable output vs. source input)
 - `build_fold_cache.py` — top-level script: precompute/refresh all rigid caches, prints per-net progress
@@ -431,6 +432,71 @@ keep being served forever, since its checksum only ever tracked the
 bypasses the cache (it wants a *different* one of the many valid
 embeddings) and never overwrites it.
 
+### Fabric subdivision (`net_fold_utils/mesh_subdivide.py`, `tools/generate_subdivided_stretchy_nets.py`)
+
+Simulates a stretchy net's faces as fabric rather than (at most gently
+bending) rigid-ish panels: every coarse face is split into a fine
+triangular mesh — the same hardcoded per-n-gon coarse split
+(`subdivision_utils.SUBDIVISIONS`) and barycentric refinement
+(`subdivision_utils._subdivide_triangle`) `polygon_subdivide.py` uses to
+preview a single polygon — applied to every face of a whole net at once,
+with points on a shared coarse edge merged into one global vertex so the
+result is a single connected mesh, not N disconnected per-face patches.
+
+**This is a file-generation step, not an app feature.**
+`tools/generate_subdivided_stretchy_nets.py` reads an existing
+`stretchy_nets/<name>.json`, calls `subdivide_mesh(coarse_faces,
+resolution)`, and writes the fine triangulation straight out as an
+ordinary `stretchy_nets/<name>_res<resolution>.json` — a plain
+vertex-loop mesh, no different in format from any other stretchy net.
+(`SUBDIVISIONS_TO_GENERATE` at the top of that script is the editable
+list of `(name, resolution)` pairs to produce; `stretchy_nets/cube_res4.json`
+is the one generated so far.) Once written, it goes through
+`build_stretchy_cache.py` / `stretchy_polyhedron_init.py`'s net picker
+completely unmodified — there is no separate fabric mode or UI control
+for this, it's just another `.json` in the directory.
+
+**Known simplification: rest lengths are treated as uniform, even though
+they aren't.** SUBDIVISIONS' coarse triangles aren't generally
+equilateral (a pentagon's centroid fan has unit-length rim edges but
+shorter spoke edges to the centroid; a square's diagonal split has a unit
+rim but a `sqrt(2)` diagonal) — `subdivide_mesh`'s `edge_lengths` return
+value captures each fine edge's true rest length correctly (derived from
+`subdivide_polygon`'s own exact 2D coordinates for a regular n-gon of
+unit edge length), but `generate_subdivided_stretchy_nets.py` currently
+discards it, since the plain vertex-loop JSON format has no field for
+per-edge lengths and `build_stretchy_cache.py` always solves with
+`solve_wireframe`'s default UNIFORM `edge_length=1.0`. Confirmed
+empirically on `cube_res4.json` (192 faces, 98 vertices): it solves
+successfully (6.8% max stretch, within `STRETCH_CAP`) but settles into a
+generic rounded/geodesic-ball shape, NOT a recognizable puffed-up cube —
+because forcing the true-length rim and diagonal segments to be equal
+erases the geometric distinction between them. This was a deliberate,
+known-and-accepted tradeoff (see git history around this section), not a
+bug to fix reflexively — `solve_wireframe`/`_residual` already support a
+per-edge `{(a, b): length}` dict plus an explicit `volume_target` (see
+their docstrings) if this ever needs to be revisited for geometric
+fidelity.
+
+Also worth knowing before reusing it: `solve_fabric_mesh` in
+`mesh_subdivide.py` is a *different*, more involved path that was tried
+for driving this live from the app (a "Fabric subdivision" checkbox in
+`stretchy_polyhedron_init.py`, since removed at the user's request in
+favor of this file-based workflow) — it drapes the fine mesh over the
+coarse net's own `solve_wireframe` result as a 3D-accurate starting
+guess (`_subdivide_dual` reruns the same barycentric grid construction in
+3D, fed real solved corner/centroid positions) and then does one light
+`_relax_seed` pass, specifically to avoid the same
+orientation-consistency search that made `cube_res4.json` above take
+~13 minutes to solve (a resolution-2 tetrahedron subdivision — just 16
+small triangles — never once reached a consistent embedding in 30 random
+attempts when tried via plain `solve_wireframe(fine_faces)`, several
+seconds each). `mesh_subdivide.py` is kept around specifically so
+different resolutions can still be explored this way later; it's just
+not wired into `generate_subdivided_stretchy_nets.py` right now, which
+takes the simpler (if slower and less faithful) route of the ordinary
+cache/solve pipeline instead.
+
 ### The app (`stretchy_polyhedron_init.py`)
 
 Same `sv_ttk` shell as the rigid apps, but the two panels mean something
@@ -438,6 +504,9 @@ different: left is each face's own **undeformed** regular-polygon target
 (unconnected, side by side — there's no flat "net" for bendable faces),
 right is the actual solved (generally non-planar, edges not quite unit
 length) wireframe, drawn as translucent faces + edge lines + vertex dots.
+There is no fabric-specific UI here — a subdivided net (see "Fabric
+subdivision" above) is just another `stretchy_nets/*.json` file and shows
+up in the same picker as anything else.
 Solving always runs in a background thread (`_solve_worker` +
 `queue.Queue`, same pattern as the rigid apps' "Compute" button) since a
 cache miss on a bigger mesh (e.g. the dodecahedron) can take ~10s+. Net
@@ -470,6 +539,16 @@ failure path (forcing `_is_orientation_consistent` to always return
 `False` to exercise the `ValueError`) and of the winding convention itself
 (reversing one face's loop and checking `_is_orientation_consistent`
 catches it).
+
+`test_mesh_subdivide.py` covers the fabric-subdivision pipeline (see
+above): combinatorial closure of the fine mesh at several resolutions,
+that shared coarse edges actually merge (not left as disconnected
+per-face patches), that a pentagon face's fine edges have exactly two
+distinct rest lengths (rim vs. spoke, not a uniform one), and that
+`solve_fabric_mesh` produces low-stretch results for both an
+already-rigid coarse net (tetrahedron) and a genuinely bendy one
+(`two_pentagons_and_a_square.json`) — fast (~5s total) since the
+drape-then-relax approach never needs the slow random-restart search.
 
 ## Conventions worth knowing before editing
 

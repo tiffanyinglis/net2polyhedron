@@ -56,6 +56,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
@@ -63,6 +64,8 @@ import sv_ttk
 from net_fold_utils.stretchy_mesh import load_stretchy_mesh, mesh_edges, solve_wireframe
 from net_fold_utils.stretchy_cache import load_with_cache, is_cached, build_all
 from net_fold_utils.polygon_geom import regular_polygon_vertices
+from net_fold_utils.mesh_subdivide import load_fabric_spec
+from subdivision_utils import subdivide as subdivide_polygon
 from polygon_fold_app import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 from tooltip import Tooltip
 
@@ -70,6 +73,11 @@ STRETCHY_NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "st
 COMPUTE_ALL_TOOLTIP = ("Solves the wireframe for every net that hasn't been computed "
                        "yet.\nThis may take a while -- bigger nets (like the "
                        "dodecahedron)\ncan take up to a minute each.")
+# A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
+# subdivision reads as texture rather than a bold wireframe competing
+# with the per-coarse-face coloring -- see load_fabric_spec.
+SUBDIVISION_EDGE_ALPHA = 0.35
+SUBDIVISION_EDGE_WIDTH = 0.5
 
 
 class StretchyPolyhedronApp:
@@ -128,6 +136,9 @@ class StretchyPolyhedronApp:
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self.faces = None
+        self.coarse_faces = None
+        self.face_of_fine = None
+        self.fabric_resolution = None
         self.current_path = None
         self.seed = 0
         self.current_label = None
@@ -243,7 +254,16 @@ class StretchyPolyhedronApp:
             self._set_status(str(e), "error")
             self.faces = None
             return
-        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.faces))]
+        # A fabric-subdivided net (see net_fold_utils/mesh_subdivide.py and
+        # tools/generate_subdivided_stretchy_nets.py) carries its original
+        # coarse polygons + a fine-triangle -> coarse-face mapping right in
+        # the JSON -- used to color every fine triangle by its ORIGINAL
+        # face and to show the coarse net (not hundreds of fine triangles)
+        # in the left "Target faces" panel. An ordinary net has none of
+        # this, and renders exactly as before.
+        self.coarse_faces, self.fabric_resolution, self.face_of_fine = load_fabric_spec(path)
+        color_count = len(self.coarse_faces) if self.coarse_faces is not None else len(self.faces)
+        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(color_count)]
         self.current_path = path
         self.seed = 0
         self._solve_and_draw(use_cache=True)
@@ -385,19 +405,38 @@ class StretchyPolyhedronApp:
         connected to its neighbors) side by side purely for reference --
         there's no flat "net" for a mesh whose faces are allowed to bend,
         so this just shows what each face would look like if it weren't
-        being stretched/bent to make the whole thing close up."""
+        being stretched/bent to make the whole thing close up.
+
+        For a fabric-subdivided net (self.coarse_faces set, see
+        load_fabric_spec), shows the COARSE polygons here -- not the
+        hundreds of individual fine triangles -- with a faint subdivision
+        overlay at the resolution the net was actually generated at, as a
+        2D preview of the mesh being solved."""
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
+        fabric = self.coarse_faces is not None
+        faces = self.coarse_faces if fabric else self.faces
         gap = 0.6
         x_cursor = 0.0
         all_pts = []
-        for face, color in zip(self.faces, self.colors):
+        for face, color in zip(faces, self.colors):
             verts = regular_polygon_vertices(len(face))
             width = max(p[0] for p in verts) - min(p[0] for p in verts)
             offset = np.array([x_cursor - min(p[0] for p in verts), 0.0])
             placed = [p + offset for p in verts]
             self.ax2d.add_patch(Polygon(placed, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
+            if fabric:
+                sub_points, sub_triangles = subdivide_polygon(
+                    len(face), placed, self.fabric_resolution)
+                segments = []
+                for i, j, k in sub_triangles:
+                    segments += [(sub_points[i], sub_points[j]),
+                                 (sub_points[j], sub_points[k]),
+                                 (sub_points[k], sub_points[i])]
+                self.ax2d.add_collection(LineCollection(
+                    segments, colors="k", linewidths=SUBDIVISION_EDGE_WIDTH,
+                    alpha=SUBDIVISION_EDGE_ALPHA, zorder=3))
             cx = np.mean([p[0] for p in placed])
             top_y = max(p[1] for p in placed)
             self.ax2d.text(cx, top_y + 0.15, str(face), ha="center", va="bottom",
@@ -418,21 +457,37 @@ class StretchyPolyhedronApp:
         translucent so the bend is visible) plus the raw vertex/edge
         wireframe on top, since a "face" here is just a rendering
         convenience -- the thing that's actually being solved for is the
-        vertex positions and edge lengths."""
+        vertex positions and edge lengths.
+
+        For a fabric-subdivided net, colors every fine triangle by its
+        ORIGINAL coarse face (self.face_of_fine, indexing the same
+        per-coarse-face self.colors the left panel uses) so the coarse
+        faces stay visually distinct as color blocks, with the fine mesh
+        edges thin and faint (see SUBDIVISION_EDGE_ALPHA/WIDTH) so the
+        subdivision reads as texture rather than a bold wireframe, and no
+        per-vertex scatter dots (there can be hundreds of fine
+        vertices)."""
         self.ax3d.cla()
         self._style_3d_axis(self.ax3d, theme)
 
+        fabric = self.coarse_faces is not None
+        face_colors = ([self.colors[c % len(self.colors)] for c in self.face_of_fine]
+                        if fabric else self.colors)
+
         all_pts = np.array(list(self.positions.values()))
-        for face, color in zip(self.faces, self.colors):
+        for face, color in zip(self.faces, face_colors):
             pts = np.array([self.positions[v] for v in face])
             self.ax3d.add_collection3d(
                 Poly3DCollection([pts], facecolor=color, edgecolor="none", alpha=0.55))
 
         edge_segments = [(self.positions[a], self.positions[b]) for a, b in mesh_edges(self.faces)]
-        self.ax3d.add_collection3d(
-            Line3DCollection(edge_segments, colors=theme["fg"], linewidths=1.6))
-        self.ax3d.scatter(all_pts[:, 0], all_pts[:, 1], all_pts[:, 2],
-                           color=theme["fg"], s=18, depthshade=False)
+        self.ax3d.add_collection3d(Line3DCollection(
+            edge_segments, colors=theme["fg"],
+            linewidths=SUBDIVISION_EDGE_WIDTH if fabric else 1.6,
+            alpha=SUBDIVISION_EDGE_ALPHA if fabric else 1.0))
+        if not fabric:
+            self.ax3d.scatter(all_pts[:, 0], all_pts[:, 1], all_pts[:, 2],
+                               color=theme["fg"], s=18, depthshade=False)
 
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
         center = (lo + hi) / 2
@@ -446,7 +501,8 @@ class StretchyPolyhedronApp:
         self.ax3d.set_box_aspect([1, 1, 1])
         if self.show_axes_var.get():
             self._draw_box_wireframe(xlim, ylim, zlim, theme["fg"])
-        self.ax3d.set_title("Wireframe result (bent, edges stretched to fit)")
+        self.ax3d.set_title("Wireframe result (fabric, subdivided)" if fabric else
+                             "Wireframe result (bent, edges stretched to fit)")
 
     def draw(self):
         theme = self._apply_plot_theme()

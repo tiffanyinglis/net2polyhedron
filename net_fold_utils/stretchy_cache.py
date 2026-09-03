@@ -16,13 +16,22 @@ Cache files live in a top-level stretchy_cache/ directory, kept separate
 from the human-authored stretchy_nets/ directory, mirroring fold_cache/
 vs nets/.
 
-The cache always stores solve_wireframe's seed=0 result -- the one
-canonical "this net's cached wireframe" answer. stretchy_polyhedron_init.py's
-"Recompute Wireframe" button, which deliberately asks for a *different*
-random embedding (solve_wireframe's underdetermined system has many valid
-solutions), bypasses the cache entirely rather than overwriting it: the
-cache is meant to make the ordinary "pick a net" path instant, not to
-track whichever alternate embedding was last explored.
+The cache always stores seed=0's result -- the one canonical "this net's
+cached wireframe" answer -- via `_solve` (see below), which is
+solve_wireframe(faces, seed) for an ordinary net, or
+mesh_subdivide.solve_fabric_mesh(coarse_faces, resolution, seed) for a
+fabric-subdivided one (see mesh_subdivide.load_fabric_spec and
+tools/generate_subdivided_stretchy_nets.py) -- plain solve_wireframe on a
+subdivided mesh's fine faces, at its usual uniform edge_length=1.0, was
+tried first and either takes a very long time or settles into a
+generic, unrecognizable rounded blob (see mesh_subdivide.py's
+docstring), so a fabric net needs the coarse-solve-then-drape approach
+instead. stretchy_polyhedron_init.py's "Recompute Wireframe" button,
+which deliberately asks for a *different* random embedding (the
+underlying system has many valid solutions), bypasses the cache entirely
+rather than overwriting it: the cache is meant to make the ordinary
+"pick a net" path instant, not to track whichever alternate embedding
+was last explored.
 """
 import glob
 import json
@@ -33,6 +42,25 @@ import numpy as np
 
 from .fold_cache import source_checksum as _file_checksum
 from .stretchy_mesh import load_stretchy_mesh, solve_wireframe, ALGORITHM_VERSION
+from .mesh_subdivide import load_fabric_spec, solve_fabric_mesh
+
+
+def _solve(net_path, faces, seed):
+    """Solve a stretchy net for caching -- solve_fabric_mesh (drape the
+    fine mesh over the coarse net's own correctly-shaped, correctly-
+    rounded solve) for a fabric-subdivided net (one with "coarse_faces",
+    see mesh_subdivide.load_fabric_spec and
+    tools/generate_subdivided_stretchy_nets.py), else plain
+    solve_wireframe at the usual uniform edge_length=1.0. Both return
+    (positions, stats); solve_fabric_mesh's extra (fine_faces,
+    face_of_fine) are discarded here since they're already stored
+    verbatim in the net's own JSON (deterministically reproducible from
+    the same coarse_faces/resolution, so there's no risk of drift)."""
+    coarse_faces, resolution, _ = load_fabric_spec(net_path)
+    if coarse_faces is not None:
+        _, _, positions, stats = solve_fabric_mesh(coarse_faces, resolution, seed=seed)
+        return positions, stats
+    return solve_wireframe(faces, seed=seed)
 
 
 def source_checksum(net_path):
@@ -128,7 +156,7 @@ def load_with_cache(net_path, cache_path=None):
         _, positions, stats, cached_name = cached
         return faces, positions, stats, cached_name or name
 
-    positions, stats = solve_wireframe(faces, seed=0)
+    positions, stats = _solve(net_path, faces, seed=0)
     write_stretchy_cache(cache_path, checksum, positions, stats, name)
     return faces, positions, stats, name
 
@@ -170,7 +198,7 @@ def build_all(nets_dir, force=False, on_progress=None):
         start = time.time()
         try:
             faces, name = load_stretchy_mesh(path)
-            positions, stats = solve_wireframe(faces, seed=0)
+            positions, stats = _solve(path, faces, seed=0)
         except ValueError as e:
             if on_progress:
                 on_progress(i, n, label, "failed")

@@ -204,14 +204,24 @@ def _sphere_bound_volume(faces, edge_length):
 
 def _residual(flat, edge_ai, edge_bi, faces, idx, edge_length,
               inflation_weight=0.0, inflation_target=0.0, planarity_weight=0.0):
-    """The full objective: edge-length error for every mesh edge, plus
-    two optional terms (both zero-weighted -- i.e. absent -- by
-    default): an inflation "pressure" term (see _inflate) and a per-face
-    flatness term (see _face_planarity_residual). Always returns edge
-    residuals first, so callers can slice `result[:len(edge_ai)]` to get
-    just the edge-length error without the other terms."""
+    """The full objective: RELATIVE edge-length error for every mesh edge
+    (i.e. (actual - rest) / rest, not the raw difference), plus two
+    optional terms (both zero-weighted -- i.e. absent -- by default): an
+    inflation "pressure" term (see _inflate) and a per-face flatness term
+    (see _face_planarity_residual). Always returns edge residuals first,
+    so callers can slice `result[:len(edge_ai)]` to get just the
+    edge-length error without the other terms.
+
+    `edge_length` may be a scalar (uniform rest length -- the original,
+    still-default usage) or a per-edge array aligned with edge_ai/edge_bi
+    (a subdivided fabric mesh's edges do NOT all share one rest length,
+    see mesh_subdivide.py). Dividing by edge_length rather than using the
+    raw difference makes every threshold elsewhere in this module
+    (STRETCH_CAP, CONVERGE_TOL) a fraction regardless of scale; for the
+    scalar edge_length=1.0 the original callers all use, this is
+    numerically identical to the old raw-difference residual."""
     pts = flat.reshape(-1, 3)
-    parts = [np.linalg.norm(pts[edge_ai] - pts[edge_bi], axis=1) - edge_length]
+    parts = [(np.linalg.norm(pts[edge_ai] - pts[edge_bi], axis=1) - edge_length) / edge_length]
     if inflation_weight:
         vol = _mesh_volume(pts, faces, idx)
         parts.append(np.array([inflation_weight * (inflation_target - vol)]))
@@ -303,7 +313,7 @@ def _edge_stretch(residual, n_edges):
     return np.max(np.abs(residual[:n_edges])) if n_edges else 0.0
 
 
-def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length):
+def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_target=None):
     """Gradually "blow up" an already-valid (edges ~= edge_length)
     point cloud into a rounder, more convex shape -- the fix for both
     problems a plain edge-length fit leaves on the table: a mesh with
@@ -355,9 +365,16 @@ def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length):
 
     Returns (pts, edge_stretch, inflation_weight) -- the last of which
     the caller can reuse as-is for a final planarity pass, so that pass
-    doesn't let the pressure relax back down."""
+    doesn't let the pressure relax back down.
+
+    `volume_target`, if given, overrides the target volume derived from
+    `faces`/`edge_length` -- needed for a subdivided fabric mesh, where
+    every face is a small triangle with no consistent side length for
+    _sphere_bound_volume's regular-polygon-area formula to use; the
+    caller instead derives one target volume from the un-subdivided
+    coarse polyhedron (see mesh_subdivide.solve_fabric_mesh)."""
     n_edges = len(edge_ai)
-    target = _sphere_bound_volume(faces, edge_length)
+    target = volume_target if volume_target is not None else _sphere_bound_volume(faces, edge_length)
     cur = pts0
     cur_err = _edge_stretch(
         np.linalg.norm(pts0[edge_ai] - pts0[edge_bi], axis=1) - edge_length, n_edges)
@@ -377,32 +394,52 @@ MAX_ORIENTATION_ATTEMPTS = 60  # hard cap on stage-1 restarts spent seeking a us
 CANDIDATES_PER_ROUND = 8  # how many stage-1 starts to try inflating before giving up a round
 
 
-def _inflate_from(pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges):
+def _inflate_from(pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges,
+                   volume_target=None, scale=None):
     """Run _inflate from one stage-1 starting point, then (if it
     inflated at all) a light final planarity pass at the same pressure.
     Returns (pts, edge_stretch, weight_reached) -- weight_reached is 0.0
     if the very first pressure step was already rejected (see _inflate),
-    meaning this start never actually inflated."""
-    pts, residual, weight = _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length)
+    meaning this start never actually inflated.
+
+    `volume_target` is forwarded to _inflate (see its docstring).
+    `scale`, if given, is the characteristic edge length used for the
+    MIN_3D_EXTENT threshold below in place of `edge_length` itself --
+    needed when `edge_length` is a per-edge array (a subdivided fabric
+    mesh) rather than a single scalar."""
+    if scale is None:
+        scale = edge_length
+    pts, residual, weight = _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_target)
     if weight:
-        target = _sphere_bound_volume(faces, edge_length)
+        target = volume_target if volume_target is not None else _sphere_bound_volume(faces, edge_length)
         sol = least_squares(_residual, pts.flatten(),
                              args=(edge_ai, edge_bi, faces, idx, edge_length,
                                    weight, target, PLANARITY_WEIGHT))
         polished = sol.x.reshape(-1, 3)
         err = _edge_stretch(sol.fun, n_edges)
-        if (err < STRETCH_CAP and _overall_3d_extent(polished) > MIN_3D_EXTENT * edge_length
+        if (err < STRETCH_CAP and _overall_3d_extent(polished) > MIN_3D_EXTENT * scale
                 and _is_orientation_consistent(polished, faces, idx)):
             pts, residual = polished, err
     return pts, residual, weight
 
 
-def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATES_PER_ROUND):
+def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATES_PER_ROUND,
+                     volume_target=None):
     """Find 3D positions for every vertex that make every mesh edge as
     close to `edge_length` as possible, inflated into a rounded, convex-
     ish shape rather than left as whatever arbitrary (possibly tangled,
     possibly skewed, possibly self-intersecting) configuration a plain
     edge-length fit first finds.
+
+    `edge_length` is normally a scalar (every edge shares one rest
+    length, the original behavior). It may instead be a
+    {(a, b): length} dict keyed by the same (a, b) pairs mesh_edges(faces)
+    produces -- needed for a subdivided fabric mesh, whose fine edges do
+    NOT all share one rest length (see mesh_subdivide.py). In that case
+    `volume_target` must be given explicitly too, since _sphere_bound_volume's
+    regular-polygon-area estimate has no single edge length to work from
+    (mesh_subdivide.solve_fabric_mesh derives it from the un-subdivided
+    coarse polyhedron instead).
 
     Two stages, retried over random stage-1 starts, one at a time, until
     one actually works (see below for why it can take more than one):
@@ -474,21 +511,31 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
     n_edges = len(edges)
 
+    if isinstance(edge_length, dict):
+        if volume_target is None:
+            raise ValueError("volume_target must be given explicitly when edge_length is a dict")
+        length_arr = np.array([edge_length[e] for e in edges])
+        scale = float(np.min(length_arr))
+    else:
+        length_arr = edge_length
+        scale = float(edge_length)
+
     rng = np.random.default_rng(seed)
     best = None  # (pts, residual)
     attempted = 0
     budget = n_restarts
     while best is None and attempted < MAX_ORIENTATION_ATTEMPTS:
         for _ in range(min(budget, MAX_ORIENTATION_ATTEMPTS - attempted)):
-            x0 = rng.normal(scale=edge_length, size=3 * n)
-            sol = least_squares(_residual, x0, args=(edge_ai, edge_bi, faces, idx, edge_length))
+            x0 = rng.normal(scale=scale, size=3 * n)
+            sol = least_squares(_residual, x0, args=(edge_ai, edge_bi, faces, idx, length_arr))
             pts0 = sol.x.reshape(-1, 3)
             attempted += 1
 
             pts, residual, weight = _inflate_from(
-                pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges)
+                pts0, faces, edge_ai, edge_bi, idx, length_arr, n_edges,
+                volume_target=volume_target, scale=scale)
             if (weight and _is_orientation_consistent(pts, faces, idx)
-                    and _min_pairwise_separation(pts) > MIN_SEPARATION_FRACTION * edge_length):
+                    and _min_pairwise_separation(pts) > MIN_SEPARATION_FRACTION * scale):
                 # the first success is kept as-is, not compared against
                 # further candidates: repeated runs land on essentially
                 # the same result once one succeeds at all (see
@@ -514,7 +561,7 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
     positions = {v: pts[i] for i, v in enumerate(vertex_ids)}
 
     lengths = np.array([np.linalg.norm(positions[a] - positions[b]) for a, b in edges])
-    stretch_pct = 100 * (lengths - edge_length) / edge_length
+    stretch_pct = 100 * (lengths - length_arr) / length_arr
     stats = dict(residual=residual,
                  max_stretch_pct=float(np.max(np.abs(stretch_pct))),
                  rms_stretch_pct=float(np.sqrt(np.mean(stretch_pct ** 2))))

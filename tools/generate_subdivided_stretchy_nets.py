@@ -1,0 +1,76 @@
+"""Generator: writes stretchy_nets/<name>_res<resolution>.json -- a fine
+triangulated "fabric" version of an existing coarse stretchy net
+(stretchy_nets/<name>.json), via net_fold_utils.mesh_subdivide.subdivide_mesh
+(see that module's docstring for how the subdivision is built and merged
+across shared coarse edges into one connected mesh).
+
+    python tools/generate_subdivided_stretchy_nets.py
+
+Written as an EXTENDED vertex-loop mesh: the ordinary "faces" (the fine
+triangulation, for combinatorics/solving) plus "coarse_faces" (the
+original, un-subdivided polygon loops), "resolution", and "face_of_fine"
+(fine_faces[i] belongs to coarse_faces[face_of_fine[i]]). A plain
+stretchy_nets/*.json reader that only looks at "faces" still works
+unmodified (extra keys are just ignored) -- but
+net_fold_utils.mesh_subdivide.load_fabric_spec picks up the extra fields
+so net_fold_utils.stretchy_cache can solve this via solve_fabric_mesh
+(draping the fine mesh over the COARSE net's own correctly-shaped,
+correctly-rounded solve) instead of plain solve_wireframe(faces) at a
+uniform edge_length=1.0. That distinction matters a lot here: tried
+first, plain solve_wireframe on a subdivided cube took ~13 minutes and
+settled into a generic rounded blob, not a recognizable cube -- forcing
+every fine edge (rim, or a diagonal-split segment ~sqrt(2) times longer)
+to the same rest length erases exactly the shape information that makes
+it look like a cube. See mesh_subdivide.py's and stretchy_cache.py's
+docstrings for the full story.
+
+stretchy_polyhedron_init.py also reads "coarse_faces"/"face_of_fine" at
+render time, so a fabric net's left panel shows the coarse polygons
+(with a faint subdivision overlay) instead of hundreds of individual
+fine triangles, and its right panel colors every fine triangle by its
+original coarse face.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from net_fold_utils.stretchy_mesh import load_stretchy_mesh
+from net_fold_utils.mesh_subdivide import subdivide_mesh
+
+STRETCHY_NETS_DIR = os.path.join(os.path.dirname(__file__), "..", "stretchy_nets")
+
+# (source net basename, resolution) pairs to generate -- add more here to
+# try other nets/resolutions; subdivide_mesh does the actual work for
+# whatever's listed. Kept as an editable list (like
+# generate_stretchy_platonic_nets.py's PLATONIC_SOLIDS) rather than CLI
+# args, since this is meant to be tweaked and rerun during exploration.
+SUBDIVISIONS_TO_GENERATE = [
+    ("cube", 4),
+]
+
+
+def main():
+    for name, resolution in SUBDIVISIONS_TO_GENERATE:
+        src_path = os.path.join(STRETCHY_NETS_DIR, f"{name}.json")
+        coarse_faces, coarse_name = load_stretchy_mesh(src_path)
+        fine_faces, face_of_fine, _, _ = subdivide_mesh(coarse_faces, resolution)
+        faces = [list(f) for f in fine_faces]
+        n_verts = len({v for f in faces for v in f})
+        spec = {
+            "name": f"{coarse_name} (res{resolution})",
+            "coarse_faces": [list(f) for f in coarse_faces],
+            "resolution": resolution,
+            "faces": faces,
+            "face_of_fine": list(face_of_fine),
+        }
+        out_path = os.path.join(STRETCHY_NETS_DIR, f"{name}_res{resolution}.json")
+        with open(out_path, "w") as f:
+            json.dump(spec, f, indent=2)
+            f.write("\n")
+        print(f"wrote {out_path}  ({len(faces)} faces, {n_verts} vertices)")
+
+
+if __name__ == "__main__":
+    main()
