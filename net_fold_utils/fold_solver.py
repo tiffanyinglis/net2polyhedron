@@ -24,6 +24,7 @@ from .polygon_geom import EDGE_LENGTH
 
 CLOSE_TOL = 1e-6
 COLLISION_TOL = 1e-3
+SPARSITY_MIN_HINGES = 15
 
 
 def _residual(theta, net, root, hinges, extra_edges, edge_map, subtree_map):
@@ -54,7 +55,45 @@ def _is_embeddable(theta, net, root, hinges, subtree_map):
     return d.min() > EDGE_LENGTH * (1 - COLLISION_TOL)
 
 
-def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map, subtree_map):
+def _ancestor_hinge_indices(hinges):
+    """For every non-root face, the set of hinge indices (positions in
+    `hinges`) on the path from the root down to it -- exactly the theta
+    parameters that affect that face's final 3D position. A sibling
+    branch's hinge can never be in this set: fold() only ever rotates a
+    hinge's own subtree, so a face's position is a function of its
+    ancestors' angles alone."""
+    child_to_index = {h["child"]: i for i, h in enumerate(hinges)}
+    parent_of = {h["child"]: h["parent"] for h in hinges}
+    cache = {}
+
+    def ancestors(face):
+        if face not in child_to_index:
+            return frozenset()
+        if face not in cache:
+            cache[face] = frozenset({child_to_index[face]}) | ancestors(parent_of[face])
+        return cache[face]
+
+    return {h["child"]: ancestors(h["child"]) for h in hinges}
+
+
+def _closure_jac_sparsity(hinges, extra_edges):
+    """The exact Jacobian sparsity pattern of _residual (shape matches its
+    output: 6 rows per extra edge, one column per hinge angle). Row block i
+    (extra_edges[i]'s 6 scalar residuals) is zero in every column except
+    the hinges that are ancestors of either face in that edge -- letting
+    scipy's finite-difference Jacobian perturb many non-interacting hinge
+    angles in a single combined evaluation instead of one at a time."""
+    ancestors = _ancestor_hinge_indices(hinges)
+    n_params = len(hinges)
+    sparsity = np.zeros((6 * len(extra_edges), n_params), dtype=bool)
+    for row, (f1, f2) in enumerate(extra_edges):
+        cols = sorted(ancestors.get(f1, frozenset()) | ancestors.get(f2, frozenset()))
+        sparsity[6 * row:6 * row + 6, cols] = True
+    return sparsity
+
+
+def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map, subtree_map,
+                  jac_sparsity=None):
     """Run least_squares from each initial guess, returning
     (valid_candidates, best_err) where valid_candidates is a list of
     (sum_of_angles, theta) for every guess that converged to a genuine,
@@ -64,7 +103,8 @@ def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map, subtree_map)
     best_err = np.inf
     for x0 in guesses:
         sol = least_squares(_residual, x0, bounds=(lo, hi),
-                             args=(net, root, hinges, extra_edges, edge_map, subtree_map))
+                             args=(net, root, hinges, extra_edges, edge_map, subtree_map),
+                             jac_sparsity=jac_sparsity)
         err = np.max(np.abs(sol.fun)) if sol.fun.size else 0.0
         best_err = min(best_err, err)
         if err < CLOSE_TOL and _is_embeddable(sol.x, net, root, hinges, subtree_map):
@@ -88,6 +128,20 @@ def solve_fold_angles(net, root, hinges, extra_edges, edge_map, seed=0):
     # one of the many thousands of calls the optimizer makes below.
     subtree_map = precompute_subtree_map(hinges)
 
+    # Each closure residual only actually depends on the hinge angles that
+    # are ancestors of the two faces it involves -- a sibling branch's
+    # angle can't affect it. That makes the true Jacobian sparse, so scipy
+    # can perturb many non-interacting hinges in one combined finite-
+    # difference evaluation instead of one parameter at a time.
+    #
+    # This only pays off for larger, bushier nets, though: providing
+    # jac_sparsity forces scipy off its dense 'exact' trust-region solver
+    # onto the sparse-only iterative 'lsmr' one, and for a handful of
+    # hinges that switch costs more than the fewer evaluations save
+    # (measured: faster from ~19 hinges up, up to 2x slower below ~15).
+    jac_sparsity = (_closure_jac_sparsity(hinges, extra_edges)
+                    if n >= SPARSITY_MIN_HINGES else None)
+
     # A sweep of evenly-spaced, all-hinges-equal starting guesses is enough
     # to find every algebraic closure branch for the symmetric solids this
     # targets (verified: it finds both the true and the "collapsed" branch
@@ -97,14 +151,14 @@ def solve_fold_angles(net, root, hinges, extra_edges, edge_map, seed=0):
     # to find additional branches once the sweep already has one.
     sweep = [np.full(n, np.radians(d)) for d in range(10, 180, 10)]
     valid_candidates, best_err = _try_guesses(
-        sweep, net, root, hinges, extra_edges, edge_map, subtree_map)
+        sweep, net, root, hinges, extra_edges, edge_map, subtree_map, jac_sparsity)
 
     if not valid_candidates:
         rng = np.random.default_rng(seed)
         lo, hi = 1e-3, np.pi - 1e-3
         fallback = [rng.uniform(lo, hi, n) for _ in range(40)]
         valid_candidates, fallback_err = _try_guesses(
-            fallback, net, root, hinges, extra_edges, edge_map, subtree_map)
+            fallback, net, root, hinges, extra_edges, edge_map, subtree_map, jac_sparsity)
         best_err = min(best_err, fallback_err)
 
     if not valid_candidates:
