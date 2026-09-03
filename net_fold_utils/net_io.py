@@ -15,10 +15,13 @@ legacy nets and for the .fold cache written by fold_cache.py):
     FOLD <face_id> <angle_degrees>
     ...
 
-Faces must be declared in order 0, 1, 2, ... (the id is just for readability
-and cross-checked against declaration order). FOLD gives the rotation (in
-degrees, from flat/180-degrees-coplanar) applied at that face's hinge to its
-parent -- i.e. how far it swings when fully folded (t=1).
+Face ids must strictly increase top to bottom (mostly for readability and
+to catch an out-of-order/duplicate id) but need not be contiguous -- an
+OPEN net's .fold cache (see polyhedron_spec.py's module docstring) has
+gaps where its omitted faces would be, since those are never built into
+geometry. FOLD gives the rotation (in degrees, from flat/180-degrees-
+coplanar) applied at that face's hinge to its parent -- i.e. how far it
+swings when fully folded (t=1).
 """
 import numpy as np
 from .net_fold_core import Net
@@ -31,8 +34,11 @@ from .fold_solver import solve_fold_angles
 def parse_net_body(f):
     """Parse the FACES/ROOT/FOLD body shared by the legacy .txt format and
     the .fold cache format. Returns (faces_raw, root, fold_angles_deg, name,
-    checksum) -- checksum is None unless a CHECKSUM line was present."""
+    checksum) -- checksum is None unless a CHECKSUM line was present.
+    faces_raw is a list of (face_id, points) pairs, ids strictly
+    increasing but not necessarily contiguous."""
     faces_raw = []
+    last_fid = None
     root = None
     fold_angles_deg = {}
     name = None
@@ -61,11 +67,12 @@ def parse_net_body(f):
         # face line: "<id>: x,y x,y x,y ..."
         fid_str, coords_str = line.split(":", 1)
         fid = int(fid_str.strip())
-        if fid != len(faces_raw):
-            raise ValueError(f"faces must be declared in order "
-                              f"(expected id {len(faces_raw)}, got {fid})")
+        if last_fid is not None and fid <= last_fid:
+            raise ValueError(f"faces must be declared in strictly increasing "
+                              f"id order (got {fid} after {last_fid})")
+        last_fid = fid
         pts = [tuple(map(float, c.split(","))) for c in coords_str.strip().split()]
-        faces_raw.append(pts)
+        faces_raw.append((fid, pts))
 
     return faces_raw, root, fold_angles_deg, name, checksum
 
@@ -78,8 +85,8 @@ def load_net_txt(path):
         raise ValueError(f"{path}: missing ROOT line")
 
     net = Net()
-    for pts in faces_raw:
-        net.add_face(pts)
+    for fid, pts in faces_raw:
+        net.add_face(pts, fid=fid)
 
     root_id, hinges = net.build_tree(root=root)
     fold_angles = {fid: np.radians(deg) for fid, deg in fold_angles_deg.items()}
@@ -96,10 +103,18 @@ def load_polyhedron_net(path):
     polyhedron_spec.py) and derive everything else: the 2D net layout and
     every fold angle. This is the slow path -- it runs the full
     combinatorial + numerical solve; see fold_cache.py for a checksummed
-    cache that avoids repeating it."""
-    degrees, net_edges, extra_edges, root, name = load_polyhedron_spec(path)
-    edge_map = EdgeMap(degrees, net_edges + extra_edges)
-    net, hinges = build_net_layout(degrees, net_edges, edge_map, root)
+    cache that avoids repeating it.
+
+    For an OPEN net (some faces marked "omit"), edge_map is built from
+    every edge -- including "hidden" ones touching an omitted face -- so
+    the faces that ARE present still recover their correct polygon-edge
+    index (see polyhedron_spec.py's module docstring), but only net_edges
+    and extra_edges (never hidden_edges) go on to actually build geometry
+    or constrain the fold, since an omitted face has neither."""
+    degrees, net_edges, extra_edges, hidden_edges, omitted, root, name = \
+        load_polyhedron_spec(path)
+    edge_map = EdgeMap(degrees, net_edges + extra_edges + hidden_edges)
+    net, hinges = build_net_layout(degrees, net_edges, edge_map, root, omitted)
     fold_angles = solve_fold_angles(net, root, hinges, extra_edges, edge_map)
     return net, root, hinges, fold_angles, name
 

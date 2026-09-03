@@ -1,7 +1,7 @@
 import numpy as np
 
 from net_fold_utils.net_fold_core import (
-    Net, fold, distinct_vertices, precompute_subtree_map, face_normal)
+    Net, fold, distinct_vertices, precompute_subtree_map, face_normal, is_closed_solid)
 
 
 def _square(x0, y0, s=1.0):
@@ -86,3 +86,39 @@ def test_distinct_vertices_merges_close_points_and_keeps_far_ones_separate():
     }
     merged = distinct_vertices(verts3d, tol=1e-4)
     assert len(merged) == 3
+
+
+def test_add_face_with_explicit_id_preserves_it_and_avoids_future_collisions():
+    net = Net()
+    fid = net.add_face(_square(0, 0), fid=5)
+    assert fid == 5
+    assert set(net.faces) == {5}
+    # the next auto-assigned id must not collide with the explicit one
+    next_fid = net.add_face(_square(1, 0))
+    assert next_fid == 6
+
+
+def test_is_closed_solid_true_for_a_fully_folded_cube():
+    net, root, hinges, _ = _cross_cube_net()
+    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
+    verts = fold(net, root, hinges, fold_angles, t=1.0)
+    assert is_closed_solid(verts)
+
+
+def test_is_closed_solid_false_for_a_flat_unfolded_net():
+    # at t=0 the hinge edges still coincide (that's how the flat net was
+    # laid out), but the "wrap-around" edges between non-adjacent arms
+    # (e.g. left/right) only meet once actually folded -- so the flat
+    # net has unmatched (free) edges and isn't a closed solid.
+    net, root, hinges, _ = _cross_cube_net()
+    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
+    verts = fold(net, root, hinges, fold_angles, t=0.0)
+    assert not is_closed_solid(verts)
+
+
+def test_is_closed_solid_false_when_a_face_is_missing():
+    net, root, hinges, faces = _cross_cube_net()
+    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
+    verts = fold(net, root, hinges, fold_angles, t=1.0)
+    del verts[faces["top"]]  # simulate an open net missing one face
+    assert not is_closed_solid(verts)

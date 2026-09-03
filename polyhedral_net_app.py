@@ -27,12 +27,12 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Line3DCollection
+from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-from net_fold_utils import load_net, fold, is_cached, build_all, face_normal
+from net_fold_utils import load_net, fold, is_cached, build_all, face_normal, is_closed_solid
 from tooltip import Tooltip
 from polygon_fold_app import (STATUS_COLORS, PLOT_THEME, NETS_DIR, DISABLED_SUFFIX,
                                COMPUTE_TOOLTIP, FACE_COLORS, _CullableFace)
@@ -329,14 +329,20 @@ class PolyhedralNetApp:
         self._style_3d_axis(self.ax3d, theme)
         verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, 1.0)
         all_pts = np.vstack(list(verts.values()))
-        # This panel is always the fully folded (closed, convex) solid, so
-        # backface culling (_CullableFace) is always valid here -- see its
-        # docstring in polygon_fold_app.py for why that's what fixes the
-        # wrong-face-on-top glitches a plain depth-sorted Poly3DCollection
-        # is prone to.
+        # This panel always shows the fully FOLDED shape, but that's only
+        # a closed, convex solid for an ordinary net -- an OPEN net (some
+        # faces omitted, see polyhedron_spec.py) never closes even at
+        # t=1, and backface culling (_CullableFace) assumes a closed
+        # solid (see its docstring in polygon_fold_app.py and
+        # is_closed_solid()'s in net_fold_core.py); fall back to the
+        # ordinary depth-sorted Poly3DCollection for those.
+        use_culling = is_closed_solid(verts)
         for (fid, pts), color in zip(verts.items(), self.colors):
-            poly = _CullableFace([pts], face_normal(pts), 0.9,
-                                  facecolor=color, edgecolor="k")
+            if use_culling:
+                poly = _CullableFace([pts], face_normal(pts), 0.9,
+                                      facecolor=color, edgecolor="k")
+            else:
+                poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
             self.ax3d.add_collection3d(poly)
 
         # Center the view on the shape's own bounding-box center (not just

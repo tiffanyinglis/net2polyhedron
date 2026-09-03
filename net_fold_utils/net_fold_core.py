@@ -21,10 +21,17 @@ class Net:
         self.faces = {}      # face_id -> list of 2D np.array points (ordered polygon)
         self._next_id = 0
 
-    def add_face(self, points2d):
-        fid = self._next_id
+    def add_face(self, points2d, fid=None):
+        """fid: explicit face id to use (e.g. to preserve a polyhedron
+        spec's original face numbering when some ids are skipped, as for
+        an OPEN net's omitted faces -- see net_layout.build_net_layout).
+        Defaults to the next sequential id, as before."""
+        if fid is None:
+            fid = self._next_id
+            self._next_id += 1
+        else:
+            self._next_id = max(self._next_id, fid + 1)
         self.faces[fid] = [np.array(p, dtype=float) for p in points2d]
-        self._next_id += 1
         return fid
 
     def find_shared_edges(self):
@@ -132,6 +139,37 @@ def face_normal(points):
     p0, p1, p2 = points[0], points[1], points[2]
     n = np.cross(p1 - p0, p2 - p0)
     return n / np.linalg.norm(n)
+
+
+def is_closed_solid(verts3d, tol=1e-4):
+    """True if the folded shape is a closed 2-manifold -- every face's
+    every polygon edge is matched by exactly one other face's edge at the
+    same two 3D points (in either order) -- and False if any edge is a
+    free/boundary edge belonging to only one face, as for an OPEN net
+    (e.g. a polyhedron with one or more faces omitted; see
+    polyhedron_spec.py's module docstring).
+
+    This is purely geometric (just the already-folded points, no
+    combinatorial bookkeeping needed), so it works the same for a JSON
+    net's omitted faces and a legacy .txt net alike, and for the .fold
+    cache -- which drops the JSON's "omit"/"hidden" info entirely,
+    keeping only folded coordinates. It's what callers should check
+    before relying on backface culling (_CullableFace in
+    polygon_fold_app.py): that trick's assumption -- a face's own
+    orientation alone determines whether the solid's far side hides it
+    from the camera -- only holds for a closed, convex solid; an open
+    net has no "far side" to hide anything, so culling by orientation
+    alone can wrongly hide faces that are genuinely visible (e.g. from
+    inside the open side, looking at faces that would be interior in the
+    closed original)."""
+    edge_count = {}
+    for pts in verts3d.values():
+        k = len(pts)
+        for i in range(k):
+            a, b = pts[i], pts[(i + 1) % k]
+            key = frozenset((tuple(np.round(a / tol)), tuple(np.round(b / tol))))
+            edge_count[key] = edge_count.get(key, 0) + 1
+    return all(count == 2 for count in edge_count.values())
 
 
 def distinct_vertices(verts3d, tol=1e-4):

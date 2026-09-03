@@ -54,8 +54,8 @@ def read_fold_cache(cache_path):
         if root is None or checksum is None or not faces_raw:
             return None
         net = Net()
-        for pts in faces_raw:
-            net.add_face(pts)
+        for fid, pts in faces_raw:
+            net.add_face(pts, fid=fid)
         root_id, hinges = net.build_tree(root=root)
         fold_angles = {fid: np.radians(deg) for fid, deg in fold_angles_deg.items()}
         if any(h["child"] not in fold_angles for h in hinges):

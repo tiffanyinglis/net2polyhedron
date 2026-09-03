@@ -31,7 +31,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-from net_fold_utils import load_net, fold, is_cached, build_all, face_normal
+from net_fold_utils import load_net, fold, is_cached, build_all, face_normal, is_closed_solid
 from tooltip import Tooltip
 
 NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nets")
@@ -389,12 +389,16 @@ class PolygonFoldApp:
         verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, t)
         all_pts = np.vstack(list(verts.values()))
         # Backface culling (_CullableFace) only makes sense once the net is
-        # a closed convex solid, i.e. fully folded -- mid-fold it's an
-        # open, generally non-convex shape, so fall back to the ordinary
-        # (imperfect) depth-sorted rendering there.
+        # a closed convex solid: fully folded (mid-fold it's an open,
+        # generally non-convex shape) AND actually closes up -- an OPEN
+        # net (some faces omitted, see polyhedron_spec.py) never closes
+        # even at t=1, so still falls back to the ordinary (imperfect)
+        # depth-sorted rendering there. See is_closed_solid()'s docstring
+        # for why culling would otherwise wrongly hide visible faces.
         fully_folded = abs(t - 1.0) < 1e-9
+        use_culling = fully_folded and is_closed_solid(verts)
         for (fid, pts), color in zip(verts.items(), self.colors):
-            if fully_folded:
+            if use_culling:
                 poly = _CullableFace([pts], face_normal(pts), 0.9,
                                       facecolor=color, edgecolor="k")
             else:

@@ -13,10 +13,13 @@ def test_write_then_load_round_trips(tmp_path):
     path = tmp_path / "tetra.json"
     write_polyhedron_spec(str(path), DEGREES, NET_EDGES, EXTRA_EDGES, root=0, name="Tetra")
 
-    degrees, net_edges, extra_edges, root, name = load_polyhedron_spec(str(path))
+    degrees, net_edges, extra_edges, hidden_edges, omitted, root, name = \
+        load_polyhedron_spec(str(path))
     assert degrees == DEGREES
     assert net_edges == NET_EDGES
     assert extra_edges == EXTRA_EDGES
+    assert hidden_edges == []
+    assert omitted == set()
     assert root == 0
     assert name == "Tetra"
 
@@ -103,4 +106,58 @@ def test_malformed_json_is_rejected(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("not json at all")
     with pytest.raises(ValueError):
+        load_polyhedron_spec(str(path))
+
+
+def test_omit_and_hidden_edges_round_trip(tmp_path):
+    # A tetrahedron with face 3 omitted: net/extra span only faces 0-2,
+    # hidden carries every edge that touches the omitted face.
+    path = tmp_path / "open_tetra.json"
+    write_polyhedron_spec(str(path), DEGREES, [(0, 1), (0, 2)], [(1, 2)], root=0,
+                           name="Open Tetra", omitted={3},
+                           hidden_edges=[(0, 3), (1, 3), (2, 3)])
+
+    degrees, net_edges, extra_edges, hidden_edges, omitted, root, name = \
+        load_polyhedron_spec(str(path))
+    assert degrees == DEGREES
+    assert net_edges == [(0, 1), (0, 2)]
+    assert extra_edges == [(1, 2)]
+    assert hidden_edges == [(0, 3), (1, 3), (2, 3)]
+    assert omitted == {3}
+    assert root == 0
+    assert name == "Open Tetra"
+
+
+def test_omitted_face_is_marked_in_written_json(tmp_path):
+    path = tmp_path / "open_tetra.json"
+    write_polyhedron_spec(str(path), DEGREES, [(0, 1), (0, 2)], [(1, 2)], root=0,
+                           omitted={3}, hidden_edges=[(0, 3), (1, 3), (2, 3)])
+    with open(path) as f:
+        spec = json.load(f)
+    assert [f.get("omit", False) for f in spec["faces"]] == [False, False, False, True]
+    assert spec["edges"]["hidden"] == [[0, 3], [1, 3], [2, 3]]
+
+
+def test_root_face_cannot_be_omitted(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({
+        "faces": [{"id": 0, "sides": 3, "isRoot": True, "omit": True},
+                  {"id": 1, "sides": 3}, {"id": 2, "sides": 3}, {"id": 3, "sides": 3}],
+        "edges": {"net": [[1, 2], [1, 3]], "extra": [[2, 3]],
+                  "hidden": [[0, 1], [0, 2], [0, 3]]},
+    }))
+    with pytest.raises(ValueError, match="cannot be omitted"):
+        load_polyhedron_spec(str(path))
+
+
+def test_net_edge_count_check_accounts_for_omitted_faces(tmp_path):
+    # 4 faces, 1 omitted -> spanning tree over the remaining 3 needs
+    # exactly 2 edges, not 3.
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({
+        "faces": [{"id": 0, "sides": 3}, {"id": 1, "sides": 3},
+                  {"id": 2, "sides": 3}, {"id": 3, "sides": 3, "omit": True}],
+        "edges": {"net": [[0, 1], [0, 2], [1, 2]], "extra": [], "hidden": []},
+    }))
+    with pytest.raises(ValueError, match="spanning tree"):
         load_polyhedron_spec(str(path))
