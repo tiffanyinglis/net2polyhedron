@@ -20,6 +20,10 @@ parent -- i.e. how far it swings when fully folded (t=1).
 """
 import numpy as np
 from net_fold_core import Net
+from polyhedron_spec import load_polyhedron_spec
+from combinatorics import EdgeMap
+from net_layout import build_net_layout
+from fold_solver import solve_fold_angles
 
 
 def load_net_txt(path):
@@ -70,3 +74,22 @@ def load_net_txt(path):
         raise ValueError(f"{path}: missing FOLD angle for face(s) {missing}")
 
     return net, root_id, hinges, fold_angles, (name or path)
+
+
+def load_polyhedron_net(path):
+    """Load the abstract FACES/NET/EXTRA spec format (see polyhedron_spec.py)
+    and derive everything else: the 2D net layout and every fold angle."""
+    degrees, net_edges, extra_edges, root, name = load_polyhedron_spec(path)
+    edge_map = EdgeMap(degrees, net_edges + extra_edges)
+    net, hinges = build_net_layout(degrees, net_edges, edge_map, root)
+    fold_angles = solve_fold_angles(net, root, hinges, extra_edges, edge_map)
+    return net, root, hinges, fold_angles, name
+
+
+def load_net(path):
+    """Dispatch to the right loader by file extension: .poly for the
+    abstract combinatorial spec, .txt for the legacy explicit-coordinate
+    format."""
+    if path.endswith(".poly"):
+        return load_polyhedron_net(path)
+    return load_net_txt(path)

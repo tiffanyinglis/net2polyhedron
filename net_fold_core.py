@@ -101,6 +101,33 @@ def subtree_members(root, hinges, node):
     return members
 
 
+def distinct_vertices(verts3d, tol=1e-4):
+    """Merge the (possibly many, per-face-corner) points in a folded
+    vertex dict into the solid's actual distinct 3D vertices, by
+    transitively clustering points within `tol` of each other."""
+    pts = [p for arr in verts3d.values() for p in arr]
+    n = len(pts)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if np.linalg.norm(pts[i] - pts[j]) < tol:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    clusters = defaultdict(list)
+    for i in range(n):
+        clusters[find(i)].append(pts[i])
+    return [np.mean(c, axis=0) for c in clusters.values()]
+
+
 def fold(net, root, hinges, fold_angles, t, fold_signs=None):
     """Return dict face_id -> (N,3) np.array of folded 3D coordinates,
     at fold progress t in [0, 1].
