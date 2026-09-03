@@ -7,8 +7,10 @@ per-vertex 3D positions and the summary stats solve_wireframe returns).
 
 A cache file records the settled `positions`, the `stats` dict
 (max/rms stretch, residual), and a CHECKSUM of the source .json it was
-solved from. If the source changes, the checksum no longer matches and
-the cache is treated as stale and rebuilt.
+solved from, combined with stretchy_mesh.ALGORITHM_VERSION -- so either
+the source .json changing OR solve_wireframe's algorithm itself changing
+(see ALGORITHM_VERSION's docstring) makes the checksum no longer match,
+and the cache is treated as stale and rebuilt.
 
 Cache files live in a top-level stretchy_cache/ directory, kept separate
 from the human-authored stretchy_nets/ directory, mirroring fold_cache/
@@ -29,8 +31,16 @@ import time
 
 import numpy as np
 
-from .fold_cache import source_checksum
-from .stretchy_mesh import load_stretchy_mesh, solve_wireframe
+from .fold_cache import source_checksum as _file_checksum
+from .stretchy_mesh import load_stretchy_mesh, solve_wireframe, ALGORITHM_VERSION
+
+
+def source_checksum(net_path):
+    """The source .json's own content hash, combined with the current
+    solve_wireframe ALGORITHM_VERSION -- see this module's docstring for
+    why the version needs to be part of the cache key too, not just the
+    file's bytes."""
+    return f"{_file_checksum(net_path)}+algo{ALGORITHM_VERSION}"
 
 
 def cache_path_for(net_path, cache_dir=None):
