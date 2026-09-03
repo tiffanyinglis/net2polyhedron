@@ -2,8 +2,8 @@
 net's spanning-tree edges and the polyhedron's combinatorial edge map."""
 from collections import defaultdict, deque
 
-from net_fold_core import Net
-from polygon_geom import regular_polygon_vertices, attach_polygon
+from .net_fold_core import Net
+from .polygon_geom import regular_polygon_vertices, attach_polygon
 
 
 def build_net_layout(degrees, net_edges, edge_map, root):

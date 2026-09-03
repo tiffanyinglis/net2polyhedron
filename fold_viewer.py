@@ -22,8 +22,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from net_io import load_net
-from net_fold_core import fold
+from netfold import load_net, fold
 
 NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nets")
 

@@ -19,8 +19,8 @@ length, which a genuine convex, unit-edge solid never allows.
 import numpy as np
 from scipy.optimize import least_squares
 
-from net_fold_core import fold, distinct_vertices
-from polygon_geom import EDGE_LENGTH
+from .net_fold_core import fold, distinct_vertices
+from .polygon_geom import EDGE_LENGTH
 
 CLOSE_TOL = 1e-6
 COLLISION_TOL = 1e-3

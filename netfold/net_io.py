@@ -19,11 +19,11 @@ degrees, from flat/180-degrees-coplanar) applied at that face's hinge to its
 parent -- i.e. how far it swings when fully folded (t=1).
 """
 import numpy as np
-from net_fold_core import Net
-from polyhedron_spec import load_polyhedron_spec
-from combinatorics import EdgeMap
-from net_layout import build_net_layout
-from fold_solver import solve_fold_angles
+from .net_fold_core import Net
+from .polyhedron_spec import load_polyhedron_spec
+from .combinatorics import EdgeMap
+from .net_layout import build_net_layout
+from .fold_solver import solve_fold_angles
 
 
 def load_net_txt(path):
