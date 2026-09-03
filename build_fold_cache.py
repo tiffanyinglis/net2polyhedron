@@ -5,18 +5,28 @@ time -- it just reads back the cached result in fold_cache/ if the source
 
     python build_fold_cache.py            # only nets whose cache is stale
     python build_fold_cache.py --force     # recompute every net
+
+The same logic backs the "Compute Folding Pattern" button in
+polygon_fold_app.py (see net_fold_utils.fold_cache.build_all).
 """
 import argparse
-import glob
 import os
-import time
 
-from net_fold_utils.net_io import load_polyhedron_net
-from net_fold_utils.fold_cache import (
-    cache_path_for, source_checksum, read_fold_cache, write_fold_cache,
-)
+from net_fold_utils.fold_cache import build_all
 
 NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nets")
+
+
+def _print_progress(i, n, label, status, elapsed=None):
+    tag = f"[{i}/{n}] {label}"
+    if status == "skip":
+        print(f"{tag}: up to date, skipping")
+    elif status == "start":
+        print(f"{tag}: solving...", flush=True)
+    elif status == "done":
+        print(f"{tag}: done in {elapsed:.2f}s")
+    elif status == "failed":
+        print(f"{tag}: FAILED")
 
 
 def main():
@@ -25,33 +35,14 @@ def main():
                          help="recompute even if the cache looks up to date")
     args = parser.parse_args()
 
-    paths = sorted(glob.glob(os.path.join(NETS_DIR, "*.poly")))
-    if not paths:
+    results = build_all(NETS_DIR, force=args.force, on_progress=_print_progress)
+    if not results:
         print(f"no .poly nets found in {NETS_DIR}")
         return
 
-    for i, path in enumerate(paths, 1):
-        label = os.path.basename(path)
-        tag = f"[{i}/{len(paths)}] {label}"
-        cache_path = cache_path_for(path)
-        checksum = source_checksum(path)
-
-        if not args.force:
-            cached = read_fold_cache(cache_path)
-            if cached is not None and cached[0] == checksum:
-                print(f"{tag}: up to date, skipping")
-                continue
-
-        print(f"{tag}: solving...", flush=True)
-        start = time.time()
-        try:
-            net, root, hinges, fold_angles, name = load_polyhedron_net(path)
-        except ValueError as e:
-            print(f"{tag}: FAILED -- {e}")
-            continue
-        write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
-        elapsed = time.time() - start
-        print(f"{tag}: done in {elapsed:.2f}s -> {os.path.relpath(cache_path)}")
+    for path, ok, message in results:
+        if not ok:
+            print(f"{os.path.basename(path)}: {message}")
 
 
 if __name__ == "__main__":

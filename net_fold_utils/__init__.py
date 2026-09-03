@@ -17,9 +17,10 @@ The most common entry points are re-exported here for convenience.
 """
 from .net_io import load_net, load_polyhedron_net, load_net_txt
 from .net_fold_core import fold, distinct_vertices
-from .fold_cache import load_with_cache
+from .fold_cache import load_with_cache, is_cached, build_all
 
 __all__ = [
     "load_net", "load_polyhedron_net", "load_net_txt", "load_with_cache",
+    "is_cached", "build_all",
     "fold", "distinct_vertices",
 ]

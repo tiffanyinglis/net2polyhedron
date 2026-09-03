@@ -12,8 +12,10 @@ Cache files live in a top-level fold_cache/ directory, kept separate from
 the human-authored nets/ directory -- nets/ is what you hand-edit,
 fold_cache/ is entirely computed/disposable output.
 """
+import glob
 import hashlib
 import os
+import time
 
 import numpy as np
 
@@ -84,6 +86,31 @@ def write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
         f.write("\n".join(lines))
 
 
+def is_cached(poly_path, cache_path=None):
+    """True if a valid, up-to-date .fold cache already exists for
+    poly_path -- i.e. loading it would be a fast parse, not a solve. A
+    read-only check: never deletes anything, so it's safe to call just to
+    decide how to render a net (e.g. in the app's net list)."""
+    cache_path = cache_path or cache_path_for(poly_path)
+    cached = read_fold_cache(cache_path)
+    return cached is not None and cached[0] == source_checksum(poly_path)
+
+
+def _valid_cache_or_clear_stale(cache_path, checksum):
+    """Read the cache; if present but its checksum no longer matches (the
+    source .poly was edited since), it no longer applies to anything, so
+    delete it -- otherwise a failed re-solve would leave a stale .fold file
+    behind that looks like a real, current cache. Returns the parsed cache
+    tuple if it's still valid, else None."""
+    cached = read_fold_cache(cache_path)
+    if cached is None:
+        return None
+    if cached[0] != checksum:
+        os.remove(cache_path)
+        return None
+    return cached
+
+
 def load_with_cache(poly_path, cache_path=None):
     """Load a .poly net, reusing a cached .fold file if it's still valid
     for the current contents of poly_path; otherwise solve fresh and
@@ -91,11 +118,60 @@ def load_with_cache(poly_path, cache_path=None):
     cache_path = cache_path or cache_path_for(poly_path)
     checksum = source_checksum(poly_path)
 
-    cached = read_fold_cache(cache_path)
-    if cached is not None and cached[0] == checksum:
+    cached = _valid_cache_or_clear_stale(cache_path, checksum)
+    if cached is not None:
         _, net, root, hinges, fold_angles, name = cached
         return net, root, hinges, fold_angles, name
 
     net, root, hinges, fold_angles, name = load_polyhedron_net(poly_path)
     write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
     return net, root, hinges, fold_angles, name
+
+
+def build_all(nets_dir, force=False, on_progress=None):
+    """Compute/refresh the .fold cache for every .poly net in nets_dir.
+
+    Shared by the build_fold_cache.py CLI and the "Compute Folding
+    Pattern" button in polygon_fold_app.py, so both report progress the
+    same way and stay in sync with how caching actually works.
+
+    on_progress(i, n, label, status, elapsed=None), if given, is called
+    once per net with status one of "skip", "start", "done", "failed".
+    Returns a list of (path, ok, message) tuples.
+    """
+    paths = sorted(glob.glob(os.path.join(nets_dir, "*.poly")))
+    n = len(paths)
+    results = []
+    for i, path in enumerate(paths, 1):
+        label = os.path.basename(path)
+        cache_path = cache_path_for(path)
+        checksum = source_checksum(path)
+
+        # Deletes the cache as a side effect if it exists but its source
+        # .poly has since been edited (checksum mismatch) -- that cache no
+        # longer describes anything real, so it shouldn't survive a failed
+        # re-solve below.
+        cached = _valid_cache_or_clear_stale(cache_path, checksum)
+        if cached is not None and not force:
+            if on_progress:
+                on_progress(i, n, label, "skip")
+            results.append((path, True, "up to date"))
+            continue
+
+        if on_progress:
+            on_progress(i, n, label, "start")
+        start = time.time()
+        try:
+            net, root, hinges, fold_angles, name = load_polyhedron_net(path)
+        except ValueError as e:
+            if on_progress:
+                on_progress(i, n, label, "failed")
+            results.append((path, False, str(e)))
+            continue
+        write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
+        elapsed = time.time() - start
+        if on_progress:
+            on_progress(i, n, label, "done", elapsed)
+        results.append((path, True, f"solved in {elapsed:.2f}s"))
+
+    return results
