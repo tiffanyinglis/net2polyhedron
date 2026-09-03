@@ -1,7 +1,7 @@
 """Precompute and cache the fold for every net in nets/, so the app never
 has to run the (potentially slow) combinatorial + numerical solve at load
 time -- it just reads back the cached result in fold_cache/ if the source
-.poly is unchanged.
+.json is unchanged.
 
     python build_fold_cache.py            # only nets whose cache is stale
     python build_fold_cache.py --force     # recompute every net
@@ -37,7 +37,7 @@ def main():
 
     results = build_all(NETS_DIR, force=args.force, on_progress=_print_progress)
     if not results:
-        print(f"no .poly nets found in {NETS_DIR}")
+        print(f"no .json nets found in {NETS_DIR}")
         return
 
     for path, ok, message in results:

@@ -28,45 +28,59 @@ included out of the box in `nets/`.
 
 ## Describing your own net
 
-A net is a plain text `.poly` file in `nets/`. You only ever describe the
+A net is a JSON `.json` file in `nets/`. You only ever describe the
 *combinatorics* — which faces exist and which ones touch — and everything
 else (the flat layout, every fold angle) is worked out for you. For
 example, a cube:
 
+```json
+{
+  "name": "Cube",
+  "faces": [
+    {"id": 0, "sides": 4, "isRoot": true},
+    {"id": 1, "sides": 4},
+    {"id": 2, "sides": 4},
+    {"id": 3, "sides": 4},
+    {"id": 4, "sides": 4},
+    {"id": 5, "sides": 4}
+  ],
+  "edges": {
+    "net": [
+      [0, 1],
+      [0, 2],
+      [0, 3],
+      [0, 4],
+      [1, 5]
+    ],
+    "extra": [
+      [1, 2],
+      [1, 3],
+      [3, 4],
+      [2, 4],
+      [3, 5],
+      [2, 5],
+      [4, 5]
+    ]
+  }
+}
 ```
-FACES        # one line per face: its number of sides
-4
-4
-4
-4
-4
-4
 
-ROOT 0       # which face the flat net is built outward from
+`faces` gives each face's number of sides, with an explicit `id` per face
+so they're easy to number and cross-reference even in a long list. The
+face the flat net is built outward from is marked `"isRoot": true` (face 0
+if none is marked). `edges.net` lists the hinges in the flat net — it must
+connect every face (a spanning tree: exactly one fewer edge than there are
+faces). `edges.extra` lists every other edge of the solid: faces that only
+touch once folded, not in the flat layout. These are what pin down the
+fold angles — without them there'd be nothing forcing the net to close
+into one particular shape.
 
-NET          # hinges in the flat net -- must connect every face (a
-0 1          # spanning tree: exactly one fewer edge than there are faces)
-0 2
-0 3
-0 4
-1 5
-
-EXTRA        # every other edge of the solid: faces that only touch once
-1 2          # folded, not in the flat layout. These are what pin down
-1 3          # the fold angles -- without them there'd be nothing forcing
-3 4          # the net to close into one particular shape.
-2 4
-3 5
-2 5
-4 5
-```
-
-Drop a new `.poly` file into `nets/` and it shows up in the app's dropdown
+Drop a new `.json` file into `nets/` and it shows up in the app's dropdown
 automatically. See `net_fold_utils/polyhedron_spec.py` for the full format
 reference, and the existing files in `nets/` for more examples.
 
 If you already know a solid's exact 3D vertex coordinates and just want a
-`.poly` file generated from them, see `net_fold_utils/hull_to_spec.py` and
+`.json` file generated from them, see `net_fold_utils/hull_to_spec.py` and
 `tools/generate_platonic_nets.py` for a worked example.
 
 ### Legacy format
@@ -74,7 +88,7 @@ If you already know a solid's exact 3D vertex coordinates and just want a
 If you need to hand-specify exact vertex positions and fold angles instead
 (e.g. for a shape the automatic solver can't handle), a `.txt` net format
 is also supported — see `net_fold_utils/net_io.py:load_net_txt` for its
-format. Both `.poly` and `.txt` files in `nets/` show up in the app.
+format. Both `.json` and `.txt` files in `nets/` show up in the app.
 
 ## The fold cache
 
@@ -82,7 +96,7 @@ Working out how a net folds involves solving a system of equations, which
 can take anywhere from under a second to about a minute for a large net
 (the included truncated icosahedron takes tens of seconds). To avoid
 re-solving on every launch, results are cached in `fold_cache/` alongside
-a checksum of the source `.poly` file — editing a net automatically
+a checksum of the source `.json` file — editing a net automatically
 invalidates its stale cache.
 
 A net with no cached fold yet shows up **greyed out** in the app's
@@ -120,7 +134,7 @@ net_fold_utils/         the reusable library -- net format parsing, the
                          combinatorics -> geometry pipeline, the fold
                          solver, and the fold cache
 
-nets/*.poly             human-authored net descriptions (edit these)
+nets/*.json             human-authored net descriptions (edit these)
 fold_cache/*.fold       computed fold results (generated, not hand-edited)
 tools/                  one-off generator scripts
 tests/                  pytest suite

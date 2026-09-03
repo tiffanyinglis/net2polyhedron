@@ -92,10 +92,11 @@ def load_net_txt(path):
 
 
 def load_polyhedron_net(path):
-    """Load the abstract FACES/NET/EXTRA spec format (see polyhedron_spec.py)
-    and derive everything else: the 2D net layout and every fold angle. This
-    is the slow path -- it runs the full combinatorial + numerical solve;
-    see fold_cache.py for a checksummed cache that avoids repeating it."""
+    """Load the abstract JSON faces/edges spec format (see
+    polyhedron_spec.py) and derive everything else: the 2D net layout and
+    every fold angle. This is the slow path -- it runs the full
+    combinatorial + numerical solve; see fold_cache.py for a checksummed
+    cache that avoids repeating it."""
     degrees, net_edges, extra_edges, root, name = load_polyhedron_spec(path)
     edge_map = EdgeMap(degrees, net_edges + extra_edges)
     net, hinges = build_net_layout(degrees, net_edges, edge_map, root)
@@ -104,10 +105,10 @@ def load_polyhedron_net(path):
 
 
 def load_net(path):
-    """Dispatch to the right loader by file extension: .poly for the
+    """Dispatch to the right loader by file extension: .json for the
     abstract combinatorial spec (via the .fold cache, see fold_cache.py),
     .txt for the legacy explicit-coordinate format."""
-    if path.endswith(".poly"):
+    if path.endswith(".json"):
         from .fold_cache import load_with_cache
         return load_with_cache(path)
     return load_net_txt(path)

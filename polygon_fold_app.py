@@ -1,21 +1,22 @@
 """
-Interactive polyhedron-net folding app: a dropdown to pick from .poly net
+Interactive polyhedron-net folding app: a dropdown to pick from .json net
 files in the nets/ folder (5 Platonic solids included), plus a slider to
 fold from flat (0%) to fully closed (100%).
 
     python polygon_fold_app.py
 
-Add your own nets by dropping a new .poly file (see polyhedron_spec.py for
+Add your own nets by dropping a new .json file (see polyhedron_spec.py for
 the format, or any file in nets/ for reference) into the nets/ folder --
 it'll show up in the dropdown automatically. Legacy .txt files with explicit
 coordinates and fold angles (see net_io.load_net_txt) are also supported.
 
-A .poly net with no matching fold_cache/*.fold file hasn't been solved yet
+A .json net with no matching fold_cache/*.fold file hasn't been solved yet
 and shows up greyed out and unselectable; use the "Compute Folding Pattern"
 button (or run build_fold_cache.py from the command line) to solve it.
 """
 import os
 import glob
+import itertools
 import queue
 import threading
 import tkinter as tk
@@ -25,7 +26,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
@@ -45,6 +46,15 @@ STATUS_COLORS = {
     "warn": "#9a6700",
 }
 
+# Mirrors sv_ttk's own background colors (theme/{light,dark}.tcl -bg) so the
+# 3D plot doesn't look like a mismatched white box dropped onto a dark
+# window. fg/grid are the axis lines, ticks, labels and gridlines -- these
+# need to flip to a light color in dark mode to stay visible against -bg.
+PLOT_THEME = {
+    "light": {"bg": "#fafafa", "fg": "#1c1c1c", "grid": (0, 0, 0, 0.1)},
+    "dark": {"bg": "#1c1c1c", "fg": "#e0e0e0", "grid": (1, 1, 1, 0.15)},
+}
+
 
 class PolygonFoldApp:
     def __init__(self, root):
@@ -53,7 +63,7 @@ class PolygonFoldApp:
         root.geometry("900x820")
         root.minsize(680, 560)
 
-        sv_ttk.set_theme("light")
+        sv_ttk.set_theme("dark")
 
         # ---- Net selection ----
         net_frame = ttk.LabelFrame(root, text="Net", padding=12)
@@ -71,9 +81,15 @@ class PolygonFoldApp:
         self.compute_button.pack(side=tk.LEFT, padx=(12, 0))
         Tooltip(self.compute_button, COMPUTE_TOOLTIP)
 
-        self.theme_button = ttk.Button(picker_row, text="Dark Mode", width=10,
+        self.theme_button = ttk.Button(picker_row, text="Light Mode", width=10,
                                         command=self.on_toggle_theme)
         self.theme_button.pack(side=tk.RIGHT)
+
+        self.show_axes_var = tk.BooleanVar(value=False)
+        self.axes_check = ttk.Checkbutton(picker_row, text="Show Axes",
+                                           variable=self.show_axes_var,
+                                           command=self.on_toggle_axes)
+        self.axes_check.pack(side=tk.RIGHT, padx=(0, 12))
 
         status_row = ttk.Frame(net_frame)
         status_row.pack(fill=tk.X, pady=(10, 0))
@@ -108,6 +124,8 @@ class PolygonFoldApp:
         self.current_label = None
         self.label_to_path = {}
         self.label_enabled = {}
+        self.is_dark = True
+        self._apply_plot_theme()
         self.refresh_net_list()
         if self.current_label:
             self.on_select_net()
@@ -116,17 +134,54 @@ class PolygonFoldApp:
         self.status_var.set(text)
         self.status_label.configure(foreground=STATUS_COLORS.get(kind, ""))
 
+    def _apply_plot_theme(self):
+        """Recolor the figure/axes chrome to match the current sv_ttk theme
+        and the "Show Axes" toggle -- ax.cla() (called every draw()) resets
+        all of this to matplotlib's defaults, so it has to be re-applied on
+        every redraw, not just on toggle. Returns the active theme dict so
+        callers (draw()) can reuse its colors, e.g. for the box wireframe."""
+        theme = PLOT_THEME["dark" if self.is_dark else "light"]
+        self.fig.patch.set_facecolor(theme["bg"])
+        self.ax.set_facecolor(theme["bg"])
+        self.ax.title.set_color(theme["fg"])
+        if self.show_axes_var.get():
+            self.ax.set_axis_on()
+            for axis in (self.ax.xaxis, self.ax.yaxis, self.ax.zaxis):
+                axis.pane.set_facecolor(theme["bg"])
+                axis.pane.set_edgecolor(theme["fg"])
+                axis.line.set_color(theme["fg"])
+                axis.label.set_color(theme["fg"])
+                axis._axinfo["grid"]["color"] = theme["grid"]
+            self.ax.tick_params(colors=theme["fg"])
+        else:
+            self.ax.set_axis_off()
+        return theme
+
+    def _refresh_plot(self):
+        """Redraw with the current fold position, or just recolor the empty
+        plot if no net is loaded yet -- shared by the theme and axes-visibility
+        toggles, which both need the same "redraw everything" behavior."""
+        if self.net is not None:
+            self.draw(self.slider.get() / 100.0)
+        else:
+            self._apply_plot_theme()
+            self.canvas.draw_idle()
+
     def on_toggle_theme(self):
         sv_ttk.toggle_theme()
-        is_dark = sv_ttk.get_theme() == "dark"
-        self.theme_button.configure(text="Light Mode" if is_dark else "Dark Mode")
+        self.is_dark = sv_ttk.get_theme() == "dark"
+        self.theme_button.configure(text="Light Mode" if self.is_dark else "Dark Mode")
+        self._refresh_plot()
+
+    def on_toggle_axes(self):
+        self._refresh_plot()
 
     def refresh_net_list(self, keep_selection=True):
         """Rescan nets/, figure out which are already solved (a valid
         fold_cache/*.fold exists), and rebuild the dropdown -- unsolved
-        .poly nets get a "(not computed)" suffix and are rejected on
+        .json nets get a "(not computed)" suffix and are rejected on
         selection instead of being loaded."""
-        paths = sorted(glob.glob(os.path.join(NETS_DIR, "*.poly")) +
+        paths = sorted(glob.glob(os.path.join(NETS_DIR, "*.json")) +
                         glob.glob(os.path.join(NETS_DIR, "*.txt")))
 
         self.label_to_path = {}
@@ -243,19 +298,44 @@ class PolygonFoldApp:
         if self.net is not None:
             self.draw(float(value) / 100.0)
 
+    def _draw_box_wireframe(self, xlim, ylim, zlim, color):
+        """Explicitly draw all 12 edges of the bounding box. matplotlib's
+        default 3D pane borders only cover the 9 edges belonging to the 3
+        panes it renders (whichever are "far" from the camera for the
+        current, fixed view angle) -- the near vertical edge where the two
+        visible walls meet is never drawn, leaving the box looking open on
+        one corner."""
+        corners = list(itertools.product(xlim, ylim, zlim))
+        edges = [(a, b) for i, a in enumerate(corners) for b in corners[i + 1:]
+                  if sum(p != q for p, q in zip(a, b)) == 1]
+        self.ax.add_collection3d(Line3DCollection(edges, colors=color, linewidths=0.8))
+
     def draw(self, t):
         self.ax.cla()
+        theme = self._apply_plot_theme()
         verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, t)
         all_pts = np.vstack(list(verts.values()))
         for (fid, pts), color in zip(verts.items(), self.colors):
             poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
             self.ax.add_collection3d(poly)
-        lo, hi = all_pts.min(), all_pts.max()
-        pad = (hi - lo) * 0.1 + 1e-6
-        self.ax.set_xlim(lo - pad, hi + pad)
-        self.ax.set_ylim(lo - pad, hi + pad)
-        self.ax.set_zlim(lo - pad, hi + pad)
+
+        # Center the view on the shape's own bounding-box center (not just
+        # its raw min/max) so it sits in the middle of the plot instead of
+        # wherever the net layout happened to place it, on every axis --
+        # one shared half-width (not one per axis) keeps the box cubic so
+        # set_box_aspect([1, 1, 1]) doesn't distort the shape.
+        lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
+        center = (lo + hi) / 2
+        half = (hi - lo).max() / 2 * 1.2 + 1e-6
+        xlim = (center[0] - half, center[0] + half)
+        ylim = (center[1] - half, center[1] + half)
+        zlim = (center[2] - half, center[2] + half)
+        self.ax.set_xlim(*xlim)
+        self.ax.set_ylim(*ylim)
+        self.ax.set_zlim(*zlim)
         self.ax.set_box_aspect([1, 1, 1])
+        if self.show_axes_var.get():
+            self._draw_box_wireframe(xlim, ylim, zlim, theme["fg"])
         self.ax.set_title(f"{self.current_label}  (fold {t*100:.0f}%)")
         self.canvas.draw_idle()
 

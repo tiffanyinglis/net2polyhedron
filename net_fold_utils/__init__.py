@@ -6,8 +6,8 @@ Reusable library modules:
   net_layout       -- flat 2D net layout from a spanning tree of faces
   fold_solver      -- solve hinge fold angles from closure constraints
   net_fold_core    -- the fold engine (Net, fold(), distinct_vertices())
-  polyhedron_spec  -- parse/write the FACES/NET/EXTRA .poly format
-  net_io           -- load_net(): dispatches .poly / legacy .txt loaders
+  polyhedron_spec  -- parse/write the faces/edges .json format
+  net_io           -- load_net(): dispatches .json / legacy .txt loaders
   fold_cache       -- checksummed .fold cache so a solve only runs once
   spanning_tree    -- split a full edge list into tree + extra edges
   hull_to_spec     -- derive a spec from a convex polyhedron's 3D vertices

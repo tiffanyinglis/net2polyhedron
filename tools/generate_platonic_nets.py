@@ -1,4 +1,4 @@
-"""One-off generator: writes nets/<solid>.poly for each of the 5 Platonic
+"""One-off generator: writes nets/<solid>.json for each of the 5 Platonic
 solids, deriving face degrees and adjacency straight from canonical 3D
 vertex coordinates.
 
@@ -21,7 +21,7 @@ def main():
     for name, coord_fn in SOLIDS.items():
         degrees, edges, _ = polyhedron_from_vertices(coord_fn())
         net_edges, extra_edges = split_spanning_tree(len(degrees), edges, root=0)
-        out_path = os.path.join(NETS_DIR, f"{name}.poly")
+        out_path = os.path.join(NETS_DIR, f"{name}.json")
         write_polyhedron_spec(out_path, degrees, net_edges, extra_edges,
                                root=0, name=name.capitalize())
         print(f"wrote {out_path}  ({len(degrees)} faces, "

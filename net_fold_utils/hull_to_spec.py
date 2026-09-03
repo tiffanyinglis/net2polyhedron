@@ -4,9 +4,9 @@ convex polyhedron's 3D vertex coordinates.
 This is a reusable on-ramp: given nothing but the vertices of a convex
 polyhedron with regular-polygon faces, it recovers which faces exist, their
 degrees, and which faces are adjacent -- everything polyhedron_spec.py needs
-to write out a FACES/NET/EXTRA file. scipy's convex hull always triangulates
-non-triangular facets, so coplanar triangles are merged back into their true
-polygonal face first.
+to write out a faces/edges JSON spec. scipy's convex hull always
+triangulates non-triangular facets, so coplanar triangles are merged back
+into their true polygonal face first.
 """
 from collections import defaultdict
 

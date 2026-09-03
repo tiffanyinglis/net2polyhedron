@@ -1,11 +1,11 @@
-"""Cache the (expensive) result of solving a .poly net's fold angles into a
+"""Cache the (expensive) result of solving a .json net's fold angles into a
 .fold file, so re-loading an unchanged net is just a fast text parse
 instead of a full combinatorial + numerical solve.
 
 A .fold file has the same shape as the legacy explicit-coordinate net
 format (see net_io.parse_net_body): computed vertex positions and fold
 angles, spelled out plainly, plus a CHECKSUM line recording a hash of the
-source .poly file it was generated from. If the source changes, the
+source .json file it was generated from. If the source changes, the
 checksum no longer matches and the cache is treated as stale and rebuilt.
 
 Cache files live in a top-level fold_cache/ directory, kept separate from
@@ -25,20 +25,20 @@ from .net_io import load_polyhedron_net, parse_net_body
 CHECKSUM_ALGO = "sha256"
 
 
-def cache_path_for(poly_path, cache_dir=None):
-    """Where the .fold cache for a given .poly source lives. Defaults to
+def cache_path_for(net_path, cache_dir=None):
+    """Where the .fold cache for a given .json source lives. Defaults to
     <project root>/fold_cache/<basename>.fold, where <project root> is the
-    parent of the .poly file's own directory (i.e. the parent of nets/)."""
-    poly_path = os.path.abspath(poly_path)
+    parent of the .json file's own directory (i.e. the parent of nets/)."""
+    net_path = os.path.abspath(net_path)
     if cache_dir is None:
-        project_root = os.path.dirname(os.path.dirname(poly_path))
+        project_root = os.path.dirname(os.path.dirname(net_path))
         cache_dir = os.path.join(project_root, "fold_cache")
-    base = os.path.splitext(os.path.basename(poly_path))[0]
+    base = os.path.splitext(os.path.basename(net_path))[0]
     return os.path.join(cache_dir, base + ".fold")
 
 
-def source_checksum(poly_path):
-    with open(poly_path, "rb") as f:
+def source_checksum(net_path):
+    with open(net_path, "rb") as f:
         digest = hashlib.new(CHECKSUM_ALGO, f.read()).hexdigest()
     return f"{CHECKSUM_ALGO}:{digest}"
 
@@ -86,19 +86,19 @@ def write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
         f.write("\n".join(lines))
 
 
-def is_cached(poly_path, cache_path=None):
+def is_cached(net_path, cache_path=None):
     """True if a valid, up-to-date .fold cache already exists for
-    poly_path -- i.e. loading it would be a fast parse, not a solve. A
+    net_path -- i.e. loading it would be a fast parse, not a solve. A
     read-only check: never deletes anything, so it's safe to call just to
     decide how to render a net (e.g. in the app's net list)."""
-    cache_path = cache_path or cache_path_for(poly_path)
+    cache_path = cache_path or cache_path_for(net_path)
     cached = read_fold_cache(cache_path)
-    return cached is not None and cached[0] == source_checksum(poly_path)
+    return cached is not None and cached[0] == source_checksum(net_path)
 
 
 def _valid_cache_or_clear_stale(cache_path, checksum):
     """Read the cache; if present but its checksum no longer matches (the
-    source .poly was edited since), it no longer applies to anything, so
+    source .json was edited since), it no longer applies to anything, so
     delete it -- otherwise a failed re-solve would leave a stale .fold file
     behind that looks like a real, current cache. Returns the parsed cache
     tuple if it's still valid, else None."""
@@ -111,25 +111,25 @@ def _valid_cache_or_clear_stale(cache_path, checksum):
     return cached
 
 
-def load_with_cache(poly_path, cache_path=None):
-    """Load a .poly net, reusing a cached .fold file if it's still valid
-    for the current contents of poly_path; otherwise solve fresh and
+def load_with_cache(net_path, cache_path=None):
+    """Load a .json net, reusing a cached .fold file if it's still valid
+    for the current contents of net_path; otherwise solve fresh and
     (re)write the cache."""
-    cache_path = cache_path or cache_path_for(poly_path)
-    checksum = source_checksum(poly_path)
+    cache_path = cache_path or cache_path_for(net_path)
+    checksum = source_checksum(net_path)
 
     cached = _valid_cache_or_clear_stale(cache_path, checksum)
     if cached is not None:
         _, net, root, hinges, fold_angles, name = cached
         return net, root, hinges, fold_angles, name
 
-    net, root, hinges, fold_angles, name = load_polyhedron_net(poly_path)
+    net, root, hinges, fold_angles, name = load_polyhedron_net(net_path)
     write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
     return net, root, hinges, fold_angles, name
 
 
 def build_all(nets_dir, force=False, on_progress=None):
-    """Compute/refresh the .fold cache for every .poly net in nets_dir.
+    """Compute/refresh the .fold cache for every .json net in nets_dir.
 
     Shared by the build_fold_cache.py CLI and the "Compute Folding
     Pattern" button in polygon_fold_app.py, so both report progress the
@@ -139,7 +139,7 @@ def build_all(nets_dir, force=False, on_progress=None):
     once per net with status one of "skip", "start", "done", "failed".
     Returns a list of (path, ok, message) tuples.
     """
-    paths = sorted(glob.glob(os.path.join(nets_dir, "*.poly")))
+    paths = sorted(glob.glob(os.path.join(nets_dir, "*.json")))
     n = len(paths)
     results = []
     for i, path in enumerate(paths, 1):
@@ -148,7 +148,7 @@ def build_all(nets_dir, force=False, on_progress=None):
         checksum = source_checksum(path)
 
         # Deletes the cache as a side effect if it exists but its source
-        # .poly has since been edited (checksum mismatch) -- that cache no
+        # .json has since been edited (checksum mismatch) -- that cache no
         # longer describes anything real, so it shouldn't survive a failed
         # re-solve below.
         cached = _valid_cache_or_clear_stale(cache_path, checksum)
