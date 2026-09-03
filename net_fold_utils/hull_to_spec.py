@@ -14,6 +14,7 @@ import numpy as np
 from scipy.spatial import ConvexHull
 
 PLANE_TOL = 1e-6
+_PLANE_DECIMALS = round(-np.log10(PLANE_TOL))
 
 
 def _merge_coplanar_facets(hull):
@@ -21,7 +22,7 @@ def _merge_coplanar_facets(hull):
     sets, one per true polygon face."""
     groups = defaultdict(list)
     for simplex, eq in zip(hull.simplices, hull.equations):
-        key = tuple(np.round(eq / np.linalg.norm(eq[:3]), 6))
+        key = tuple(np.round(eq / np.linalg.norm(eq[:3]), _PLANE_DECIMALS))
         groups[key].append(simplex)
     return [set(np.concatenate(simplices)) for simplices in groups.values()]
 

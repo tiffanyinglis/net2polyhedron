@@ -25,6 +25,7 @@ from .polygon_geom import EDGE_LENGTH
 CLOSE_TOL = 1e-6
 COLLISION_TOL = 1e-3
 SPARSITY_MIN_HINGES = 15
+ANGLE_BOUNDS = (1e-3, np.pi - 1e-3)  # exclude exactly flat (0) and doubled-back (pi)
 
 
 def _residual(theta, net, root, hinges, extra_edges, edge_map, subtree_map):
@@ -98,11 +99,10 @@ def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map, subtree_map,
     (valid_candidates, best_err) where valid_candidates is a list of
     (sum_of_angles, theta) for every guess that converged to a genuine,
     embeddable closure."""
-    lo, hi = 1e-3, np.pi - 1e-3
     valid_candidates = []
     best_err = np.inf
     for x0 in guesses:
-        sol = least_squares(_residual, x0, bounds=(lo, hi),
+        sol = least_squares(_residual, x0, bounds=ANGLE_BOUNDS,
                              args=(net, root, hinges, extra_edges, edge_map, subtree_map),
                              jac_sparsity=jac_sparsity)
         err = np.max(np.abs(sol.fun)) if sol.fun.size else 0.0
@@ -155,7 +155,7 @@ def solve_fold_angles(net, root, hinges, extra_edges, edge_map, seed=0):
 
     if not valid_candidates:
         rng = np.random.default_rng(seed)
-        lo, hi = 1e-3, np.pi - 1e-3
+        lo, hi = ANGLE_BOUNDS
         fallback = [rng.uniform(lo, hi, n) for _ in range(40)]
         valid_candidates, fallback_err = _try_guesses(
             fallback, net, root, hinges, extra_edges, edge_map, subtree_map, jac_sparsity)

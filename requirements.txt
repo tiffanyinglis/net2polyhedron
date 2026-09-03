@@ -2,3 +2,7 @@ numpy
 scipy
 networkx
 matplotlib
+sv-ttk
+
+# dev/test only
+pytest

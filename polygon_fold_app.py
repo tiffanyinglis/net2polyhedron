@@ -27,6 +27,7 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import sv_ttk
 
 from net_fold_utils import load_net, fold, is_cached, build_all
 from tooltip import Tooltip
@@ -37,41 +38,71 @@ COMPUTE_TOOLTIP = ("Solves the fold for every net that hasn't been computed "
                     "yet.\nThis may take a few minutes -- larger nets (like "
                     "the icosahedron)\ncan take up to a minute each.")
 
+STATUS_COLORS = {
+    "info": "#3b6ea5",
+    "success": "#1a7f37",
+    "error": "#cf222e",
+    "warn": "#9a6700",
+}
+
 
 class PolygonFoldApp:
     def __init__(self, root):
         self.root = root
-        root.title("Net Folder")
-        root.geometry("800x800")
+        root.title("Polygon Net Folder")
+        root.geometry("900x820")
+        root.minsize(680, 560)
 
-        top = ttk.Frame(root, padding=8)
-        top.pack(side=tk.TOP, fill=tk.X)
+        sv_ttk.set_theme("light")
 
-        ttk.Label(top, text="Net:").pack(side=tk.LEFT, padx=(0, 6))
-        self.combo = ttk.Combobox(top, state="readonly", width=30)
+        # ---- Net selection ----
+        net_frame = ttk.LabelFrame(root, text="Net", padding=12)
+        net_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
+
+        picker_row = ttk.Frame(net_frame)
+        picker_row.pack(fill=tk.X)
+        ttk.Label(picker_row, text="Choose a net:").pack(side=tk.LEFT, padx=(0, 8))
+        self.combo = ttk.Combobox(picker_row, state="readonly", width=30)
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
-        self.compute_button = ttk.Button(top, text="Compute Folding Pattern",
+        self.compute_button = ttk.Button(picker_row, text="Compute Folding Pattern",
                                           command=self.on_compute_clicked)
-        self.compute_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.compute_button.pack(side=tk.LEFT, padx=(12, 0))
         Tooltip(self.compute_button, COMPUTE_TOOLTIP)
 
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.status_var,
-                  foreground="#a05a00").pack(side=tk.LEFT, padx=(10, 0))
+        self.theme_button = ttk.Button(picker_row, text="Dark Mode", width=10,
+                                        command=self.on_toggle_theme)
+        self.theme_button.pack(side=tk.RIGHT)
 
+        status_row = ttk.Frame(net_frame)
+        status_row.pack(fill=tk.X, pady=(10, 0))
+        self.progress = ttk.Progressbar(status_row, mode="indeterminate", length=160)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(status_row, textvariable=self.status_var)
+        self.status_label.pack(side=tk.LEFT)
+
+        # ---- 3D view ----
+        view_frame = ttk.Frame(root)
+        view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=6)
         self.fig = plt.figure(figsize=(6, 6))
         self.ax = self.fig.add_subplot(111, projection="3d")
-        self.canvas = FigureCanvasTkAgg(self.fig, master=root)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=view_frame)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        bottom = ttk.Frame(root, padding=8)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X)
-        ttk.Label(bottom, text="Fold:").pack(side=tk.LEFT, padx=(0, 6))
-        self.slider = ttk.Scale(bottom, from_=0, to=100, orient=tk.HORIZONTAL,
+        # ---- Fold control ----
+        fold_frame = ttk.LabelFrame(root, text="Fold", padding=12)
+        fold_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(8, 14))
+        slider_row = ttk.Frame(fold_frame)
+        slider_row.pack(fill=tk.X)
+        ttk.Label(slider_row, text="Flat").pack(side=tk.LEFT)
+        self.slider = ttk.Scale(slider_row, from_=0, to=100, orient=tk.HORIZONTAL,
                                  command=self.on_slider)
-        self.slider.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        ttk.Label(slider_row, text="Folded").pack(side=tk.LEFT)
+        self.pct_var = tk.StringVar(value="0%")
+        ttk.Label(slider_row, textvariable=self.pct_var, width=5, anchor="e").pack(
+            side=tk.LEFT, padx=(10, 0))
 
         self.net = self.root_face = self.hinges = self.fold_angles = None
         self.current_label = None
@@ -80,6 +111,15 @@ class PolygonFoldApp:
         self.refresh_net_list()
         if self.current_label:
             self.on_select_net()
+
+    def _set_status(self, text, kind="info"):
+        self.status_var.set(text)
+        self.status_label.configure(foreground=STATUS_COLORS.get(kind, ""))
+
+    def on_toggle_theme(self):
+        sv_ttk.toggle_theme()
+        is_dark = sv_ttk.get_theme() == "dark"
+        self.theme_button.configure(text="Light Mode" if is_dark else "Dark Mode")
 
     def refresh_net_list(self, keep_selection=True):
         """Rescan nets/, figure out which are already solved (a valid
@@ -127,7 +167,7 @@ class PolygonFoldApp:
             popdown = self.combo.tk.eval(f"ttk::combobox::PopdownWindow {self.combo}")
             listbox = f"{popdown}.f.l"
             for i, label in enumerate(self.combo["values"]):
-                color = "grey60" if not self.label_enabled.get(label, True) else "black"
+                color = "grey60" if not self.label_enabled.get(label, True) else ""
                 self.combo.tk.call(listbox, "itemconfigure", i, "-foreground", color)
         except tk.TclError:
             pass
@@ -135,12 +175,12 @@ class PolygonFoldApp:
     def on_select_net(self, event=None):
         chosen = self.combo.get()
         if not self.label_enabled.get(chosen, False):
-            self.status_var.set(f'"{chosen.replace(DISABLED_SUFFIX, "")}" hasn\'t '
-                                 f'been folded yet -- click Compute Folding Pattern.')
+            self._set_status(f'"{chosen.replace(DISABLED_SUFFIX, "")}" hasn\'t '
+                              f'been folded yet -- click Compute Folding Pattern.', "warn")
             self.combo.set(self.current_label)
             return
 
-        self.status_var.set("")
+        self._set_status("")
         self.current_label = chosen
         path = self.label_to_path[chosen]
         self.net, self.root_face, self.hinges, self.fold_angles, _ = load_net(path)
@@ -150,7 +190,9 @@ class PolygonFoldApp:
 
     def on_compute_clicked(self):
         self.compute_button.state(["disabled"])
-        self.status_var.set("Computing folding patterns, this may take a few minutes...")
+        self.progress.pack(side=tk.LEFT, padx=(10, 0))
+        self.progress.start(12)
+        self._set_status("Computing folding patterns, this may take a few minutes...", "info")
         # Tk is not thread-safe: the worker thread only ever pushes to this
         # queue, and the main thread (via _poll_compute_queue, scheduled
         # with `after`) is the only one that touches any Tk widget.
@@ -172,7 +214,7 @@ class PolygonFoldApp:
             while True:
                 kind, payload = self._compute_queue.get_nowait()
                 if kind == "progress":
-                    self.status_var.set(payload)
+                    self._set_status(payload, "info")
                 elif kind == "done":
                     self._compute_finished(payload)
                     return  # worker is finished, stop polling
@@ -181,20 +223,23 @@ class PolygonFoldApp:
         self.root.after(100, self._poll_compute_queue)
 
     def _compute_finished(self, results):
+        self.progress.stop()
+        self.progress.pack_forget()
         self.compute_button.state(["!disabled"])
         failures = [(os.path.basename(p), msg) for p, ok, msg in results if not ok]
         if failures:
-            self.status_var.set(f"Done, but {len(failures)} net(s) failed -- see popup.")
+            self._set_status(f"Done, but {len(failures)} net(s) failed -- see popup.", "error")
             detail = "\n\n".join(f"{name}:\n{msg}" for name, msg in failures)
             messagebox.showerror(
                 "Some nets failed to compute",
                 f"{len(failures)} net(s) could not be folded:\n\n{detail}",
                 parent=self.root)
         else:
-            self.status_var.set("All nets computed." if results else "")
+            self._set_status("All nets computed." if results else "", "success")
         self.refresh_net_list()
 
     def on_slider(self, value):
+        self.pct_var.set(f"{float(value):.0f}%")
         if self.net is not None:
             self.draw(float(value) / 100.0)
 

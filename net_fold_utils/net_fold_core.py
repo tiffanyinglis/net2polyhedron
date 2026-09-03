@@ -112,11 +112,6 @@ def _subtree_from_children(children, node):
     return members
 
 
-def subtree_members(root, hinges, node):
-    """All face ids in the subtree rooted at `node` (inclusive)."""
-    return _subtree_from_children(_children_map(hinges), node)
-
-
 def precompute_subtree_map(hinges):
     """Precompute, once, every hinge's subtree member list (and each
     member's vertex count). The hinge tree's *shape* never changes across
@@ -203,30 +198,3 @@ def fold(net, root, hinges, fold_angles, t, fold_signs=None, subtree_map=None):
             offset += size
 
     return verts3d
-
-
-# ---------------------------------------------------------------------------
-# Quick self-test: unfolded cube (cross-shaped net) should close into a cube
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    net = Net()
-    s = 1.0
-    # 6 unit squares in a cross layout
-    def sq(x0, y0):
-        return [(x0, y0), (x0 + s, y0), (x0 + s, y0 + s), (x0, y0 + s)]
-
-    bottom = net.add_face(sq(0, 0))
-    front  = net.add_face(sq(0, s))
-    top    = net.add_face(sq(0, 2 * s))
-    back   = net.add_face(sq(0, 3 * s))
-    left   = net.add_face(sq(-s, s))
-    right  = net.add_face(sq(s, s))
-
-    root, hinges = net.build_tree(root=front)
-    print("hinges:", hinges)
-
-    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    verts = fold(net, root, hinges, fold_angles, t=1.0)
-
-    for fid, pts in verts.items():
-        print(fid, np.round(pts, 3).tolist())
