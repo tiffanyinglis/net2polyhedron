@@ -27,14 +27,15 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-from net_fold_utils import load_net, fold, is_cached, build_all
+from net_fold_utils import load_net, fold, is_cached, build_all, face_normal
 from tooltip import Tooltip
-from polygon_fold_app import STATUS_COLORS, PLOT_THEME, NETS_DIR, DISABLED_SUFFIX, COMPUTE_TOOLTIP
+from polygon_fold_app import (STATUS_COLORS, PLOT_THEME, NETS_DIR, DISABLED_SUFFIX,
+                               COMPUTE_TOOLTIP, _CullableFace)
 
 
 class PolyhedralNetApp:
@@ -319,8 +320,14 @@ class PolyhedralNetApp:
         self._style_3d_axis(self.ax3d, theme)
         verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, 1.0)
         all_pts = np.vstack(list(verts.values()))
+        # This panel is always the fully folded (closed, convex) solid, so
+        # backface culling (_CullableFace) is always valid here -- see its
+        # docstring in polygon_fold_app.py for why that's what fixes the
+        # wrong-face-on-top glitches a plain depth-sorted Poly3DCollection
+        # is prone to.
         for (fid, pts), color in zip(verts.items(), self.colors):
-            poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
+            poly = _CullableFace([pts], face_normal(pts), 0.9,
+                                  facecolor=color, edgecolor="k")
             self.ax3d.add_collection3d(poly)
 
         # Center the view on the shape's own bounding-box center (not just

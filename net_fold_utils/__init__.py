@@ -5,7 +5,7 @@ Reusable library modules:
   combinatorics    -- face-adjacency graph -> per-face edge index map
   net_layout       -- flat 2D net layout from a spanning tree of faces
   fold_solver      -- solve hinge fold angles from closure constraints
-  net_fold_core    -- the fold engine (Net, fold(), distinct_vertices())
+  net_fold_core    -- the fold engine (Net, fold(), distinct_vertices(), face_normal())
   polyhedron_spec  -- parse/write the faces/edges .json format
   net_io           -- load_net(): dispatches .json / legacy .txt loaders
   fold_cache       -- checksummed .fold cache so a solve only runs once
@@ -16,11 +16,11 @@ Reusable library modules:
 The most common entry points are re-exported here for convenience.
 """
 from .net_io import load_net, load_polyhedron_net, load_net_txt
-from .net_fold_core import fold, distinct_vertices
+from .net_fold_core import fold, distinct_vertices, face_normal
 from .fold_cache import load_with_cache, is_cached, build_all
 
 __all__ = [
     "load_net", "load_polyhedron_net", "load_net_txt", "load_with_cache",
     "is_cached", "build_all",
-    "fold", "distinct_vertices",
+    "fold", "distinct_vertices", "face_normal",
 ]

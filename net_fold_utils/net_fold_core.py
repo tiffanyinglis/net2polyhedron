@@ -122,6 +122,18 @@ def precompute_subtree_map(hinges):
     return {h["child"]: _subtree_from_children(children, h["child"]) for h in hinges}
 
 
+def face_normal(points):
+    """Outward unit normal of a folded (3D) planar CCW polygon face, via
+    the cross product of its first two edges. "Outward" relies on the
+    net's CCW winding convention (see net_layout.py / polygon_geom.py) --
+    verified empirically for every net in nets/: the fold always produces
+    consistent outward normals this way, for every face, with no need to
+    know the solid's centroid."""
+    p0, p1, p2 = points[0], points[1], points[2]
+    n = np.cross(p1 - p0, p2 - p0)
+    return n / np.linalg.norm(n)
+
+
 def distinct_vertices(verts3d, tol=1e-4):
     """Merge the (possibly many, per-face-corner) points in a folded
     vertex dict into the solid's actual distinct 3D vertices, by

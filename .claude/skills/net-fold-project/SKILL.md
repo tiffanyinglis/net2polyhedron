@@ -152,6 +152,42 @@ in the middle, the fold slider on the bottom.
   9 edges belonging to the 3 panes it renders for a fixed view angle, so
   the near vertical corner where the two visible walls meet is otherwise
   left undrawn.
+- `_CullableFace` (in `polygon_fold_app.py`, also imported by
+  `polyhedral_net_app.py`) fixes wrong-face-on-top glitches in the fully
+  folded 3D view: mplot3d's `Poly3DCollection` only depth-sorts by one
+  scalar per face (`do_3d_projection`'s `np.min(pzs)`), which a face at a
+  grazing view angle can trick into rendering in front of something it
+  should be behind. `_CullableFace` instead does exact backface culling
+  (hides itself via `alpha=0` when `dot(face_normal, view_dir) <= 0`,
+  recomputed from `self.axes.elev`/`azim` on every `do_3d_projection()`
+  call -- which mplot3d makes on every redraw, including mid-drag during
+  interactive rotation, so it stays correct as the user rotates). This is
+  only mathematically valid for a face on a **closed convex** solid (a
+  face's own orientation alone then determines whether the solid's far
+  side hides it, and no two visible faces of a convex solid ever overlap
+  in projection either, so nothing else needs sorting) -- never apply it
+  to an open/non-convex net. `polygon_fold_app.py`'s `draw(t)` therefore
+  only uses it when `t == 1.0` (fully folded); for `t < 1` (an open,
+  generally non-convex partial fold) it falls back to a plain
+  `Poly3DCollection`. `polyhedral_net_app.py`'s folded-solid panel always
+  shows `t = 1.0`, so it always uses `_CullableFace`.
+  `net_fold_utils.face_normal()` computes each face's outward unit normal
+  via the cross product of its first two edges -- verified (see
+  `test_net_fold_core.py`) to be consistently outward-pointing for every
+  face of every net in `nets/`, relying on the net's CCW winding
+  convention (see Conventions below).
+  **Gotcha**: `_CullableFace` applies visibility by writing straight to
+  `_facecolor3d`/`_edgecolor3d`, not via `set_alpha()`/`set_edgecolor()`.
+  `Poly3DCollection.set_alpha()` only refreshes `_facecolor3d` -- it
+  updates a *different*, unused `_edgecolors` attribute for edges instead
+  of `_edgecolor3d` (apparently a matplotlib inconsistency), so
+  `do_3d_projection()`'s internals (which build the actually-rendered
+  `_edgecolors2d` from `_edgecolor3d`) never see an edge-alpha change:
+  the face fill correctly disappears but its black outline stays fully
+  opaque, visibly bleeding through whatever's in front of it. Confirmed
+  with an isolated repro (`get_edgecolor()` unchanged after `set_alpha(0)`
+  + `do_3d_projection()`) before switching to writing `_edgecolor3d`
+  directly, which does update what's actually drawn.
 - "Compute Folding Pattern" runs `build_all` in a background thread with an
   indeterminate `ttk.Progressbar` and status-line updates; on completion,
   any failures are reported via `messagebox.showerror` listing each failed

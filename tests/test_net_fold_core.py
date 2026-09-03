@@ -1,6 +1,7 @@
 import numpy as np
 
-from net_fold_utils.net_fold_core import Net, fold, distinct_vertices, precompute_subtree_map
+from net_fold_utils.net_fold_core import (
+    Net, fold, distinct_vertices, precompute_subtree_map, face_normal)
 
 
 def _square(x0, y0, s=1.0):
@@ -64,6 +65,18 @@ def test_fold_with_precomputed_subtree_map_matches_default():
 
     for fid in net.faces:
         assert np.allclose(verts_default[fid], verts_precomputed[fid])
+
+
+def test_face_normal_points_outward_for_every_face_of_a_folded_cube():
+    net, root, hinges, _ = _cross_cube_net()
+    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
+    verts = fold(net, root, hinges, fold_angles, t=1.0)
+
+    center = np.mean([pts.mean(axis=0) for pts in verts.values()], axis=0)
+    for pts in verts.values():
+        normal = face_normal(pts)
+        assert np.isclose(np.linalg.norm(normal), 1.0)
+        assert np.dot(normal, pts.mean(axis=0) - center) > 0
 
 
 def test_distinct_vertices_merges_close_points_and_keeps_far_ones_separate():

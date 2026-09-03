@@ -25,12 +25,13 @@ from tkinter import ttk, messagebox
 import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-from net_fold_utils import load_net, fold, is_cached, build_all
+from net_fold_utils import load_net, fold, is_cached, build_all, face_normal
 from tooltip import Tooltip
 
 NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nets")
@@ -54,6 +55,56 @@ PLOT_THEME = {
     "light": {"bg": "#fafafa", "fg": "#1c1c1c", "grid": (0, 0, 0, 0.1)},
     "dark": {"bg": "#1c1c1c", "fg": "#e0e0e0", "grid": (1, 1, 1, 0.15)},
 }
+
+
+class _CullableFace(Poly3DCollection):
+    """A single-face Poly3DCollection that hides itself when its outward
+    normal points away from the camera, instead of relying on mplot3d's
+    painter's-algorithm depth sort (which only has one scalar "depth" per
+    face to work with -- a face at a grazing angle to the camera can have
+    that scalar put it in front of a face it should be occluded by,
+    causing exactly the wrong-face-drawn-on-top glitches this class fixes).
+
+    do_3d_projection() -- which mplot3d calls on every redraw, including
+    mid-drag during interactive rotation -- recomputes visibility from the
+    CURRENT view angle every time, so it stays correct as the user rotates.
+
+    Only valid for a face on a CLOSED CONVEX solid: there, a face's own
+    orientation alone determines whether the solid's far side hides it
+    from the camera, and no two visible (camera-facing) faces of a convex
+    solid ever overlap in the projection, so no depth sorting is needed
+    among them either. Do NOT use this for an open/non-convex net (e.g. a
+    mid-fold net) -- a face's own orientation there doesn't determine
+    whether some other, unrelated face occludes it.
+
+    Visibility is applied by writing directly to `_facecolor3d` /
+    `_edgecolor3d` rather than via the public set_alpha()/set_edgecolor()
+    -- Poly3DCollection.set_alpha() only refreshes `_facecolor3d`, not
+    `_edgecolor3d` (it updates a *different*, unused `_edgecolors`
+    attribute instead, seemingly a matplotlib inconsistency), so the
+    do_3d_projection() internals that build the actually-rendered
+    `_edgecolors2d` from `_edgecolor3d` never see the alpha-0 update: the
+    face fill correctly disappears but its black edge outline stays fully
+    opaque and visibly bleeds through the (correctly hidden) face in
+    front of it. Setting `_edgecolor3d` directly sidesteps that."""
+    def __init__(self, verts, normal, base_alpha, facecolor, edgecolor="k", **kwargs):
+        super().__init__(verts, facecolor=facecolor, edgecolor=edgecolor,
+                          alpha=base_alpha, **kwargs)
+        self._outward_normal = normal
+        self._base_alpha = base_alpha
+        self._base_facecolor3d = mcolors.to_rgba_array(facecolor, base_alpha)
+        self._base_edgecolor3d = mcolors.to_rgba_array(edgecolor, base_alpha)
+
+    def do_3d_projection(self):
+        elev, azim = np.radians(self.axes.elev), np.radians(self.axes.azim)
+        view_dir = np.array([np.cos(elev) * np.cos(azim),
+                              np.cos(elev) * np.sin(azim),
+                              np.sin(elev)])
+        visible = np.dot(self._outward_normal, view_dir) > 0
+        alpha = self._base_alpha if visible else 0.0
+        self._facecolor3d = mcolors.to_rgba_array(self._base_facecolor3d, alpha)
+        self._edgecolor3d = mcolors.to_rgba_array(self._base_edgecolor3d, alpha)
+        return super().do_3d_projection()
 
 
 class PolygonFoldApp:
@@ -315,8 +366,17 @@ class PolygonFoldApp:
         theme = self._apply_plot_theme()
         verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, t)
         all_pts = np.vstack(list(verts.values()))
+        # Backface culling (_CullableFace) only makes sense once the net is
+        # a closed convex solid, i.e. fully folded -- mid-fold it's an
+        # open, generally non-convex shape, so fall back to the ordinary
+        # (imperfect) depth-sorted rendering there.
+        fully_folded = abs(t - 1.0) < 1e-9
         for (fid, pts), color in zip(verts.items(), self.colors):
-            poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
+            if fully_folded:
+                poly = _CullableFace([pts], face_normal(pts), 0.9,
+                                      facecolor=color, edgecolor="k")
+            else:
+                poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
             self.ax.add_collection3d(poly)
 
         # Center the view on the shape's own bounding-box center (not just
