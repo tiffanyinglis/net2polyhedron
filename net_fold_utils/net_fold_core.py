@@ -76,22 +76,33 @@ class Net:
         return root, hinges
 
 
-def rotate_points(points, axis_point, axis_dir, angle):
-    """Rotate an (N,3) array of points by `angle` radians around the 3D line
-    through axis_point with direction axis_dir (Rodrigues' formula)."""
+def _rotation_matrix(axis_dir, angle):
+    """The 3x3 rotation matrix for `angle` radians about a 3D direction
+    (Rodrigues' formula). Split out from rotate_points so fold() can build
+    it once per hinge and reuse it across every face in that hinge's
+    subtree, instead of rebuilding it per face."""
     axis_dir = axis_dir / np.linalg.norm(axis_dir)
     K = np.array([[0, -axis_dir[2], axis_dir[1]],
                   [axis_dir[2], 0, -axis_dir[0]],
                   [-axis_dir[1], axis_dir[0], 0]])
-    R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+    return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+
+
+def rotate_points(points, axis_point, axis_dir, angle):
+    """Rotate an (N,3) array of points by `angle` radians around the 3D line
+    through axis_point with direction axis_dir (Rodrigues' formula)."""
+    R = _rotation_matrix(axis_dir, angle)
     return (points - axis_point) @ R.T + axis_point
 
 
-def subtree_members(root, hinges, node):
-    """All face ids in the subtree rooted at `node` (inclusive)."""
+def _children_map(hinges):
     children = defaultdict(list)
     for h in hinges:
         children[h["parent"]].append(h["child"])
+    return children
+
+
+def _subtree_from_children(children, node):
     members = []
     stack = [node]
     while stack:
@@ -99,6 +110,11 @@ def subtree_members(root, hinges, node):
         members.append(n)
         stack.extend(children[n])
     return members
+
+
+def subtree_members(root, hinges, node):
+    """All face ids in the subtree rooted at `node` (inclusive)."""
+    return _subtree_from_children(_children_map(hinges), node)
 
 
 def distinct_vertices(verts3d, tol=1e-4):
@@ -140,12 +156,16 @@ def fold(net, root, hinges, fold_angles, t, fold_signs=None):
     verts3d = {fid: np.array([[x, y, 0.0] for x, y in pts])
                for fid, pts in net.faces.items()}
 
+    # The tree shape doesn't change from one call to the next (only the
+    # angles/t do), so build the parent->children map once per call instead
+    # of once per hinge.
+    children = _children_map(hinges)
+
     # BFS order guarantees a parent is fully positioned before its hinge is used
     for h in hinges:
         parent, child = h["parent"], h["child"]
         pi = h["parent_edge_idx"]
         pts_parent = net.faces[parent]
-        p1_local, p2_local = pts_parent[pi], pts_parent[(pi + 1) % len(pts_parent)]
 
         # find those same two points in the parent's CURRENT (already-rotated) coords
         # by matching against the parent's original 2D layout order/index.
@@ -155,8 +175,18 @@ def fold(net, root, hinges, fold_angles, t, fold_signs=None):
         sign = fold_signs.get(child, 1)
         angle = fold_angles.get(child, np.pi / 2) * t * sign
 
-        for fid in subtree_members(root, hinges, child):
-            verts3d[fid] = rotate_points(verts3d[fid], axis_p1, axis_p2 - axis_p1, angle)
+        # Every face in this hinge's subtree gets the exact same rotation,
+        # so build the rotation matrix once and apply it to all of their
+        # points in a single batched array op, rather than once per face.
+        members = _subtree_from_children(children, child)
+        R = _rotation_matrix(axis_p2 - axis_p1, angle)
+        sizes = [len(verts3d[fid]) for fid in members]
+        stacked = np.concatenate([verts3d[fid] for fid in members], axis=0)
+        rotated = (stacked - axis_p1) @ R.T + axis_p1
+        offset = 0
+        for fid, size in zip(members, sizes):
+            verts3d[fid] = rotated[offset:offset + size]
+            offset += size
 
     return verts3d
 

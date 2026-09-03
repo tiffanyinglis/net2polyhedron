@@ -54,6 +54,24 @@ def _is_embeddable(theta, net, root, hinges):
     return d.min() > EDGE_LENGTH * (1 - COLLISION_TOL)
 
 
+def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map):
+    """Run least_squares from each initial guess, returning
+    (valid_candidates, best_err) where valid_candidates is a list of
+    (sum_of_angles, theta) for every guess that converged to a genuine,
+    embeddable closure."""
+    lo, hi = 1e-3, np.pi - 1e-3
+    valid_candidates = []
+    best_err = np.inf
+    for x0 in guesses:
+        sol = least_squares(_residual, x0, bounds=(lo, hi),
+                             args=(net, root, hinges, extra_edges, edge_map))
+        err = np.max(np.abs(sol.fun)) if sol.fun.size else 0.0
+        best_err = min(best_err, err)
+        if err < CLOSE_TOL and _is_embeddable(sol.x, net, root, hinges):
+            valid_candidates.append((np.sum(sol.x), sol.x))
+    return valid_candidates, best_err
+
+
 def solve_fold_angles(net, root, hinges, extra_edges, edge_map, seed=0):
     """Return {child_face_id: fold_angle_radians} satisfying every EXTRA
     edge's closure constraint at t=1, filtered to genuinely embeddable
@@ -64,20 +82,24 @@ def solve_fold_angles(net, root, hinges, extra_edges, edge_map, seed=0):
                           "(any hinge angle would be consistent with the "
                           "net alone)")
 
-    lo, hi = 1e-3, np.pi - 1e-3
-    rng = np.random.default_rng(seed)
+    # A sweep of evenly-spaced, all-hinges-equal starting guesses is enough
+    # to find every algebraic closure branch for the symmetric solids this
+    # targets (verified: it finds both the true and the "collapsed" branch
+    # for the icosahedron, for instance) -- so it's tried first, alone.
+    # Random per-hinge restarts are a fallback for the rare/asymmetric case
+    # where a uniform guess doesn't land in any solution's basin, not a way
+    # to find additional branches once the sweep already has one.
     sweep = [np.full(n, np.radians(d)) for d in range(10, 180, 10)]
-    guesses = sweep + [rng.uniform(lo, hi, n) for _ in range(40)]
+    valid_candidates, best_err = _try_guesses(
+        sweep, net, root, hinges, extra_edges, edge_map)
 
-    valid_candidates = []  # (sum_of_angles, theta)
-    best_err = np.inf
-    for x0 in guesses:
-        sol = least_squares(_residual, x0, bounds=(lo, hi),
-                             args=(net, root, hinges, extra_edges, edge_map))
-        err = np.max(np.abs(sol.fun)) if sol.fun.size else 0.0
-        best_err = min(best_err, err)
-        if err < CLOSE_TOL and _is_embeddable(sol.x, net, root, hinges):
-            valid_candidates.append((np.sum(sol.x), sol.x))
+    if not valid_candidates:
+        rng = np.random.default_rng(seed)
+        lo, hi = 1e-3, np.pi - 1e-3
+        fallback = [rng.uniform(lo, hi, n) for _ in range(40)]
+        valid_candidates, fallback_err = _try_guesses(
+            fallback, net, root, hinges, extra_edges, edge_map)
+        best_err = min(best_err, fallback_err)
 
     if not valid_candidates:
         raise ValueError(
