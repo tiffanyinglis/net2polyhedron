@@ -117,6 +117,16 @@ def subtree_members(root, hinges, node):
     return _subtree_from_children(_children_map(hinges), node)
 
 
+def precompute_subtree_map(hinges):
+    """Precompute, once, every hinge's subtree member list (and each
+    member's vertex count). The hinge tree's *shape* never changes across
+    the many fold() calls a caller like the fold solver makes (only the
+    angles/t do), so this lets fold() skip re-deriving it -- pass the
+    result back in as fold()'s `subtree_map` argument."""
+    children = _children_map(hinges)
+    return {h["child"]: _subtree_from_children(children, h["child"]) for h in hinges}
+
+
 def distinct_vertices(verts3d, tol=1e-4):
     """Merge the (possibly many, per-face-corner) points in a folded
     vertex dict into the solid's actual distinct 3D vertices, by
@@ -144,22 +154,26 @@ def distinct_vertices(verts3d, tol=1e-4):
     return [np.mean(c, axis=0) for c in clusters.values()]
 
 
-def fold(net, root, hinges, fold_angles, t, fold_signs=None):
+def fold(net, root, hinges, fold_angles, t, fold_signs=None, subtree_map=None):
     """Return dict face_id -> (N,3) np.array of folded 3D coordinates,
     at fold progress t in [0, 1].
 
     fold_angles: dict child_face_id -> target rotation-from-flat, radians
                  (e.g. pi/2 for a right-angle fold like a cube).
     fold_signs:  optional dict child_face_id -> +1/-1 to flip fold direction.
+    subtree_map: optional, from precompute_subtree_map(hinges) -- since the
+                 hinge tree's shape is the same on every call, a caller that
+                 folds the same (net, hinges) many times (e.g. the fold
+                 solver's inner optimization loop) can compute this once and
+                 reuse it, instead of fold() re-deriving it from `hinges` on
+                 every single call.
     """
     fold_signs = fold_signs or {}
     verts3d = {fid: np.array([[x, y, 0.0] for x, y in pts])
                for fid, pts in net.faces.items()}
 
-    # The tree shape doesn't change from one call to the next (only the
-    # angles/t do), so build the parent->children map once per call instead
-    # of once per hinge.
-    children = _children_map(hinges)
+    if subtree_map is None:
+        subtree_map = precompute_subtree_map(hinges)
 
     # BFS order guarantees a parent is fully positioned before its hinge is used
     for h in hinges:
@@ -178,7 +192,7 @@ def fold(net, root, hinges, fold_angles, t, fold_signs=None):
         # Every face in this hinge's subtree gets the exact same rotation,
         # so build the rotation matrix once and apply it to all of their
         # points in a single batched array op, rather than once per face.
-        members = _subtree_from_children(children, child)
+        members = subtree_map[child]
         R = _rotation_matrix(axis_p2 - axis_p1, angle)
         sizes = [len(verts3d[fid]) for fid in members]
         stacked = np.concatenate([verts3d[fid] for fid in members], axis=0)
