@@ -293,11 +293,20 @@ class PolyhedralNetApp:
         panes it renders (whichever are "far" from the camera for the
         current, fixed view angle) -- the near vertical edge where the two
         visible walls meet is never drawn, leaving the box looking open on
-        one corner."""
+        one corner.
+
+        Each edge is its own Line3DCollection rather than all 12 in one:
+        mplot3d sorts collections for draw order by a single depth value
+        from do_3d_projection(), and for a line collection that's just the
+        nearest point across *every* segment in it -- bundled into one
+        collection, the box's far edges would inherit the near edges'
+        depth and wrongly draw in front of (or behind) the solid instead
+        of being individually depth-tested against it."""
         corners = list(itertools.product(xlim, ylim, zlim))
         edges = [(a, b) for i, a in enumerate(corners) for b in corners[i + 1:]
                   if sum(p != q for p, q in zip(a, b)) == 1]
-        self.ax3d.add_collection3d(Line3DCollection(edges, colors=color, linewidths=0.8))
+        for edge in edges:
+            self.ax3d.add_collection3d(Line3DCollection([edge], colors=color, linewidths=0.8))
 
     def _draw_flat_net(self, theme):
         self.ax2d.cla()
