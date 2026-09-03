@@ -7,13 +7,16 @@ description: Architecture, file layout, and conventions for this polyhedron net-
 
 Takes a description of a polyhedron's net (which faces exist, how they're
 hinged flat, and which edges only meet once folded) and computes the exact
-3D fold: a 2D face layout plus a per-hinge fold angle. `polygon_fold_app.py`
-is a Tkinter app that lets you pick a net and drag a slider from flat (0%)
-to fully folded (100%).
+3D fold: a 2D face layout plus a per-hinge fold angle. Two Tkinter entry
+points share this pipeline: `polygon_fold_app.py` lets you pick a net and
+drag a slider from flat (0%) to fully folded (100%); `polyhedral_net_app.py`
+instead shows the flat 2D net and the fully folded 3D solid side by side at
+once (the 3D panel is mouse-rotatable via matplotlib's own 3D navigation).
 
 ## Directory layout
 
-- `polygon_fold_app.py` — the Tkinter GUI app (entry point, class `PolygonFoldApp`)
+- `polygon_fold_app.py` — the animated-slider Tkinter app (entry point, class `PolygonFoldApp`)
+- `polyhedral_net_app.py` — the side-by-side flat/folded Tkinter app (entry point, class `PolyhedralNetApp`); imports `STATUS_COLORS`/`PLOT_THEME`/`NETS_DIR`/`DISABLED_SUFFIX`/`COMPUTE_TOOLTIP` from `polygon_fold_app.py` rather than redefining them, but otherwise deliberately duplicates the net-picker/compute-worker Tk wiring rather than factoring out a shared base class, so each entry point stays a self-contained, independently readable script
 - `tooltip.py` — small generic hover-tooltip helper for Tkinter (not net-fold-specific)
 - `net_fold_utils/` — the reusable library (see below)
 - `nets/*.json` — **human-authored** net specs; the only files meant to be hand-edited

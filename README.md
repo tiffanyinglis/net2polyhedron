@@ -23,6 +23,14 @@ python polygon_fold_app.py
 Pick a net from the dropdown and drag the **Fold** slider from *Flat* to
 *Folded* to watch it close up into the solid.
 
+There's also a side-by-side viewer, showing the flat net and the fully
+folded solid at once instead of animating between them (drag the folded
+solid with the mouse to rotate it):
+
+```bash
+python polyhedral_net_app.py
+```
+
 Five Platonic solids and a soccer-ball-style truncated icosahedron are
 included out of the box in `nets/`.
 
@@ -125,7 +133,8 @@ through to pytest, e.g. `python run_tests.py -k fold_cache -v`.
 ## Project layout
 
 ```
-polygon_fold_app.py     the app (entry point)
+polygon_fold_app.py     the animated-slider app (entry point)
+polyhedral_net_app.py   the side-by-side flat/folded viewer (entry point)
 build_fold_cache.py     precompute the fold cache for every net, with progress output
 run_tests.py            run the test suite
 tooltip.py              small generic Tkinter hover-tooltip helper
