@@ -252,24 +252,15 @@ def _sphere_bound_volume(faces, edge_length):
     return (4 / 3) * np.pi * r ** 3
 
 
-def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
-              inflation_weight=0.0, inflation_target=0.0, planarity_weight=0.0):
-    """The full objective: RELATIVE edge-length error for every mesh edge
-    (i.e. (actual - rest) / rest, not the raw difference), plus two
-    optional terms (both zero-weighted -- i.e. absent -- by default): an
-    inflation "pressure" term (see _inflate) and a per-face flatness term
-    (see _face_planarity_residual). Always returns edge residuals first,
-    so callers can slice `result[:len(edge_ai)]` to get just the
-    edge-length error without the other terms.
-
-    `volume_indices`/`planarity_groups` are the precomputed structures
-    from _volume_indices/_planarity_groups (built once per solve by the
-    caller, e.g. _edge_setup or solve_wireframe) -- NOT `faces`/`idx`
-    directly: this function is called extremely often (hundreds of times
-    per solver step, since scipy's finite-difference Jacobian needs
-    roughly n_vars+1 evaluations each), so re-deriving per-face vertex
-    indices via a Python loop + dict lookup on every call was measured as
-    a real bottleneck (see git history / the vectorize-mesh-volume task).
+def _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups):
+    """The two residual pieces shared by _residual (target-based pressure,
+    used by _inflate/solve_wireframe) and _relax_residual (target-free
+    pressure, used by relax_once): RELATIVE edge-length error for every
+    mesh edge (i.e. (actual - rest) / rest, not the raw difference) --
+    always first, so callers can slice `result[:len(edge_ai)]` to get
+    just the edge-length error -- plus an optional per-face flatness term
+    (see _face_planarity_residual). Returns a list of arrays, so the
+    caller can append its own pressure term before concatenating.
 
     `edge_length` may be a scalar (uniform rest length -- the original,
     still-default usage) or a per-edge array aligned with edge_ai/edge_bi
@@ -279,13 +270,79 @@ def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_len
     (STRETCH_CAP, CONVERGE_TOL) a fraction regardless of scale; for the
     scalar edge_length=1.0 the original callers all use, this is
     numerically identical to the old raw-difference residual."""
-    pts = flat.reshape(-1, 3)
     parts = [(np.linalg.norm(pts[edge_ai] - pts[edge_bi], axis=1) - edge_length) / edge_length]
-    if inflation_weight:
-        vol = _mesh_volume(pts, volume_indices)
-        parts.append(np.array([inflation_weight * (inflation_target - vol)]))
     if planarity_weight:
         parts.append(planarity_weight * _face_planarity_residual(pts, planarity_groups))
+    return parts
+
+
+def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
+              inflation_weight=0.0, inflation_target=0.0, planarity_weight=0.0):
+    """The full objective for _inflate/solve_wireframe's AUTOMATIC ramp:
+    edge-length + planarity (see _edge_and_planarity_parts) plus a
+    TARGET-based inflation "pressure" term -- `inflation_weight *
+    (inflation_target - volume)`, driving volume toward a fixed,
+    precomputed ceiling (_sphere_bound_volume). That ceiling is exactly
+    what lets the automatic ramp (INFLATION_WEIGHTS) know it's "done"
+    without a human watching -- see _inflate's docstring. relax_once (the
+    interactive "Inflate" button) deliberately does NOT use this function
+    -- see _relax_residual, which has no target at all, since a human
+    dialing in pressure by hand doesn't need or want one.
+
+    `volume_indices`/`planarity_groups` are the precomputed structures
+    from _volume_indices/_planarity_groups (built once per solve by the
+    caller, e.g. _edge_setup or solve_wireframe) -- NOT `faces`/`idx`
+    directly: this function is called extremely often (hundreds of times
+    per solver step, since scipy's finite-difference Jacobian needs
+    roughly n_vars+1 evaluations each), so re-deriving per-face vertex
+    indices via a Python loop + dict lookup on every call was measured as
+    a real bottleneck (see git history / the vectorize-mesh-volume task)."""
+    pts = flat.reshape(-1, 3)
+    parts = _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups)
+    if inflation_weight:
+        vol = _mesh_volume(pts, volume_indices)
+        parts.insert(1, np.array([inflation_weight * (inflation_target - vol)]))
+    return np.concatenate(parts)
+
+
+def _relax_residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
+                     pressure=0.0, planarity_weight=0.0):
+    """relax_once's objective: edge-length + planarity (see
+    _edge_and_planarity_parts) plus a TARGET-FREE inflation "pressure"
+    term -- `pressure * exp(-volume)`.
+
+    Why no target: _residual's `inflation_weight * (target - volume)`
+    term is a two-sided penalty that's zero exactly AT `target` and grows
+    whether volume overshoots OR undershoots it -- so once volume gets
+    close to that (fixed, precomputed) ceiling, no amount of extra
+    pressure can ask for more; it just enforces the SAME ceiling more
+    strictly (verified empirically on an earlier version of the default
+    cube net: max stretch plateaued around 5.5% from pressure ~100 all
+    the way to 300+, because the mesh was already within a fraction of a
+    percent of _sphere_bound_volume's target by then). For
+    solve_wireframe's automatic ramp that plateau is a FEATURE (see
+    _residual's docstring: it's how the ramp knows to stop). For a human
+    turning a pressure dial and expecting "more pressure = more
+    inflated", it's exactly backwards.
+
+    `pressure * exp(-volume)` has no target and is never satisfied: it
+    shrinks toward (but never reaches) zero as volume grows, so there's
+    always a gradient rewarding more volume, and the actual equilibrium
+    is set entirely by the balance against edge stretch -- a genuinely
+    higher pressure asks for genuinely more stretch to rebalance, with no
+    ceiling. `exp` (rather than something like `1/volume`) is smooth and
+    finite for every volume, including negative/near-zero (a tangled
+    starting configuration) -- see _mesh_volume's docstring on why a
+    singularity there (like `1/distance`) is specifically something this
+    residual family avoids.
+
+    See _residual for what `volume_indices`/`planarity_groups`/
+    `edge_length` are (identical here)."""
+    pts = flat.reshape(-1, 3)
+    parts = _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups)
+    if pressure:
+        vol = _mesh_volume(pts, volume_indices)
+        parts.insert(1, np.array([pressure * np.exp(-vol)]))
     return np.concatenate(parts)
 
 
@@ -685,7 +742,7 @@ class RelaxStopped(Exception):
     stop_event is set -- never escapes relax_once itself."""
 
 
-def relax_once(positions, faces, edge_length, pressure=0.0, volume_target=0.0,
+def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
                 gtol=CONVERGENCE_GTOL):
     """Run ONE relaxation pass from `positions` (a {vertex_id: [x, y, z]}
@@ -695,6 +752,18 @@ def relax_once(positions, faces, edge_length, pressure=0.0, volume_target=0.0,
     answer" use case; this is for the opposite one: the caller picks the
     pressure and how much work to do, and can call this again with the
     result to keep going, watching it evolve step by step).
+
+    Uses _relax_residual, NOT _residual -- there is deliberately no target
+    volume here (see _relax_residual's docstring): a human turning a
+    pressure dial expects "more pressure -> more inflated", which a
+    target-based penalty can't deliver once volume gets close to its
+    (fixed) target -- verified empirically to plateau hard well before
+    any dramatic shape change. `pressure` here isn't on the same numeric
+    scale as _inflate's INFLATION_WEIGHTS ramp (those target a specific
+    volume; this doesn't) -- as a reference point, pressure=6.5 reaches
+    about 5.5% max stretch on stretchy_nets/cube_res3.json, which is
+    roughly what the old target-based formula needed pressure~100-300
+    (i.e. its plateau) to reach.
 
     `max_nfev` caps the number of solver function evaluations -- used as
     a practical, always-available proxy for "how many steps to run"
@@ -726,12 +795,12 @@ def relax_once(positions, faces, edge_length, pressure=0.0, volume_target=0.0,
         last_x[0] = x
         if stop_event is not None and stop_event.is_set():
             raise RelaxStopped()
-        return _residual(x, *args)
+        return _relax_residual(x, *args)
 
     try:
         sol = least_squares(wrapped_residual, x0,
                              args=(edge_ai, edge_bi, volume_indices, planarity_groups, length_arr,
-                                   pressure, volume_target, planarity_weight),
+                                   pressure, planarity_weight),
                              max_nfev=max_nfev, gtol=gtol)
         pts = sol.x.reshape(-1, 3)
         # scipy's own nfev -- NOT wrapped_residual's raw call count, which

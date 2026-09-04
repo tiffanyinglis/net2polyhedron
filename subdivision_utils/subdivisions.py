@@ -8,14 +8,33 @@ library, so this stays cheap even redrawn on every UI toggle):
 
 1. `SUBDIVISIONS` -- a coarse split of each n-gon into a handful of
    triangles, using the polygon's own vertices plus its centroid as the
-   only extra point. As close to equilateral as an n-gon's vertex count
-   allows: n=3 is already a triangle; n=4 uses a diagonal split (two
-   45-45-90 triangles -- the most regular split possible with only 2
-   pieces); n=5..8 use a centroid fan (n congruent isoceles triangles,
+   only extra point: n=3 is already a triangle (no centroid needed); n=4
+   through n=8 all use a centroid fan (n congruent isoceles triangles,
    exactly equilateral at n=6, since the fan's apex angle is 360/n).
-   Coarse triangle counts (1, 2, 5, 6, 7, 8) were picked so their sizes
-   stay within about 1.5x of each other across all six n-gons (they all
-   share an edge length), rather than growing with n unchecked.
+
+   n=4 used to be a diagonal split (two 45-45-90 triangles from the
+   square's own corners, no centroid) instead of a fan -- "the most
+   regular split possible with only 2 pieces", per an earlier version of
+   this docstring. That turned out to have a real cost once these
+   n-gons are glued edge-to-edge into a whole polyhedron: a diagonal
+   split only adds an extra edge between TWO of a square's four corners
+   (whichever two the diagonal connects), so a polyhedron built entirely
+   out of squares -- a cube -- ends up with two opposite corners at a
+   LOWER mesh valence (fewer edges, hence less resistance to stretching)
+   than the other six, purely as an accident of which corner each square
+   face's diagonal happened to touch. Verified directly on the
+   diagonal-split version of stretchy_nets/cube_res3.json (then still
+   named cube_res4.json, at resolution 4 -- regenerated at resolution 3
+   as part of this same fix, see tools/generate_subdivided_stretchy_nets.py's
+   comment on why the resolution changed too): 2 of the cube's 8 corners
+   at valence 3, the other 6 at valence 5 -- invisible at modest
+   inflation pressure, but a visibly lopsided bulge at high pressure,
+   since the two weaker corners give more than the rest. A centroid fan
+   doesn't have this problem: EVERY corner of a fan-subdivided face gets
+   exactly one spoke edge to that face's own centroid, so a polyhedron
+   built from congruent faces (any Platonic solid) gets the SAME valence
+   increase at every one of its corners, symmetric by construction.
+
 2. `_subdivide_triangle` -- splits each coarse triangle into
    `resolution ** 2` small ones via a regular barycentric grid (the
    standard geodesic/icosphere-style refinement): every small triangle
@@ -28,13 +47,22 @@ library, so this stays cheap even redrawn on every UI toggle):
    rather than staying as disconnected duplicates, which matters once
    this mesh feeds a spring/particle simulation: a seam has to be one
    particle, not two coincident ones that can drift apart.
+
+`resolution_for` picks a PER-N-GON resolution so that every n-gon's fine
+triangles end up roughly the same SIZE for a given nominal resolution --
+without it, using the same literal `resolution` for every n-gon (as an
+earlier version of this module did) makes bigger-sided polygons' fine
+triangles coarser than a square's at that same resolution, since
+`len(SUBDIVISIONS[n])` (the coarse triangle count) doesn't scale exactly
+with a regular n-gon's own area. See its docstring for the formula.
 """
+import math
 
 DEFAULT_RESOLUTION = 10
 
 SUBDIVISIONS = {
     3: [(0, 1, 2)],
-    4: [(0, 1, 2), (0, 2, 3)],
+    4: [(0, 1, "C"), (1, 2, "C"), (2, 3, "C"), (3, 0, "C")],
     5: [(0, 1, "C"), (1, 2, "C"), (2, 3, "C"), (3, 4, "C"), (4, 0, "C")],
     6: [(0, 1, "C"), (1, 2, "C"), (2, 3, "C"), (3, 4, "C"), (4, 5, "C"),
         (5, 0, "C")],
@@ -47,6 +75,47 @@ SUBDIVISIONS = {
 
 def _resolve(ref, vertices, centroid):
     return centroid if ref == "C" else vertices[ref]
+
+
+def _regular_polygon_area(n, edge_length=1.0):
+    """Area of a regular n-gon with the given edge length -- the standard
+    closed form, side_count * side^2 / (4 * tan(pi / side_count))."""
+    return (n / 4.0) / math.tan(math.pi / n) * edge_length ** 2
+
+
+def resolution_for(n, base_resolution, base_n=4):
+    """The resolution to use for an n-sided polygon so its fine triangles
+    end up roughly the same SIZE as a `base_n`-gon's at `base_resolution`
+    -- i.e. so `subdivide(n, ..., resolution_for(n, base_resolution))`'s
+    fine triangles have about the same area as
+    `subdivide(base_n, ..., base_resolution)`'s, regardless of n.
+
+    Each coarse triangle in SUBDIVISIONS[n] has area
+    `_regular_polygon_area(n) / len(SUBDIVISIONS[n])` (they're always
+    congruent within one n-gon, by construction -- a fan's slices are
+    congruent for a regular polygon, and n=3 is just the one triangle).
+    Refining a coarse triangle at some resolution r divides its area by
+    r**2, so matching `base_n`'s fine-triangle area means solving
+    `coarse_area(n) / r**2 == coarse_area(base_n) / base_resolution**2`
+    for r. Rounded to the nearest positive integer, since resolution is
+    a literal grid subdivision count, not a continuous quantity.
+
+    `base_n` defaults to 4 (the square) since that's the shape this
+    project's own worked examples (stretchy_nets/cube_res3.json,
+    DEFAULT_RESOLUTION in net_fold_utils/mesh_subdivide.py) are built
+    around -- `base_resolution` is the resolution that shape actually
+    uses, and every other n-gon is scaled relative to it.
+
+    Not safe to use independently for adjacent faces of DIFFERENT n that
+    share an edge (e.g. a pentagon glued to a square): the two faces
+    would want different resolutions, but a shared edge needs both sides
+    to agree on how many points it's split into. See
+    net_fold_utils.mesh_subdivide.subdivide_mesh's docstring for how (and
+    when) that's actually enforced."""
+    base_triangle_area = _regular_polygon_area(base_n) / len(SUBDIVISIONS[base_n])
+    target_fine_area = base_triangle_area / base_resolution ** 2
+    triangle_area = _regular_polygon_area(n) / len(SUBDIVISIONS[n])
+    return max(1, round(math.sqrt(triangle_area / target_fine_area)))
 
 
 def _subdivide_triangle(a, b, c, resolution):

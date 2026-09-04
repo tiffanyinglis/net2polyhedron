@@ -2,9 +2,16 @@
 Grid demo of regular-polygon-to-fine-triangle-mesh subdivision: shows a
 triangle, square, pentagon, hexagon, 7-gon and 8-gon, each split into a
 fine triangular mesh via subdivision_utils (see that package's
-docstring for how the mesh is built, and why it comes out with
-comparable triangle size/regularity and no duplicate points across all
-six shapes). Meant as a preview of the mesh a later fabric/cloth
+docstring for how the mesh is built and merged with no duplicate points
+across all six shapes). Each n-gon is subdivided at
+`resolution_for(n, DEFAULT_RESOLUTION)`, not the same literal
+`DEFAULT_RESOLUTION` for every n -- a bigger-sided polygon has more area
+per fixed edge length, so using the same resolution across all six would
+give it visibly larger (lower-density) fine triangles than a triangle's
+or square's; `resolution_for` scales resolution per n-gon so every
+subplot's triangles come out roughly the same size, matching what
+net_fold_utils/mesh_subdivide.py does for the real fabric nets this is a
+preview of. Meant as a preview of the mesh a later fabric/cloth
 simulation would use, so it defaults to a resolution with enough points
 to stretch realistically rather than just a handful of big triangles. A
 "Show subdivision" checkbox (on by default) toggles the internal mesh
@@ -31,7 +38,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
 from net_fold_utils.polygon_geom import regular_polygon_vertices
-from subdivision_utils import subdivide
+from subdivision_utils import subdivide, resolution_for, DEFAULT_RESOLUTION
 from polygon_fold_app import PLOT_THEME
 
 # Columns pair a small n-gon with a big one (top row / bottom row) so
@@ -113,7 +120,7 @@ class PolygonSubdivideApp:
                          linewidth=1.5, zorder=1)
 
                 if show_subdivision:
-                    points, triangles = subdivide(n, verts)
+                    points, triangles = subdivide(n, verts, resolution_for(n, DEFAULT_RESOLUTION))
                     # One LineCollection for all mesh edges rather than an
                     # ax.plot() per triangle -- at this resolution each
                     # subplot has several hundred triangles, and matplotlib

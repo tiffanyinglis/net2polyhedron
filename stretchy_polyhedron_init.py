@@ -9,7 +9,7 @@ vertex ids ARE the adjacency, so a face pair sharing several edges (which
 would force two RIGID flat faces into the same plane -- see
 net_fold_utils/stretchy_mesh.py's module docstring) needs no special
 casing. A fabric-subdivided net (see net_fold_utils/mesh_subdivide.py and
-tools/generate_subdivided_stretchy_nets.py, e.g. stretchy_nets/cube_res4.json)
+tools/generate_subdivided_stretchy_nets.py, e.g. stretchy_nets/cube_res3.json)
 additionally carries its original coarse polygons + a fine-triangle ->
 coarse-face mapping, used here to color every fine triangle by its
 original face and to show the coarse net (with a faint subdivision
@@ -28,7 +28,7 @@ precomputed/cached ahead of time via net_fold_utils/stretchy_cache.py
    cleanly is cheap and effective -- see solve_wireframe's docstring).
 2. For a fabric-subdivided net (net_fold_utils/mesh_subdivide.py,
    tools/generate_subdivided_stretchy_nets.py, e.g.
-   stretchy_nets/cube_res4.json), the fine mesh is then DRAPED over that
+   stretchy_nets/cube_res3.json), the fine mesh is then DRAPED over that
    already-solved coarse shape (mesh_subdivide.solve_fabric_mesh) --
    giving every fine vertex a starting position that's already properly
    oriented and already roughly the right shape, then one light
@@ -46,7 +46,11 @@ precomputed/cached ahead of time via net_fold_utils/stretchy_cache.py
      pressure, continuing from wherever the mesh currently is (not from
      scratch) -- so repeated clicks let you watch/steer the shape settle
      incrementally, rather than the program silently retrying different
-     random starts under the hood.
+     random starts under the hood. Unlike the precompute step's automatic
+     ramp (which targets a fixed, precomputed volume so it knows when to
+     stop on its own), this pressure has NO target to converge to --
+     genuinely more pressure asks for genuinely more stretch, with no
+     built-in ceiling (see stretchy_mesh._relax_residual's docstring).
    - The radio buttons control how much work each "Inflate" click does:
      either a capped number of solver steps (relax_once's `max_nfev`, the
      closest thing scipy's trust-region solver exposes to "N steps" --
@@ -78,7 +82,7 @@ import sv_ttk
 
 from net_fold_utils.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, relax_once,
-    _sphere_bound_volume, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
+    EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from net_fold_utils.stretchy_cache import load_with_cache, is_cached
 from net_fold_utils.mesh_subdivide import load_fabric_spec, subdivide_mesh
@@ -88,7 +92,7 @@ from polygon_fold_app import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SU
 
 STRETCHY_NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stretchy_nets")
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Save")
-DEFAULT_NET_BASENAME = "cube_res4"
+DEFAULT_NET_BASENAME = "cube_res3"
 
 # A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
 # subdivision reads as texture rather than a bold wireframe competing
@@ -96,12 +100,21 @@ DEFAULT_NET_BASENAME = "cube_res4"
 SUBDIVISION_EDGE_ALPHA = 0.35
 SUBDIVISION_EDGE_WIDTH = 0.5
 
-# Pressure spinner bounds: 3.0 was the top (final, most-used) rung of the
-# old automatic INFLATION_WEIGHTS ramp in stretchy_mesh._inflate, so it's
-# the natural default here; the max gives headroom well beyond that for
-# experimentation without being unbounded.
-DEFAULT_PRESSURE = 3.0
-MAX_PRESSURE = 10.0
+# Pressure spinner bounds: relax_once's pressure has no fixed target to
+# converge to (see stretchy_mesh._relax_residual's docstring -- it uses
+# `pressure * exp(-volume)`, not _inflate's target-based term), so unlike
+# an automatic ramp's weights, there's no natural "final" value to anchor
+# the default to. 6.5 was picked empirically to land around 5.5% max
+# stretch on stretchy_nets/cube_res3.json -- a reasonable-looking amount
+# of give, comparable to what the old target-based formula settled at
+# once fully plateaued (pressure ~100-300 there, before this model
+# replaced it specifically because that plateau meant more pressure
+# stopped doing anything). The max gives roughly 3x that stretch at the
+# top of the slider (pressure=20 measured at ~18% stretch) without being
+# unbounded. (These numbers are specific to cube_res3.json's particular
+# mesh -- re-measure if the default net or its resolution ever changes.)
+DEFAULT_PRESSURE = 6.5
+MAX_PRESSURE = 20.0
 PRESSURE_INCREMENT = 0.1
 
 DEFAULT_STEPS = 10
@@ -113,14 +126,13 @@ DEFAULT_STEPS = 10
 # matters: relax_once's residual wrapper checked, EACH chunk is a fresh
 # least_squares call with no memory of the previous one's shrunk
 # trust-region radius, so a chunk size that's too small (measured: 1-5 on
-# a 294-variable mesh) can get stuck re-exploring the same neighborhood
+# a 330-variable mesh) can get stuck re-exploring the same neighborhood
 # forever without ever reaching real convergence, even after hundreds of
 # total steps. Starting small keeps early feedback frequent while step
 # counts are cheap, then growing the chunk lets later chunks actually be
-# large enough to finish the job -- measured on cube_res4.json: chunks of
-# 5/10/20 (35 total steps) converged in ~1.5s, matching one uncapped call
-# (28 steps, ~1.5s) almost exactly, while giving 3 live updates instead
-# of 1.
+# large enough to finish the job -- measured on cube_res3.json: chunks of
+# 5/10/20 (31 total steps) converged in ~2.3s, while giving 3 live
+# updates instead of 1.
 INFLATE_CHUNK_START = 5
 INFLATE_CHUNK_MAX = 200
 # Hard stop for "iterate until convergence" mode in case a mesh/pressure
@@ -232,7 +244,6 @@ class StretchyPolyhedronApp:
         self.face_of_fine = None
         self.fabric_resolution = None
         self.edge_length = None
-        self.volume_target = 0.0
         self.target_layout = None
         self.positions = None
         self.iteration_count = 0
@@ -334,7 +345,7 @@ class StretchyPolyhedronApp:
                     self.current_label = label
                     break
         else:
-            # Default to DEFAULT_NET_BASENAME (cube_res4.json) if present,
+            # Default to DEFAULT_NET_BASENAME (cube_res3.json) if present,
             # else just the first net alphabetically.
             default_path = os.path.join(STRETCHY_NETS_DIR, DEFAULT_NET_BASENAME + ".json")
             default_label = next((l for l, p in self.label_to_path.items() if p == default_path), None)
@@ -366,11 +377,9 @@ class StretchyPolyhedronApp:
         self.coarse_faces, self.fabric_resolution, self.face_of_fine = load_fabric_spec(path)
         if self.coarse_faces is not None:
             _, _, self.edge_length, _ = subdivide_mesh(self.coarse_faces, self.fabric_resolution)
-            self.volume_target = _sphere_bound_volume(self.coarse_faces, EDGE_LENGTH)
             color_count = len(self.coarse_faces)
         else:
             self.edge_length = EDGE_LENGTH
-            self.volume_target = _sphere_bound_volume(self.faces, EDGE_LENGTH)
             color_count = len(self.faces)
         self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(color_count)]
 
@@ -477,7 +486,7 @@ class StretchyPolyhedronApp:
         queue; the main thread (via the scheduled poll below) is the
         only one that touches Tk widgets."""
         q = queue.Queue()
-        faces, edge_length, volume_target = self.faces, self.edge_length, self.volume_target
+        faces, edge_length = self.faces, self.edge_length
         start_positions = self.positions
 
         def worker():
@@ -487,7 +496,7 @@ class StretchyPolyhedronApp:
             try:
                 while True:
                     this_chunk = chunk if target_steps is None else min(chunk, target_steps - completed)
-                    result = relax_once(positions, faces, edge_length, pressure, volume_target,
+                    result = relax_once(positions, faces, edge_length, pressure,
                                          PLANARITY_WEIGHT, max_nfev=this_chunk, stop_event=stop_event)
                     positions, nfev, max_stretch, rms_stretch, optimality, converged = result
                     completed += nfev

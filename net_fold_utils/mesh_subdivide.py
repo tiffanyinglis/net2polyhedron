@@ -57,7 +57,7 @@ import json
 import numpy as np
 from scipy.optimize import least_squares
 
-from subdivision_utils.subdivisions import SUBDIVISIONS, _resolve, _subdivide_triangle
+from subdivision_utils.subdivisions import SUBDIVISIONS, _resolve, _subdivide_triangle, resolution_for
 from .polygon_geom import regular_polygon_vertices
 from .stretchy_mesh import (
     EDGE_LENGTH, mesh_edges, _pair_index_arrays, _residual, solve_wireframe,
@@ -134,10 +134,53 @@ def _classify_point(p, verts2d, resolution):
     return ("interior",)
 
 
+def _check_shared_edges_agree_on_resolution(coarse_faces, face_resolutions):
+    """resolution_for gives a DIFFERENT resolution to faces of different
+    side counts (that's the whole point -- see its docstring), but two
+    faces sharing an edge must agree on how many points that edge is
+    split into: there's no support here for a mesh where one side of a
+    shared edge is finer than the other (a proper fix would need
+    T-junction handling, which is out of scope). Raises a clear error
+    naming the offending faces/edge rather than silently building a
+    mismatched mesh.
+
+    This only bites nets with faces of DIFFERENT side counts sharing an
+    edge -- e.g. stretchy_nets/two_pentagons_and_a_square.json (pentagons
+    glued to a square). Any net where every face has the same side count
+    (any Platonic solid) is unaffected, since resolution_for then gives
+    every face the identical resolution regardless."""
+    edge_owner = {}
+    for face_idx, face in enumerate(coarse_faces):
+        n = len(face)
+        for i in range(n):
+            a, b = face[i], face[(i + 1) % n]
+            key = (a, b) if a < b else (b, a)
+            other = edge_owner.get(key)
+            if other is not None and face_resolutions[other] != face_resolutions[face_idx]:
+                raise ValueError(
+                    f"coarse faces {other} ({len(coarse_faces[other])}-gon) and {face_idx} "
+                    f"({len(face)}-gon) share edge {key}, but resolution_for gives them "
+                    f"different resolutions ({face_resolutions[other]} vs "
+                    f"{face_resolutions[face_idx]}) -- a shared edge can't be split two "
+                    f"different ways. Try a resolution where resolution_for happens to agree "
+                    f"for every side count in this mesh (see subdivision_utils.resolution_for).")
+            edge_owner[key] = face_idx
+
+
 def subdivide_mesh(coarse_faces, resolution=DEFAULT_RESOLUTION, coarse_positions=None):
     """Subdivide every face of a coarse vertex-loop mesh into a fine
     triangular mesh, merging points shared across coarse edges into
     single global vertices.
+
+    `resolution` is interpreted as a SQUARE's resolution (subdivision_utils.
+    resolution_for's `base_n=4` default) -- every face is actually
+    subdivided at `resolution_for(len(face), resolution)`, its own
+    side-count-adjusted resolution, so a face with more sides doesn't end
+    up with visibly coarser fine triangles than a face with fewer (see
+    resolution_for's docstring for why the same literal resolution
+    wouldn't do that on its own). All faces sharing an edge must resolve
+    to the SAME resolution -- see _check_shared_edges_agree_on_resolution
+    for when that can fail and what to do about it.
 
     If `coarse_positions` (a {vertex_id: 3D point} dict, e.g. from
     stretchy_mesh.solve_wireframe on the SAME coarse_faces) is given, also
@@ -158,8 +201,11 @@ def subdivide_mesh(coarse_faces, resolution=DEFAULT_RESOLUTION, coarse_positions
                         mesh, see module docstring).
       seed_positions -- {vertex_id: np.array([x, y, z])} or None.
     """
+    face_resolutions = [resolution_for(len(face), resolution) for face in coarse_faces]
+    _check_shared_edges_agree_on_resolution(coarse_faces, face_resolutions)
+
     next_id = 1 + max(v for face in coarse_faces for v in face)
-    edge_chain = {}  # (lo, hi) coarse vertex ids -> [resolution-1 new global ids], ordered lo->hi
+    edge_chain = {}  # (lo, hi) coarse vertex ids -> [face_resolution-1 new global ids], ordered lo->hi
     fine_faces = []
     face_of_fine = []
     edge_lengths = {}
@@ -167,13 +213,14 @@ def subdivide_mesh(coarse_faces, resolution=DEFAULT_RESOLUTION, coarse_positions
 
     for face_idx, face in enumerate(coarse_faces):
         n = len(face)
+        face_resolution = face_resolutions[face_idx]
         verts2d = regular_polygon_vertices(n)
         verts3d = [coarse_positions[v] for v in face] if coarse_positions is not None else None
-        points2d, points3d, triangles = _subdivide_dual(n, verts2d, verts3d, resolution)
+        points2d, points3d, triangles = _subdivide_dual(n, verts2d, verts3d, face_resolution)
 
         local_to_global = [None] * len(points2d)
         for li, p in enumerate(points2d):
-            kind, *rest = _classify_point(p, verts2d, resolution)
+            kind, *rest = _classify_point(p, verts2d, face_resolution)
             if kind == "corner":
                 gid = face[rest[0]]
             elif kind == "edge":
@@ -182,10 +229,10 @@ def subdivide_mesh(coarse_faces, resolution=DEFAULT_RESOLUTION, coarse_positions
                 lo, hi = (a, b) if a < b else (b, a)
                 chain = edge_chain.get((lo, hi))
                 if chain is None:
-                    chain = list(range(next_id, next_id + resolution - 1))
-                    next_id += resolution - 1
+                    chain = list(range(next_id, next_id + face_resolution - 1))
+                    next_id += face_resolution - 1
                     edge_chain[(lo, hi)] = chain
-                pos_from_lo = k if a == lo else resolution - k
+                pos_from_lo = k if a == lo else face_resolution - k
                 gid = chain[pos_from_lo - 1]
             else:
                 gid = next_id

@@ -264,11 +264,21 @@ hardcoded/closed-form (no runtime search):
 
 1. `subdivision_utils.subdivisions.SUBDIVISIONS` — a hardcoded coarse split
    of each n-gon into a handful of triangles using only the polygon's own
-   vertices plus its centroid (a diagonal split for the square; a centroid
-   fan — n congruent isoceles triangles, exactly equilateral at n=6 — for
-   n=5..8). Triangle counts were picked so sizes stay within ~1.5x of each
-   other across all six n-gons.
-2. `_subdivide_triangle` splits each coarse triangle into `resolution ** 2`
+   vertices plus its centroid: a centroid fan for every n = 4..8 (n
+   congruent isoceles triangles, exactly equilateral at n=6). n=4 used to
+   be a diagonal split (2 triangles, no centroid) instead, until that was
+   found to give a polyhedron built from squares (a cube) an asymmetric
+   mesh valence at some of its corners — see "Fabric subdivision" below
+   for the full story.
+2. `resolution_for(n, base_resolution)` picks a PER-N-GON resolution so
+   that every n-gon's fine triangles end up roughly the same size for a
+   given nominal resolution — since `len(SUBDIVISIONS[n])` (the coarse
+   triangle count) doesn't scale exactly with a regular n-gon's own area,
+   using the same literal `resolution` for every n-gon leaves bigger-sided
+   polygons' fine triangles coarser than a square's. Matches fine-triangle
+   AREA against `base_n=4` (the square) at `base_resolution`, via the
+   closed-form regular-polygon area formula — see its docstring.
+3. `_subdivide_triangle` splits each coarse triangle into `resolution ** 2`
    small ones via a regular barycentric grid (the standard geodesic/
    icosphere-style refinement) — every small triangle is a scaled copy of
    the coarse one it sits inside. `subdivide()` merges the results from all
@@ -367,6 +377,15 @@ equilibrium.
   wherever its edges allow), so this only has a little polishing left to
   do.
 
+This target-based pressure term (`_residual`) is specific to this
+AUTOMATIC ramp, where a bounded target is exactly what lets it know when
+to stop without a human watching. `stretchy_polyhedron_init.py`'s
+interactive "Inflate" button uses a DIFFERENT, target-free residual
+(`_relax_residual`, see "The app" below) for the opposite reason: once
+volume nears a fixed target, more pressure stops changing anything,
+which is backwards for a human turning a pressure dial and expecting
+"more pressure → more inflated".
+
 ### Orientation consistency (why this needed real iteration to get right)
 
 Plain edge-length fitting has no opinion about orientation, so a stage-1
@@ -454,28 +473,33 @@ resolution)`, and writes the fine triangulation straight out as an
 ordinary `stretchy_nets/<name>_res<resolution>.json` — a plain
 vertex-loop mesh, no different in format from any other stretchy net.
 (`SUBDIVISIONS_TO_GENERATE` at the top of that script is the editable
-list of `(name, resolution)` pairs to produce; `stretchy_nets/cube_res4.json`
-is the one generated so far.) Once written, it goes through
+list of `(name, resolution)` pairs to produce; `stretchy_nets/cube_res3.json`
+is the one generated so far -- resolution 3, not 4, because SUBDIVISIONS[4]
+switching to a 4-triangle centroid fan (see below) doubled the coarse
+triangle count per face, so resolution 3 there lands close to the triangle
+count resolution 4 used to give under the old 2-triangle split.) Once
+written, it goes through
 `build_stretchy_cache.py` / `stretchy_polyhedron_init.py`'s net picker
 completely unmodified — there is no separate fabric mode or UI control
 for this, it's just another `.json` in the directory.
 
 **Known simplification: rest lengths are treated as uniform, even though
 they aren't.** SUBDIVISIONS' coarse triangles aren't generally
-equilateral (a pentagon's centroid fan has unit-length rim edges but
-shorter spoke edges to the centroid; a square's diagonal split has a unit
-rim but a `sqrt(2)` diagonal) — `subdivide_mesh`'s `edge_lengths` return
-value captures each fine edge's true rest length correctly (derived from
-`subdivide_polygon`'s own exact 2D coordinates for a regular n-gon of
-unit edge length), but `generate_subdivided_stretchy_nets.py` currently
-discards it, since the plain vertex-loop JSON format has no field for
-per-edge lengths and `build_stretchy_cache.py` always solves with
-`solve_wireframe`'s default UNIFORM `edge_length=1.0`. Confirmed
-empirically on `cube_res4.json` (192 faces, 98 vertices): it solves
-successfully (6.8% max stretch, within `STRETCH_CAP`) but settles into a
-generic rounded/geodesic-ball shape, NOT a recognizable puffed-up cube —
-because forcing the true-length rim and diagonal segments to be equal
-erases the geometric distinction between them. This was a deliberate,
+equilateral (a centroid fan has unit-length rim edges but shorter spoke
+edges to the centroid, except exactly at n=6) — `subdivide_mesh`'s
+`edge_lengths` return value captures each fine edge's true rest length
+correctly (derived from `subdivide_polygon`'s own exact 2D coordinates for
+a regular n-gon of unit edge length), but `generate_subdivided_stretchy_nets.py`
+currently discards it, since the plain vertex-loop JSON format has no
+field for per-edge lengths and `build_stretchy_cache.py` always solves
+with `solve_wireframe`'s default UNIFORM `edge_length=1.0`. Confirmed
+empirically on an earlier, diagonal-split version of the subdivided cube
+net (192 faces, 98 vertices): it solves successfully (6.8% max stretch,
+within `STRETCH_CAP`) but settles into a generic rounded/geodesic-ball
+shape, NOT a recognizable puffed-up cube — because forcing the true-length
+rim and diagonal segments to be equal erases the geometric distinction
+between them. The same mismatch exists just as much (rim vs. spoke) under
+the current centroid-fan split, so this remains a deliberate,
 known-and-accepted tradeoff (see git history around this section), not a
 bug to fix reflexively — `solve_wireframe`/`_residual` already support a
 per-edge `{(a, b): length}` dict plus an explicit `volume_target` (see
@@ -491,7 +515,7 @@ coarse net's own `solve_wireframe` result as a 3D-accurate starting
 guess (`_subdivide_dual` reruns the same barycentric grid construction in
 3D, fed real solved corner/centroid positions) and then does one light
 `_relax_seed` pass, specifically to avoid the same
-orientation-consistency search that made `cube_res4.json` above take
+orientation-consistency search that made the subdivided cube net above take
 ~13 minutes to solve (a resolution-2 tetrahedron subdivision — just 16
 small triangles — never once reached a consistent embedding in 30 random
 attempts when tried via plain `solve_wireframe(fine_faces)`, several
@@ -525,13 +549,13 @@ pipeline**, split between an offline precompute and an interactive app:
 Steps 1-2 are precomputed/cached by `net_fold_utils/stretchy_cache.py`
 (same cache `build_stretchy_cache.py` warms -- see "Caching" above) --
 `on_select_net` calls `load_with_cache`, so opening the app on an
-already-cached net (e.g. `cube_res4.json`, already warm) lands on a fully
+already-cached net (e.g. `cube_res3.json`, already warm) lands on a fully
 rounded starting shape in about a second, not from a blank/random state.
 `refresh_net_list` shows the old "(not computed)" suffix again for any
 net that isn't cached yet (selecting it still works, it's just a fresh
 solve instead of an instant read).
 
-- **Net picker**: defaults to `stretchy_nets/cube_res4.json` if present
+- **Net picker**: defaults to `stretchy_nets/cube_res3.json` if present
   (`DEFAULT_NET_BASENAME`), else the first net alphabetically.
 - **The "Inflate" `LabelFrame`** groups everything about running
   `relax_once`, top to bottom in the order it's used: Pressure spinner,
@@ -542,7 +566,43 @@ solve instead of an instant read).
     `relax_once`, continuing from wherever `self.positions` currently is
     (not from scratch) -- so repeated clicks let the user watch/steer the
     shape incrementally, rather than the app silently retrying different
-    random starts under the hood. Default/max: 3.0 / 10.0.
+    random starts under the hood. Default/max: 6.5 / 20.0 (see
+    `stretchy_mesh._relax_residual` below for why these numbers, not the
+    rounder 3.0/10.0 an earlier version used).
+  - **`stretchy_mesh._relax_residual`: pressure has NO target volume,
+    unlike `_inflate`/`solve_wireframe`'s `_residual`.** `_residual`'s
+    pressure term is `inflation_weight * (inflation_target - volume)` --
+    a TWO-SIDED penalty, zero exactly at a fixed, precomputed
+    `_sphere_bound_volume` target, growing whether volume over- or
+    undershoots it. That's exactly right for the automatic coarse-solve
+    ramp (`INFLATION_WEIGHTS`), which needs a bounded target to know when
+    to stop on its own -- but it means more pressure eventually does
+    NOTHING: once volume is close to that fixed ceiling, no amount of
+    extra weight can ask for more (verified on an earlier version of the
+    default cube net: max stretch plateaus at ~5.5% from pressure ~100
+    all the way past 300, because volume is already >99.9% of its target
+    by then -- a 100x pressure change made no visible difference). For a
+    human dialing pressure by hand and expecting "more pressure = more
+    inflated", that's backwards. `relax_once` uses `_relax_residual`
+    instead: `pressure * exp(-volume)` -- no target, shrinks toward (but
+    never reaches) zero as volume grows, so there's always a gradient
+    rewarding more volume; the actual equilibrium is set purely by the
+    balance against edge stretch, so genuinely higher pressure asks for
+    genuinely more stretch with no ceiling (verified: pressure 1/5/20 on
+    `cube.json` give strictly increasing stretch, no plateau).
+    `exp(-volume)`, not `1/volume`, specifically to stay smooth and
+    finite even for a negative/near-zero volume (a tangled starting
+    configuration) -- `_mesh_volume`'s docstring already flags a
+    `1/distance`-style singularity as exactly what this residual family
+    needs to avoid. Default pressure 6.5 was picked empirically to land
+    at ~5.5% stretch on `cube_res3.json` -- comparable to where the old
+    target-based formula's plateau (pressure ~100-300) used to sit,
+    before that plateau became the reason to replace it.
+    At sufficiently high pressure, the old diagonal-split n=4 subdivision
+    (see "Polygon subdivision demo" above) also showed a visible lopsided
+    bulge, traced to an asymmetric mesh valence at some of a cube's
+    corners -- fixed by switching SUBDIVISIONS[4] to a centroid fan (see
+    "Fabric subdivision" above), not by anything in this residual.
   - **Radio buttons** control how much work one "Inflate" click does:
     "Iterate for N steps" passes `max_nfev=N` to `relax_once` (the
     closest thing scipy's trust-region solver exposes to "N steps" --
@@ -551,6 +611,37 @@ solve instead of an instant read).
     tolerance (`stretchy_mesh.CONVERGENCE_GTOL = 1e-8`, passed explicitly
     to `least_squares` so it's a known, displayable value rather than
     relying on scipy's own default staying put across versions).
+  - **Live progress, not one big jump**: `on_inflate_clicked` doesn't
+    make ONE `relax_once` call for the whole request -- `_run_inflate_stream`
+    calls it repeatedly in a GROWING sequence of chunks (`INFLATE_CHUNK_START
+    = 5`, doubling up to `INFLATE_CHUNK_MAX = 200`), pushing a "progress"
+    message (redraws + bumps the iteration counter) after every chunk.
+    Growing matters: each chunk is a fresh `least_squares` call with no
+    memory of the previous one's shrunk trust-region radius, so a FIXED
+    small chunk size (measured: 1-8, on a 330-variable mesh) can get
+    stuck re-exploring the same neighborhood forever without ever
+    reaching real convergence, even after hundreds of total steps.
+    Starting small keeps early feedback frequent while steps are cheap,
+    then growing lets later chunks actually be large enough to finish --
+    measured on `cube_res3.json`: chunks of 5/10/20 (31 total steps)
+    converged in ~2.3s, matching one uncapped call almost exactly, while
+    giving multiple live updates instead of 1.
+    `INFLATE_SAFETY_STEP_CAP = 5000` hard-stops "until convergence" mode
+    if a mesh/pressure combination genuinely never reaches
+    `CONVERGENCE_GTOL`, instead of looping forever.
+  - **Won't re-run once converged**: `_update_inflate_button_state`
+    greys out the Inflate button whenever `self.last_stats["converged"]`
+    is true, and `on_inflate_clicked` refuses to run even if clicked
+    anyway. This isn't just cosmetic -- verified empirically that
+    re-running `relax_once` from an already-converged point can burn
+    real steps without moving anything (a fresh `least_squares` call has
+    no memory of how far the previous one's trust region had already
+    shrunk, so it doesn't just no-op, it can wander a while
+    re-discovering the same spot). Re-armed by `_on_pressure_changed` (a
+    `trace_add("write", ...)` on `pressure_var` -- a "converged" verdict
+    only applies to the pressure it was reached at) and by loading a new
+    net; a Stop leaves `converged=False` since it didn't run to
+    completion, so the button stays enabled after one.
   - **"Stop" button** sets a `threading.Event` (`self.stop_event`,
     created fresh per Inflate click) that `relax_once`'s residual wrapper
     checks on every evaluation, raising `stretchy_mesh.RelaxStopped`
@@ -569,7 +660,9 @@ solve instead of an instant read).
     request corresponding to a reported step count near 10, not some much
     larger multiple. The raw count is used as a fallback ONLY when a Stop
     request aborts before scipy ever returns a result (no `sol` to read
-    `nfev` from in that case).
+    `nfev` from in that case) -- and even then it's capped at that call's
+    own `max_nfev`, so a Stop can never look like it consumed more steps
+    than the chunk it interrupted actually asked for.
   - The bottom-of-figure annotation (`draw()`, via `fig.text` -- see
     below) shows `optimality` (scipy's first-order optimality measure,
     should approach 0) against `CONVERGENCE_GTOL`, plus whether THIS
@@ -577,25 +670,22 @@ solve instead of an instant read).
     cap (or a Stop request) first -- `optimality` is `None`/shown as
     "n/a" right after loading (before any Inflate press) or after a
     Stop, since neither path has a real scipy result to read it from.
-- **Performance, measured on `cube_res4.json` (98 vertices, 294
-  variables)**: each `relax_once` "step" costs roughly 2-2.5 seconds,
-  REGARDLESS of pressure magnitude (0.1 and 3.0 measured about the same)
-  or how good the starting shape already is -- scipy's numerical Jacobian
-  for this residual needs close to one full n_vars-sized finite-
-  difference sweep per step. `DEFAULT_STEPS = 10` (~15-25s per default
-  click) was chosen with this in mind; raising it trades a snappier UI
-  for more progress per click. This is a real, confirmed cost (not a
-  bug) -- if it ever needs to come down, `_mesh_volume`/
-  `_face_planarity_residual`'s per-face Python loop (with a dict lookup
-  per vertex, executed on every single residual evaluation -- i.e.
-  hundreds of times per step) is the obvious place to vectorize; not
-  done here since it was out of scope for this rewrite.
+- **Performance**: after vectorizing `_mesh_volume`/`_face_planarity_residual`
+  (precomputed flat index arrays instead of a per-face Python loop with a
+  dict lookup per vertex, built once per solve rather than on every
+  single residual evaluation -- see their docstrings), a `relax_once`
+  "step" on `cube_res3.json` (110 vertices, 330 variables) costs roughly
+  0.04-0.06s, not the ~2-2.5s it did before -- about a 50x speedup. A
+  full "until convergence" run there now takes ~2.3s total instead of
+  ~70s+. `DEFAULT_STEPS = 10` predates this fix and is now more
+  conservative than it needs to be, but is left alone since it's still a
+  perfectly reasonable default, not a stale workaround.
 - **Known, accepted history**: an earlier version of this app used a
   literal random start (`stretchy_mesh.initial_relaxation`, since
   removed) with NO coarse-solve-and-drape step at all, to keep the whole
   pipeline restart-free end to end. That failed empirically: a random
-  stage-1 fit for `cube_res4.json` lands orientation-INCONSISTENT (volume
-  ≈ -0.03 against a target of ~1.38), and applying ANY nonzero pressure
+  stage-1 fit for a subdivided cube net lands orientation-INCONSISTENT
+  (volume ≈ -0.03 against a target of ~1.38), and applying ANY nonzero pressure
   to it made `least_squares` grind for 60-90+ seconds without returning,
   for any `max_nfev` cap tried (scipy's cap does not reliably bound
   wall-clock time on a badly-conditioned problem -- observed one case
@@ -617,11 +707,12 @@ solve instead of an instant read).
   just a separate Tk label, and gets captured by `savefig` too) to
   `Save/<source>_<timestamp>.png` -- same stem, so the two files are easy
   to pair up later.
-- Both the initial cache load and every "Inflate" click run in a
-  background thread via `_run_background` (one shared helper for both),
-  since either can take a while; Tk isn't thread-safe, so the worker only
-  ever pushes to a queue and the main thread (via a scheduled `after`
-  poll) is the only one touching widgets.
+- The initial cache load runs in a background thread via `_run_background`;
+  each "Inflate" click runs via the streaming variant, `_run_inflate_stream`
+  (see above) -- both because either can take a while and because Tk
+  isn't thread-safe, so the worker only ever pushes to a queue and the
+  main thread (via a scheduled `after` poll) is the only one touching
+  widgets.
 - **Left panel is a real connected net, not disconnected islands**:
   `on_select_net` precomputes `self.target_layout` once via
   `net_fold_utils/stretchy_net_layout.py`'s `build_stretchy_net_layout` --
@@ -667,11 +758,15 @@ failure path (forcing `_is_orientation_consistent` to always return
 catches it). Also covers `relax_once` (the restart-free primitive
 `stretchy_polyhedron_init.py`'s interactive "Inflate" workflow is built
 on -- see "The app" above), continuing from a `solve_wireframe` result
-rather than a raw random start -- deliberately only on the small
-tetrahedron: a single `relax_once` call at nonzero pressure costs real
-wall-clock time roughly proportional to mesh size (see "The app"'s
-measured ~2-2.5s/step on a 98-vertex mesh), so a bigger mesh isn't safe
-to put in a fast test.
+rather than a raw random start -- on the small tetrahedron and cube
+(post-vectorization these are fast even at nonzero pressure; see "The
+app"'s measured ~0.04-0.05s/step on a 98-vertex mesh, so cost isn't the
+reason to keep tests small here anymore, just habit/consistency with the
+rest of the suite). Includes a check that pressure genuinely has no
+plateau (`test_relax_once_pressure_has_no_plateau_unlike_a_fixed_target`
+-- strictly increasing stretch at pressure 1/5/20 on `cube.json`), the
+property `_relax_residual` exists specifically to have, unlike
+`_residual`'s target-based term.
 
 `test_mesh_subdivide.py` covers the fabric-subdivision pipeline (see
 above): combinatorial closure of the fine mesh at several resolutions,

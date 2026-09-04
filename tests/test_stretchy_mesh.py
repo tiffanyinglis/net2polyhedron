@@ -300,7 +300,7 @@ def test_relax_once_continues_from_the_given_positions_not_from_scratch():
     positions, stats = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     assert stats["max_stretch_pct"] > 0.5  # confirms it started non-trivially stretched
     _, nfev, max_stretch, rms_stretch, optimality, converged = relax_once(
-        positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=0.0, volume_target=0.0)
+        positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=0.0)
     assert max_stretch < 0.1
     assert converged
     assert optimality is not None and optimality < 1e-4
@@ -312,23 +312,19 @@ def test_relax_once_max_nfev_caps_reported_steps():
     # max_nfev a little -- scipy only checks the cap between its own
     # internal steps, not mid-Jacobian-estimate -- but a small budget
     # should still cut off well short of an unbounded run.
-    vol_target = _sphere_bound_volume(TETRAHEDRON_FACES, EDGE_LENGTH)
     positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     _, nfev, _, _, _, converged = relax_once(
-        positions, TETRAHEDRON_FACES, EDGE_LENGTH,
-        pressure=3.0, volume_target=vol_target, max_nfev=5)
+        positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=3.0, max_nfev=5)
     assert nfev < 30
     assert not converged  # stopped by the step cap, not scipy's own tolerance
 
 
 def test_relax_once_stop_event_aborts_and_reports_not_converged():
-    vol_target = _sphere_bound_volume(TETRAHEDRON_FACES, EDGE_LENGTH)
     positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     stop_event = threading.Event()
     stop_event.set()  # already set: should abort at the very first evaluation
     new_positions, nfev, _, _, optimality, converged = relax_once(
-        positions, TETRAHEDRON_FACES, EDGE_LENGTH,
-        pressure=3.0, volume_target=vol_target, stop_event=stop_event)
+        positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=3.0, stop_event=stop_event)
     assert set(new_positions) == set(positions)
     assert nfev >= 1
     assert optimality is None
@@ -339,17 +335,16 @@ def test_relax_once_stop_event_reported_nfev_is_capped_by_max_nfev():
     # A Stop mid-call has no scipy sol.nfev to report, so it falls back to
     # the residual wrapper's raw call count -- which counts every
     # numerical-Jacobian perturbation, not just "steps", and can run well
-    # past whatever max_nfev the caller declared (see _residual's
+    # past whatever max_nfev the caller declared (see _relax_residual's
     # docstring). Reported nfev must never exceed that declared budget,
     # so a caller tracking cumulative "steps" (e.g.
     # stretchy_polyhedron_init.py's iteration counter) doesn't see a
     # stopped call's cost look bigger than the caller's own request.
-    vol_target = _sphere_bound_volume(TETRAHEDRON_FACES, EDGE_LENGTH)
     positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     stop_event = threading.Event()
 
     calls = [0]
-    real_wrapped = stretchy_mesh._residual
+    real_wrapped = stretchy_mesh._relax_residual
 
     def counting_residual(*args, **kwargs):
         calls[0] += 1
@@ -358,9 +353,28 @@ def test_relax_once_stop_event_reported_nfev_is_capped_by_max_nfev():
         return real_wrapped(*args, **kwargs)
 
     import unittest.mock
-    with unittest.mock.patch.object(stretchy_mesh, "_residual", counting_residual):
+    with unittest.mock.patch.object(stretchy_mesh, "_relax_residual", counting_residual):
         _, nfev, _, _, optimality, converged = relax_once(
             positions, TETRAHEDRON_FACES, EDGE_LENGTH,
-            pressure=3.0, volume_target=vol_target, max_nfev=1, stop_event=stop_event)
+            pressure=3.0, max_nfev=1, stop_event=stop_event)
     assert nfev <= 1
     assert not converged
+
+
+def test_relax_once_pressure_has_no_plateau_unlike_a_fixed_target():
+    # relax_once uses _relax_residual (pressure * exp(-volume)), not
+    # _residual's target-based `pressure * (target - volume)` -- the
+    # whole point being that genuinely higher pressure keeps demanding
+    # genuinely more stretch, rather than converging toward the same
+    # fixed ceiling harder once volume gets close to a precomputed
+    # target (verified manually on a subdivided cube: max stretch
+    # plateaus around 5.5% from pressure ~100 all the way past 300 with
+    # the target-based formula). Confirm that monotonic relationship
+    # holds here too, on a small/fast net.
+    faces, _ = load_stretchy_mesh("stretchy_nets/cube.json")
+    positions, _ = solve_wireframe(faces, seed=0)
+    stretches = []
+    for pressure in (1.0, 5.0, 20.0):
+        _, _, max_stretch, _, _, _ = relax_once(positions, faces, EDGE_LENGTH, pressure=pressure)
+        stretches.append(max_stretch)
+    assert stretches[0] < stretches[1] < stretches[2]

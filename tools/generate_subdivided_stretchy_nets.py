@@ -46,8 +46,18 @@ STRETCHY_NETS_DIR = os.path.join(os.path.dirname(__file__), "..", "stretchy_nets
 # whatever's listed. Kept as an editable list (like
 # generate_stretchy_platonic_nets.py's PLATONIC_SOLIDS) rather than CLI
 # args, since this is meant to be tweaked and rerun during exploration.
+#
+# "cube" at resolution 3 (not 4): SUBDIVISIONS[4] switched from a
+# 2-triangle diagonal split to a 4-triangle centroid fan (see
+# subdivision_utils/subdivisions.py's docstring -- the diagonal split
+# gave two of the cube's 8 corners a lower mesh valence than the other
+# six, an asymmetry invisible at modest pressure but visibly lopsided at
+# high pressure). That doubles the coarse triangle count per face, so
+# resolution 3 here (6 faces * 4 coarse * 3**2 = 216 fine triangles)
+# lands close to what resolution 4 under the OLD 2-triangle split used
+# to produce (192), rather than resolution 4 under the new split (384).
 SUBDIVISIONS_TO_GENERATE = [
-    ("cube", 4),
+    ("cube", 3),
 ]
 
 
