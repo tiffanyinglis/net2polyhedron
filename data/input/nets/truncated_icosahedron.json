@@ -1,7 +1,7 @@
 {
   "name": "Truncated_icosahedron",
   "faces": [
-    {"id": 0, "sides": 6, "isRoot": true},
+    {"id": 0, "sides": 6},
     {"id": 1, "sides": 5},
     {"id": 2, "sides": 6},
     {"id": 3, "sides": 5},

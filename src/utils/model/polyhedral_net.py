@@ -87,18 +87,16 @@ class PolyhedralNet:
     def _load_legacy_txt(cls, path):
         """Legacy explicit-coordinate format (no solving needed): hinges
         are derived from coincident 2D points (Net.build_tree), not from
-        any edge-id list."""
+        any edge-id list. The unfold root is always the first (lowest-id)
+        face declared -- Net.build_tree(root=None) picks that automatically."""
         with open(path) as f:
-            faces_raw, root, fold_angles_deg, name, _ = parse_net_body(f)
-
-        if root is None:
-            raise ValueError(f"{path}: missing ROOT line")
+            faces_raw, fold_angles_deg, name, _ = parse_net_body(f)
 
         legacy_net = Net()
         for fid, pts in faces_raw:
             legacy_net.add_face(pts, fid=fid)
 
-        root_id, legacy_hinges = legacy_net.build_tree(root=root)
+        root_id, legacy_hinges = legacy_net.build_tree(root=None)
         fold_angles = {fid: np.radians(deg) for fid, deg in fold_angles_deg.items()}
 
         missing = [h["child"] for h in legacy_hinges if h["child"] not in fold_angles]

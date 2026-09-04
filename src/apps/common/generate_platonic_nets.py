@@ -19,7 +19,7 @@ def main():
         net_edges, extra_edges = split_spanning_tree(len(degrees), edges, root=0)
         out_path = os.path.join(NETS_DIR, f"{name}.json")
         write_polyhedron_spec(out_path, degrees, net_edges, extra_edges,
-                               root=0, name=name.capitalize())
+                               name=name.capitalize())
         print(f"wrote {out_path}  ({len(degrees)} faces, "
               f"{len(net_edges)} net edges, {len(extra_edges)} extra edges)")
 

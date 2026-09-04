@@ -2,7 +2,7 @@
   "name": "Dodecahedron Minus One",
   "faces": [
     {"id": 0, "sides": 5, "omit": true},
-    {"id": 1, "sides": 5, "isRoot": true},
+    {"id": 1, "sides": 5},
     {"id": 2, "sides": 5},
     {"id": 3, "sides": 5},
     {"id": 4, "sides": 5},

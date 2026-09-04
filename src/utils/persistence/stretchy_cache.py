@@ -1,8 +1,8 @@
 """Cache the (expensive) result of solve_wireframe()-ing a stretchy .json
 mesh, so re-loading an unchanged net is just a fast JSON parse instead of
 a full least-squares relaxation -- the same idea as fold_cache.py for the
-rigid pipeline, just a plain JSON file instead of the FACES/ROOT/FOLD
-text format (there's no hinge tree or fold angle here to write out, just
+rigid pipeline, just a plain JSON file instead of the FACES/FOLD text
+format (there's no hinge tree or fold angle here to write out, just
 per-vertex 3D positions and the summary stats solve_wireframe returns).
 
 A cache file records the settled `positions`, the `stats` dict

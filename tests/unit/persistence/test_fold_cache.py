@@ -9,7 +9,7 @@ from utils.model import PolyhedralNet
 TETRA_JSON = """{
   "name": "Tetra",
   "faces": [
-    {"id": 0, "sides": 3, "isRoot": true},
+    {"id": 0, "sides": 3},
     {"id": 1, "sides": 3},
     {"id": 2, "sides": 3},
     {"id": 3, "sides": 3}

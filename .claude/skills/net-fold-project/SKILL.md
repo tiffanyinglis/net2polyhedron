@@ -130,7 +130,7 @@ Full grammar lives in `src/utils/persistence/polyhedron_spec.py`'s docstring. Sh
 ```json
 {
   "name": "...",
-  "faces": [{"id": 0, "sides": 4, "isRoot": true}, {"id": 1, "sides": 4}, ...],
+  "faces": [{"id": 0, "sides": 4}, {"id": 1, "sides": 4}, ...],
   "edges": {
     "net": [[0, 1], ...],
     "extra": [[1, 2], ...]
@@ -141,9 +141,12 @@ Full grammar lives in `src/utils/persistence/polyhedron_spec.py`'s docstring. Sh
 `faces` gives each face's number of sides (k for a regular k-gon), with an
 explicit `id` per face -- checked against declaration order on load -- so
 faces stay easy to number and cross-reference even in a long list. The
-face the flat net is built outward from is marked `isRoot: true` (defaults
-to face 0 if no face is marked; more than one marked face is an error).
-`edges.net` is the (f1, f2) hinge edges forming the flat net; must be a
+face the flat net is built outward from (the "root") is always the first
+(lowest-id) non-omitted face -- there's no field to override this, since
+any face works equally well as root (net_edges is a spanning tree, so BFS
+from any face reaches every other one); the choice only affects how the
+flat net happens to be arranged on paper, never whether it folds up
+correctly. `edges.net` is the (f1, f2) hinge edges forming the flat net; must be a
 spanning tree over every **non-omitted** face (see "Open nets" below —
 `len(net) == len(faces) - len(omitted) - 1`). `edges.extra` is the (f1, f2)
 edges that only meet once folded; these pin down the fold angles.
@@ -545,7 +548,7 @@ to keep distinct vertices apart.
 ### Caching (`src/utils/persistence/stretchy_cache.py`)
 
 Mirrors `fold_cache.py`, but as plain JSON (positions + stats dict — no
-hinge tree to write out) instead of the FACES/ROOT/FOLD text format.
+hinge tree to write out) instead of the FACES/FOLD text format.
 `ALGORITHM_VERSION` (in `stretchy_mesh.py`) is folded into the cache key
 (`stretchy_cache.source_checksum` = file hash + `"+algo{VERSION}"`) —
 **bump it whenever `solve_wireframe`'s algorithm changes enough to produce
@@ -999,7 +1002,7 @@ why that's expected, not a bug).
   verification as a real test, not a script block.
 - Rigid nets (`data/input/nets/*.json`) and stretchy nets (`data/input/stretchy_nets/*.json`) are
   NOT interchangeable formats, even though both are JSON with a `"faces"`
-  key — one is `{"id", "sides", "isRoot"?, "omit"?}` objects with a
+  key — one is `{"id", "sides", "omit"?}` objects with a
   separate `edges.net`/`edges.extra`/`edges.hidden`, the other is plain
   vertex-id-loop lists. Loading one with the other pipeline's loader will
   fail (usually confusingly) rather than "just working".

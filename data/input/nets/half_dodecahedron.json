@@ -1,7 +1,7 @@
 {
   "name": "Half Dodecahedron",
   "faces": [
-    {"id": 0, "sides": 5, "isRoot": true},
+    {"id": 0, "sides": 5},
     {"id": 1, "sides": 5},
     {"id": 2, "sides": 5, "omit": true},
     {"id": 3, "sides": 5, "omit": true},

@@ -70,13 +70,13 @@ def read_fold_cache(cache_path):
         return None
     try:
         with open(cache_path) as f:
-            faces_raw, root, fold_angles_deg, name, checksum = parse_net_body(f)
-        if root is None or checksum is None or not faces_raw:
+            faces_raw, fold_angles_deg, name, checksum = parse_net_body(f)
+        if checksum is None or not faces_raw:
             return None
         legacy_net = Net()
         for fid, pts in faces_raw:
             legacy_net.add_face(pts, fid=fid)
-        root_id, legacy_hinges = legacy_net.build_tree(root=root)
+        root_id, legacy_hinges = legacy_net.build_tree(root=None)
         fold_angles = {fid: np.radians(deg) for fid, deg in fold_angles_deg.items()}
         if any(h["child"] not in fold_angles for h in legacy_hinges):
             return None
@@ -95,8 +95,6 @@ def write_fold_cache(cache_path, checksum, net):
     for fid in sorted(net.faces):
         coords = " ".join(f"{p[0]:.6f},{p[1]:.6f}" for p in net.faces[fid].vertices2d)
         lines.append(f"{fid}: {coords}")
-    lines.append("")
-    lines.append(f"ROOT {net.root_id}")
     lines.append("")
     for h in net.hinges:
         lines.append(f"FOLD {h.child_id} {np.degrees(h.angle):.6f}")

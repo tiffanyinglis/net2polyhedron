@@ -40,7 +40,7 @@ For example, a cube:
 {
   "name": "Cube",
   "faces": [
-    {"id": 0, "sides": 4, "isRoot": true},
+    {"id": 0, "sides": 4},
     {"id": 1, "sides": 4},
     {"id": 2, "sides": 4},
     {"id": 3, "sides": 4},
@@ -70,8 +70,9 @@ For example, a cube:
 
 `faces` gives each face's number of sides, with an explicit `id` per face
 so they're easy to number and cross-reference even in a long list. The
-face the flat net is built outward from is marked `"isRoot": true` (face 0
-if none is marked). `edges.net` lists the hinges in the flat net — it must
+face the flat net is built outward from is always the first (lowest-id)
+face — there's nothing to mark; any face works equally well as the
+starting point. `edges.net` lists the hinges in the flat net — it must
 connect every face (a spanning tree: exactly one fewer edge than there are
 faces). `edges.extra` lists every other edge of the solid: faces that only
 touch once folded, not in the flat layout. These are what pin down the

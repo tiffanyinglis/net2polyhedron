@@ -2,7 +2,7 @@
 
 Modules:
   polyhedron_spec -- parse/write the faces/edges .json format (rigid nets)
-  net_io          -- shared FACES/ROOT/FOLD text parsing (parse_net_body),
+  net_io          -- shared FACES/FOLD text parsing (parse_net_body),
                       used by both the legacy .txt loader and fold_cache
   fold_cache      -- checksummed .fold cache for rigid nets, so a solve only
                       runs once per unchanged source .json

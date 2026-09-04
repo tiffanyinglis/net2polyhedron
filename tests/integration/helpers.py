@@ -25,14 +25,14 @@ class TetraNetSpec:
         # omitted face -- same shape of spec tools/generate_open_dodecahedron_nets.py
         # produces for half_dodecahedron.json / dodecahedron_minus_one.json.
         write_polyhedron_spec(str(path), TetraNetSpec.DEGREES, [(0, 1), (0, 2)], [(1, 2)],
-                               root=0, name="Open Tetra", omitted={3},
+                               name="Open Tetra", omitted={3},
                                hidden_edges=[(0, 3), (1, 3), (2, 3)])
 
     @staticmethod
     def write_closed(path):
         write_polyhedron_spec(str(path), TetraNetSpec.DEGREES,
                                [(0, 1), (0, 2), (0, 3)], [(1, 2), (1, 3), (2, 3)],
-                               root=0, name="Closed Tetra")
+                               name="Closed Tetra")
 
     @staticmethod
     def load(path):

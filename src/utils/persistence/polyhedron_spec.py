@@ -3,7 +3,7 @@
     {
       "name": "Cube",
       "faces": [
-        {"id": 0, "sides": 4, "isRoot": true},
+        {"id": 0, "sides": 4},
         {"id": 1, "sides": 4},
         ...
       ],
@@ -16,8 +16,12 @@
 "faces" gives each face's number of sides (a regular k-gon), with an
 explicit "id" per face (0, 1, 2, ... in order) so faces stay easy to look
 up and cross-reference by number even in a long list. The face the flat
-net is built outward from is marked "isRoot": true; if no face is marked,
-face 0 is the root.
+net is built outward from (the "root") is always the first (lowest-id)
+non-omitted face -- there's no way to override this, since any face works
+equally well as the unfold root for a given net (net_edges is a spanning
+tree, so BFS-ing it from any face reaches every other one) and the choice
+only affects how the flat net happens to be arranged on paper, never
+whether it folds up correctly.
 
 "edges.net" lists the hinge edges [f1, f2] joining faces in the flat net;
 it must form a spanning tree over every non-omitted face (see "omit"
@@ -64,7 +68,6 @@ def load_polyhedron_spec(path):
         raise ValueError(f"{path}: no faces declared")
 
     degrees = []
-    root = None
     omitted = set()
     for i, face in enumerate(faces):
         if face.get("id") != i:
@@ -73,15 +76,11 @@ def load_polyhedron_spec(path):
         degrees.append(face["sides"])
         if face.get("omit"):
             omitted.add(i)
-        if face.get("isRoot"):
-            if root is not None:
-                raise ValueError(f"{path}: more than one face marked isRoot "
-                                  f"({root} and {i})")
-            root = i
-    if root is None:
-        root = 0
-    if root in omitted:
-        raise ValueError(f"{path}: root face {root} cannot be omitted")
+
+    non_omitted = [i for i in range(len(degrees)) if i not in omitted]
+    if not non_omitted:
+        raise ValueError(f"{path}: every face is omitted, nothing to unfold")
+    root = non_omitted[0]
 
     edges = spec.get("edges") or {}
     net_edges = [tuple(e) for e in edges.get("net", [])]
@@ -109,11 +108,14 @@ def _json_array(items, item_indent, closing_indent):
     return f"[\n{body}\n{closing_indent}]"
 
 
-def write_polyhedron_spec(path, degrees, net_edges, extra_edges, root, name=None,
+def write_polyhedron_spec(path, degrees, net_edges, extra_edges, name=None,
                            omitted=None, hidden_edges=None):
     """omitted (a set/iterable of face ids) and hidden_edges are for OPEN
     nets only (see the module docstring); left as None/empty, the output
-    is exactly the ordinary closed-net format."""
+    is exactly the ordinary closed-net format. There's no `root` parameter
+    -- the unfold root is always derived on load as the first non-omitted
+    face id, so it's never written into the file (see the module
+    docstring for why any face works equally well as root)."""
     omitted = set(omitted or ())
     hidden_edges = hidden_edges or []
     lines = ["{"]
@@ -122,8 +124,6 @@ def write_polyhedron_spec(path, degrees, net_edges, extra_edges, root, name=None
     faces = []
     for i, k in enumerate(degrees):
         attrs = f'"id": {i}, "sides": {k}'
-        if i == root:
-            attrs += ', "isRoot": true'
         if i in omitted:
             attrs += ', "omit": true'
         faces.append(f"{{{attrs}}}")

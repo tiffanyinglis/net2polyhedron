@@ -1,7 +1,7 @@
 {
   "name": "Cube",
   "faces": [
-    {"id": 0, "sides": 4, "isRoot": true},
+    {"id": 0, "sides": 4},
     {"id": 1, "sides": 4},
     {"id": 2, "sides": 4},
     {"id": 3, "sides": 4},

@@ -9,8 +9,6 @@ legacy nets and for the .fold cache written by fold_cache.py):
     1: x,y x,y ...
     ...
 
-    ROOT <face_id>
-
     FOLD <face_id> <angle_degrees>   <- one line per non-root face
     FOLD <face_id> <angle_degrees>
     ...
@@ -23,6 +21,12 @@ geometry. FOLD gives the rotation (in degrees, from flat/180-degrees-
 coplanar) applied at that face's hinge to its parent -- i.e. how far it
 swings when fully folded (t=1).
 
+There's no ROOT line: the unfold root is always the first (lowest-id)
+face present -- net_fold_core.Net.build_tree(root=None) derives it that
+way directly from the FACES block, so it never needs to be spelled out
+separately (see polyhedron_spec.py's module docstring for why any face
+works equally well as root).
+
 Loading a net (.json spec or this legacy .txt format) into the actual
 object model is model.PolyhedralNet.load() -- this module only holds the
 shared text-parsing plumbing that both PolyhedralNet and persistence.fold_cache
@@ -31,14 +35,13 @@ build on.
 
 
 def parse_net_body(f):
-    """Parse the FACES/ROOT/FOLD body shared by the legacy .txt format and
-    the .fold cache format. Returns (faces_raw, root, fold_angles_deg, name,
+    """Parse the FACES/FOLD body shared by the legacy .txt format and the
+    .fold cache format. Returns (faces_raw, fold_angles_deg, name,
     checksum) -- checksum is None unless a CHECKSUM line was present.
     faces_raw is a list of (face_id, points) pairs, ids strictly
     increasing but not necessarily contiguous."""
     faces_raw = []
     last_fid = None
-    root = None
     fold_angles_deg = {}
     name = None
     checksum = None
@@ -56,9 +59,6 @@ def parse_net_body(f):
             continue
         if line.startswith("FACES"):
             continue
-        if line.startswith("ROOT"):
-            root = int(line.split()[1])
-            continue
         if line.startswith("FOLD"):
             _, fid, ang = line.split()
             fold_angles_deg[int(fid)] = float(ang)
@@ -73,4 +73,4 @@ def parse_net_body(f):
         pts = [tuple(map(float, c.split(","))) for c in coords_str.strip().split()]
         faces_raw.append((fid, pts))
 
-    return faces_raw, root, fold_angles_deg, name, checksum
+    return faces_raw, fold_angles_deg, name, checksum

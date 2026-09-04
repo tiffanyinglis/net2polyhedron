@@ -25,7 +25,12 @@ def _write_open_subset(degrees, edges, keep_faces, root, name):
     tree over keep_faces, using only edges between two kept faces) and
     hidden (everything else: any edge touching an omitted face) --
     see polyhedron_spec.py for why hidden edges still have to be
-    listed."""
+    listed. `root` only picks split_spanning_tree's BFS starting face
+    (which just shapes which edges land in net vs. extra); it's never
+    written into the spec -- the loader always derives the actual unfold
+    root as the first non-omitted face id, which for every net generated
+    here is `root` itself anyway (see polyhedron_spec.py's module
+    docstring for why the choice doesn't otherwise matter)."""
     keep_faces = set(keep_faces)
     omitted = set(range(len(degrees))) - keep_faces
     kept_edges = [(a, b) for a, b in edges if a in keep_faces and b in keep_faces]
@@ -43,7 +48,7 @@ def _write_open_subset(degrees, edges, keep_faces, root, name):
     extra_edges = [(global_of[a], global_of[b]) for a, b in extra_local]
 
     out_path = os.path.join(NETS_DIR, f"{name}.json")
-    write_polyhedron_spec(out_path, degrees, net_edges, extra_edges, root=root,
+    write_polyhedron_spec(out_path, degrees, net_edges, extra_edges,
                            name=name.replace("_", " ").title(),
                            omitted=omitted, hidden_edges=hidden_edges)
     print(f"wrote {out_path}  ({len(keep_faces)} faces kept, {len(omitted)} omitted, "

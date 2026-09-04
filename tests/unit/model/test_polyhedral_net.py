@@ -1,12 +1,11 @@
 import numpy as np
-import pytest
 
 from utils.model import PolyhedralNet
 
 TETRA_JSON = """{
   "name": "Tetra",
   "faces": [
-    {"id": 0, "sides": 3, "isRoot": true},
+    {"id": 0, "sides": 3},
     {"id": 1, "sides": 3},
     {"id": 2, "sides": 3},
     {"id": 3, "sides": 3}
@@ -29,12 +28,11 @@ TETRA_JSON = """{
 # Two triangles sharing one edge (face 1's edge, reversed, matches face 0's
 # edge 0->1) -- a minimal legacy .txt net, just enough to exercise
 # PolyhedralNet._load_legacy_txt's coincident-2D-point hinge derivation.
+# No ROOT line: the root is always the first (lowest-id) face declared.
 TWO_TRIANGLE_TXT = """# Two Triangles
 FACES
 0: 0,0 1,0 0.5,0.866025
 1: 1,0 0,0 0.5,-0.866025
-
-ROOT 0
 
 FOLD 1 90.0
 """
@@ -127,8 +125,19 @@ def test_load_legacy_txt(tmp_path):
     assert not solid.is_closed  # two triangles never close up into a solid
 
 
-def test_load_legacy_txt_missing_root_raises(tmp_path):
-    bad = TWO_TRIANGLE_TXT.replace("ROOT 0\n", "")
-    path = _write(tmp_path, bad, "no_root.txt")
-    with pytest.raises(ValueError, match="ROOT"):
-        PolyhedralNet.load(path)
+def test_load_legacy_txt_root_is_first_face_even_when_faces_declared_from_a_higher_id(tmp_path):
+    # Same two triangles, but face 1 declared before face 2 -- root must
+    # still be the lowest-id face present (1), not just "whichever came
+    # first in the file" or "face 0" (there is no face 0 here at all).
+    txt = """# Shifted Triangles
+FACES
+1: 0,0 1,0 0.5,0.866025
+2: 1,0 0,0 0.5,-0.866025
+
+FOLD 2 90.0
+"""
+    path = _write(tmp_path, txt, "shifted.txt")
+    net = PolyhedralNet.load(path)
+    assert net.root_id == 1
+    assert net.hinges[0].parent_id == 1
+    assert net.hinges[0].child_id == 2
