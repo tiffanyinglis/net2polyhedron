@@ -4,18 +4,21 @@ triangle, square, pentagon, hexagon, 7-gon and 8-gon, each split into a
 fine triangular mesh via subdivision_utils (see that package's
 docstring for how the mesh is built and merged with no duplicate points
 across all six shapes). Each n-gon is subdivided at
-`resolution_for(n, DEFAULT_RESOLUTION)`, not the same literal
-`DEFAULT_RESOLUTION` for every n -- a bigger-sided polygon has more area
-per fixed edge length, so using the same resolution across all six would
-give it visibly larger (lower-density) fine triangles than a triangle's
-or square's; `resolution_for` scales resolution per n-gon so every
-subplot's triangles come out roughly the same size, matching what
-net_fold_utils/mesh_subdivide.py does for the real fabric nets this is a
-preview of. Meant as a preview of the mesh a later fabric/cloth
-simulation would use, so it defaults to a resolution with enough points
-to stretch realistically rather than just a handful of big triangles. A
-"Show subdivision" checkbox (on by default) toggles the internal mesh
-edges on/off.
+`resolution_for(n, FABRIC_APP_RESOLUTION)`, not the same literal
+resolution for every n -- a bigger-sided polygon has more area per fixed
+edge length, so using the same resolution across all six would give it
+visibly larger (lower-density) fine triangles than a triangle's or
+square's; `resolution_for` scales resolution per n-gon so every subplot's
+triangles come out roughly the same size. `FABRIC_APP_RESOLUTION` is the
+SAME base resolution (3) net_fold_utils/mesh_subdivide.py's
+DEFAULT_RESOLUTION uses for the real stretchy fabric nets
+(tools/generate_subdivided_stretchy_nets.py, e.g.
+stretchy_nets/cube_res3.json) -- this demo is meant as a preview of
+exactly that mesh, so it shows exactly that subdivision rather than some
+other, denser one (subdivision_utils.DEFAULT_RESOLUTION=10 is a much
+finer default meant for a purely visual preview, not this one). A "Show
+subdivision" checkbox (on by default) toggles the internal mesh edges
+on/off.
 
 Laid out as small-paired-with-big columns (3-gon over 8-gon, 4-gon over
 7-gon, 5-gon over 6-gon) rather than in n order, so a big and a small
@@ -38,7 +41,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
 from net_fold_utils.polygon_geom import regular_polygon_vertices
-from subdivision_utils import subdivide, resolution_for, DEFAULT_RESOLUTION
+from net_fold_utils.mesh_subdivide import DEFAULT_RESOLUTION as FABRIC_APP_RESOLUTION
+from subdivision_utils import subdivide, resolution_for
 from polygon_fold_app import PLOT_THEME
 
 # Columns pair a small n-gon with a big one (top row / bottom row) so
@@ -120,7 +124,7 @@ class PolygonSubdivideApp:
                          linewidth=1.5, zorder=1)
 
                 if show_subdivision:
-                    points, triangles = subdivide(n, verts, resolution_for(n, DEFAULT_RESOLUTION))
+                    points, triangles = subdivide(n, verts, resolution_for(n, FABRIC_APP_RESOLUTION))
                     # One LineCollection for all mesh edges rather than an
                     # ax.plot() per triangle -- at this resolution each
                     # subplot has several hundred triangles, and matplotlib

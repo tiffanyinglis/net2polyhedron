@@ -81,7 +81,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
 from net_fold_utils.stretchy_mesh import (
-    load_stretchy_mesh, mesh_edges, relax_once,
+    load_stretchy_mesh, mesh_edges, relax_once, per_face_volumes, is_orientation_consistent,
     EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from net_fold_utils.stretchy_cache import load_with_cache, is_cached
@@ -101,21 +101,23 @@ SUBDIVISION_EDGE_ALPHA = 0.35
 SUBDIVISION_EDGE_WIDTH = 0.5
 
 # Pressure spinner bounds: relax_once's pressure has no fixed target to
-# converge to (see stretchy_mesh._relax_residual's docstring -- it uses
-# `pressure * exp(-volume)`, not _inflate's target-based term), so unlike
-# an automatic ramp's weights, there's no natural "final" value to anchor
-# the default to. 6.5 was picked empirically to land around 5.5% max
-# stretch on stretchy_nets/cube_res3.json -- a reasonable-looking amount
-# of give, comparable to what the old target-based formula settled at
-# once fully plateaued (pressure ~100-300 there, before this model
-# replaced it specifically because that plateau meant more pressure
-# stopped doing anything). The max gives roughly 3x that stretch at the
-# top of the slider (pressure=20 measured at ~18% stretch) without being
-# unbounded. (These numbers are specific to cube_res3.json's particular
-# mesh -- re-measure if the default net or its resolution ever changes.)
-DEFAULT_PRESSURE = 6.5
-MAX_PRESSURE = 20.0
-PRESSURE_INCREMENT = 0.1
+# converge to (see stretchy_mesh._relax_residual's docstring -- it uses a
+# PER-FACE `pressure * exp(-v_f / reference_volume)`, not _inflate's
+# target-based term), so unlike an automatic ramp's weights, there's no
+# natural "final" value to anchor the default to. 30 reaches roughly 73%
+# max stretch on stretchy_nets/cube_res3.json (measured with the correct
+# per-edge rest lengths a fabric net actually needs -- see
+# mesh_subdivide.py's docstring -- and reference_volume set from
+# per_face_volumes on that net's own starting shape, per net/pressure
+# session, as _on_loaded does). That's a lot of give -- deliberately, per
+# explicit request, rather than the earlier ~5.5%-at-default calibration
+# -- so MAX_PRESSURE=60 (2x the default) is meant purely as slider
+# headroom, not a "sane" ceiling. (These numbers are specific to
+# cube_res3.json's particular mesh -- re-measure if the default net or
+# its resolution ever changes.)
+DEFAULT_PRESSURE = 30.0
+MAX_PRESSURE = 60.0
+PRESSURE_INCREMENT = 0.5
 
 DEFAULT_STEPS = 10
 
@@ -205,7 +207,7 @@ class StretchyPolyhedronApp:
 
         mode_row = ttk.Frame(inflate_frame)
         mode_row.pack(fill=tk.X, pady=(8, 0))
-        self.iterate_mode_var = tk.StringVar(value="steps")
+        self.iterate_mode_var = tk.StringVar(value="convergence")
         self.steps_radio = ttk.Radiobutton(mode_row, text="Iterate for", value="steps",
                                             variable=self.iterate_mode_var,
                                             command=self._update_mode_state)
@@ -397,6 +399,7 @@ class StretchyPolyhedronApp:
         self.iteration_count = 0
         self.last_stats = {}
         self.positions = None
+        self.reference_volume = None
         self.stop_event = None
         # load_with_cache is the precomputed "step 1 + step 2" starting
         # point (see module docstring): the coarse net solved with
@@ -412,6 +415,17 @@ class StretchyPolyhedronApp:
     def _on_loaded(self, payload):
         _, positions, stats, name = payload
         self.positions = positions
+        # Fixed for the rest of this net's session (see relax_once's and
+        # _relax_residual's docstrings on reference_volume): one entry
+        # PER FACE, each face's own starting volume contribution, so
+        # _relax_residual's per-face pressure term means roughly the same
+        # thing on every face of every net, whether the loaded net is a
+        # small tetrahedron or a large dodecahedron -- left unnormalized,
+        # the SAME pressure value can be ~780x too weak to move a
+        # dodecahedron's faces yet already excessive for a cube's, purely
+        # because of their very different enclosed volumes at unit edge
+        # length, nothing to do with the pressure dial itself.
+        self.reference_volume = per_face_volumes(positions, self.faces)
         self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
                             "rms_stretch_pct": stats["rms_stretch_pct"],
                             "optimality": None, "converged": None}
@@ -484,29 +498,64 @@ class StretchyPolyhedronApp:
         instead of jumping straight from the start count to the end one.
         Tk isn't thread-safe, so the worker only ever pushes to the
         queue; the main thread (via the scheduled poll below) is the
-        only one that touches Tk widgets."""
+        only one that touches Tk widgets.
+
+        Each chunk is checked for orientation consistency (see
+        is_orientation_consistent's docstring) before being accepted: a
+        big enough single relax_once call CAN fold the mesh through
+        itself -- verified empirically even on a plain cube at
+        pressure=30 with a single 5-evaluation chunk, which "converges"
+        to a deceptively tiny reported edge stretch while actually
+        self-intersecting, not genuinely inflated -- and relax_once has
+        no restart/retry logic of its own to catch that (by design, see
+        its docstring: it's meant for small incremental nudges from an
+        already-good point). A chunk that tangles the mesh is REJECTED
+        (positions not updated) and retried at half the size instead;
+        once a size is found to tangle, `ceiling` permanently caps how
+        far this click's chunk is ever allowed to grow back to again, so
+        the loop can't oscillate forever between "too small to move
+        anything" and "big enough to tangle" -- it converges on some
+        safe operating size and keeps making progress at that size
+        instead. If even a single-evaluation chunk tangles the mesh (the
+        smallest step possible), inflation is stopped there and reported
+        as unsafe rather than looping forever or accepting a corrupted
+        result."""
         q = queue.Queue()
         faces, edge_length = self.faces, self.edge_length
         start_positions = self.positions
+        reference_volume = self.reference_volume
 
         def worker():
             positions = start_positions
             completed = 0
             chunk = INFLATE_CHUNK_START
+            ceiling = None  # once set, chunk is never allowed to grow past this again
             try:
                 while True:
-                    this_chunk = chunk if target_steps is None else min(chunk, target_steps - completed)
+                    this_chunk = max(1, chunk if target_steps is None
+                                      else min(chunk, target_steps - completed))
                     result = relax_once(positions, faces, edge_length, pressure,
-                                         PLANARITY_WEIGHT, max_nfev=this_chunk, stop_event=stop_event)
-                    positions, nfev, max_stretch, rms_stretch, optimality, converged = result
+                                         PLANARITY_WEIGHT, max_nfev=this_chunk, stop_event=stop_event,
+                                         reference_volume=reference_volume)
+                    trial_positions, nfev, max_stretch, rms_stretch, optimality, converged = result
+                    stopped = stop_event is not None and stop_event.is_set()
+
+                    if not stopped and not is_orientation_consistent(trial_positions, faces):
+                        if this_chunk <= 1:
+                            q.put(("tangled", None))
+                            return
+                        ceiling = max(1, this_chunk - 1)
+                        chunk = max(1, this_chunk // 2)
+                        continue  # reject this chunk entirely; positions unchanged, no progress counted
+
+                    positions = trial_positions
                     completed += nfev
                     q.put(("progress", result))
-                    stopped = stop_event is not None and stop_event.is_set()
                     reached_target = target_steps is not None and completed >= target_steps
                     safety_cap_hit = target_steps is None and completed >= INFLATE_SAFETY_STEP_CAP
                     if converged or stopped or reached_target or safety_cap_hit:
                         break
-                    chunk = min(chunk * 2, INFLATE_CHUNK_MAX)
+                    chunk = min(chunk * 2, INFLATE_CHUNK_MAX if ceiling is None else ceiling)
                 q.put(("final", None))
             except Exception as e:  # surface a solver crash instead of hanging forever
                 q.put(("error", str(e)))
@@ -521,6 +570,14 @@ class StretchyPolyhedronApp:
                         self._apply_inflate_progress(payload)
                     elif kind == "final":
                         self._finish_inflate()
+                        return
+                    elif kind == "tangled":
+                        self.progress.stop()
+                        self.progress.pack_forget()
+                        self._set_controls_enabled(True)
+                        self._set_status(
+                            "Stopped: this pressure folds the mesh through itself even at the "
+                            "smallest possible step. Lower the pressure and try again.", "error")
                         return
                     elif kind == "error":
                         self.progress.stop()

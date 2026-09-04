@@ -173,6 +173,45 @@ def _volume_indices(faces, idx):
     return (np.array(v0s, dtype=int), np.array(v1s, dtype=int), np.array(v2s, dtype=int))
 
 
+def _face_volume_group(faces, idx):
+    """Like _volume_indices, but additionally tracks which ORIGINAL face
+    each flattened fan-triangle belongs to -- a parallel `face_ids` array,
+    same length as the (v0, v1, v2) index arrays, giving the source face's
+    position in `faces` (0..len(faces)-1) for every fan-triangle. Lets
+    _per_face_volumes recover each face's OWN volume contribution (via
+    np.bincount) instead of only the whole mesh's total (_mesh_volume) --
+    see _relax_residual's docstring for why that distinction matters for
+    relax_once's pressure term specifically."""
+    v0s, v1s, v2s, face_ids = [], [], [], []
+    for face_id, face in enumerate(faces):
+        face_idx = [idx[v] for v in face]
+        for i in range(1, len(face_idx) - 1):
+            v0s.append(face_idx[0])
+            v1s.append(face_idx[i])
+            v2s.append(face_idx[i + 1])
+            face_ids.append(face_id)
+    return (np.array(v0s, dtype=int), np.array(v1s, dtype=int), np.array(v2s, dtype=int),
+            np.array(face_ids, dtype=int), len(faces))
+
+
+def _per_face_volumes(pts, face_volume_group):
+    """Each face's OWN signed volume contribution (see _mesh_volume for
+    the underlying fan-triangulation/divergence-theorem calculation) --
+    an array of length n_faces, summing that face's own fan-triangles'
+    signed tetrahedron volumes via `face_ids` (see _face_volume_group)
+    rather than the single grand total _mesh_volume returns. Faces with
+    more than 3 vertices contribute more than one fan-triangle each;
+    np.bincount groups and sums them back per original face."""
+    v0_idx, v1_idx, v2_idx, face_ids, n_faces = face_volume_group
+    if len(v0_idx) == 0:
+        return np.zeros(n_faces)
+    v0 = pts[v0_idx]
+    v1 = pts[v1_idx]
+    v2 = pts[v2_idx]
+    tetra_volumes = np.einsum('ij,ij->i', v0, np.cross(v1, v2)) / 6.0
+    return np.bincount(face_ids, weights=tetra_volumes, minlength=n_faces)
+
+
 def _planarity_groups(faces, idx):
     """Precomputed per-face-size index arrays for _face_planarity_residual:
     {n: array of shape (num_faces_with_n_vertices, n)} for every face
@@ -305,11 +344,54 @@ def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_len
     return np.concatenate(parts)
 
 
-def _relax_residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
-                     pressure=0.0, planarity_weight=0.0):
+def _relax_residual(flat, edge_ai, edge_bi, face_volume_group, planarity_groups, edge_length,
+                     pressure=0.0, planarity_weight=0.0, reference_volume=1.0):
     """relax_once's objective: edge-length + planarity (see
     _edge_and_planarity_parts) plus a TARGET-FREE inflation "pressure"
-    term -- `pressure * exp(-volume)`.
+    term -- ONE `pressure * exp(-v_f / reference_volume)` residual PER
+    FACE (v_f = that face's own volume contribution, see
+    _per_face_volumes), not a single global term for the mesh's total
+    volume.
+
+    Why PER FACE, not one global term (this is the second, deeper layer
+    of this residual's design -- see "Why reference_volume" below for the
+    first): a single global `pressure * exp(-total_volume)` term gives
+    the optimizer a CHEAP way to satisfy it on a mesh with many
+    vertices/faces that doesn't involve genuinely inflating at all --
+    fold one small local patch of the mesh through itself. That fold
+    spikes _mesh_volume's naive divergence-theorem sum (a self-
+    intersecting surface can integrate to an arbitrarily large SIGNED
+    volume) while leaving nearly every other edge, and every OTHER face's
+    own local geometry, completely untouched. Squared into a SINGLE
+    scalar cost term, the optimizer has no way to tell "genuinely
+    expanded a little everywhere" apart from "faked it by folding one
+    corner enormously" -- both reduce that one term's magnitude, and the
+    fold is numerically cheaper since it barely disturbs the (far more
+    numerous) edge-length residuals. Verified empirically: even a
+    coarse-to-fine gradual pressure ramp (mirroring _inflate's own
+    INFLATION_WEIGHTS ramp), starting from a tiny fraction of the target
+    pressure, immediately lands stretchy_nets/cube_res3.json (110
+    vertices) in exactly this self-intersecting state at the VERY FIRST,
+    gentlest ramp step -- while the plain COARSE stretchy_nets/cube.json
+    (8 vertices) inflates perfectly cleanly at every pressure up to and
+    including 30, no ramp needed at all. The fold "cheat" specifically
+    needs enough spare vertices/faces to hide in; a coarse mesh, where
+    every vertex has too much leverage over too large a fraction of the
+    mesh's edges, has nowhere for it to hide.
+
+    Splitting the SAME pressure*exp(-v/ref) formula into one residual per
+    face closes this loophole: now folding ONE face's own local patch
+    only reduces THAT face's own residual, while every OTHER face's
+    residual still wants ITS OWN v_f to increase -- so a local fold is no
+    longer numerically cheaper than genuine, mesh-wide expansion; making
+    N-1 other residuals worse to help just one is a losing trade in a
+    sum-of-squares objective. This also happens to match REAL pressure's
+    physics much more directly than a global term ever did: the gradient
+    of a face's own v_f with respect to moving that face outward is
+    proportional to that face's own AREA (a basic divergence-theorem
+    fact -- dV/d(extrusion distance) = surface area), so this residual
+    family's local gradient is naturally a force-per-area quantity,
+    exactly the "pressure" a real inflating membrane feels locally.
 
     Why no target: _residual's `inflation_weight * (target - volume)`
     term is a two-sided penalty that's zero exactly AT `target` and grows
@@ -323,26 +405,45 @@ def _relax_residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, ed
     solve_wireframe's automatic ramp that plateau is a FEATURE (see
     _residual's docstring: it's how the ramp knows to stop). For a human
     turning a pressure dial and expecting "more pressure = more
-    inflated", it's exactly backwards.
+    inflated", it's exactly backwards. `exp` (rather than something like
+    `1/v_f`) is smooth and finite for every v_f, including negative/
+    near-zero (a tangled or barely-3D starting configuration) -- see
+    _mesh_volume's docstring on why a singularity there (like
+    `1/distance`) is specifically something this residual family avoids.
 
-    `pressure * exp(-volume)` has no target and is never satisfied: it
-    shrinks toward (but never reaches) zero as volume grows, so there's
-    always a gradient rewarding more volume, and the actual equilibrium
-    is set entirely by the balance against edge stretch -- a genuinely
-    higher pressure asks for genuinely more stretch to rebalance, with no
-    ceiling. `exp` (rather than something like `1/volume`) is smooth and
-    finite for every volume, including negative/near-zero (a tangled
-    starting configuration) -- see _mesh_volume's docstring on why a
-    singularity there (like `1/distance`) is specifically something this
-    residual family avoids.
+    Why `reference_volume`: a mesh's own enclosed volume scales with its
+    PHYSICAL size, not with how finely it's subdivided or how much it's
+    already stretched -- at edge_length=1, a dodecahedron encloses ~7.66,
+    a cube ~1.0, a tetrahedron ~0.12, and a single face's own SHARE of
+    that (v_f) scales down the same way. Left unnormalized, this is an
+    EXPONENTIAL, not linear, sensitivity to that difference (verified
+    empirically before the per-face fix above: reaching comparable
+    stretch needed roughly 1000x more pressure on a dodecahedron than a
+    cube, matching exp(-7.66)/exp(-1.0)'s ~783x ratio's order of
+    magnitude, not the much smaller ~3.4x ratio of their surface areas --
+    so this is specifically a VOLUME effect, not a force-per-area one).
+    Dividing each face's v_f by a matching reference before exponentiating
+    keeps `v_f / reference_volume` close to 1 regardless of the mesh's
+    absolute size, so a given pressure value means roughly the same thing
+    across every net. `reference_volume` may be a scalar (broadcast
+    against every face -- the default 1.0 is the original, unnormalized
+    per-face behavior several existing tests rely on implicitly) or an
+    array of one reference per face (e.g. from per_face_volumes on the
+    mesh's own starting shape -- see relax_once's docstring for the
+    intended usage), whichever numpy's broadcasting against the `v_f`
+    array calls for.
 
-    See _residual for what `volume_indices`/`planarity_groups`/
-    `edge_length` are (identical here)."""
+    See _residual for what `planarity_groups`/`edge_length` are
+    (identical here); `face_volume_group` is _face_volume_group's
+    precomputed structure (analogous to `volume_indices` there, but
+    additionally tracking which face each fan-triangle belongs to, so
+    _per_face_volumes can report one volume per face instead of one grand
+    total)."""
     pts = flat.reshape(-1, 3)
     parts = _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups)
     if pressure:
-        vol = _mesh_volume(pts, volume_indices)
-        parts.insert(1, np.array([pressure * np.exp(-vol)]))
+        face_volumes = _per_face_volumes(pts, face_volume_group)
+        parts.insert(1, pressure * np.exp(-face_volumes / reference_volume))
     return np.concatenate(parts)
 
 
@@ -696,16 +797,17 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
 
 def _edge_setup(faces, edge_length):
     """Shared setup for relax_once: vertex/edge index arrays, the
-    precomputed structures _residual needs for its pressure/planarity
-    terms (see _volume_indices/_planarity_groups -- built once here
-    rather than re-derived on every _residual call), plus a per-edge
-    length array (broadcastable from a scalar) and a characteristic
-    scalar scale (the array's min, or the scalar itself)."""
+    precomputed structures _relax_residual needs for its pressure/
+    planarity terms (see _face_volume_group/_planarity_groups -- built
+    once here rather than re-derived on every _relax_residual call),
+    plus a per-edge length array (broadcastable from a scalar) and a
+    characteristic scalar scale (the array's min, or the scalar
+    itself)."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(faces)
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
-    volume_indices = _volume_indices(faces, idx)
+    face_volume_group = _face_volume_group(faces, idx)
     planarity_groups = _planarity_groups(faces, idx)
     if isinstance(edge_length, dict):
         length_arr = np.array([edge_length[e] for e in edges])
@@ -713,7 +815,7 @@ def _edge_setup(faces, edge_length):
     else:
         length_arr = edge_length
         scale = float(edge_length)
-    return (vertex_ids, idx, edges, edge_ai, edge_bi, volume_indices, planarity_groups,
+    return (vertex_ids, idx, edges, edge_ai, edge_bi, face_volume_group, planarity_groups,
             length_arr, scale)
 
 
@@ -742,9 +844,63 @@ class RelaxStopped(Exception):
     stop_event is set -- never escapes relax_once itself."""
 
 
+def mesh_volume(positions, faces):
+    """The mesh's current TOTAL enclosed volume (see _mesh_volume) from a
+    plain {vertex_id: [x, y, z]} `positions` dict and its `faces` -- for
+    callers (e.g. stretchy_polyhedron_init.py) that want a mesh's own
+    volume without reaching into the private index-array machinery
+    _residual uses internally. relax_once's own pressure term is now
+    PER-FACE, not a single total (see _relax_residual's docstring) --
+    use per_face_volumes, not this function, to compute its
+    `reference_volume`."""
+    vertex_ids = sorted({v for face in faces for v in face})
+    idx = {v: i for i, v in enumerate(vertex_ids)}
+    pts = np.array([positions[v] for v in vertex_ids])
+    return _mesh_volume(pts, _volume_indices(faces, idx))
+
+
+def per_face_volumes(positions, faces):
+    """Each face's own volume contribution (see _per_face_volumes) from a
+    plain {vertex_id: [x, y, z]} `positions` dict and its `faces` -- the
+    per-face counterpart to mesh_volume, for computing the
+    `reference_volume` array relax_once's pressure term needs (see its
+    docstring): pass this function's result on the mesh's own STARTING
+    shape, once per net, not the mesh's currently-evolving volumes."""
+    vertex_ids = sorted({v for face in faces for v in face})
+    idx = {v: i for i, v in enumerate(vertex_ids)}
+    pts = np.array([positions[v] for v in vertex_ids])
+    return _per_face_volumes(pts, _face_volume_group(faces, idx))
+
+
+def is_orientation_consistent(positions, faces):
+    """Whether every face still agrees on which way is "outward" (see
+    _is_orientation_consistent) -- exposed for callers like
+    stretchy_polyhedron_init.py's interactive Inflate loop, which (unlike
+    solve_wireframe) has no random-restart-and-retry search of its own:
+    relax_once only ever takes small incremental steps from an
+    already-good starting point, so it has no built-in way to notice if
+    one of those steps folds the mesh through itself. This was the
+    dominant failure mode BEFORE _relax_residual switched to a per-face
+    pressure term (see its docstring): a single global pressure residual
+    let the optimizer cheaply satisfy it by folding one small local patch
+    of a FINE, many-vertex mesh through itself (verified even on
+    stretchy_nets/cube_res3.json at a barely-there pressure) rather than
+    genuinely inflating, something the coarse, few-vertex nets never had
+    room to do. The per-face fix removes that specific incentive, but
+    this check is kept as a cheap, general-purpose safety net regardless
+    -- a caller running relax_once in a sequence of chunks should still
+    check this after each one and back off (retry with a smaller step)
+    rather than accept a chunk that just made an orientation-consistent
+    mesh inconsistent."""
+    vertex_ids = sorted({v for face in faces for v in face})
+    idx = {v: i for i, v in enumerate(vertex_ids)}
+    pts = np.array([positions[v] for v in vertex_ids])
+    return _is_orientation_consistent(pts, faces, idx)
+
+
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL):
+                gtol=CONVERGENCE_GTOL, reference_volume=1.0):
     """Run ONE relaxation pass from `positions` (a {vertex_id: [x, y, z]}
     dict) at a fixed inflation `pressure` -- no automatic weight ramp, no
     random restarts, no orientation-consistency retries (that machinery
@@ -760,10 +916,27 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     (fixed) target -- verified empirically to plateau hard well before
     any dramatic shape change. `pressure` here isn't on the same numeric
     scale as _inflate's INFLATION_WEIGHTS ramp (those target a specific
-    volume; this doesn't) -- as a reference point, pressure=6.5 reaches
-    about 5.5% max stretch on stretchy_nets/cube_res3.json, which is
-    roughly what the old target-based formula needed pressure~100-300
-    (i.e. its plateau) to reach.
+    volume; this doesn't), nor is it comparable to a value calibrated
+    before _relax_residual switched to a per-face pressure term (see its
+    docstring) -- re-measure for the current default net/resolution
+    rather than trusting an old number here.
+
+    `reference_volume` normalizes _relax_residual's PER-FACE pressure
+    term against this mesh's own characteristic volume scale (see its
+    docstring for the full story -- including why the term is per-face
+    at all, not just why it's normalized). May be a scalar (broadcast
+    against every face) or an array with one entry per face. Callers
+    relaxing more than one net across a session (e.g.
+    stretchy_polyhedron_init.py) should compute this ONCE per net -- via
+    `per_face_volumes(positions, faces)` on that net's starting shape --
+    and pass the SAME array on every subsequent relax_once call for it,
+    so a given pressure keeps meaning a consistent thing across repeated
+    Inflate clicks; it should NOT be recomputed from the mesh's
+    currently-evolving volumes on every call, since that would keep
+    dragging the target out from under the user's pressure dial. Defaults
+    to 1.0 (the original, unnormalized per-face behavior -- correct for a
+    mesh whose own volume is already close to 1 at edge_length=1, e.g. a
+    plain unit cube, and what several existing tests rely on implicitly).
 
     `max_nfev` caps the number of solver function evaluations -- used as
     a practical, always-available proxy for "how many steps to run"
@@ -783,7 +956,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     None if a stop was requested before scipy ever returned a result.
     `converged` is True only if scipy's own tolerance (gtol/ftol/xtol)
     was what stopped it, False if the step cap or a stop request did."""
-    vertex_ids, idx, edges, edge_ai, edge_bi, volume_indices, planarity_groups, length_arr, _ = \
+    vertex_ids, idx, edges, edge_ai, edge_bi, face_volume_group, planarity_groups, length_arr, _ = \
         _edge_setup(faces, edge_length)
     x0 = np.array([positions[v] for v in vertex_ids]).flatten()
 
@@ -799,8 +972,8 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
 
     try:
         sol = least_squares(wrapped_residual, x0,
-                             args=(edge_ai, edge_bi, volume_indices, planarity_groups, length_arr,
-                                   pressure, planarity_weight),
+                             args=(edge_ai, edge_bi, face_volume_group, planarity_groups, length_arr,
+                                   pressure, planarity_weight, reference_volume),
                              max_nfev=max_nfev, gtol=gtol)
         pts = sol.x.reshape(-1, 3)
         # scipy's own nfev -- NOT wrapped_residual's raw call count, which

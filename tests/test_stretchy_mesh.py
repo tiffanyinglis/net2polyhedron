@@ -8,12 +8,13 @@ from net_fold_utils.combinatorics import EdgeMap
 from net_fold_utils.hull_to_spec import polyhedron_from_vertices
 from net_fold_utils.solid_coords import tetrahedron as tetrahedron_coords
 from net_fold_utils import stretchy_mesh
+from net_fold_utils.mesh_subdivide import solve_fabric_mesh
 from net_fold_utils.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, solve_wireframe, STRETCH_CAP,
     _overall_3d_extent, _min_pairwise_separation, _mesh_volume, _sphere_bound_volume,
     _volume_indices, _planarity_groups, _face_planarity_residual,
     _orientation_signs, _is_orientation_consistent,
-    relax_once, EDGE_LENGTH,
+    relax_once, EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
 )
 
 PENTAGONS_AND_SQUARE = "stretchy_nets/two_pentagons_and_a_square.json"
@@ -378,3 +379,86 @@ def test_relax_once_pressure_has_no_plateau_unlike_a_fixed_target():
         _, _, max_stretch, _, _, _ = relax_once(positions, faces, EDGE_LENGTH, pressure=pressure)
         stretches.append(max_stretch)
     assert stretches[0] < stretches[1] < stretches[2]
+
+
+# ---- mesh_volume / per_face_volumes / is_orientation_consistent (public wrappers) ----
+
+def test_mesh_volume_public_wrapper_matches_true_tetrahedron_volume():
+    pts, faces = _unit_edge_tetrahedron_points()
+    positions = {i: pts[i] for i in range(len(pts))}
+    assert np.isclose(mesh_volume(positions, faces), TRUE_VOLUME["tetrahedron"], atol=1e-6)
+
+
+def test_per_face_volumes_sums_to_the_same_total_as_mesh_volume():
+    pts, faces = _unit_edge_tetrahedron_points()
+    positions = {i: pts[i] for i in range(len(pts))}
+    per_face = per_face_volumes(positions, faces)
+    assert len(per_face) == len(faces)
+    assert np.isclose(per_face.sum(), mesh_volume(positions, faces))
+
+
+def test_is_orientation_consistent_public_wrapper_matches_private_helper():
+    pts, faces = _unit_edge_tetrahedron_points()
+    positions = {i: pts[i] for i in range(len(pts))}
+    assert is_orientation_consistent(positions, faces)
+
+    flipped_faces = [list(reversed(faces[0]))] + faces[1:]
+    flipped_positions = positions  # same points, just one face's winding reversed
+    assert not is_orientation_consistent(flipped_positions, flipped_faces)
+
+
+# ---- per-face pressure (the fix for a fine mesh's "cheap local fold" exploit) ----
+
+def test_relax_once_per_face_pressure_stays_orientation_consistent_on_a_fine_mesh():
+    # Before _relax_residual switched to a PER-FACE pressure term, a
+    # single GLOBAL `pressure * exp(-total_volume)` residual gave the
+    # optimizer a cheap way to satisfy it on a mesh with many
+    # vertices/faces without genuinely inflating at all: fold one small
+    # local patch through itself, which spikes the naive divergence-
+    # theorem volume sum while leaving nearly every edge (and every OTHER
+    # face) untouched. A coarse mesh (few faces, tested above on
+    # stretchy_nets/cube.json) has no room for that cheat -- every vertex
+    # has too much leverage over too large a fraction of the mesh's
+    # edges. A subdivided FINE mesh (many small faces) is exactly where
+    # the cheat has room to hide, so that's what this test exercises:
+    # a resolution-2 tetrahedron subdivision (16 small triangles),
+    # solved and draped via solve_fabric_mesh (giving it the CORRECT,
+    # non-uniform per-edge rest lengths a fine mesh actually needs --
+    # see mesh_subdivide.py's docstring), then relaxed under real
+    # pressure. If the per-face fix works, every face keeps agreeing on
+    # which way is outward at every step, even as the mesh visibly
+    # inflates (positive, growing stretch) -- no self-intersecting fold.
+    fine_faces, _, positions, _ = solve_fabric_mesh(TETRAHEDRON_FACES, resolution=2, seed=0)
+    from net_fold_utils.mesh_subdivide import subdivide_mesh
+    _, _, edge_length, _ = subdivide_mesh(TETRAHEDRON_FACES, resolution=2)
+    reference_volume = per_face_volumes(positions, fine_faces)
+
+    pos = positions
+    prev_stretch = -1.0
+    for pressure in (1.0, 5.0, 15.0):
+        pos, _, max_stretch, _, _, converged = relax_once(
+            pos, fine_faces, edge_length, pressure=pressure, reference_volume=reference_volume)
+        assert is_orientation_consistent(pos, fine_faces)
+        assert max_stretch > prev_stretch  # genuinely more pressure keeps demanding more stretch
+        prev_stretch = max_stretch
+
+
+def test_relax_once_reference_volume_accepts_a_scalar_or_a_per_face_array():
+    # A scalar broadcasts against every face (the original, still-default
+    # behavior several other tests rely on); an array with one entry per
+    # face (the new, mesh-size-aware normalization -- see
+    # _relax_residual's docstring) must work identically well. Same
+    # small/fast coarse net as the plateau test above, just checking the
+    # two call styles don't raise and both produce a sane, positive
+    # stretch increase.
+    faces, _ = load_stretchy_mesh("stretchy_nets/cube.json")
+    positions, _ = solve_wireframe(faces, seed=0)
+
+    _, _, scalar_stretch, _, _, _ = relax_once(
+        positions, faces, EDGE_LENGTH, pressure=5.0, reference_volume=1.0)
+    per_face_ref = mesh_volume(positions, faces) / len(faces)
+    _, _, array_stretch, _, _, _ = relax_once(
+        positions, faces, EDGE_LENGTH, pressure=5.0,
+        reference_volume=np.full(len(faces), per_face_ref))
+    assert scalar_stretch > 0
+    assert array_stretch > 0
