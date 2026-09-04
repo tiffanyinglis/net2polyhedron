@@ -14,7 +14,8 @@ from ..persistence.polyhedron_spec import load_polyhedron_spec
 from ..persistence.net_io import parse_net_body
 from ..combinatorics.edge_map import EdgeMap
 from ..geometry2d.net_layout import build_net_layout
-from ..geometry3d.net_fold_core import Net, fold as _fold, precompute_subtree_map
+from ..geometry3d.net_fold_core import (
+    Net, fold as _fold, fold_transforms as _fold_transforms, cluster_faces_into_mesh)
 from ..geometry3d.fold_solver import solve_fold_angles
 from .face import Face
 from .hinge import Hinge
@@ -28,7 +29,6 @@ class PolyhedralNet:
         self.faces = faces          # dict[fid -> Face], 2D only
         self.hinges = hinges        # list[Hinge], BFS order
         self._hinge_by_child = {h.child_id: h for h in hinges}
-        self._subtree_map = None    # lazy; the hinge tree's shape never changes
 
     # ---- loading ----
 
@@ -136,29 +136,43 @@ class PolyhedralNet:
         return legacy_net, [h.to_legacy_dict() for h in self.hinges]
 
     def fold(self, t=1.0, fold_signs=None):
-        """Return a Polyhedron at fold progress t. self._subtree_map is
-        cached on this instance (the hinge tree's shape never changes
-        across many calls, e.g. dragging a fold slider), so repeated calls
-        only re-run net_fold_core.fold()'s per-call rotation work, not its
-        precompute -- the same precompute-once/reuse-many pattern
-        fold_solver.py already applies during solving, applied here to
-        repeated rendering instead."""
+        """Return a model.Polyhedron at fold progress t (not just t=1 --
+        every intermediate slider position is an equally valid Polyhedron,
+        with .is_closed simply reporting False until the fold actually
+        completes). Each face's own flat corners are folded to 3D via
+        net_fold_core.fold(), then cluster_faces_into_mesh() merges
+        coincident corners (real hinge-glued edges at any t; closure/extra
+        edges too, once t reaches the solved angle) into shared vertex
+        indices -- Polyhedron.faces is therefore always ordered by
+        ascending original face id, so a caller needing per-original-face
+        metadata (e.g. color) can zip it against sorted(self.faces)."""
         legacy_net, legacy_hinges = self._as_legacy()
-        if self._subtree_map is None:
-            self._subtree_map = precompute_subtree_map(legacy_hinges)
         verts3d = _fold(legacy_net, self.root_id, legacy_hinges, self.fold_angles,
-                         t, fold_signs=fold_signs, subtree_map=self._subtree_map)
-        faces3d = {fid: face.with_vertices3d(verts3d[fid]) for fid, face in self.faces.items()}
-        return Polyhedron(name=self.name, faces=faces3d, t=t, root_id=self.root_id)
+                         t, fold_signs=fold_signs)
+        vertices, faces = cluster_faces_into_mesh(verts3d)
+        return Polyhedron(vertices=vertices, faces=faces, name=self.name)
+
+    def face_transforms(self, t=1.0, fold_signs=None):
+        """dict[fid -> np.ndarray(4,4)] -- each face's cumulative affine
+        transform at fold progress t (net_fold_core.fold_transforms(),
+        bridged through this net's Face/Hinge objects). This is the
+        unfolding's "path" as explicit matrices, independent of fold()'s
+        Polyhedron-building step -- useful for inspecting/animating the
+        motion itself rather than just its t=1 (or any single-t) result."""
+        legacy_net, legacy_hinges = self._as_legacy()
+        return _fold_transforms(legacy_net, self.root_id, legacy_hinges,
+                                 self.fold_angles, t, fold_signs=fold_signs)
 
     # ---- app-facing convenience ----
 
     def assign_colors(self, palette):
         """Assign each face a color from `palette` (a list of color
         strings), cycling if there are more faces than colors, in
-        ascending face-id order. Color then lives on the Face and
-        survives into any Polyhedron folded from this net (see
-        Face.with_vertices3d)."""
+        ascending face-id order. Color lives on Face (the flat, pre-fold
+        net layout) only -- a folded Polyhedron is pure geometry and
+        deliberately carries no color; a caller wanting per-face color for
+        a folded solid zips sorted(self.faces) against solid.faces (see
+        fold()'s docstring)."""
         for i, fid in enumerate(sorted(self.faces)):
             self.faces[fid].color = palette[i % len(palette)]
 

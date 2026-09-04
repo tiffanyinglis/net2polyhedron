@@ -1,48 +1,66 @@
-"""Polyhedron: a realized 3D solid at some fold state t (general -- not
-always t=1, since e.g. polyhedron_unfolder's "Animated Fold" tab needs
-every intermediate slider state as the same shape), produced by
-PolyhedralNet.fold(t). Immutable after construction -- don't mutate a
-Face's vertices3d on a Polyhedron you're holding onto."""
+"""Polyhedron: pure 3D solid geometry -- shared, indexed vertices; faces as
+CCW (viewed from outside) vertex-index tuples; edges as vertex-index pairs,
+derived from faces. Knows nothing about nets, hinges, roots, fold progress,
+or color -- those all belong to PolyhedralNet (the pre-fold flat net + hinge
+tree) and to whatever renders a Polyhedron, not to this class.
+
+PolyhedralNet.fold(t) is what produces one of these, at any fold progress t
+(not just t=1) -- see its docstring for how per-face-corner points get
+merged into this class's shared vertex indices."""
 import numpy as np
 
-from ..geometry3d.net_fold_core import is_closed_solid, distinct_vertices
-from .vertex import Vertex
+from ..geometry3d.net_fold_core import face_normal as _face_normal
 
 
 class Polyhedron:
-    def __init__(self, name, faces, t=1.0, root_id=None):
+    def __init__(self, vertices, faces, name=None):
+        self.vertices = vertices   # list[np.ndarray(3,)]
+        self.faces = faces         # list[tuple[int, ...]], CCW from outside
         self.name = name
-        self.faces = faces          # dict[fid -> Face], vertices3d populated
-        self.t = t
-        self.root_id = root_id      # provenance only
-        self._vertices = None
-        self._is_closed = None
+        self._edges = None
 
-    def _verts3d_dict(self):
-        """{fid: face.vertices3d} -- the shape net_fold_core.is_closed_solid/
-        distinct_vertices expect."""
-        return {fid: f.vertices3d for fid, f in self.faces.items()}
+    def face_vertices(self, face_index):
+        """np.ndarray(k,3) -- this face's own vertex positions, in order."""
+        return np.array([self.vertices[i] for i in self.faces[face_index]])
+
+    def face_normal(self, face_index):
+        """Outward unit normal -- reuses net_fold_core.face_normal's cross-
+        product formula on this face's own gathered vertex positions."""
+        return _face_normal(self.face_vertices(face_index))
+
+    @property
+    def edges(self):
+        """list[tuple[int,int]] (small index first), derived from faces --
+        not separately stored, so it can never disagree with them."""
+        if self._edges is None:
+            edge_set = set()
+            for face in self.faces:
+                k = len(face)
+                for i in range(k):
+                    a, b = face[i], face[(i + 1) % k]
+                    edge_set.add((a, b) if a < b else (b, a))
+            self._edges = sorted(edge_set)
+        return self._edges
 
     @property
     def is_closed(self):
-        """Wraps net_fold_core.is_closed_solid, unchanged -- what
-        polyhedron_unfolder checks before applying backface culling."""
-        if self._is_closed is None:
-            self._is_closed = is_closed_solid(self._verts3d_dict())
-        return self._is_closed
-
-    @property
-    def vertices(self):
-        """list[Vertex] -- lazy, cached; wraps net_fold_core.distinct_vertices."""
-        if self._vertices is None:
-            merged = distinct_vertices(self._verts3d_dict())
-            self._vertices = [Vertex(i, p) for i, p in enumerate(merged)]
-        return self._vertices
+        """True iff every edge (by vertex-index pair) appears in exactly 2
+        faces -- pure integer counting, no float tolerance anywhere (unlike
+        net_fold_core.is_closed_solid, which has to match raw 3D points
+        since it has no vertex indices to work with)."""
+        counts = {}
+        for face in self.faces:
+            k = len(face)
+            for i in range(k):
+                a, b = face[i], face[(i + 1) % k]
+                key = (a, b) if a < b else (b, a)
+                counts[key] = counts.get(key, 0) + 1
+        return all(count == 2 for count in counts.values())
 
     def bounding_box(self):
-        """(lo, hi) np.ndarray(3,) -- convenience for view-centering."""
-        all_pts = np.vstack([f.vertices3d for f in self.faces.values()])
-        return all_pts.min(axis=0), all_pts.max(axis=0)
+        """(lo, hi) np.ndarray(3,) over self.vertices."""
+        pts = np.array(self.vertices)
+        return pts.min(axis=0), pts.max(axis=0)
 
     def __repr__(self):
-        return f"Polyhedron(name={self.name!r}, t={self.t}, faces={len(self.faces)})"
+        return f"Polyhedron(name={self.name!r}, vertices={len(self.vertices)}, faces={len(self.faces)})"

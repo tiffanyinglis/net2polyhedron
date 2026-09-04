@@ -1,27 +1,43 @@
 import numpy as np
 
-from utils.model.face import Face
 from utils.model.polyhedron import Polyhedron
 
-# A regular tetrahedron's 4 vertices, and its 4 triangular faces -- every
-# edge appears in exactly 2 faces regardless of each face's own winding, so
-# this is a valid closed solid combinatorially without needing a real
-# PolyhedralNet.fold() to produce it.
+# A regular tetrahedron: 4 shared vertices, 4 triangular faces as
+# vertex-index tuples (CCW from outside) -- every edge appears in exactly
+# 2 faces, a proper closed indexed mesh, no per-face point duplication.
 A = np.array([1.0, 1.0, 1.0])
 B = np.array([1.0, -1.0, -1.0])
 C = np.array([-1.0, 1.0, -1.0])
 D = np.array([-1.0, -1.0, 1.0])
-
-TETRA_FACES = {
-    0: Face(0, vertices3d=np.array([A, B, C])),
-    1: Face(1, vertices3d=np.array([A, B, D])),
-    2: Face(2, vertices3d=np.array([A, C, D])),
-    3: Face(3, vertices3d=np.array([B, C, D])),
-}
+TETRA_VERTICES = [A, B, C, D]
+TETRA_FACES = [(0, 1, 2), (0, 3, 1), (0, 2, 3), (1, 3, 2)]
 
 
 def _closed_tetra():
-    return Polyhedron(name="tetra", faces=TETRA_FACES)
+    return Polyhedron(vertices=TETRA_VERTICES, faces=TETRA_FACES, name="tetra")
+
+
+def test_face_vertices_gathers_positions_in_order():
+    solid = _closed_tetra()
+    assert np.array_equal(solid.face_vertices(0), np.array([A, B, C]))
+
+
+def test_face_normal_points_outward():
+    solid = _closed_tetra()
+    center = np.mean(TETRA_VERTICES, axis=0)
+    for i in range(len(solid.faces)):
+        normal = solid.face_normal(i)
+        assert np.isclose(np.linalg.norm(normal), 1.0)
+        centroid = solid.face_vertices(i).mean(axis=0)
+        assert np.dot(normal, centroid - center) > 0
+
+
+def test_edges_derived_from_faces_are_unique_and_unordered_pairs():
+    solid = _closed_tetra()
+    # 4 vertices, fully connected -> 6 edges (a tetrahedron's edge count)
+    assert len(solid.edges) == 6
+    for a, b in solid.edges:
+        assert a < b
 
 
 def test_is_closed_true_for_a_real_closed_solid():
@@ -29,17 +45,17 @@ def test_is_closed_true_for_a_real_closed_solid():
 
 
 def test_is_closed_false_when_a_face_is_missing():
-    open_faces = {fid: f for fid, f in TETRA_FACES.items() if fid != 3}
-    solid = Polyhedron(name="open tetra", faces=open_faces)
+    solid = Polyhedron(vertices=TETRA_VERTICES, faces=TETRA_FACES[:-1])
     assert not solid.is_closed
-
-
-def test_vertices_merges_duplicated_corners_into_four_distinct_points():
-    solid = _closed_tetra()
-    assert len(solid.vertices) == 4
 
 
 def test_bounding_box_matches_the_tetrahedron_extent():
     lo, hi = _closed_tetra().bounding_box()
     assert np.allclose(lo, [-1.0, -1.0, -1.0])
     assert np.allclose(hi, [1.0, 1.0, 1.0])
+
+
+def test_edges_property_is_cached_and_reflects_faces_at_construction():
+    solid = _closed_tetra()
+    first = solid.edges
+    assert solid.edges is first  # same cached list object, not recomputed

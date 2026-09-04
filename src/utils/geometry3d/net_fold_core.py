@@ -5,13 +5,17 @@ Model:
 - A "Net" is a set of flat polygonal faces defined in 2D "net space".
 - Faces that share an edge (matching endpoint coordinates) are glued.
 - The glue graph must be a TREE (no cycles) -- that's what makes a valid net.
-- Folding = walk the tree from a root face; at each hinge, rotate the
-  entire subtree beyond that hinge around the 3D line of the shared edge.
+- Folding = walk the tree from a root face; at each hinge, compose that
+  hinge's rotation (about the 3D line of the shared edge, scaled by fold
+  progress t) with its parent's already-computed transform, giving each
+  face one cumulative 4x4 affine matrix -- see fold_transforms().
 """
 
 import numpy as np
 from itertools import combinations
 from collections import defaultdict, deque
+
+from scipy.spatial.transform import Rotation
 
 TOL = 1e-6
 
@@ -83,50 +87,21 @@ class Net:
         return root, hinges
 
 
-def _rotation_matrix(axis_dir, angle):
-    """The 3x3 rotation matrix for `angle` radians about a 3D direction
-    (Rodrigues' formula). Split out from rotate_points so fold() can build
-    it once per hinge and reuse it across every face in that hinge's
-    subtree, instead of rebuilding it per face."""
+def hinge_transform(axis_point, axis_dir, angle):
+    """4x4 homogeneous affine matrix: rotate by `angle` radians about the
+    3D line through axis_point with direction axis_dir. The rotation
+    itself is scipy.spatial.transform.Rotation's axis-angle
+    construction; translating the axis to the origin, rotating, then
+    translating back is folded into one matrix so the whole rigid motion
+    -- rotation AND the translation needed to pivot around an off-origin
+    axis -- composes with other such matrices via plain matrix
+    multiplication (see fold_transforms)."""
     axis_dir = axis_dir / np.linalg.norm(axis_dir)
-    K = np.array([[0, -axis_dir[2], axis_dir[1]],
-                  [axis_dir[2], 0, -axis_dir[0]],
-                  [-axis_dir[1], axis_dir[0], 0]])
-    return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
-
-
-def rotate_points(points, axis_point, axis_dir, angle):
-    """Rotate an (N,3) array of points by `angle` radians around the 3D line
-    through axis_point with direction axis_dir (Rodrigues' formula)."""
-    R = _rotation_matrix(axis_dir, angle)
-    return (points - axis_point) @ R.T + axis_point
-
-
-def _children_map(hinges):
-    children = defaultdict(list)
-    for h in hinges:
-        children[h["parent"]].append(h["child"])
-    return children
-
-
-def _subtree_from_children(children, node):
-    members = []
-    stack = [node]
-    while stack:
-        n = stack.pop()
-        members.append(n)
-        stack.extend(children[n])
-    return members
-
-
-def precompute_subtree_map(hinges):
-    """Precompute, once, every hinge's subtree member list (and each
-    member's vertex count). The hinge tree's *shape* never changes across
-    the many fold() calls a caller like the fold solver makes (only the
-    angles/t do), so this lets fold() skip re-deriving it -- pass the
-    result back in as fold()'s `subtree_map` argument."""
-    children = _children_map(hinges)
-    return {h["child"]: _subtree_from_children(children, h["child"]) for h in hinges}
+    R = Rotation.from_rotvec(axis_dir * angle).as_matrix()
+    M = np.eye(4)
+    M[:3, :3] = R
+    M[:3, 3] = axis_point - R @ axis_point
+    return M
 
 
 def face_normal(points):
@@ -231,52 +206,84 @@ def distinct_vertices(verts3d, tol=1e-4):
     return [np.mean(c, axis=0) for c in clusters.values()]
 
 
-def fold(net, root, hinges, fold_angles, t, fold_signs=None, subtree_map=None):
-    """Return dict face_id -> (N,3) np.array of folded 3D coordinates,
-    at fold progress t in [0, 1].
+def fold_transforms(net, root, hinges, fold_angles, t, fold_signs=None):
+    """Return dict face_id -> 4x4 np.ndarray: each face's cumulative
+    affine transform at fold progress t in [0, 1], mapping that face's
+    own flat (net-space, z=0) points to their 3D position at t. This IS
+    the "path" of the unfolding -- evaluate at any t to get that face's
+    placement; t=0 gives every non-root face's transform as pure
+    rotation-in-progress from flat, t=1 the fully folded pose.
 
     fold_angles: dict child_face_id -> target rotation-from-flat, radians
                  (e.g. pi/2 for a right-angle fold like a cube).
     fold_signs:  optional dict child_face_id -> +1/-1 to flip fold direction.
-    subtree_map: optional, from precompute_subtree_map(hinges) -- since the
-                 hinge tree's shape is the same on every call, a caller that
-                 folds the same (net, hinges) many times (e.g. the fold
-                 solver's inner optimization loop) can compute this once and
-                 reuse it, instead of fold() re-deriving it from `hinges` on
-                 every single call.
-    """
+
+    Root gets the identity (it never moves). For a non-root face, a
+    nested hinge's axis is the PARENT's own flat edge
+    (net.faces[parent][pi]) mapped through the parent's already-computed
+    transform -- physically, the shared edge moves wherever the parent
+    face has already rotated to, which is exactly why hinges must be
+    processed in BFS order (each parent's transform is ready before its
+    children's hinges use it)."""
     fold_signs = fold_signs or {}
-    verts3d = {fid: np.array([[x, y, 0.0] for x, y in pts])
-               for fid, pts in net.faces.items()}
-
-    if subtree_map is None:
-        subtree_map = precompute_subtree_map(hinges)
-
-    # BFS order guarantees a parent is fully positioned before its hinge is used
+    transforms = {root: np.eye(4)}
     for h in hinges:
         parent, child = h["parent"], h["child"]
         pi = h["parent_edge_idx"]
         pts_parent = net.faces[parent]
+        p1 = np.array([*pts_parent[pi], 0.0, 1.0])
+        p2 = np.array([*pts_parent[(pi + 1) % len(pts_parent)], 0.0, 1.0])
 
-        # find those same two points in the parent's CURRENT (already-rotated) coords
-        # by matching against the parent's original 2D layout order/index.
-        axis_p1 = verts3d[parent][pi]
-        axis_p2 = verts3d[parent][(pi + 1) % len(pts_parent)]
+        M_parent = transforms[parent]
+        axis_point = (M_parent @ p1)[:3]
+        axis_dir = M_parent[:3, :3] @ (p2 - p1)[:3]
 
         sign = fold_signs.get(child, 1)
         angle = fold_angles.get(child, np.pi / 2) * t * sign
 
-        # Every face in this hinge's subtree gets the exact same rotation,
-        # so build the rotation matrix once and apply it to all of their
-        # points in a single batched array op, rather than once per face.
-        members = subtree_map[child]
-        R = _rotation_matrix(axis_p2 - axis_p1, angle)
-        sizes = [len(verts3d[fid]) for fid in members]
-        stacked = np.concatenate([verts3d[fid] for fid in members], axis=0)
-        rotated = (stacked - axis_p1) @ R.T + axis_p1
-        offset = 0
-        for fid, size in zip(members, sizes):
-            verts3d[fid] = rotated[offset:offset + size]
-            offset += size
+        transforms[child] = hinge_transform(axis_point, axis_dir, angle) @ M_parent
+    return transforms
 
-    return verts3d
+
+def fold(net, root, hinges, fold_angles, t, fold_signs=None):
+    """Return dict face_id -> (N,3) np.array of folded 3D coordinates,
+    at fold progress t in [0, 1] -- each face's own flat points run
+    through its fold_transforms() matrix."""
+    transforms = fold_transforms(net, root, hinges, fold_angles, t, fold_signs)
+    result = {}
+    for fid, pts2d in net.faces.items():
+        pts_h = np.array([[x, y, 0.0, 1.0] for x, y in pts2d])
+        result[fid] = (pts_h @ transforms[fid].T)[:, :3]
+    return result
+
+
+def cluster_faces_into_mesh(verts3d, tol=1e-4):
+    """Turn a fold()-shaped dict (face_id -> per-face-corner 3D points,
+    with the same corner potentially duplicated once per adjacent face)
+    into a proper indexed mesh: (vertices, faces) where vertices is a
+    list of distinct 3D positions and faces is a list of vertex-index
+    tuples, one per face_id in ascending order, CCW as fold() already
+    produces them. Reuses _cluster_point_ids (the same real-distance
+    union-find is_closed_solid/distinct_vertices use) so this is the
+    ONE place float-tolerance merging happens when building a
+    model.Polyhedron -- once vertices are indices, is_closed/edges on
+    the resulting Polyhedron are pure integer combinatorics."""
+    fids = sorted(verts3d)
+    all_points = [p for fid in fids for p in verts3d[fid]]
+    cluster_ids = _cluster_point_ids(all_points, tol)
+
+    clusters = defaultdict(list)
+    for cid, p in zip(cluster_ids, all_points):
+        clusters[cid].append(p)
+    index_of_cluster = {cid: i for i, cid in enumerate(clusters)}
+    vertices = [np.mean(clusters[cid], axis=0) for cid in clusters]
+
+    faces = []
+    offset = 0
+    for fid in fids:
+        k = len(verts3d[fid])
+        face_ids = cluster_ids[offset:offset + k]
+        offset += k
+        faces.append(tuple(index_of_cluster[cid] for cid in face_ids))
+
+    return vertices, faces

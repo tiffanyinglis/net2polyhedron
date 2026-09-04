@@ -85,18 +85,19 @@ def test_fold_at_t1_produces_a_closed_solid(tmp_path):
     net = _load_json(tmp_path)
     solid = net.fold(1.0)
     assert solid.is_closed
-    assert set(solid.faces) == {0, 1, 2, 3}
+    assert len(solid.faces) == 4
+    assert len(solid.vertices) == 4  # a tetrahedron has 4 distinct vertices
 
 
 def test_fold_at_t0_is_flat(tmp_path):
     net = _load_json(tmp_path)
     solid = net.fold(0.0)
-    # Flat: every face's z-coordinate is 0.
-    for face in solid.faces.values():
-        assert np.allclose(face.vertices3d[:, 2], 0.0)
+    # Flat: every vertex's z-coordinate is 0.
+    for v in solid.vertices:
+        assert np.isclose(v[2], 0.0)
 
 
-def test_assign_colors_cycles_and_survives_fold(tmp_path):
+def test_assign_colors_cycles_and_zips_against_sorted_face_ids(tmp_path):
     net = _load_json(tmp_path)
     net.assign_colors(["red", "green"])
     assert net.faces[0].color == "red"
@@ -104,9 +105,30 @@ def test_assign_colors_cycles_and_survives_fold(tmp_path):
     assert net.faces[2].color == "red"
     assert net.faces[3].color == "green"
 
+    # A folded Polyhedron carries no color of its own (see fold()'s
+    # docstring) -- a caller aligns colors positionally via sorted fids.
     solid = net.fold(1.0)
-    assert solid.faces[0].color == "red"
-    assert solid.faces[3].color == "green"
+    colors = [net.faces[fid].color for fid in sorted(net.faces)]
+    assert len(colors) == len(solid.faces)
+    assert colors == ["red", "green", "red", "green"]
+
+
+def test_face_transforms_root_is_always_identity(tmp_path):
+    net = _load_json(tmp_path)
+    for t in (0.0, 0.5, 1.0):
+        transforms = net.face_transforms(t)
+        assert np.allclose(transforms[net.root_id], np.eye(4))
+
+
+def test_face_transforms_at_t0_matches_fold_at_t0(tmp_path):
+    net = _load_json(tmp_path)
+    transforms = net.face_transforms(0.0)
+    for fid, face in net.faces.items():
+        pts2d = face.vertices2d
+        pts_h = np.array([[x, y, 0.0, 1.0] for x, y in pts2d])
+        expected = (pts_h @ transforms[fid].T)[:, :3]
+        assert np.allclose(expected[:, 2], 0.0)
+        assert np.allclose(expected[:, :2], pts2d)
 
 
 def test_load_legacy_txt(tmp_path):

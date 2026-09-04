@@ -19,7 +19,7 @@ length, which a genuine convex, unit-edge solid never allows.
 import numpy as np
 from scipy.optimize import least_squares
 
-from .net_fold_core import fold, distinct_vertices, precompute_subtree_map
+from .net_fold_core import fold, distinct_vertices
 from ..geometry2d.polygon_geom import EDGE_LENGTH
 
 CLOSE_TOL = 1e-6
@@ -28,9 +28,9 @@ SPARSITY_MIN_HINGES = 15
 ANGLE_BOUNDS = (1e-3, np.pi - 1e-3)  # exclude exactly flat (0) and doubled-back (pi)
 
 
-def _residual(theta, net, root, hinges, extra_edges, edge_map, subtree_map):
+def _residual(theta, net, root, hinges, extra_edges, edge_map):
     fold_angles = {h["child"]: theta[i] for i, h in enumerate(hinges)}
-    verts = fold(net, root, hinges, fold_angles, t=1.0, subtree_map=subtree_map)
+    verts = fold(net, root, hinges, fold_angles, t=1.0)
     res = []
     for f1, f2 in extra_edges:
         i1, i2 = edge_map.edge_index(f1, f2), edge_map.edge_index(f2, f1)
@@ -42,12 +42,12 @@ def _residual(theta, net, root, hinges, extra_edges, edge_map, subtree_map):
     return np.concatenate(res) if res else np.zeros(0)
 
 
-def _is_embeddable(theta, net, root, hinges, subtree_map):
+def _is_embeddable(theta, net, root, hinges):
     """Reject collapsed/self-intersecting branches: in a genuine convex,
     unit-edge solid no two distinct vertices are ever closer than one
     edge length."""
     fold_angles = {h["child"]: theta[i] for i, h in enumerate(hinges)}
-    verts = fold(net, root, hinges, fold_angles, t=1.0, subtree_map=subtree_map)
+    verts = fold(net, root, hinges, fold_angles, t=1.0)
     pts = np.array(distinct_vertices(verts))
     if len(pts) < 2:
         return True
@@ -93,7 +93,7 @@ def _closure_jac_sparsity(hinges, extra_edges):
     return sparsity
 
 
-def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map, subtree_map,
+def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map,
                   jac_sparsity=None):
     """Run least_squares from each initial guess, returning
     (valid_candidates, best_err) where valid_candidates is a list of
@@ -103,11 +103,11 @@ def _try_guesses(guesses, net, root, hinges, extra_edges, edge_map, subtree_map,
     best_err = np.inf
     for x0 in guesses:
         sol = least_squares(_residual, x0, bounds=ANGLE_BOUNDS,
-                             args=(net, root, hinges, extra_edges, edge_map, subtree_map),
+                             args=(net, root, hinges, extra_edges, edge_map),
                              jac_sparsity=jac_sparsity)
         err = np.max(np.abs(sol.fun)) if sol.fun.size else 0.0
         best_err = min(best_err, err)
-        if err < CLOSE_TOL and _is_embeddable(sol.x, net, root, hinges, subtree_map):
+        if err < CLOSE_TOL and _is_embeddable(sol.x, net, root, hinges):
             valid_candidates.append((np.sum(sol.x), sol.x))
     return valid_candidates, best_err
 
@@ -121,12 +121,6 @@ def solve_fold_angles(net, root, hinges, extra_edges, edge_map, seed=0):
         raise ValueError("no EXTRA edges given; the fold is underdetermined "
                           "(any hinge angle would be consistent with the "
                           "net alone)")
-
-    # The hinge tree's shape (which faces are in which hinge's subtree)
-    # never changes across the whole solve -- only the angles do -- so
-    # derive it once here instead of letting fold() re-derive it on every
-    # one of the many thousands of calls the optimizer makes below.
-    subtree_map = precompute_subtree_map(hinges)
 
     # Each closure residual only actually depends on the hinge angles that
     # are ancestors of the two faces it involves -- a sibling branch's
@@ -151,14 +145,14 @@ def solve_fold_angles(net, root, hinges, extra_edges, edge_map, seed=0):
     # to find additional branches once the sweep already has one.
     sweep = [np.full(n, np.radians(d)) for d in range(10, 180, 10)]
     valid_candidates, best_err = _try_guesses(
-        sweep, net, root, hinges, extra_edges, edge_map, subtree_map, jac_sparsity)
+        sweep, net, root, hinges, extra_edges, edge_map, jac_sparsity)
 
     if not valid_candidates:
         rng = np.random.default_rng(seed)
         lo, hi = ANGLE_BOUNDS
         fallback = [rng.uniform(lo, hi, n) for _ in range(40)]
         valid_candidates, fallback_err = _try_guesses(
-            fallback, net, root, hinges, extra_edges, edge_map, subtree_map, jac_sparsity)
+            fallback, net, root, hinges, extra_edges, edge_map, jac_sparsity)
         best_err = min(best_err, fallback_err)
 
     if not valid_candidates:

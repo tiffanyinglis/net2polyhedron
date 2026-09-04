@@ -1,7 +1,8 @@
 import numpy as np
 
 from utils.geometry3d.net_fold_core import (
-    Net, fold, distinct_vertices, precompute_subtree_map, face_normal, is_closed_solid)
+    Net, fold, fold_transforms, hinge_transform, cluster_faces_into_mesh,
+    distinct_vertices, face_normal, is_closed_solid)
 
 
 def _square(x0, y0, s=1.0):
@@ -55,16 +56,64 @@ def test_fold_at_t_zero_is_flat():
         assert np.allclose(pts[:, 2], 0.0)  # nothing has folded out of the z=0 plane
 
 
-def test_fold_with_precomputed_subtree_map_matches_default():
+def test_hinge_transform_is_a_pure_rotation_about_an_offset_axis():
+    # Rotate 90 degrees about the vertical line through (1, 0, 0) --
+    # (1, 0, 5) sits ON that axis so it must map to itself; (2, 0, 0), one
+    # unit off-axis along +x, must swing to +y around it.
+    M = hinge_transform(axis_point=np.array([1.0, 0.0, 0.0]),
+                         axis_dir=np.array([0.0, 0.0, 1.0]),
+                         angle=np.pi / 2)
+    on_axis = M @ np.array([1.0, 0.0, 5.0, 1.0])
+    assert np.allclose(on_axis[:3], [1.0, 0.0, 5.0])
+    off_axis = M @ np.array([2.0, 0.0, 0.0, 1.0])
+    assert np.allclose(off_axis[:3], [1.0, 1.0, 0.0], atol=1e-10)
+
+
+def test_fold_transforms_root_is_always_identity():
     net, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    subtree_map = precompute_subtree_map(hinges)
+    for t in (0.0, 0.5, 1.0):
+        transforms = fold_transforms(net, root, hinges, fold_angles, t=t)
+        assert np.allclose(transforms[root], np.eye(4))
 
-    verts_default = fold(net, root, hinges, fold_angles, t=0.6)
-    verts_precomputed = fold(net, root, hinges, fold_angles, t=0.6, subtree_map=subtree_map)
 
-    for fid in net.faces:
-        assert np.allclose(verts_default[fid], verts_precomputed[fid])
+def test_fold_transforms_applied_to_flat_points_matches_fold():
+    """fold()'s per-face 3D points are just fold_transforms()'s matrices
+    applied to that face's own flat (z=0) points -- verify the two agree,
+    since fold() is now a thin wrapper over fold_transforms()."""
+    net, root, hinges, _ = _cross_cube_net()
+    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
+    t = 0.6
+    verts = fold(net, root, hinges, fold_angles, t=t)
+    transforms = fold_transforms(net, root, hinges, fold_angles, t=t)
+
+    for fid, pts2d in net.faces.items():
+        pts_h = np.array([[x, y, 0.0, 1.0] for x, y in pts2d])
+        expected = (pts_h @ transforms[fid].T)[:, :3]
+        assert np.allclose(expected, verts[fid])
+
+
+def test_cluster_faces_into_mesh_builds_a_proper_cube():
+    net, root, hinges, _ = _cross_cube_net()
+    fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
+    verts = fold(net, root, hinges, fold_angles, t=1.0)
+
+    vertices, faces = cluster_faces_into_mesh(verts)
+
+    assert len(vertices) == 8         # a cube's distinct vertices
+    assert len(faces) == 6            # one per face_id, ascending order
+    assert all(len(f) == 4 for f in faces)  # every face still a quad
+    # every edge (by vertex index) must appear in exactly 2 faces, i.e.
+    # cluster_faces_into_mesh's index tuples describe a real closed cube
+    edge_counts = {}
+    for face in faces:
+        k = len(face)
+        for i in range(k):
+            a, b = face[i], face[(i + 1) % k]
+            key = (a, b) if a < b else (b, a)
+            edge_counts[key] = edge_counts.get(key, 0) + 1
+    assert len(edge_counts) == 12      # a cube has 12 edges
+    assert all(c == 2 for c in edge_counts.values())
 
 
 def test_face_normal_points_outward_for_every_face_of_a_folded_cube():

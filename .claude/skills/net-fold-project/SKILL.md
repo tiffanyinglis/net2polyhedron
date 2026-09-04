@@ -179,16 +179,28 @@ closed convex solid.
 ## Pipeline (`src/utils/model/polyhedral_net.py: PolyhedralNet.load`)
 
 The rigid pipeline's object model lives in `src/utils/model/` --
-`Face`/`Hinge`/`Vertex`/`PolyhedralNet`/`Polyhedron` -- replacing the bare
-tuples/dicts (a `net_fold_core.Net`, hinge dicts, a `verts3d` dict) earlier
-versions of this pipeline passed between free functions.
-`PolyhedralNet.load(path, cache_dir=None)` is the one public loading entry
-point (dispatching `.json` via the cache, see below, or legacy `.txt`
-directly); `PolyhedralNet.fold(t)` returns a `Polyhedron` (a realized 3D
-solid at fold progress `t`, with `.is_closed`/`.vertices`/`.bounding_box()`).
-The steps below are unchanged internally -- `PolyhedralNet._load_json_uncached`
-calls them in the same sequence, wrapping the result into `Face`/`Hinge`
-objects only at the very end:
+`Face`/`Hinge`/`PolyhedralNet`/`Polyhedron`. `Face` (2D-only: id, sides,
+`vertices2d`, color) and `Hinge` (parent/child ids, edge indices, angle)
+describe the pre-fold flat net; `Polyhedron` is deliberately the opposite
+of that -- pure 3D geometry (shared, indexed `vertices`, CCW
+vertex-index `faces`, derived `edges`) with **no** awareness of nets,
+hinges, roots, fold progress, or color. `PolyhedralNet.load(path,
+cache_dir=None)` is the one public loading entry point (dispatching
+`.json` via the cache, see below, or legacy `.txt` directly);
+`PolyhedralNet.fold(t)` returns a `Polyhedron` at fold progress `t` (not
+just `t=1` -- every slider position is an equally valid one, with
+`.is_closed` simply false until the fold completes), by folding each
+face's own flat corners to 3D (`net_fold_core.fold()`) and then merging
+coincident corners into shared vertex indices
+(`net_fold_core.cluster_faces_into_mesh()`) -- see "Pipeline" step 5
+below for the fold engine itself. Since a `Polyhedron`'s faces carry no
+original face id, `PolyhedralNet.fold()` always emits them in ascending
+original-id order, so a caller needing per-original-face metadata (e.g.
+`polyhedron_unfolder`'s per-face color) zips `solid.faces` against
+`sorted(net.faces)`. The combinatorial steps below are unchanged
+internally -- `PolyhedralNet._load_json_uncached` calls them in the same
+sequence, wrapping the result into `Face`/`Hinge` objects only at the
+very end:
 
 1. `polyhedron_spec.py` parses `faces`/`edges.net`/`edges.extra`/`edges.hidden`/`omit` from the JSON.
 2. `edge_map.py` (`EdgeMap`) turns the full edge list (net + extra +
@@ -232,17 +244,36 @@ objects only at the very end:
      forced switch to the sparse-only iterative `lsmr` trust-region solver
      costs more than it saves (measured ~2x *slower* on the 7-hinge
      octahedron); above it, it's a real win (~1.7x on a 31-hinge net).
-5. `net_fold_core.fold()` is the actual rotation engine — walks the hinge
-   tree, rotating each subtree rigidly by its solved angle in one batched
-   array operation (`precompute_subtree_map` derives the tree's shape once
-   per solve rather than once per `fold()` call, since it never changes
-   across the whole optimization). Works identically for both
-   `.json`-derived and legacy `.txt` nets.
+5. `net_fold_core.fold_transforms()` is the actual rotation engine — walks
+   the hinge tree in BFS order, giving each face one cumulative 4x4
+   affine transform matrix (`scipy.spatial.transform.Rotation` builds
+   each hinge's rotation; `hinge_transform()` embeds it into a 4x4 that
+   also pivots around the hinge's axis point, so it composes with the
+   parent's matrix via plain matrix multiplication: `M_child = hinge_M @
+   M_parent`). A nested hinge's axis is the parent's own flat edge
+   mapped through the parent's already-computed matrix, which is exactly
+   why hinges must be processed in BFS order. `fold()` is a thin wrapper
+   that applies each face's matrix to that face's own flat (z=0) points,
+   returning the same `dict[face_id -> (N,3) ndarray]` shape it always
+   has. Works identically for both `.json`-derived and legacy `.txt`
+   nets. `model.PolyhedralNet.fold(t)` goes one step further:
+   `net_fold_core.cluster_faces_into_mesh()` merges the per-face-corner
+   points this produces into a proper indexed mesh (shared vertices,
+   CCW vertex-index faces) — see the "Object model" section below.
 
-Perf history (32-face truncated icosahedron, 31 hinges): ~78s naive →
-~72s (subtree precompute) → ~42s (+ `jac_sparsity`). Small nets (≤~15
-hinges) were already sub-second and are unaffected by the `jac_sparsity`
-change (explicitly gated off for them).
+Perf history (32-face truncated icosahedron, 31 hinges), from the
+original hand-rolled-Rodrigues-formula/batched-subtree-array
+implementation: ~78s naive → ~72s (subtree precompute) → ~42s (+
+`jac_sparsity`). Switching to the current per-face
+`scipy.spatial.transform.Rotation`-based affine-matrix engine (chosen for
+being explicit, composable, and library-backed rather than hand-rolled)
+measured ~45s — a real but modest regression from scipy's per-call
+overhead across the many thousands of `fold()` calls `least_squares`
+makes, accepted as a one-time cost of solving/caching a net (not a cost
+paid on every interactive redraw, which folds at a fixed, already-solved
+`t` and stays fast). Small nets (≤~15 hinges) were already sub-second
+either way and are unaffected by the `jac_sparsity` change (explicitly
+gated off for them).
 
 ## Caching (`src/utils/persistence/fold_cache.py`)
 
@@ -927,9 +958,9 @@ solve. Files map roughly 1:1 to `src/utils/` modules
 `unit/persistence/test_fold_cache.py`, `unit/geometry3d/test_hull_to_spec.py`,
 `unit/combinatorics/test_spanning_tree.py`, `integration/test_open_nets.py`,
 `unit/subdivisions/test_polygon_subdivisions.py`), plus `unit/model/*.py`
-(one file per `Face`/`Hinge`/`Vertex`/`Polyhedron`/`PolyhedralNet` class,
-covering both `.json` and legacy `.txt` loading, folding at several `t`,
-and `assign_colors`).
+(one file per `Face`/`Hinge`/`Polyhedron`/`PolyhedralNet` class, covering
+both `.json` and legacy `.txt` loading, folding at several `t`,
+`assign_colors`, and `Polyhedron`'s pure index-based `is_closed`/`edges`).
 `unit/persistence/test_fold_cache.py` uses `tmp_path` + `monkeypatch` to
 verify cache reuse (patches `PolyhedralNet._load_json_uncached` to raise,
 proving a cache hit never calls it) and stale-cache deletion on a failed

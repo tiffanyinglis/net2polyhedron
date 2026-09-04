@@ -386,18 +386,27 @@ class PolyhedronUnfolderApp:
 
     def _draw_solid(self, ax, solid, theme, title):
         """Shared by both tabs: render `solid` (a PolyhedralNet.fold()
-        result) as one Poly3DCollection per face onto `ax`, backface-culled
+        result -- a model.Polyhedron, pure geometry with no color of its
+        own) as one Poly3DCollection per face onto `ax`, backface-culled
         (_CullableFace) only when it's actually a closed convex solid --
-        see ui.cullable_face's docstring for why that check matters."""
+        see ui.cullable_face's docstring for why that check matters.
+
+        solid.faces is ordered by ascending original net face id (see
+        PolyhedralNet.fold's docstring), so a plain positional zip against
+        sorted(self.net.faces) is exactly how a Polyhedron's i-th face
+        lines up with this net's own Face colors."""
         ax.cla()
         self._style_3d_axis(ax, theme)
         use_culling = solid.is_closed
-        for face in solid.faces.values():
+        colors = [self.net.faces[fid].color for fid in sorted(self.net.faces)]
+        for i in range(len(solid.faces)):
+            pts3d = solid.face_vertices(i)
+            color = colors[i]
             if use_culling:
-                poly = _CullableFace([face.vertices3d], face.normal(), 0.9,
-                                      facecolor=face.color, edgecolor="k")
+                poly = _CullableFace([pts3d], solid.face_normal(i), 0.9,
+                                      facecolor=color, edgecolor="k")
             else:
-                poly = Poly3DCollection([face.vertices3d], facecolor=face.color,
+                poly = Poly3DCollection([pts3d], facecolor=color,
                                         edgecolor="k", alpha=0.9)
             ax.add_collection3d(poly)
 

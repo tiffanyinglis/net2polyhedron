@@ -33,8 +33,14 @@ def test_open_net_stays_open_at_full_fold(tmp_path):
     # edge) DOES still hold, same as it would inside a real, closed
     # tetrahedron -- it's specifically the missing face's edges that are
     # left unmatched, not the whole shape falling apart.
-    p1 = np.array(solid.faces[1].vertices3d)
-    p2 = np.array(solid.faces[2].vertices3d)
+    #
+    # solid.faces is ordered by ascending original net face id (see
+    # PolyhedralNet.fold's docstring); this open net keeps faces 0,1,2
+    # (only face 3 is omitted), so sorted(net.faces).index(fid) gives
+    # each original face's position in solid.faces.
+    order = sorted(net.faces)
+    p1 = solid.face_vertices(order.index(1))
+    p2 = solid.face_vertices(order.index(2))
     dists = np.linalg.norm(p1[:, None, :] - p2[None, :, :], axis=-1)
     assert np.isclose(dists.min(), 0.0, atol=1e-6)
 
