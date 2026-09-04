@@ -56,8 +56,23 @@ STRETCHY_NETS_DIR = os.path.join(os.path.dirname(__file__), "..", "stretchy_nets
 # resolution 3 here (6 faces * 4 coarse * 3**2 = 216 fine triangles)
 # lands close to what resolution 4 under the OLD 2-triangle split used
 # to produce (192), rather than resolution 4 under the new split (384).
+#
+# The other Platonic solids are all single-n-gon nets (every face the
+# same n), so subdivide_mesh's per-face resolution_for(n, 3) is applied
+# uniformly across the whole net with no shared-edge resolution mismatch
+# to worry about (see mesh_subdivide.subdivide_mesh's docstring -- that's
+# only a concern for a MIXED-n net like two_pentagons_and_a_square,
+# skipped here for that reason). "3" below is the shared nominal base
+# resolution passed to resolution_for, not the literal per-face
+# resolution -- e.g. resolution_for(3, 3) == 4, so tetrahedron/octahedron/
+# icosahedron's triangular faces are actually subdivided at resolution 4
+# each, and dodecahedron's pentagons at resolution_for(5, 3) == 4.
 SUBDIVISIONS_TO_GENERATE = [
     ("cube", 3),
+    ("tetrahedron", 3),
+    ("octahedron", 3),
+    ("icosahedron", 3),
+    ("dodecahedron", 3),
 ]
 
 
