@@ -17,7 +17,7 @@ pip install -r requirements.txt
 Run the app:
 
 ```bash
-python polygon_fold_app.py
+python src/apps/polygon_fold_app.py
 ```
 
 Pick a net from the dropdown and drag the **Fold** slider from *Flat* to
@@ -28,18 +28,18 @@ folded solid at once instead of animating between them (drag the folded
 solid with the mouse to rotate it):
 
 ```bash
-python polyhedral_net_app.py
+python src/apps/polyhedral_net_app.py
 ```
 
 Five Platonic solids and a soccer-ball-style truncated icosahedron are
-included out of the box in `nets/`.
+included out of the box in `data/input/nets/`.
 
 ## Describing your own net
 
-A net is a JSON `.json` file in `nets/`. You only ever describe the
-*combinatorics* — which faces exist and which ones touch — and everything
-else (the flat layout, every fold angle) is worked out for you. For
-example, a cube:
+A net is a JSON `.json` file in `data/input/nets/`. You only ever describe
+the *combinatorics* — which faces exist and which ones touch — and
+everything else (the flat layout, every fold angle) is worked out for you.
+For example, a cube:
 
 ```json
 {
@@ -83,29 +83,31 @@ touch once folded, not in the flat layout. These are what pin down the
 fold angles — without them there'd be nothing forcing the net to close
 into one particular shape.
 
-Drop a new `.json` file into `nets/` and it shows up in the app's dropdown
-automatically. See `net_fold_utils/polyhedron_spec.py` for the full format
-reference, and the existing files in `nets/` for more examples.
+Drop a new `.json` file into `data/input/nets/` and it shows up in the
+app's dropdown automatically. See `src/utils/persistence/polyhedron_spec.py`
+for the full format reference, and the existing files in
+`data/input/nets/` for more examples.
 
 If you already know a solid's exact 3D vertex coordinates and just want a
-`.json` file generated from them, see `net_fold_utils/hull_to_spec.py` and
-`tools/generate_platonic_nets.py` for a worked example.
+`.json` file generated from them, see `src/utils/geometry3d/hull_to_spec.py`
+and `src/apps/generate_platonic_nets.py` for a worked example.
 
 ### Legacy format
 
 If you need to hand-specify exact vertex positions and fold angles instead
 (e.g. for a shape the automatic solver can't handle), a `.txt` net format
-is also supported — see `net_fold_utils/net_io.py:load_net_txt` for its
-format. Both `.json` and `.txt` files in `nets/` show up in the app.
+is also supported — see `src/utils/persistence/net_io.py:load_net_txt` for
+its format. Both `.json` and `.txt` files in `data/input/nets/` show up in
+the app.
 
 ## The fold cache
 
 Working out how a net folds involves solving a system of equations, which
 can take anywhere from under a second to about a minute for a large net
 (the included truncated icosahedron takes tens of seconds). To avoid
-re-solving on every launch, results are cached in `fold_cache/` alongside
-a checksum of the source `.json` file — editing a net automatically
-invalidates its stale cache.
+re-solving on every launch, results are cached in `data/cache/fold_cache/`
+alongside a checksum of the source `.json` file — editing a net
+automatically invalidates its stale cache.
 
 A net with no cached fold yet shows up **greyed out** in the app's
 dropdown. Either:
@@ -116,37 +118,49 @@ dropdown. Either:
 - run it from the command line ahead of time:
 
 ```bash
-python build_fold_cache.py            # only nets whose cache is stale
-python build_fold_cache.py --force    # recompute every net regardless
+python src/apps/build_fold_cache.py            # only nets whose cache is stale
+python src/apps/build_fold_cache.py --force    # recompute every net regardless
 ```
 
 ## Running the tests
 
 ```bash
-python run_tests.py
+python tests/run_tests.py
 ```
 
 The suite runs in a few seconds (it deliberately only exercises small nets
 for the numerical solver, so it stays fast). Pass extra arguments straight
-through to pytest, e.g. `python run_tests.py -k fold_cache -v`.
+through to pytest, e.g. `python tests/run_tests.py -k fold_cache -v`.
 
 ## Project layout
 
 ```
-polygon_fold_app.py     the animated-slider app (entry point)
-polyhedral_net_app.py   the side-by-side flat/folded viewer (entry point)
-build_fold_cache.py     precompute the fold cache for every net, with progress output
-run_tests.py            run the test suite
-tooltip.py              small generic Tkinter hover-tooltip helper
+src/
+  utils/                 the reusable library
+    geometry2d/           flat 2D polygon geometry and net layout
+    geometry3d/           3D fold solving, stretchy-mesh solving, coordinates
+    subdivisions/         fine-triangle-mesh subdivision (2D preview + 3D fabric)
+    combinatorics/        face-adjacency graph algorithms
+    persistence/          parse/load/write/cache the on-disk .json/.fold formats
+  apps/                  every entry point (GUI apps, cache builders, one-off
+                         generator scripts) -- see each file's own docstring
+                         for what it does and how to run it
 
-net_fold_utils/         the reusable library -- net format parsing, the
-                         combinatorics -> geometry pipeline, the fold
-                         solver, and the fold cache
+data/
+  input/                 human-authored net descriptions (edit these)
+    nets/*.json            rigid nets
+    stretchy_nets/*.json    stretchy (vertex-loop) nets
+  cache/                  computed results (generated, not hand-edited)
+    fold_cache/*.fold       rigid-pipeline fold cache
+    stretchy_cache/*.json   stretchy-pipeline solve cache
+  output/                 user-generated saves from stretchy_polyhedron_init.py
 
-nets/*.json             human-authored net descriptions (edit these)
-fold_cache/*.fold       computed fold results (generated, not hand-edited)
-tools/                  one-off generator scripts
-tests/                  pytest suite
+tests/
+  unit/                   one test file per utils module, mirroring src/utils/'s
+                          own sub-package layout
+  integration/            tests that exercise multiple utils sub-packages
+                          together, plus shared fixture-builder helpers
+  run_tests.py            run the test suite
 ```
 
 For a deeper dive into how the solver works, the combinatorics behind it,
