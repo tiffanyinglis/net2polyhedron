@@ -1,14 +1,14 @@
 """Shared fixture builders for tests/integration/.
 
 An integration test exercises several utils sub-packages together (here:
-persistence.polyhedron_spec -> persistence.net_io -> geometry3d.net_fold_core),
+persistence.polyhedron_spec -> model.PolyhedralNet -> geometry3d.net_fold_core),
 so its setup tends to be a multi-line net spec rather than a single call
 into one function. These small classes package that setup up so a test
 itself reads as "build a net, load it, check a property" instead of
 repeating write_polyhedron_spec's full argument list inline.
 """
 from utils.persistence.polyhedron_spec import write_polyhedron_spec
-from utils.persistence.net_io import load_polyhedron_net
+from utils.model import PolyhedralNet
 
 
 class TetraNetSpec:
@@ -36,4 +36,7 @@ class TetraNetSpec:
 
     @staticmethod
     def load(path):
-        return load_polyhedron_net(str(path))
+        # The no-cache slow path (spec parse -> EdgeMap -> layout -> solve),
+        # not PolyhedralNet.load()'s .fold-cache-dispatching entry point --
+        # these tests don't want a cache directory created as a side effect.
+        return PolyhedralNet._load_json_uncached(str(path))

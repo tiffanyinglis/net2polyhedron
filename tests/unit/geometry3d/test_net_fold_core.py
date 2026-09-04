@@ -122,3 +122,24 @@ def test_is_closed_solid_false_when_a_face_is_missing():
     verts = fold(net, root, hinges, fold_angles, t=1.0)
     del verts[faces["top"]]  # simulate an open net missing one face
     assert not is_closed_solid(verts)
+
+
+def test_is_closed_solid_true_despite_endpoints_straddling_a_rounding_boundary():
+    """Regression test for a real bug found solving
+    data/input/nets/icosahedron.json: is_closed_solid used to match edge
+    endpoints by independently rounding each point to a tol-sized grid
+    (`round(x / tol)`). Two points genuinely coincident (well within tol)
+    but landing on OPPOSITE sides of that grid's bucket boundary rounded
+    to different keys and were wrongly treated as unmatched -- 4 of the
+    icosahedron's 32 edges hit this, so a real closed icosahedron
+    incorrectly reported is_closed_solid=False.
+
+    Reproduced here with two copies of the same triangle (a trivially
+    "closed" pair -- every edge shared by exactly the two faces) where one
+    point is perturbed by ~6e-9 -- far under the default tol=1e-4 -- so
+    it sits just past 0.00005, the midpoint of that point's rounding
+    bucket, while its otherwise-identical partner sits just before it."""
+    boundary = 0.00005
+    tri_a = np.array([[boundary - 3e-9, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    tri_b = np.array([[1.0, 0.0, 0.0], [boundary + 3e-9, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    assert is_closed_solid({0: tri_a, 1: tri_b})

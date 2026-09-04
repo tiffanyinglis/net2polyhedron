@@ -16,8 +16,8 @@ share one net picker / compute-cache control bar:
 Add your own nets by dropping a new .json file (see polyhedron_spec.py
 for the format, or any file in data/input/nets/ for reference) into that
 folder -- it'll show up in the dropdown automatically. Legacy .txt files
-with explicit coordinates and fold angles (see net_io.load_net_txt) are
-also supported.
+with explicit coordinates and fold angles (see
+utils.model.PolyhedralNet.load) are also supported.
 
 A .json net with no matching cache/*.fold file (in this app's OWN cache/
 folder, next to this file -- not shared with any other app) hasn't been
@@ -55,9 +55,9 @@ from common.ui_theme import (STATUS_COLORS, PLOT_THEME, FACE_COLORS,
                               DISABLED_SUFFIX, COMPUTE_TOOLTIP)
 from ui.tooltip import Tooltip
 from ui.cullable_face import _CullableFace
-from utils.persistence import load_net, is_cached, build_all
+from utils.persistence import is_cached, build_all
 from utils.persistence.fold_cache import cache_path_for
-from utils.geometry3d import fold, face_normal, is_closed_solid
+from utils.model import PolyhedralNet
 
 # This app's OWN cache -- not shared with inflate_polyhedron_app (a
 # different pipeline entirely) or with any other app, so nothing here
@@ -116,8 +116,7 @@ class PolyhedronUnfolderApp:
         self._build_fold_tab()
         self._build_compare_tab()
 
-        self.net = self.root_face = self.hinges = self.fold_angles = None
-        self.colors = []
+        self.net = None
         self.current_label = None
         self.label_to_path = {}
         self.label_enabled = {}
@@ -299,8 +298,8 @@ class PolyhedronUnfolderApp:
         self._set_status("")
         self.current_label = chosen
         path = self.label_to_path[chosen]
-        self.net, self.root_face, self.hinges, self.fold_angles, _ = load_net(path, cache_dir=CACHE_DIR)
-        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.net.faces))]
+        self.net = PolyhedralNet.load(path, cache_dir=CACHE_DIR)
+        self.net.assign_colors(FACE_COLORS)
         self.slider.set(0)
         self.draw_fold(0.0)
         self.draw_compare()
@@ -385,21 +384,21 @@ class PolyhedronUnfolderApp:
         for edge in edges:
             ax.add_collection3d(Line3DCollection([edge], colors=color, linewidths=0.8))
 
-    def _draw_solid(self, ax, verts, theme, title):
-        """Shared by both tabs: render `verts` (a fold() result) as one
-        Poly3DCollection per face onto `ax`, backface-culled (_CullableFace)
-        only when it's actually a closed convex solid -- see
-        ui.cullable_face's docstring for why that check matters."""
+    def _draw_solid(self, ax, solid, theme, title):
+        """Shared by both tabs: render `solid` (a PolyhedralNet.fold()
+        result) as one Poly3DCollection per face onto `ax`, backface-culled
+        (_CullableFace) only when it's actually a closed convex solid --
+        see ui.cullable_face's docstring for why that check matters."""
         ax.cla()
         self._style_3d_axis(ax, theme)
-        all_pts = np.vstack(list(verts.values()))
-        use_culling = is_closed_solid(verts)
-        for (fid, pts), color in zip(verts.items(), self.colors):
+        use_culling = solid.is_closed
+        for face in solid.faces.values():
             if use_culling:
-                poly = _CullableFace([pts], face_normal(pts), 0.9,
-                                      facecolor=color, edgecolor="k")
+                poly = _CullableFace([face.vertices3d], face.normal(), 0.9,
+                                      facecolor=face.color, edgecolor="k")
             else:
-                poly = Poly3DCollection([pts], facecolor=color, edgecolor="k", alpha=0.9)
+                poly = Poly3DCollection([face.vertices3d], facecolor=face.color,
+                                        edgecolor="k", alpha=0.9)
             ax.add_collection3d(poly)
 
         # Center the view on the shape's own bounding-box center (not just
@@ -407,7 +406,7 @@ class PolyhedronUnfolderApp:
         # of where the net/fold happened to place it, on every axis -- one
         # shared half-width (not one per axis) keeps the box cubic so
         # set_box_aspect([1, 1, 1]) doesn't distort the shape.
-        lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
+        lo, hi = solid.bounding_box()
         center = (lo + hi) / 2
         half = (hi - lo).max() / 2 * 1.2 + 1e-6
         xlim = (center[0] - half, center[0] + half)
@@ -424,15 +423,15 @@ class PolyhedronUnfolderApp:
     def draw_fold(self, t):
         """"Animated Fold" tab: the single 3D view at fold progress t."""
         theme = self._apply_plot_theme()
-        verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, t)
+        solid = self.net.fold(t)
         # Backface culling (_CullableFace, applied inside _draw_solid) only
         # makes sense once the shape is a closed convex solid -- mid-fold
         # it's an open, generally non-convex shape whose edges don't yet
-        # coincide, so is_closed_solid(verts) is already false there in
-        # practice (an OPEN net -- some faces omitted -- stays false even
-        # at t=1). _draw_solid's own is_closed_solid(verts) check is what
-        # actually gates this, not t itself.
-        self._draw_solid(self.fold_ax, verts, theme,
+        # coincide, so solid.is_closed is already false there in practice
+        # (an OPEN net -- some faces omitted -- stays false even at t=1).
+        # _draw_solid's own solid.is_closed check is what actually gates
+        # this, not t itself.
+        self._draw_solid(self.fold_ax, solid, theme,
                           f"{self.current_label}  (fold {t*100:.0f}%)")
         self.fold_canvas.draw_idle()
 
@@ -441,16 +440,17 @@ class PolyhedronUnfolderApp:
         solid (right) at once."""
         theme = self._apply_plot_theme()
         self._draw_flat_net(theme)
-        verts = fold(self.net, self.root_face, self.hinges, self.fold_angles, 1.0)
-        self._draw_solid(self.ax3d, verts, theme, "Folded solid")
+        solid = self.net.fold(1.0)
+        self._draw_solid(self.ax3d, solid, theme, "Folded solid")
         self.compare_canvas.draw_idle()
 
     def _draw_flat_net(self, theme):
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
-        all_pts = np.vstack([pts for pts in self.net.faces.values()])
-        for (fid, pts), color in zip(self.net.faces.items(), self.colors):
-            self.ax2d.add_patch(Polygon(pts, closed=True, facecolor=color,
+        faces = self.net.faces.values()
+        all_pts = np.vstack([face.vertices2d for face in faces])
+        for face in faces:
+            self.ax2d.add_patch(Polygon(face.vertices2d, closed=True, facecolor=face.color,
                                          edgecolor="k", alpha=0.9))
 
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)

@@ -22,13 +22,12 @@ gaps where its omitted faces would be, since those are never built into
 geometry. FOLD gives the rotation (in degrees, from flat/180-degrees-
 coplanar) applied at that face's hinge to its parent -- i.e. how far it
 swings when fully folded (t=1).
+
+Loading a net (.json spec or this legacy .txt format) into the actual
+object model is model.PolyhedralNet.load() -- this module only holds the
+shared text-parsing plumbing that both PolyhedralNet and persistence.fold_cache
+build on.
 """
-import numpy as np
-from ..geometry3d.net_fold_core import Net
-from .polyhedron_spec import load_polyhedron_spec
-from ..combinatorics.edge_map import EdgeMap
-from ..geometry2d.net_layout import build_net_layout
-from ..geometry3d.fold_solver import solve_fold_angles
 
 
 def parse_net_body(f):
@@ -75,60 +74,3 @@ def parse_net_body(f):
         faces_raw.append((fid, pts))
 
     return faces_raw, root, fold_angles_deg, name, checksum
-
-
-def load_net_txt(path):
-    with open(path) as f:
-        faces_raw, root, fold_angles_deg, name, _ = parse_net_body(f)
-
-    if root is None:
-        raise ValueError(f"{path}: missing ROOT line")
-
-    net = Net()
-    for fid, pts in faces_raw:
-        net.add_face(pts, fid=fid)
-
-    root_id, hinges = net.build_tree(root=root)
-    fold_angles = {fid: np.radians(deg) for fid, deg in fold_angles_deg.items()}
-
-    missing = [h["child"] for h in hinges if h["child"] not in fold_angles]
-    if missing:
-        raise ValueError(f"{path}: missing FOLD angle for face(s) {missing}")
-
-    return net, root_id, hinges, fold_angles, (name or path)
-
-
-def load_polyhedron_net(path):
-    """Load the abstract JSON faces/edges spec format (see
-    polyhedron_spec.py) and derive everything else: the 2D net layout and
-    every fold angle. This is the slow path -- it runs the full
-    combinatorial + numerical solve; see fold_cache.py for a checksummed
-    cache that avoids repeating it.
-
-    For an OPEN net (some faces marked "omit"), edge_map is built from
-    every edge -- including "hidden" ones touching an omitted face -- so
-    the faces that ARE present still recover their correct polygon-edge
-    index (see polyhedron_spec.py's module docstring), but only net_edges
-    and extra_edges (never hidden_edges) go on to actually build geometry
-    or constrain the fold, since an omitted face has neither."""
-    degrees, net_edges, extra_edges, hidden_edges, omitted, root, name = \
-        load_polyhedron_spec(path)
-    edge_map = EdgeMap(degrees, net_edges + extra_edges + hidden_edges)
-    net, hinges = build_net_layout(degrees, net_edges, edge_map, root, omitted)
-    fold_angles = solve_fold_angles(net, root, hinges, extra_edges, edge_map)
-    return net, root, hinges, fold_angles, name
-
-
-def load_net(path, cache_dir=None):
-    """Dispatch to the right loader by file extension: .json for the
-    abstract combinatorial spec (via the .fold cache, see fold_cache.py),
-    .txt for the legacy explicit-coordinate format.
-
-    cache_dir, if given, overrides where the .fold cache is looked up/written
-    (see fold_cache.cache_path_for) -- needed whenever the cache directory
-    isn't simply a sibling of path's own parent directory."""
-    if path.endswith(".json"):
-        from .fold_cache import load_with_cache, cache_path_for
-        cache_path = cache_path_for(path, cache_dir) if cache_dir else None
-        return load_with_cache(path, cache_path=cache_path)
-    return load_net_txt(path)

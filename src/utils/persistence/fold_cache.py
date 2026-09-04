@@ -16,6 +16,12 @@ pass that cache directory explicitly via cache_path_for's `cache_dir`
 param, since it's not simply a sibling of net_path's own parent directory
 (see cache_path_for's docstring for the default derivation still used
 when cache_dir is omitted, e.g. in tests).
+
+Reads/writes operate on model.PolyhedralNet directly -- PolyhedralNet.load()
+is the actual public entry point for loading a .json net (which calls into
+this module's helpers internally); this module also exposes build_all() for
+warming a whole directory's cache ahead of time (each app's build_cache.py
+CLI, and polyhedron_unfolder's "Compute Folding Pattern" button).
 """
 import glob
 import hashlib
@@ -25,9 +31,16 @@ import time
 import numpy as np
 
 from ..geometry3d.net_fold_core import Net
-from .net_io import load_polyhedron_net, parse_net_body
+from .net_io import parse_net_body
 
 CHECKSUM_ALGO = "sha256"
+
+# PolyhedralNet is imported lazily (inside the functions below, not here at
+# module level): model.polyhedral_net itself imports from this package
+# (persistence.polyhedron_spec/net_io) at its own module level, so an
+# eager import here would be circular depending on which package happens
+# to be imported first. Deferring it past both modules' own init avoids
+# that regardless of import order.
 
 
 def cache_path_for(net_path, cache_dir=None):
@@ -49,8 +62,10 @@ def source_checksum(net_path):
 
 
 def read_fold_cache(cache_path):
-    """Returns (checksum, net, root, hinges, fold_angles, name), or None if
-    the file doesn't exist or can't be parsed as a valid cache."""
+    """Returns (checksum, PolyhedralNet), or None if the file doesn't exist
+    or can't be parsed as a valid cache."""
+    from ..model.polyhedral_net import PolyhedralNet
+
     if not os.path.exists(cache_path):
         return None
     try:
@@ -58,33 +73,33 @@ def read_fold_cache(cache_path):
             faces_raw, root, fold_angles_deg, name, checksum = parse_net_body(f)
         if root is None or checksum is None or not faces_raw:
             return None
-        net = Net()
+        legacy_net = Net()
         for fid, pts in faces_raw:
-            net.add_face(pts, fid=fid)
-        root_id, hinges = net.build_tree(root=root)
+            legacy_net.add_face(pts, fid=fid)
+        root_id, legacy_hinges = legacy_net.build_tree(root=root)
         fold_angles = {fid: np.radians(deg) for fid, deg in fold_angles_deg.items()}
-        if any(h["child"] not in fold_angles for h in hinges):
+        if any(h["child"] not in fold_angles for h in legacy_hinges):
             return None
-        return checksum, net, root_id, hinges, fold_angles, name
+        net = PolyhedralNet._from_legacy(legacy_net, root_id, legacy_hinges, fold_angles, name)
+        return checksum, net
     except (ValueError, OSError):
         return None
 
 
-def write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name):
+def write_fold_cache(cache_path, checksum, net):
     lines = []
-    if name:
-        lines.append(f"# {name}")
+    if net.name:
+        lines.append(f"# {net.name}")
     lines.append(f"CHECKSUM {checksum}")
     lines.append("FACES")
     for fid in sorted(net.faces):
-        coords = " ".join(f"{p[0]:.6f},{p[1]:.6f}" for p in net.faces[fid])
+        coords = " ".join(f"{p[0]:.6f},{p[1]:.6f}" for p in net.faces[fid].vertices2d)
         lines.append(f"{fid}: {coords}")
     lines.append("")
-    lines.append(f"ROOT {root}")
+    lines.append(f"ROOT {net.root_id}")
     lines.append("")
-    for h in hinges:
-        child = h["child"]
-        lines.append(f"FOLD {child} {np.degrees(fold_angles[child]):.6f}")
+    for h in net.hinges:
+        lines.append(f"FOLD {h.child_id} {np.degrees(h.angle):.6f}")
     lines.append("")
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "w") as f:
@@ -116,23 +131,6 @@ def _valid_cache_or_clear_stale(cache_path, checksum):
     return cached
 
 
-def load_with_cache(net_path, cache_path=None):
-    """Load a .json net, reusing a cached .fold file if it's still valid
-    for the current contents of net_path; otherwise solve fresh and
-    (re)write the cache."""
-    cache_path = cache_path or cache_path_for(net_path)
-    checksum = source_checksum(net_path)
-
-    cached = _valid_cache_or_clear_stale(cache_path, checksum)
-    if cached is not None:
-        _, net, root, hinges, fold_angles, name = cached
-        return net, root, hinges, fold_angles, name
-
-    net, root, hinges, fold_angles, name = load_polyhedron_net(net_path)
-    write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
-    return net, root, hinges, fold_angles, name
-
-
 def build_all(nets_dir, cache_dir=None, force=False, on_progress=None):
     """Compute/refresh the .fold cache for every .json net in nets_dir.
 
@@ -148,6 +146,8 @@ def build_all(nets_dir, cache_dir=None, force=False, on_progress=None):
     once per net with status one of "skip", "start", "done", "failed".
     Returns a list of (path, ok, message) tuples.
     """
+    from ..model.polyhedral_net import PolyhedralNet
+
     paths = sorted(glob.glob(os.path.join(nets_dir, "*.json")))
     n = len(paths)
     results = []
@@ -171,13 +171,13 @@ def build_all(nets_dir, cache_dir=None, force=False, on_progress=None):
             on_progress(i, n, label, "start")
         start = time.time()
         try:
-            net, root, hinges, fold_angles, name = load_polyhedron_net(path)
+            net = PolyhedralNet._load_json_uncached(path)
         except ValueError as e:
             if on_progress:
                 on_progress(i, n, label, "failed")
             results.append((path, False, str(e)))
             continue
-        write_fold_cache(cache_path, checksum, net, root, hinges, fold_angles, name)
+        write_fold_cache(cache_path, checksum, net)
         elapsed = time.time() - start
         if on_progress:
             on_progress(i, n, label, "done", elapsed)

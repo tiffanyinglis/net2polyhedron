@@ -7,6 +7,9 @@ Sub-packages, grouped by concern:
   subdivisions  -- fine-triangle-mesh subdivision (2D preview + 3D fabric)
   combinatorics -- face-adjacency graph algorithms (edge maps, spanning trees)
   persistence   -- parse/load/write/cache the on-disk .json/.fold formats
+  model         -- the Face/Hinge/Vertex/PolyhedralNet/Polyhedron object
+                    model for the rigid pipeline (PolyhedralNet.load() is
+                    the public loading entry point)
 
 Import from the specific sub-package rather than this top-level package,
 e.g. `from utils.geometry3d import fold` -- there is no flattened

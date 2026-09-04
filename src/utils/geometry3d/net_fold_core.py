@@ -141,6 +141,37 @@ def face_normal(points):
     return n / np.linalg.norm(n)
 
 
+def _cluster_point_ids(points, tol):
+    """Transitively cluster `points` (a list of (3,) arrays) into groups of
+    mutually-within-`tol` points, via union-find. Returns a list of
+    cluster-root ids, one per point, in the same order as `points` --
+    two points that are "the same" up to floating-point/solver noise
+    always get the SAME id, however their raw coordinates happen to fall
+    relative to any arbitrary grid. Shared by distinct_vertices() (merge
+    per-face corners into real vertices) and is_closed_solid() (match
+    edge endpoints) so both use one actual distance check instead of
+    independently rounding coordinates to a tol-sized grid, which two
+    genuinely-coincident points can straddle the boundary of (see
+    is_closed_solid's docstring)."""
+    n = len(points)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if np.linalg.norm(points[i] - points[j]) < tol:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    return [find(i) for i in range(n)]
+
+
 def is_closed_solid(verts3d, tol=1e-4):
     """True if the folded shape is a closed 2-manifold -- every face's
     every polygon edge is matched by exactly one other face's edge at the
@@ -161,13 +192,28 @@ def is_closed_solid(verts3d, tol=1e-4):
     net has no "far side" to hide anything, so culling by orientation
     alone can wrongly hide faces that are genuinely visible (e.g. from
     inside the open side, looking at faces that would be interior in the
-    closed original)."""
+    closed original).
+
+    Endpoint identity is decided by _cluster_point_ids' real distance
+    check, not by independently rounding each point to a tol-sized grid
+    (`round(x / tol)`) -- two points within `tol` of each other but on
+    opposite sides of a rounding-grid boundary would otherwise round to
+    DIFFERENT buckets and wrongly count as two unmatched edges. Confirmed
+    to actually happen on data/input/nets/icosahedron.json: 4 of its 32
+    edges had endpoints straddling a grid boundary this way, making a
+    genuinely closed icosahedron incorrectly report is_closed_solid=False."""
+    fids = list(verts3d.keys())
+    all_points = [p for fid in fids for p in verts3d[fid]]
+    cluster_ids = _cluster_point_ids(all_points, tol)
+
     edge_count = {}
-    for pts in verts3d.values():
-        k = len(pts)
+    offset = 0
+    for fid in fids:
+        k = len(verts3d[fid])
+        ids = cluster_ids[offset:offset + k]
+        offset += k
         for i in range(k):
-            a, b = pts[i], pts[(i + 1) % k]
-            key = frozenset((tuple(np.round(a / tol)), tuple(np.round(b / tol))))
+            key = frozenset((ids[i], ids[(i + 1) % k]))
             edge_count[key] = edge_count.get(key, 0) + 1
     return all(count == 2 for count in edge_count.values())
 
@@ -177,25 +223,11 @@ def distinct_vertices(verts3d, tol=1e-4):
     vertex dict into the solid's actual distinct 3D vertices, by
     transitively clustering points within `tol` of each other."""
     pts = [p for arr in verts3d.values() for p in arr]
-    n = len(pts)
-    parent = list(range(n))
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if np.linalg.norm(pts[i] - pts[j]) < tol:
-                ri, rj = find(i), find(j)
-                if ri != rj:
-                    parent[ri] = rj
+    cluster_ids = _cluster_point_ids(pts, tol)
 
     clusters = defaultdict(list)
-    for i in range(n):
-        clusters[find(i)].append(pts[i])
+    for i, cid in enumerate(cluster_ids):
+        clusters[cid].append(pts[i])
     return [np.mean(c, axis=0) for c in clusters.values()]
 
 

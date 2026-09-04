@@ -173,7 +173,19 @@ face's edge at the same two 3D points?), with no dependency on the
 `_CullableFace` backface culling (see below), which is only valid for a
 closed convex solid.
 
-## Pipeline (`src/utils/persistence/net_io.py: load_polyhedron_net`)
+## Pipeline (`src/utils/model/polyhedral_net.py: PolyhedralNet.load`)
+
+The rigid pipeline's object model lives in `src/utils/model/` --
+`Face`/`Hinge`/`Vertex`/`PolyhedralNet`/`Polyhedron` -- replacing the bare
+tuples/dicts (a `net_fold_core.Net`, hinge dicts, a `verts3d` dict) earlier
+versions of this pipeline passed between free functions.
+`PolyhedralNet.load(path, cache_dir=None)` is the one public loading entry
+point (dispatching `.json` via the cache, see below, or legacy `.txt`
+directly); `PolyhedralNet.fold(t)` returns a `Polyhedron` (a realized 3D
+solid at fold progress `t`, with `.is_closed`/`.vertices`/`.bounding_box()`).
+The steps below are unchanged internally -- `PolyhedralNet._load_json_uncached`
+calls them in the same sequence, wrapping the result into `Face`/`Hinge`
+objects only at the very end:
 
 1. `polyhedron_spec.py` parses `faces`/`edges.net`/`edges.extra`/`edges.hidden`/`omit` from the JSON.
 2. `edge_map.py` (`EdgeMap`) turns the full edge list (net + extra +
@@ -234,9 +246,11 @@ change (explicitly gated off for them).
 Solving is the slow part for bushy/large nets. A `.fold` cache file (in
 `src/apps/polyhedron_unfolder/cache/`, not `data/input/nets/`) mirrors the legacy explicit-coordinate format
 (2D vertex positions per face + fold angle per hinge) plus a
-`CHECKSUM sha256:...` of the source `.json`. `load_net()` transparently
-reuses the cache if the checksum still matches, else re-solves and
-rewrites it. Face ids in the cache's `FACES` block are allowed to be
+`CHECKSUM sha256:...` of the source `.json`. `PolyhedralNet.load()`
+transparently reuses the cache if the checksum still matches, else
+re-solves and rewrites it (via `fold_cache.read_fold_cache`/
+`write_fold_cache`, which read/write a `PolyhedralNet` directly rather than
+a loose tuple). Face ids in the cache's `FACES` block are allowed to be
 non-contiguous (`0: ... \n 5: ... \n 6: ...`, strictly increasing but with
 gaps) to support open nets' omitted faces — `parse_net_body` validates
 strictly-increasing rather than exactly-sequential ids.
@@ -909,12 +923,15 @@ solve. Files map roughly 1:1 to `src/utils/` modules
 `unit/geometry3d/test_fold_solver.py`, `unit/persistence/test_polyhedron_spec.py`,
 `unit/persistence/test_fold_cache.py`, `unit/geometry3d/test_hull_to_spec.py`,
 `unit/combinatorics/test_spanning_tree.py`, `integration/test_open_nets.py`,
-`unit/subdivisions/test_polygon_subdivisions.py`).
+`unit/subdivisions/test_polygon_subdivisions.py`), plus `unit/model/*.py`
+(one file per `Face`/`Hinge`/`Vertex`/`Polyhedron`/`PolyhedralNet` class,
+covering both `.json` and legacy `.txt` loading, folding at several `t`,
+and `assign_colors`).
 `unit/persistence/test_fold_cache.py` uses `tmp_path` + `monkeypatch` to
-verify cache reuse (patches `load_polyhedron_net` to raise, proving a
-cache hit never calls it) and stale-cache deletion on a failed re-solve;
-`unit/persistence/test_stretchy_cache.py` mirrors this for the stretchy
-pipeline.
+verify cache reuse (patches `PolyhedralNet._load_json_uncached` to raise,
+proving a cache hit never calls it) and stale-cache deletion on a failed
+re-solve; `unit/persistence/test_stretchy_cache.py` mirrors this for the
+stretchy pipeline.
 
 The **stretchy**-pipeline suite (`unit/geometry3d/test_stretchy_mesh.py`) is slower
 (~30-60s) since even the small Platonic solids run the real
@@ -973,8 +990,9 @@ why that's expected, not a bug).
   hinges rotate 90° (dihedral is also 90°, self-supplementary), tetrahedron
   hinges rotate 109.47° (dihedral is 70.53°).
 - Legacy `.txt` nets (explicit coordinates + fold angles, no solving
-  needed) are still supported via `net_io.load_net_txt`, dispatched
-  automatically by file extension in `net_io.load_net` (`.json` vs `.txt`).
+  needed) are still supported via `PolyhedralNet._load_legacy_txt`,
+  dispatched automatically by file extension in `PolyhedralNet.load`
+  (`.json` vs `.txt`).
 - `net_fold_core.py`, `fold_solver.py`, `fold_cache.py`, and
   `stretchy_mesh.py`/`stretchy_cache.py` have no `if __name__ ==
   "__main__"` demo blocks — that logic lives in `tests/`. Add new ad hoc

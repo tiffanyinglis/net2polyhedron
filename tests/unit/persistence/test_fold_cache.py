@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from utils.persistence import fold_cache
+from utils.model import PolyhedralNet
 
 TETRA_JSON = """{
   "name": "Tetra",
@@ -51,20 +52,22 @@ def test_is_cached_false_before_any_solve(tmp_path):
     assert fold_cache.is_cached(net_path) is False
 
 
-def test_load_with_cache_solves_once_then_reuses(tmp_path, monkeypatch):
+def test_load_solves_once_then_reuses(tmp_path, monkeypatch):
     net_path = _make_net_dir(tmp_path, TETRA_JSON)
 
-    net, root, hinges, fold_angles, name = fold_cache.load_with_cache(net_path)
+    net = PolyhedralNet.load(net_path)
+    fold_angles = net.fold_angles
     assert os.path.exists(fold_cache.cache_path_for(net_path))
     assert fold_cache.is_cached(net_path) is True
 
     def _boom(*a, **k):
         raise AssertionError("should not re-solve a valid cache")
 
-    monkeypatch.setattr(fold_cache, "load_polyhedron_net", _boom)
+    monkeypatch.setattr(PolyhedralNet, "_load_json_uncached", _boom)
     # this must succeed by reading the cache, NOT by calling the (now
     # exploding) solver
-    _, _, _, cached_angles, _ = fold_cache.load_with_cache(net_path)
+    cached_net = PolyhedralNet.load(net_path)
+    cached_angles = cached_net.fold_angles
     assert set(cached_angles) == set(fold_angles)
     for k in fold_angles:
         assert np.isclose(cached_angles[k], fold_angles[k], atol=1e-4)
@@ -72,7 +75,7 @@ def test_load_with_cache_solves_once_then_reuses(tmp_path, monkeypatch):
 
 def test_editing_the_source_invalidates_the_cache(tmp_path):
     net_path = _make_net_dir(tmp_path, TETRA_JSON)
-    fold_cache.load_with_cache(net_path)
+    PolyhedralNet.load(net_path)
     first_checksum = fold_cache.source_checksum(net_path)
 
     with open(net_path, "w") as f:
@@ -81,13 +84,13 @@ def test_editing_the_source_invalidates_the_cache(tmp_path):
     assert second_checksum != first_checksum
     assert fold_cache.is_cached(net_path) is False
 
-    fold_cache.load_with_cache(net_path)  # re-solves and refreshes the cache
+    PolyhedralNet.load(net_path)  # re-solves and refreshes the cache
     assert fold_cache.is_cached(net_path) is True
 
 
 def test_build_all_deletes_stale_cache_on_failed_resolve(tmp_path):
     net_path = _make_net_dir(tmp_path, TETRA_JSON)
-    fold_cache.load_with_cache(net_path)
+    PolyhedralNet.load(net_path)
     cache_path = fold_cache.cache_path_for(net_path)
     assert os.path.exists(cache_path)
 
@@ -103,7 +106,7 @@ def test_build_all_deletes_stale_cache_on_failed_resolve(tmp_path):
 
 def test_build_all_skips_up_to_date_nets(tmp_path):
     net_path = _make_net_dir(tmp_path, TETRA_JSON)
-    fold_cache.load_with_cache(net_path)  # pre-warm the cache
+    PolyhedralNet.load(net_path)  # pre-warm the cache
 
     events = []
     results = fold_cache.build_all(os.path.dirname(net_path),
@@ -114,7 +117,7 @@ def test_build_all_skips_up_to_date_nets(tmp_path):
 
 def test_build_all_force_resolves_even_when_cached(tmp_path):
     net_path = _make_net_dir(tmp_path, TETRA_JSON)
-    fold_cache.load_with_cache(net_path)
+    PolyhedralNet.load(net_path)
 
     events = []
     fold_cache.build_all(os.path.dirname(net_path), force=True,

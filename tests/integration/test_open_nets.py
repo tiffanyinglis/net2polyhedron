@@ -7,8 +7,6 @@ data/input/nets/half_dodecahedron.json or dodecahedron_minus_one.json, so
 this test doesn't need those files to exist or be pre-solved."""
 import numpy as np
 
-from utils.geometry3d.net_fold_core import fold, is_closed_solid
-
 from helpers import TetraNetSpec
 
 
@@ -16,26 +14,27 @@ def test_open_net_solves_and_builds_only_the_kept_faces(tmp_path):
     path = tmp_path / "open_tetra.json"
     TetraNetSpec.write_open(path)
 
-    net, root, hinges, fold_angles, name = TetraNetSpec.load(path)
+    net = TetraNetSpec.load(path)
 
     assert set(net.faces) == {0, 1, 2}
-    assert len(hinges) == 2
-    assert name == "Open Tetra"
+    assert len(net.hinges) == 2
+    assert net.name == "Open Tetra"
 
 
 def test_open_net_stays_open_at_full_fold(tmp_path):
     path = tmp_path / "open_tetra.json"
     TetraNetSpec.write_open(path)
-    net, root, hinges, fold_angles, name = TetraNetSpec.load(path)
+    net = TetraNetSpec.load(path)
 
-    verts = fold(net, root, hinges, fold_angles, t=1.0)
-    assert not is_closed_solid(verts)
+    solid = net.fold(t=1.0)
+    assert not solid.is_closed
 
     # but the sole "extra" closure constraint (faces 1 and 2 share an
     # edge) DOES still hold, same as it would inside a real, closed
     # tetrahedron -- it's specifically the missing face's edges that are
     # left unmatched, not the whole shape falling apart.
-    p1, p2 = np.array(verts[1]), np.array(verts[2])
+    p1 = np.array(solid.faces[1].vertices3d)
+    p2 = np.array(solid.faces[2].vertices3d)
     dists = np.linalg.norm(p1[:, None, :] - p2[None, :, :], axis=-1)
     assert np.isclose(dists.min(), 0.0, atol=1e-6)
 
@@ -43,6 +42,6 @@ def test_open_net_stays_open_at_full_fold(tmp_path):
 def test_closed_tetrahedron_net_is_closed_solid_for_comparison(tmp_path):
     path = tmp_path / "closed_tetra.json"
     TetraNetSpec.write_closed(path)
-    net, root, hinges, fold_angles, name = TetraNetSpec.load(path)
-    verts = fold(net, root, hinges, fold_angles, t=1.0)
-    assert is_closed_solid(verts)
+    net = TetraNetSpec.load(path)
+    solid = net.fold(t=1.0)
+    assert solid.is_closed

@@ -91,9 +91,9 @@ and `src/apps/common/generate_platonic_nets.py` for a worked example.
 
 If you need to hand-specify exact vertex positions and fold angles instead
 (e.g. for a shape the automatic solver can't handle), a `.txt` net format
-is also supported — see `src/utils/persistence/net_io.py:load_net_txt` for
-its format. Both `.json` and `.txt` files in `data/input/nets/` show up in
-the app.
+is also supported — see `src/utils/model/polyhedral_net.py:PolyhedralNet.load`
+for its format. Both `.json` and `.txt` files in `data/input/nets/` show up
+in the app.
 
 ## The fold cache
 
@@ -150,9 +150,13 @@ src/
     subdivisions/                fine-triangle-mesh subdivision (2D preview + 3D fabric)
     combinatorics/               face-adjacency graph algorithms
     persistence/                 parse/load/write/cache the on-disk .json/.fold
-                                  formats -- build_all()/load_net() take an
-                                  explicit cache_dir, since caches live per-app
+                                  formats -- build_all() takes an explicit
+                                  cache_dir, since caches live per-app
                                   (below), never in one shared location
+    model/                       Face/Hinge/Vertex/PolyhedralNet/Polyhedron
+                                  object model for the rigid pipeline --
+                                  PolyhedralNet.load() is the public loading
+                                  entry point
   apps/
     polyhedron_unfolder/          rigid pipeline: pick a net, see it fold
                                   (two tabs -- animated slider, flat-vs-folded)
