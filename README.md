@@ -17,19 +17,14 @@ pip install -r requirements.txt
 Run the app:
 
 ```bash
-python src/apps/polygon_fold_app.py
+python src/apps/polyhedron_unfolder/app.py
 ```
 
-Pick a net from the dropdown and drag the **Fold** slider from *Flat* to
-*Folded* to watch it close up into the solid.
-
-There's also a side-by-side viewer, showing the flat net and the fully
-folded solid at once instead of animating between them (drag the folded
-solid with the mouse to rotate it):
-
-```bash
-python src/apps/polyhedral_net_app.py
-```
+Pick a net from the dropdown, then switch between its two tabs:
+**Animated Fold** (drag the slider from *Flat* to *Folded* to watch it
+close up into the solid) and **Flat vs Folded** (the flat net and the
+fully folded solid shown side by side at once — drag the folded solid
+with the mouse to rotate it).
 
 Five Platonic solids and a soccer-ball-style truncated icosahedron are
 included out of the box in `data/input/nets/`.
@@ -90,7 +85,7 @@ for the full format reference, and the existing files in
 
 If you already know a solid's exact 3D vertex coordinates and just want a
 `.json` file generated from them, see `src/utils/geometry3d/hull_to_spec.py`
-and `src/apps/generate_platonic_nets.py` for a worked example.
+and `src/apps/common/generate_platonic_nets.py` for a worked example.
 
 ### Legacy format
 
@@ -105,9 +100,10 @@ the app.
 Working out how a net folds involves solving a system of equations, which
 can take anywhere from under a second to about a minute for a large net
 (the included truncated icosahedron takes tens of seconds). To avoid
-re-solving on every launch, results are cached in `data/cache/fold_cache/`
-alongside a checksum of the source `.json` file — editing a net
-automatically invalidates its stale cache.
+re-solving on every launch, results are cached in
+`src/apps/polyhedron_unfolder/cache/` alongside a checksum of the source
+`.json` file — editing a net automatically invalidates its stale cache.
+This cache is polyhedron_unfolder's own — no other app reads or writes it.
 
 A net with no cached fold yet shows up **greyed out** in the app's
 dropdown. Either:
@@ -118,9 +114,21 @@ dropdown. Either:
 - run it from the command line ahead of time:
 
 ```bash
-python src/apps/build_fold_cache.py            # only nets whose cache is stale
-python src/apps/build_fold_cache.py --force    # recompute every net regardless
+python src/apps/polyhedron_unfolder/build_cache.py            # only nets whose cache is stale
+python src/apps/polyhedron_unfolder/build_cache.py --force    # recompute every net regardless
 ```
+
+## Other apps
+
+- **`src/apps/inflate_polyhedron_app/app.py`** — a separate, non-rigid
+  pipeline for nets that can't stay flat and rigid (e.g. a face sharing
+  more than one edge with a neighbor): interactively inflate a stretchy
+  mesh from `data/input/stretchy_nets/`. Has its own cache
+  (`src/apps/inflate_polyhedron_app/cache/`) and its own
+  `build_cache.py`.
+- **`src/apps/polygon_subdivision_app/app.py`** — an unrelated 2D-only
+  demo of splitting a regular polygon into a fine triangular mesh, as a
+  preview of the mesh a later fabric/cloth simulation would use. No cache.
 
 ## Running the tests
 
@@ -136,24 +144,43 @@ through to pytest, e.g. `python tests/run_tests.py -k fold_cache -v`.
 
 ```
 src/
-  utils/                 the reusable library
-    geometry2d/           flat 2D polygon geometry and net layout
-    geometry3d/           3D fold solving, stretchy-mesh solving, coordinates
-    subdivisions/         fine-triangle-mesh subdivision (2D preview + 3D fabric)
-    combinatorics/        face-adjacency graph algorithms
-    persistence/          parse/load/write/cache the on-disk .json/.fold formats
-  apps/                  every entry point (GUI apps, cache builders, one-off
-                         generator scripts) -- see each file's own docstring
-                         for what it does and how to run it
+  utils/                        the reusable library
+    geometry2d/                  flat 2D polygon geometry and net layout
+    geometry3d/                  3D fold solving, stretchy-mesh solving, coordinates
+    subdivisions/                fine-triangle-mesh subdivision (2D preview + 3D fabric)
+    combinatorics/               face-adjacency graph algorithms
+    persistence/                 parse/load/write/cache the on-disk .json/.fold
+                                  formats -- build_all()/load_net() take an
+                                  explicit cache_dir, since caches live per-app
+                                  (below), never in one shared location
+  apps/
+    polyhedron_unfolder/          rigid pipeline: pick a net, see it fold
+                                  (two tabs -- animated slider, flat-vs-folded)
+      app.py                       entry point, class PolyhedronUnfolderApp
+      build_cache.py                precompute this app's OWN fold cache
+      cache/*.fold                  ...that cache lives here, not in data/
+    inflate_polyhedron_app/       stretchy pipeline: interactive fabric inflation
+      app.py                       entry point, class InflatePolyhedronApp
+      build_cache.py                precompute this app's OWN solve cache
+      cache/*.json                  ...that cache lives here, not in data/
+    polygon_subdivision_app/      unrelated 2D-only subdivision demo, no cache
+      app.py                       entry point, class PolygonSubdivisionApp
+    common/                       helpers SHARED by more than one app
+      paths.py                     cross-app locations: input nets, output saves
+                                    (NOT caches -- those are per-app, above)
+      ui_theme.py                  shared Tk/matplotlib look-and-feel constants
+      generate_*.py                 one-off scripts that (re)generate the
+                                    data/input/ specs the apps read
+    ui/                          generic Tk/matplotlib widgets, not domain logic
+      tooltip.py                    Tooltip: hover-tooltip for any Tk widget
+      cullable_face.py               _CullableFace: backface culling for a
+                                    closed convex solid's 3D render
 
 data/
   input/                 human-authored net descriptions (edit these)
     nets/*.json            rigid nets
     stretchy_nets/*.json    stretchy (vertex-loop) nets
-  cache/                  computed results (generated, not hand-edited)
-    fold_cache/*.fold       rigid-pipeline fold cache
-    stretchy_cache/*.json   stretchy-pipeline solve cache
-  output/                 user-generated saves from stretchy_polyhedron_init.py
+  output/                 user-generated saves from inflate_polyhedron_app
 
 tests/
   unit/                   one test file per utils module, mirroring src/utils/'s
@@ -162,6 +189,10 @@ tests/
                           together, plus shared fixture-builder helpers
   run_tests.py            run the test suite
 ```
+
+Each app's cache is deliberately its own, not shared even between
+`polyhedron_unfolder` and any future rigid-pipeline app: an app never
+depends on another app's cache directory.
 
 For a deeper dive into how the solver works, the combinatorics behind it,
 and the non-obvious conventions in the code, see

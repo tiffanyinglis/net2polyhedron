@@ -12,13 +12,13 @@ the source .json changing OR solve_wireframe's algorithm itself changing
 (see ALGORITHM_VERSION's docstring) makes the checksum no longer match,
 and the cache is treated as stale and rebuilt.
 
-Cache files live in data/cache/stretchy_cache/, kept separate from the
-human-authored data/input/stretchy_nets/ directory, mirroring
-data/cache/fold_cache/ vs data/input/nets/ -- callers (src/apps/paths.py)
-pass that cache directory explicitly via cache_path_for's `cache_dir`
-param, since it's no longer simply a sibling of net_path's own parent
-directory (see cache_path_for's docstring for the default derivation
-still used when cache_dir is omitted, e.g. in tests).
+Cache files live in inflate_polyhedron_app's own cache/ folder (next to
+its app.py) -- never data/, and never shared with any other app's cache
+(e.g. polyhedron_unfolder's rigid fold cache is a completely separate
+pipeline and directory). Callers pass that cache directory explicitly via
+cache_path_for's `cache_dir` param, since it's not simply a sibling of
+net_path's own parent directory (see cache_path_for's docstring for the
+default derivation still used when cache_dir is omitted, e.g. in tests).
 
 The cache always stores seed=0's result -- the one canonical "this net's
 cached wireframe" answer -- via `_solve` (see below), which is
@@ -30,7 +30,7 @@ subdivided mesh's fine faces, at its usual uniform edge_length=1.0, was
 tried first and either takes a very long time or settles into a
 generic, unrecognizable rounded blob (see mesh_subdivide.py's
 docstring), so a fabric net needs the coarse-solve-then-drape approach
-instead. stretchy_polyhedron_init.py's "Recompute Wireframe" button,
+instead. inflate_polyhedron_app's "Recompute Wireframe" button,
 which deliberately asks for a *different* random embedding (the
 underlying system has many valid solutions), bypasses the cache entirely
 rather than overwriting it: the cache is meant to make the ordinary
@@ -169,10 +169,9 @@ def build_all(nets_dir, cache_dir=None, force=False, on_progress=None):
     """Compute/refresh the cache for every stretchy .json net in
     nets_dir.
 
-    Shared by build_stretchy_cache.py's CLI and the "Compute All
-    Wireframes" button in stretchy_polyhedron_init.py, so both report
-    progress the same way and stay in sync with how caching actually
-    works.
+    Shared by inflate_polyhedron_app's build_cache.py CLI and its
+    "Compute All Wireframes" button, so both report progress the same
+    way and stay in sync with how caching actually works.
 
     cache_dir, if given, overrides where each net's cache is looked up/
     written (see cache_path_for) -- needed whenever the cache directory

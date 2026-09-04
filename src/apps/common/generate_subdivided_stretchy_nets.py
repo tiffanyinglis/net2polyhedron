@@ -5,7 +5,7 @@ utils.subdivisions.mesh_subdivide.subdivide_mesh (see that module's
 docstring for how the subdivision is built and merged across shared
 coarse edges into one connected mesh).
 
-    python src/apps/generate_subdivided_stretchy_nets.py
+    python src/apps/common/generate_subdivided_stretchy_nets.py
 
 Written as an EXTENDED vertex-loop mesh: the ordinary "faces" (the fine
 triangulation, for combinatorics/solving) plus "coarse_faces" (the
@@ -25,7 +25,7 @@ segment ~sqrt(2) times longer) to the same rest length erases exactly the
 shape information that makes it look like a cube. See mesh_subdivide.py's
 and stretchy_cache.py's docstrings for the full story.
 
-stretchy_polyhedron_init.py also reads "coarse_faces"/"face_of_fine" at
+inflate_polyhedron_app also reads "coarse_faces"/"face_of_fine" at
 render time, so a fabric net's left panel shows the coarse polygons
 (with a faint subdivision overlay) instead of hundreds of individual
 fine triangles, and its right panel colors every fine triangle by its

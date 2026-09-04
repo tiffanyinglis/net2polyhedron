@@ -7,24 +7,35 @@ description: Architecture, file layout, and conventions for this polyhedron net-
 
 Takes a description of a polyhedron's net (which faces exist, how they're
 hinged flat, and which edges only meet once folded) and computes the exact
-3D fold: a 2D face layout plus a per-hinge fold angle. Four Tkinter entry
+3D fold: a 2D face layout plus a per-hinge fold angle. Three Tkinter entry
 points share pieces of this:
 
-- `polygon_fold_app.py` — pick a **rigid** net and drag a slider from flat
-  (0%) to fully folded (100%).
-- `polyhedral_net_app.py` — same rigid pipeline, but shows the flat 2D net
-  and the fully folded 3D solid side by side at once (the 3D panel is
-  mouse-rotatable via matplotlib's own 3D navigation). Also handles **open**
-  nets (some faces deliberately omitted — see "Open nets" below), which
-  `polygon_fold_app.py` can load too but was the app originally used to
-  validate that support in.
-- `polygon_subdivide.py` — unrelated to folding: a 2D-only demo that splits
-  a triangle/square/.../8-gon into a fine triangular mesh (see "Polygon
-  subdivision demo" below).
-- `stretchy_polyhedron_init.py` — a DIFFERENT solver entirely, for nets that
-  can't stay rigid and flat at all (e.g. a face sharing more than one edge
-  with a neighbor). See "Stretchy meshes" below — this is the most
-  algorithmically involved part of the project.
+- `polyhedron_unfolder` (`src/apps/polyhedron_unfolder/app.py`) — pick a
+  **rigid** net; two tabs share one net picker / compute-cache control
+  bar: "Animated Fold" (drag a slider from flat to fully folded) and "Flat
+  vs Folded" (the flat 2D net and the fully folded 3D solid side by side
+  at once — the 3D panel is mouse-rotatable via matplotlib's own 3D
+  navigation). Also handles **open** nets (some faces deliberately
+  omitted — see "Open nets" below). Originally two separate apps
+  (`polygon_fold_app.py` / `polyhedral_net_app.py`), merged into one
+  tabbed app since they shared almost all of their net-picker/compute-
+  cache/theme-toggle machinery and always used the exact same rigid
+  cache — see "The apps" below.
+- `polygon_subdivision_app` (`src/apps/polygon_subdivision_app/app.py`) —
+  unrelated to folding: a 2D-only demo that splits a triangle/square/.../
+  8-gon into a fine triangular mesh (see "Polygon subdivision demo" below).
+- `inflate_polyhedron_app` (`src/apps/inflate_polyhedron_app/app.py`) — a
+  DIFFERENT solver entirely, for nets that can't stay rigid and flat at
+  all (e.g. a face sharing more than one edge with a neighbor). See
+  "Stretchy meshes" below — this is the most algorithmically involved
+  part of the project.
+
+Each app that needs a solve cache keeps it in its own `cache/` folder,
+next to its `app.py` (`src/apps/polyhedron_unfolder/cache/`,
+`src/apps/inflate_polyhedron_app/cache/`) — never shared between apps,
+so no app depends on another app's cache directory, even though
+`polyhedron_unfolder`'s own two tabs share one cache (they're the same
+app now, not two apps coordinating).
 
 ## Directory layout
 
@@ -35,20 +46,57 @@ top-level script/app that used to live at the repo root or in `tools/`,
 moved wholesale — no file's own content changed as part of the move
 itself, only its import paths and (for apps) its data-directory constants.
 
-`src/apps/` — every entry point, flat (all at the same directory depth on
-purpose — see `paths.py` below):
-- `polygon_fold_app.py` — the animated-slider Tkinter app (entry point, class `PolygonFoldApp`)
-- `polyhedral_net_app.py` — the side-by-side flat/folded Tkinter app (entry point, class `PolyhedralNetApp`); imports `STATUS_COLORS`/`PLOT_THEME`/`DISABLED_SUFFIX`/`COMPUTE_TOOLTIP` from `polygon_fold_app.py` rather than redefining them, but otherwise deliberately duplicates the net-picker/compute-worker Tk wiring rather than factoring out a shared base class, so each entry point stays a self-contained, independently readable script
-- `polygon_subdivide.py` — 2D-only fine-triangle-mesh demo (see below); shares only `PLOT_THEME` with the fold apps
-- `stretchy_polyhedron_init.py` — the stretchy-mesh viewer (see below); imports `STATUS_COLORS`/`PLOT_THEME`/`FACE_COLORS`/`DISABLED_SUFFIX` from `polygon_fold_app.py`, everything else is its own pipeline
-- `tooltip.py` — small generic hover-tooltip helper for Tkinter (not net-fold-specific)
-- `paths.py` — the ONLY place that computes where `data/` lives: `NETS_DIR`/`STRETCHY_NETS_DIR`/`FOLD_CACHE_DIR`/`STRETCHY_CACHE_DIR`/`OUTPUT_DIR`/`SAVE_DIR`, all derived from `Path(__file__)`. Every app/script here imports from `paths` BEFORE importing anything from `utils` — as an import side effect, `paths.py` inserts `src/` onto `sys.path`, which is what makes `from utils.<category> import ...` resolve when a script is run directly (`python src/apps/polygon_fold_app.py`) rather than as an installed package
-- `build_fold_cache.py` — precompute/refresh all rigid caches, prints per-net progress
-- `build_stretchy_cache.py` — precompute/refresh all stretchy caches
-- `generate_platonic_nets.py` — (re)generates `data/input/nets/*.json` for the 5 Platonic solids + the truncated icosahedron from canonical 3D coordinates (`utils/geometry3d/solid_coords.py`)
-- `generate_stretchy_platonic_nets.py` — (re)generates `data/input/stretchy_nets/*.json` for the 5 Platonic solids from the *same* coordinates, via `hull_to_spec.polyhedron_from_vertices`'s CCW face loops directly (no spanning tree needed — vertex-loop format has no hinge/root concept)
-- `generate_open_dodecahedron_nets.py` — generates the two open-net examples (`data/input/nets/half_dodecahedron.json`, `data/input/nets/dodecahedron_minus_one.json`)
-- `generate_subdivided_stretchy_nets.py` — writes `data/input/stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below)
+`src/apps/` — one folder per GUI app, plus `common/` and `ui/` for code
+shared across more than one of them:
+- `polyhedron_unfolder/` — the merged rigid-pipeline app (see above)
+  - `app.py` — entry point, class `PolyhedronUnfolderApp`. Builds ONE
+    shared control bar (net picker, "Compute Folding Pattern", theme
+    toggle, "Show Axes", status line) plus a `ttk.Notebook` with two
+    tabs, each with its own matplotlib figure/canvas but reading the
+    SAME loaded `self.net`/`self.colors` state — switching tabs never
+    re-picks or re-solves anything. This consolidation is *why* the
+    merge made sense: the two original apps duplicated all of that
+    control-bar wiring on purpose (see git history), a tradeoff that
+    stopped paying for itself once they became tabs of one app instead
+    of two independent scripts.
+  - `build_cache.py` — precompute/refresh this app's OWN fold cache
+    (was the top-level `build_fold_cache.py`)
+  - `cache/*.fold` — the actual cache files (was `data/cache/fold_cache/`)
+    — not shared with `inflate_polyhedron_app` (a different pipeline
+    entirely) or any other app
+- `inflate_polyhedron_app/` — the stretchy-mesh viewer (see "Stretchy meshes" below)
+  - `app.py` — entry point, class `InflatePolyhedronApp`
+  - `build_cache.py` — precompute/refresh this app's OWN solve cache
+    (was the top-level `build_stretchy_cache.py`)
+  - `cache/*.json` — the actual cache files (was `data/cache/stretchy_cache/`)
+- `polygon_subdivision_app/` — 2D-only fine-triangle-mesh demo (see below), no cache
+  - `app.py` — entry point, class `PolygonSubdivisionApp`
+- `common/` — helpers SHARED by more than one app (not net-fold domain
+  logic -- that's `utils/` -- and not GUI widgets -- that's `ui/`):
+  - `paths.py` — the ONLY place that computes shared, cross-app
+    locations: `NETS_DIR`/`STRETCHY_NETS_DIR`/`OUTPUT_DIR`/`SAVE_DIR`
+    (input nets and the interactive apps' saved output — NOT caches,
+    those are per-app, above), all derived from `Path(__file__)`. An
+    app one level deeper than `src/apps/` (e.g.
+    `polyhedron_unfolder/app.py`) first does a tiny inline bootstrap
+    (`sys.path.insert(0, str(Path(__file__).resolve().parent.parent))`)
+    so `common`/`ui` are importable at all, THEN imports from
+    `common.paths` before importing anything from `utils` — as an
+    import side effect, `common/paths.py` inserts `src/` onto
+    `sys.path`, which is what makes `from utils.<category> import ...`
+    resolve when a script is run directly (`python src/apps/<app>/app.py`)
+    rather than as an installed package
+  - `ui_theme.py` — `STATUS_COLORS`/`PLOT_THEME`/`FACE_COLORS`/
+    `DISABLED_SUFFIX`/`COMPUTE_TOOLTIP`, extracted here (they used to
+    live in `polygon_fold_app.py`, imported by the other apps from it)
+    specifically so no app depends on another app's module
+  - `generate_platonic_nets.py` — (re)generates `data/input/nets/*.json` for the 5 Platonic solids + the truncated icosahedron from canonical 3D coordinates (`utils/geometry3d/solid_coords.py`)
+  - `generate_stretchy_platonic_nets.py` — (re)generates `data/input/stretchy_nets/*.json` for the 5 Platonic solids from the *same* coordinates, via `hull_to_spec.polyhedron_from_vertices`'s CCW face loops directly (no spanning tree needed — vertex-loop format has no hinge/root concept)
+  - `generate_open_dodecahedron_nets.py` — generates the two open-net examples (`data/input/nets/half_dodecahedron.json`, `data/input/nets/dodecahedron_minus_one.json`)
+  - `generate_subdivided_stretchy_nets.py` — writes `data/input/stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below). These 4 `generate_*.py` scripts aren't imported by anything (each is its own CLI entry point); they live in `common/` anyway since they're maintenance tooling shared across whichever apps read the `data/input/` specs they produce, and neither `utils/` (no `__main__` scripts there, see Conventions) nor `ui/` fit
+- `ui/` — generic Tkinter/matplotlib widgets, not net-fold domain logic:
+  - `tooltip.py` — `Tooltip`, a small generic hover-tooltip helper for Tkinter (not net-fold-specific)
+  - `cullable_face.py` — `_CullableFace` (see "The apps" below), extracted here since `polyhedron_unfolder` is now the only user but the class itself is still generic matplotlib/3D rendering logic, not fold-solving logic
 
 `src/utils/` — the reusable library, split by concern (see each
 sub-package's own `__init__.py` docstring for its module list):
@@ -56,14 +104,14 @@ sub-package's own `__init__.py` docstring for its module list):
 - `geometry3d/` — 3D fold solving, stretchy-mesh solving, coordinates: `net_fold_core.py`, `fold_solver.py`, `stretchy_mesh.py`, `solid_coords.py`, `hull_to_spec.py`
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
 - `combinatorics/` — face-adjacency graph algorithms, independent of any 2D/3D geometry: `edge_map.py` (renamed from `combinatorics.py`, same reason as above — names its one export, `EdgeMap`) and `spanning_tree.py`
-- `persistence/` — parse/load/write/cache the on-disk `.json`/`.fold` formats: `polyhedron_spec.py`, `net_io.py`, `fold_cache.py`, `stretchy_cache.py`. `fold_cache.build_all`/`net_io.load_net` (and the stretchy-cache equivalents) take an explicit optional `cache_dir` param, threaded in by `src/apps/paths.py`'s callers — `cache_path_for`'s OLD default (still used when `cache_dir` is omitted, e.g. in tests with `tmp_path`) derives the cache directory as a sibling of the net's own parent directory, which no longer holds once nets and caches live under separate `data/input/` and `data/cache/` trees
+- `persistence/` — parse/load/write/cache the on-disk `.json`/`.fold` formats: `polyhedron_spec.py`, `net_io.py`, `fold_cache.py`, `stretchy_cache.py`. `fold_cache.build_all`/`net_io.load_net` (and the stretchy-cache equivalents) take an explicit optional `cache_dir` param, threaded in by each app's own `CACHE_DIR` constant — `cache_path_for`'s OLD default (still used when `cache_dir` is omitted, e.g. in tests with `tmp_path`) derives the cache directory as a sibling of the net's own parent directory, which doesn't hold once caches live per-app under `src/apps/<app>/cache/` instead
 
-`data/` — everything on-disk that isn't code:
+`data/` — everything on-disk that isn't code (input specs and app output
+ONLY — no caches; those are per-app, under `src/apps/<app>/cache/`, see
+above):
 - `input/nets/*.json` — **human-authored** RIGID net specs; the only files meant to be hand-edited (for that pipeline)
 - `input/stretchy_nets/*.json` — **human-authored** STRETCHY net specs (vertex-loop format, see below) — a parallel, differently-shaped set of input files, not interchangeable with `input/nets/*.json`
-- `cache/fold_cache/*.fold` — **computed** cache, one per rigid `.json`, kept in a separate directory from `input/nets/` on purpose (disposable output vs. source input)
-- `cache/stretchy_cache/*.json` — **computed** cache for stretchy nets, mirrors `cache/fold_cache/` vs `input/nets/`
-- `output/` — user-generated saves from `stretchy_polyhedron_init.py`'s "Save" button (see "The app" below), created on demand
+- `output/` — user-generated saves from `inflate_polyhedron_app`'s "Save" button (see "The app" below), created on demand
 
 `tests/` — pytest suite (see Testing below):
 - `unit/<category>/` — one test file per `src/utils/<category>/` module, mirroring `src/utils/`'s own sub-package layout exactly
@@ -112,7 +160,7 @@ correct polygon-edge index — Whitney's theorem needs the full graph, not a
 hole-punched one) but is never used as a hinge or a fold-closure constraint,
 since an omitted face has no 3D position to hinge from or close against.
 `data/input/nets/half_dodecahedron.json` and `data/input/nets/dodecahedron_minus_one.json` are
-worked examples (generated by `src/apps/generate_open_dodecahedron_nets.py`
+worked examples (generated by `src/apps/common/generate_open_dodecahedron_nets.py`
 from the same dodecahedron coordinates the closed `data/input/nets/dodecahedron.json`
 uses, just with some faces marked omitted instead of remapped away).
 
@@ -120,9 +168,10 @@ An open net's fold is generally an **open, non-convex** shape even at
 t=1 — `utils.geometry3d.is_closed_solid(verts3d)` checks this directly and
 purely geometrically (does every folded edge match exactly one other
 face's edge at the same two 3D points?), with no dependency on the
-`omit`/`hidden` JSON fields, so it works for legacy `.txt` nets too. Both
-apps check it before applying `_CullableFace` backface culling (see
-below), which is only valid for a closed convex solid.
+`omit`/`hidden` JSON fields, so it works for legacy `.txt` nets too.
+`polyhedron_unfolder` checks it (both tabs, independently) before applying
+`_CullableFace` backface culling (see below), which is only valid for a
+closed convex solid.
 
 ## Pipeline (`src/utils/persistence/net_io.py: load_polyhedron_net`)
 
@@ -183,7 +232,7 @@ change (explicitly gated off for them).
 ## Caching (`src/utils/persistence/fold_cache.py`)
 
 Solving is the slow part for bushy/large nets. A `.fold` cache file (in
-`data/cache/fold_cache/`, not `data/input/nets/`) mirrors the legacy explicit-coordinate format
+`src/apps/polyhedron_unfolder/cache/`, not `data/input/nets/`) mirrors the legacy explicit-coordinate format
 (2D vertex positions per face + fold angle per hinge) plus a
 `CHECKSUM sha256:...` of the source `.json`. `load_net()` transparently
 reuses the cache if the checksum still matches, else re-solves and
@@ -199,22 +248,30 @@ strictly-increasing rather than exactly-sequential ids.
   immediately**, before any re-solve is attempted. This means a failed
   re-solve never leaves a misleading stale cache behind; the net correctly
   falls back to "not computed" instead.
-- `build_all(nets_dir, force=False, on_progress=None)` — computes/refreshes
-  every net's cache; shared by `build_fold_cache.py` (CLI, prints progress)
-  and the app's "Compute Folding Pattern" button (runs in a background
-  thread, reports via a `queue.Queue` polled from the main thread — Tk
-  widgets must only ever be touched from the main thread).
-- Run `python src/apps/build_fold_cache.py` after editing a `.json` file to warm the
+- `build_all(nets_dir, cache_dir=None, force=False, on_progress=None)` —
+  computes/refreshes every net's cache; shared by `build_cache.py` (CLI,
+  prints progress) and the app's "Compute Folding Pattern" button (runs
+  in a background thread, reports via a `queue.Queue` polled from the
+  main thread — Tk widgets must only ever be touched from the main
+  thread).
+- Run `python src/apps/polyhedron_unfolder/build_cache.py` after editing a `.json` file to warm the
   cache ahead of time (`--force` recomputes unconditionally); otherwise it
   happens lazily on first load.
 
-## The apps (`polygon_fold_app.py`, `polyhedral_net_app.py`)
+## The apps (`polyhedron_unfolder`)
 
 Tkinter UI on the `sv_ttk` theme (dark by default, light/dark toggle
-button) with a `LabelFrame`-grouped layout: net picker + Compute button +
-"Show Axes" checkbox (off by default) + theme button on top, the 3D plot
-in the middle, the fold slider on the bottom (`polygon_fold_app.py`) or a
-flat-net panel beside the 3D one (`polyhedral_net_app.py`).
+button). ONE shared `LabelFrame`-grouped control bar sits on top: net
+picker + Compute button + "Show Axes" checkbox (off by default) + theme
+button + status line — built once in `PolyhedronUnfolderApp.__init__`,
+not duplicated per tab. Below it, a `ttk.Notebook` with two tabs, each
+built by its own `_build_*_tab` method: "Animated Fold" (a single 3D plot
+plus the fold slider) and "Flat vs Folded" (a flat-net panel beside a
+folded-3D panel, always at `t=1.0`, no slider). Both tabs read the same
+`self.net`/`self.colors`/etc. state, set once by `on_select_net`, and are
+redrawn together (`_refresh_plot` calls both `draw_fold`/`draw_compare`)
+on any state change (net selection, theme, axes) — only the slider,
+`on_slider`, redraws just the "Animated Fold" tab.
 
 - Nets without a valid `.fold` cache show a `(not computed)` suffix and are
   greyed out in the dropdown (`_style_disabled_items` — a best-effort
@@ -222,22 +279,25 @@ flat-net panel beside the 3D one (`polyhedral_net_app.py`).
   since it's not public API; the text suffix + a selection guard in
   `on_select_net` are what actually make them unselectable, independent of
   whether the grey styling succeeds).
-- `_apply_plot_theme` recolors the figure/axes to match sv_ttk's theme
-  (`PLOT_THEME`, mirroring sv_ttk's own `-bg` colors) and honors the "Show
-  Axes" toggle; `draw()` calls it fresh every redraw since `ax.cla()`
-  wipes all of it back to matplotlib's defaults each time.
-- `draw()` centers the view on the shape's own bounding-box center (not
-  its raw min/max) with one shared half-width across all three axes, so
-  the shape sits in the middle of the cubic plot regardless of which
-  direction the net layout happens to extend, and `set_box_aspect([1, 1,
-  1])` isn't distorted by unequal per-axis ranges.
+- `_apply_plot_theme` recolors BOTH tabs' figures/axes to match sv_ttk's
+  theme (`common.ui_theme.PLOT_THEME`, mirroring sv_ttk's own `-bg`
+  colors) and honors the "Show Axes" toggle; `draw_fold`/`draw_compare`
+  call it fresh every redraw since `ax.cla()` wipes all of it back to
+  matplotlib's defaults each time.
+- `_draw_solid` (shared by both tabs -- the "Animated Fold" tab's single
+  3D view and the "Flat vs Folded" tab's right-hand panel) centers the
+  view on the shape's own bounding-box center (not its raw min/max) with
+  one shared half-width across all three axes, so the shape sits in the
+  middle of the cubic plot regardless of which direction the net layout
+  happens to extend, and `set_box_aspect([1, 1, 1])` isn't distorted by
+  unequal per-axis ranges.
 - `_draw_box_wireframe` manually draws all 12 edges of the bounding box
   when axes are shown: matplotlib's default 3D pane borders only draw the
   9 edges belonging to the 3 panes it renders for a fixed view angle, so
   the near vertical corner where the two visible walls meet is otherwise
   left undrawn.
-- `_CullableFace` (in `polygon_fold_app.py`, also imported by
-  `polyhedral_net_app.py`) fixes wrong-face-on-top glitches in the fully
+- `_CullableFace` (`src/apps/ui/cullable_face.py`, imported by
+  `polyhedron_unfolder`) fixes wrong-face-on-top glitches in the fully
   folded 3D view: mplot3d's `Poly3DCollection` only depth-sorts by one
   scalar per face (`do_3d_projection`'s `np.min(pzs)`), which a face at a
   grazing view angle can trick into rendering in front of something it
@@ -250,11 +310,12 @@ flat-net panel beside the 3D one (`polyhedral_net_app.py`).
   face's own orientation alone then determines whether the solid's far
   side hides it, and no two visible faces of a convex solid ever overlap
   in projection either, so nothing else needs sorting) -- never apply it
-  to an open/non-convex net. `polygon_fold_app.py`'s `draw(t)` therefore
-  only uses it when `t == 1.0` **and** `is_closed_solid(verts)` is true;
-  for `t < 1`, or for an open net even at `t=1`, it falls back to a plain
-  `Poly3DCollection`. `polyhedral_net_app.py`'s folded-solid panel always
-  shows `t = 1.0` but likewise only culls when `is_closed_solid(verts)`.
+  to an open/non-convex net. `_draw_solid` therefore only uses it when
+  `is_closed_solid(verts)` is true (for the "Animated Fold" tab this in
+  practice also means `t == 1.0`, since mid-fold edges don't yet coincide
+  and an open net -- some faces omitted -- never closes even at t=1; for
+  the "Flat vs Folded" tab, always at `t = 1.0`, it's the ONLY gate); for
+  anything else it falls back to a plain `Poly3DCollection`.
   `utils.geometry3d.face_normal()` computes each face's outward unit normal
   via the cross product of its first two edges -- verified (see
   `test_net_fold_core.py`) to be consistently outward-pointing for every
@@ -277,9 +338,9 @@ flat-net panel beside the 3D one (`polyhedral_net_app.py`).
   any failures are reported via `messagebox.showerror` listing each failed
   net and its error message (not just the status line).
 - `_set_status(text, kind)` centralizes status-line coloring (`info` /
-  `success` / `error` / `warn` → `STATUS_COLORS`).
+  `success` / `error` / `warn` → `common.ui_theme.STATUS_COLORS`).
 
-## Polygon subdivision demo (`polygon_subdivide.py`, `utils/subdivisions/`)
+## Polygon subdivision demo (`polygon_subdivision_app`, `utils/subdivisions/`)
 
 Unrelated to folding — a standalone 2D demo of splitting a regular n-gon
 (triangle through 8-gon) into a fine triangular mesh, e.g. as a preview of
@@ -310,7 +371,7 @@ hardcoded/closed-form (no runtime search):
    triangles land on bit-for-bit identical barycentric coordinates, so they
    merge into one shared point rather than staying duplicated.
 
-`polygon_subdivide.py`'s layout pairs a small n-gon with a big one in each
+`polygon_subdivision_app`'s layout pairs a small n-gon with a big one in each
 column (3-gon over 8-gon, etc.) and gives every subplot the **same** fixed
 axis range (sized to the largest n-gon) rather than each auto-scaling to
 its own bounding box, so a unit edge length renders at the same pixel size
@@ -324,7 +385,7 @@ generic standalone preview) — this demo's whole purpose is to preview
 what the real stretchy fabric nets (e.g. `cube_res3.json`) actually solve,
 so it shows exactly that subdivision, not an unrelated denser one.
 
-## Stretchy meshes (`src/utils/geometry3d/stretchy_mesh.py`, `stretchy_polyhedron_init.py`)
+## Stretchy meshes (`src/utils/geometry3d/stretchy_mesh.py`, `inflate_polyhedron_app`)
 
 For nets that **cannot** be realized with perfectly rigid, flat faces —
 most sharply, two faces glued along more than one shared edge. If two flat
@@ -411,7 +472,7 @@ equilibrium.
 
 This target-based pressure term (`_residual`) is specific to this
 AUTOMATIC ramp, where a bounded target is exactly what lets it know when
-to stop without a human watching. `stretchy_polyhedron_init.py`'s
+to stop without a human watching. `inflate_polyhedron_app`'s
 interactive "Inflate" button uses a DIFFERENT, target-free residual
 (`_relax_residual`, see "The app" below) for the opposite reason: once
 volume nears a fixed target, more pressure stops changing anything,
@@ -457,7 +518,7 @@ before "improving" this further:
    for slower meshes). If every attempt is exhausted with nothing
    consistent, it raises `ValueError` naming the winding convention and
    pointing at the worked example, rather than silently returning a
-   self-intersecting mesh — `build_stretchy_cache.py`'s existing
+   self-intersecting mesh — `inflate_polyhedron_app/build_cache.py`'s existing
    `except ValueError` failure-reporting path surfaces this per-net.
 
 A separate, cheap guard catches what orientation-consistency can't:
@@ -480,26 +541,28 @@ keep being served forever, since its checksum only ever tracked the
 *source* `.json`, not how it was solved. The cache always stores seed=0's
 result (the one canonical answer) via `_solve` -- `solve_wireframe` for
 an ordinary net, or `mesh_subdivide.solve_fabric_mesh` for a fabric one
-(see `load_fabric_spec`) -- and is used by `build_stretchy_cache.py` and
-`build_all`. **`stretchy_polyhedron_init.py` itself no longer reads or
-writes this cache at all** (see "The app" below, a substantial rewrite
-from the earlier "pick a net, see the solved answer" design) -- caching
-still matters for warming `data/cache/stretchy_cache/` ahead of time via
-`build_stretchy_cache.py`, just not for that app anymore.
+(see `load_fabric_spec`) -- and is used by `inflate_polyhedron_app`'s
+`build_cache.py` and `build_all`. **The interactive "Inflate" loop itself
+no longer reads or writes this cache at all** (see "The app" below, a
+substantial rewrite from the earlier "pick a net, see the solved answer"
+design) -- the app's `on_select_net` still reads it once, via
+`load_with_cache`, to get the starting shape -- caching still matters for
+warming `inflate_polyhedron_app/cache/` ahead of time via `build_cache.py`,
+just not for the interactive loop itself.
 
-### Fabric subdivision (`src/utils/subdivisions/mesh_subdivide.py`, `src/apps/generate_subdivided_stretchy_nets.py`)
+### Fabric subdivision (`src/utils/subdivisions/mesh_subdivide.py`, `src/apps/common/generate_subdivided_stretchy_nets.py`)
 
 Simulates a stretchy net's faces as fabric rather than (at most gently
 bending) rigid-ish panels: every coarse face is split into a fine
 triangular mesh — the same hardcoded per-n-gon coarse split
 (`utils.subdivisions.SUBDIVISIONS`) and barycentric refinement
-(`utils.subdivisions.polygon_subdivisions._subdivide_triangle`) `polygon_subdivide.py` uses to
+(`utils.subdivisions.polygon_subdivisions._subdivide_triangle`) `polygon_subdivision_app` uses to
 preview a single polygon — applied to every face of a whole net at once,
 with points on a shared coarse edge merged into one global vertex so the
 result is a single connected mesh, not N disconnected per-face patches.
 
 **This is a file-generation step, not an app feature.**
-`src/apps/generate_subdivided_stretchy_nets.py` reads an existing
+`src/apps/common/generate_subdivided_stretchy_nets.py` reads an existing
 `data/input/stretchy_nets/<name>.json`, calls `subdivide_mesh(coarse_faces,
 resolution)`, and writes the fine triangulation straight out as an
 ordinary `data/input/stretchy_nets/<name>_res<resolution>.json` — a plain
@@ -510,10 +573,9 @@ is the one generated so far -- resolution 3, not 4, because SUBDIVISIONS[4]
 switching to a 4-triangle centroid fan (see below) doubled the coarse
 triangle count per face, so resolution 3 there lands close to the triangle
 count resolution 4 used to give under the old 2-triangle split.) Once
-written, it goes through
-`build_stretchy_cache.py` / `stretchy_polyhedron_init.py`'s net picker
-completely unmodified — there is no separate fabric mode or UI control
-for this, it's just another `.json` in the directory.
+written, it goes through `inflate_polyhedron_app`'s `build_cache.py` and
+net picker completely unmodified — there is no separate fabric mode or
+UI control for this, it's just another `.json` in the directory.
 
 **Known simplification: rest lengths are treated as uniform, even though
 they aren't.** SUBDIVISIONS' coarse triangles aren't generally
@@ -523,7 +585,7 @@ edges to the centroid, except exactly at n=6) — `subdivide_mesh`'s
 correctly (derived from `subdivide_polygon`'s own exact 2D coordinates for
 a regular n-gon of unit edge length), but `generate_subdivided_stretchy_nets.py`
 currently discards it, since the plain vertex-loop JSON format has no
-field for per-edge lengths and `build_stretchy_cache.py` always solves
+field for per-edge lengths and `inflate_polyhedron_app/build_cache.py` always solves
 with `solve_wireframe`'s default UNIFORM `edge_length=1.0`. Confirmed
 empirically on an earlier, diagonal-split version of the subdivided cube
 net (192 faces, 98 vertices): it solves successfully (6.8% max stretch,
@@ -541,7 +603,7 @@ fidelity.
 Also worth knowing before reusing it: `solve_fabric_mesh` in
 `mesh_subdivide.py` is a *different*, more involved path that was tried
 for driving this live from the app (a "Fabric subdivision" checkbox in
-`stretchy_polyhedron_init.py`, since removed at the user's request in
+`inflate_polyhedron_app`, since removed at the user's request in
 favor of this file-based workflow) — it drapes the fine mesh over the
 coarse net's own `solve_wireframe` result as a 3D-accurate starting
 guess (`_subdivide_dual` reruns the same barycentric grid construction in
@@ -557,7 +619,7 @@ not wired into `generate_subdivided_stretchy_nets.py` right now, which
 takes the simpler (if slower and less faithful) route of the ordinary
 cache/solve pipeline instead.
 
-### The app (`stretchy_polyhedron_init.py`) — precomputed starting shape, interactive from there
+### The app (`inflate_polyhedron_app`) — precomputed starting shape, interactive from there
 
 Rewritten (through a couple of iterations -- see git history if the
 reasoning below seems oddly specific) from the original "pick a net, see
@@ -579,7 +641,7 @@ pipeline**, split between an offline precompute and an interactive app:
    lets the user push further.
 
 Steps 1-2 are precomputed/cached by `src/utils/persistence/stretchy_cache.py`
-(same cache `build_stretchy_cache.py` warms -- see "Caching" above) --
+(same cache `inflate_polyhedron_app/build_cache.py` warms -- see "Caching" above) --
 `on_select_net` calls `load_with_cache`, so opening the app on an
 already-cached net (e.g. `cube_res3.json`, already warm) lands on a fully
 rounded starting shape in about a second, not from a blank/random state.
@@ -800,11 +862,11 @@ solve instead of an instant read).
   inflation control) writes the current vertex positions (plus
   `iteration`, `pressure`, `stats` -- including `optimality`/`converged`
   -- `faces`, and -- for a fabric net --
-  `coarse_faces`/`resolution`/`face_of_fine`) to `Save/<source>_<timestamp>.json`,
+  `coarse_faces`/`resolution`/`face_of_fine`) to `data/output/Save/<source>_<timestamp>.json`,
   and the current figure (which embeds the "Iteration: N | ..." line via
   `fig.text` at the bottom -- so it's part of the rendered image, not
   just a separate Tk label, and gets captured by `savefig` too) to
-  `Save/<source>_<timestamp>.png` -- same stem, so the two files are easy
+  `data/output/Save/<source>_<timestamp>.png` -- same stem, so the two files are easy
   to pair up later.
 - The initial cache load runs in a background thread via `_run_background`;
   each "Inflate" click runs via the streaming variant, `_run_inflate_stream`
@@ -863,7 +925,7 @@ failure path (forcing `_is_orientation_consistent` to always return
 `False` to exercise the `ValueError`) and of the winding convention itself
 (reversing one face's loop and checking `_is_orientation_consistent`
 catches it). Also covers `relax_once` (the restart-free primitive
-`stretchy_polyhedron_init.py`'s interactive "Inflate" workflow is built
+`inflate_polyhedron_app`'s interactive "Inflate" workflow is built
 on -- see "The app" above), continuing from a `solve_wireframe` result
 rather than a raw random start -- on the small tetrahedron and cube
 (post-vectorization these are fast even at nonzero pressure; see "The

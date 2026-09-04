@@ -154,8 +154,8 @@ def is_closed_solid(verts3d, tol=1e-4):
     net's omitted faces and a legacy .txt net alike, and for the .fold
     cache -- which drops the JSON's "omit"/"hidden" info entirely,
     keeping only folded coordinates. It's what callers should check
-    before relying on backface culling (_CullableFace in
-    polygon_fold_app.py): that trick's assumption -- a face's own
+    before relying on backface culling (ui.cullable_face._CullableFace,
+    used by polyhedron_unfolder): that trick's assumption -- a face's own
     orientation alone determines whether the solid's far side hides it
     from the camera -- only holds for a closed, convex solid; an open
     net has no "far side" to hide anything, so culling by orientation

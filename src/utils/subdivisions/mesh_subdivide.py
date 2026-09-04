@@ -303,7 +303,7 @@ def load_fabric_spec(path):
     resemble the source polyhedron at all, since forcing every edge
     (rim, diagonal, spoke -- see this module's docstring) to the same
     length erases the shape information those different lengths encode.
-    stretchy_polyhedron_init.py uses `coarse_faces`/`face_of_fine` again
+    inflate_polyhedron_app uses `coarse_faces`/`face_of_fine` again
     at render time: the left panel shows the COARSE polygons (with a
     faint subdivision overlay) instead of hundreds of individual fine
     triangles, and every fine triangle in the right panel is colored by

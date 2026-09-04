@@ -1,20 +1,30 @@
 """Precompute and cache the wireframe solve for every net in
-data/input/stretchy_nets/, so stretchy_polyhedron_init.py never has to run
-the (potentially slow) least-squares relaxation at load time -- it just
-reads back the cached result in data/cache/stretchy_cache/ if the source
-.json is unchanged.
+data/input/stretchy_nets/, so inflate_polyhedron_app never has to run the
+(potentially slow) least-squares relaxation at load time -- it just reads
+back the cached result in this app's own cache/ folder (next to this
+file) if the source .json is unchanged.
 
-    python src/apps/build_stretchy_cache.py            # only nets whose cache is stale
-    python src/apps/build_stretchy_cache.py --force     # recompute every net
+    python src/apps/inflate_polyhedron_app/build_cache.py            # only nets whose cache is stale
+    python src/apps/inflate_polyhedron_app/build_cache.py --force     # recompute every net
 
-The same logic backs the "Compute All Wireframes" button in
-stretchy_polyhedron_init.py (see utils.persistence.stretchy_cache.build_all).
+The same logic backs the "Compute All Wireframes" button in app.py (see
+utils.persistence.stretchy_cache.build_all). This cache is this app's
+own -- not shared with any other app.
 """
+import sys
+from pathlib import Path
+
+_APPS_DIR = Path(__file__).resolve().parent.parent
+if str(_APPS_DIR) not in sys.path:
+    sys.path.insert(0, str(_APPS_DIR))
+
 import argparse
 import os
 
-from paths import STRETCHY_NETS_DIR, STRETCHY_CACHE_DIR
+from common.paths import STRETCHY_NETS_DIR
 from utils.persistence.stretchy_cache import build_all
+
+CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
 
 def _print_progress(i, n, label, status, elapsed=None):
@@ -35,7 +45,7 @@ def main():
                          help="recompute even if the cache looks up to date")
     args = parser.parse_args()
 
-    results = build_all(STRETCHY_NETS_DIR, cache_dir=STRETCHY_CACHE_DIR, force=args.force,
+    results = build_all(STRETCHY_NETS_DIR, cache_dir=CACHE_DIR, force=args.force,
                          on_progress=_print_progress)
     if not results:
         print(f"no .json nets found in {STRETCHY_NETS_DIR}")

@@ -28,8 +28,15 @@ instead of each auto-zooming to its own bounding box, so a unit edge
 length -- and therefore the mesh triangles -- render at the same pixel
 size in every subplot and can be compared directly by eye.
 
-    python src/apps/polygon_subdivide.py
+    python src/apps/polygon_subdivision_app/app.py
 """
+import sys
+from pathlib import Path
+
+_APPS_DIR = Path(__file__).resolve().parent.parent
+if str(_APPS_DIR) not in sys.path:
+    sys.path.insert(0, str(_APPS_DIR))
+
 import tkinter as tk
 from tkinter import ttk
 
@@ -40,11 +47,11 @@ from matplotlib.collections import LineCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-import paths  # noqa: F401 -- import side effect puts src/ on sys.path
+from common.paths import REPO_ROOT  # noqa: F401 -- import side effect puts src/ on sys.path
+from common.ui_theme import PLOT_THEME
 from utils.geometry2d.polygon_geom import regular_polygon_vertices
 from utils.subdivisions.mesh_subdivide import DEFAULT_RESOLUTION as FABRIC_APP_RESOLUTION
 from utils.subdivisions import subdivide, resolution_for
-from polygon_fold_app import PLOT_THEME
 
 # Columns pair a small n-gon with a big one (top row / bottom row) so
 # their triangle sizes sit side by side for comparison, rather than a
@@ -72,7 +79,7 @@ def _shared_axis_half_extent(margin=1.15):
 AXIS_HALF_EXTENT = _shared_axis_half_extent()
 
 
-class PolygonSubdivideApp:
+class PolygonSubdivisionApp:
     def __init__(self, root):
         self.root = root
         root.title("Polygon Subdivision")
@@ -154,7 +161,7 @@ class PolygonSubdivideApp:
 
 def main():
     root = tk.Tk()
-    PolygonSubdivideApp(root)
+    PolygonSubdivisionApp(root)
     root.mainloop()
 
 

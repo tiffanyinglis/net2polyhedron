@@ -7,12 +7,11 @@ more shared, non-collinear points determine a single plane, so any two
 flat polygons sharing that many points must lie in it -- there's no
 dihedral fold left to make them distinct faces of a solid). The
 utils.persistence.polyhedron_spec / utils.combinatorics.edge_map.EdgeMap
-pipeline used by polygon_fold_app.py and polyhedral_net_app.py can't even
-represent this: EdgeMap's face-adjacency graph is a plain networkx.Graph,
-so two faces sharing more than one edge collapses to a single graph edge
-and raises "duplicate edge in the edge list" (see
-tests/unit/geometry3d/test_stretchy_mesh.py for a worked example, and
-stretchy_polyhedron_init.py for the app that handles these).
+pipeline used by polyhedron_unfolder can't even represent this: EdgeMap's
+face-adjacency graph is a plain networkx.Graph, so two faces sharing more
+than one edge collapses to a single graph edge and raises "duplicate edge
+in the edge list" (see tests/unit/geometry3d/test_stretchy_mesh.py for a
+worked example, and inflate_polyhedron_app for the app that handles these).
 
 Rather than the rigid pipeline's hinge-tree-plus-fold-angles model (which
 assumes every face stays flat), a stretchy mesh is specified directly as
@@ -58,7 +57,7 @@ _is_orientation_consistent) and specifically searches for a consistent
 embedding rather than accepting the first thing that satisfies the edge
 lengths; if it truly can't find one after many attempts, it raises
 ValueError with a suggestion to double check face winding -- and
-build_stretchy_cache.py surfaces that error per-net rather than caching
+inflate_polyhedron_app's build_cache.py surfaces that error per-net rather than caching
 a bad (or, as observed for two_pentagons_and_a_square.json before this
 check existed, suspiciously flat and uninflated) result.
 
@@ -89,7 +88,7 @@ EDGE_LENGTH = 1.0
 # inflation stage) -- utils.persistence.stretchy_cache folds this into
 # its cache key, so a solver change invalidates every existing cache
 # entry even though the source .json files themselves haven't changed at
-# all. Without this, data/cache/stretchy_cache/ would keep silently
+# all. Without this, inflate_polyhedron_app's cache/ would keep silently
 # serving results from a since-replaced algorithm (e.g. pre-inflation,
 # tangled/skewed ones)
 # forever, since its checksum only ever tracked the *source* .json.
@@ -848,7 +847,7 @@ class RelaxStopped(Exception):
 def mesh_volume(positions, faces):
     """The mesh's current TOTAL enclosed volume (see _mesh_volume) from a
     plain {vertex_id: [x, y, z]} `positions` dict and its `faces` -- for
-    callers (e.g. stretchy_polyhedron_init.py) that want a mesh's own
+    callers (e.g. inflate_polyhedron_app) that want a mesh's own
     volume without reaching into the private index-array machinery
     _residual uses internally. relax_once's own pressure term is now
     PER-FACE, not a single total (see _relax_residual's docstring) --
@@ -876,7 +875,7 @@ def per_face_volumes(positions, faces):
 def is_orientation_consistent(positions, faces):
     """Whether every face still agrees on which way is "outward" (see
     _is_orientation_consistent) -- exposed for callers like
-    stretchy_polyhedron_init.py's interactive Inflate loop, which (unlike
+    inflate_polyhedron_app's interactive Inflate loop, which (unlike
     solve_wireframe) has no random-restart-and-retry search of its own:
     relax_once only ever takes small incremental steps from an
     already-good starting point, so it has no built-in way to notice if
@@ -928,7 +927,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     at all, not just why it's normalized). May be a scalar (broadcast
     against every face) or an array with one entry per face. Callers
     relaxing more than one net across a session (e.g.
-    stretchy_polyhedron_init.py) should compute this ONCE per net -- via
+    inflate_polyhedron_app) should compute this ONCE per net -- via
     `per_face_volumes(positions, faces)` on that net's starting shape --
     and pass the SAME array on every subsequent relax_once call for it,
     so a given pressure keeps meaning a consistent thing across repeated
@@ -995,7 +994,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
         # _residual's docstring) -- reporting that raw count directly
         # would make a Stop request look like it consumed far more
         # "steps" than any step-counting caller (e.g.
-        # stretchy_polyhedron_init.py's iteration counter) actually
+        # inflate_polyhedron_app's iteration counter) actually
         # means by that word. Capping it at max_nfev (the caller's own
         # declared step budget for this call, when given) keeps a
         # stopped call's reported cost bounded by something the caller

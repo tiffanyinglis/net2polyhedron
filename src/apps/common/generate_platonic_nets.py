@@ -2,7 +2,7 @@
 Platonic solids, deriving face degrees and adjacency straight from
 canonical 3D vertex coordinates.
 
-    python src/apps/generate_platonic_nets.py
+    python src/apps/common/generate_platonic_nets.py
 """
 import os
 

@@ -3,12 +3,11 @@ data/input/nets/dodecahedron_minus_one.json -- OPEN nets (see
 polyhedron_spec.py's module docstring) that don't fold up into a closed
 solid, derived by marking a face subset of the full dodecahedron's
 combinatorics as omitted. They exist to exercise/validate the apps against
-nets that stay open at t=1, which polygon_fold_app.py and
-polyhedral_net_app.py's backface culling (_CullableFace) must NOT be
-applied to (see utils.geometry3d.is_closed_solid, which both apps now
-check first).
+nets that stay open at t=1, which polyhedron_unfolder's backface culling
+(ui.cullable_face._CullableFace) must NOT be applied to (see
+utils.geometry3d.is_closed_solid, which it checks first).
 
-    python src/apps/generate_open_dodecahedron_nets.py
+    python src/apps/common/generate_open_dodecahedron_nets.py
 """
 import os
 

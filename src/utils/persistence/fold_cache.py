@@ -8,14 +8,14 @@ angles, spelled out plainly, plus a CHECKSUM line recording a hash of the
 source .json file it was generated from. If the source changes, the
 checksum no longer matches and the cache is treated as stale and rebuilt.
 
-Cache files live in data/cache/fold_cache/, kept separate from the
-human-authored data/input/nets/ directory -- nets/ is what you hand-edit,
-fold_cache/ is entirely computed/disposable output. Callers
-(src/apps/paths.py) pass that cache directory explicitly via
-cache_path_for's `cache_dir` param, since it's no longer simply a sibling
-of net_path's own parent directory (see cache_path_for's docstring for
-the default derivation still used when cache_dir is omitted, e.g. in
-tests).
+Cache files live in whichever app needs them's own cache/ folder (e.g.
+src/apps/polyhedron_unfolder/cache/) -- never data/, and never shared
+between apps, so no app depends on another app's cache directory. Callers
+(each app's own paths.py or a CACHE_DIR constant next to its build_cache.py)
+pass that cache directory explicitly via cache_path_for's `cache_dir`
+param, since it's not simply a sibling of net_path's own parent directory
+(see cache_path_for's docstring for the default derivation still used
+when cache_dir is omitted, e.g. in tests).
 """
 import glob
 import hashlib
@@ -136,9 +136,9 @@ def load_with_cache(net_path, cache_path=None):
 def build_all(nets_dir, cache_dir=None, force=False, on_progress=None):
     """Compute/refresh the .fold cache for every .json net in nets_dir.
 
-    Shared by the build_fold_cache.py CLI and the "Compute Folding
-    Pattern" button in polygon_fold_app.py, so both report progress the
-    same way and stay in sync with how caching actually works.
+    Shared by polyhedron_unfolder's build_cache.py CLI and its "Compute
+    Folding Pattern" button, so both report progress the same way and
+    stay in sync with how caching actually works.
 
     cache_dir, if given, overrides where each net's cache is looked up/
     written (see cache_path_for) -- needed whenever the cache directory

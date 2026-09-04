@@ -63,8 +63,8 @@ def test_mesh_edges_deduplicates_and_sorts():
 
 
 def test_the_rigid_pipeline_rejects_this_topology_as_a_duplicate_edge():
-    """Reproduces exactly why polygon_fold_app.py / polyhedral_net_app.py
-    can't fold the pentagons-and-square net: its face-ADJACENCY graph (not
+    """Reproduces exactly why polyhedron_unfolder can't fold the
+    pentagons-and-square net: its face-ADJACENCY graph (not
     the vertex-loop mesh above, but the "which face touches which face"
     view combinatorics.EdgeMap needs) has the pentagon pair (faces 0, 1)
     joined by 3 separate edges and each pentagon joined to the square
@@ -279,7 +279,7 @@ def test_solve_wireframe_on_a_cube_rounds_out_the_skew_not_just_the_edges():
 
 
 # ---- relax_once: manual, restart-free relaxation for
-# stretchy_polyhedron_init.py's interactive "Inflate" workflow, continuing
+# inflate_polyhedron_app's interactive "Inflate" workflow, continuing
 # from an already-solved starting point (that app precomputes/caches the
 # starting point via solve_wireframe + mesh_subdivide.solve_fabric_mesh --
 # see its module docstring for why applying pressure directly to a raw
@@ -339,7 +339,7 @@ def test_relax_once_stop_event_reported_nfev_is_capped_by_max_nfev():
     # past whatever max_nfev the caller declared (see _relax_residual's
     # docstring). Reported nfev must never exceed that declared budget,
     # so a caller tracking cumulative "steps" (e.g.
-    # stretchy_polyhedron_init.py's iteration counter) doesn't see a
+    # inflate_polyhedron_app's iteration counter) doesn't see a
     # stopped call's cost look bigger than the caller's own request.
     positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     stop_event = threading.Event()

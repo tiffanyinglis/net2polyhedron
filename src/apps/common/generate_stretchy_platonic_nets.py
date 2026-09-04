@@ -10,7 +10,7 @@ genuinely rigid/closed solids like these, strictly simpler -- no spanning
 tree, no root, no fold angles to solve for) serialization of the same
 combinatorial structure.
 
-    python src/apps/generate_stretchy_platonic_nets.py
+    python src/apps/common/generate_stretchy_platonic_nets.py
 
 These are here to check the stretchy pipeline against nets we already
 know the RIGID answer for: since a Platonic solid's faces genuinely can

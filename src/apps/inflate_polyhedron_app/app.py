@@ -1,7 +1,7 @@
 """
-Stretchy polyhedron viewer -- interactive fabric relaxation.
+Inflate Polyhedron -- interactive fabric relaxation for stretchy meshes.
 
-    python src/apps/stretchy_polyhedron_init.py
+    python src/apps/inflate_polyhedron_app/app.py
 
 Nets here (data/input/stretchy_nets/*.json, see utils/geometry3d/stretchy_mesh.py
 for the vertex-loop format) are specified directly as vertex loops --
@@ -20,7 +20,8 @@ This app's job is ONLY step 3 below -- interactive, user-driven
 inflation/relaxation -- because step 1 (coarse solve) and step 2
 (subdivide) are already reliable and fast on their own, and are
 precomputed/cached ahead of time via utils/persistence/stretchy_cache.py
-(same cache build_stretchy_cache.py warms):
+(same cache this app's own build_cache.py warms -- see cache/, next to
+this file, not shared with any other app):
 
 1. The COARSE net is solved with stretchy_mesh.solve_wireframe -- its
    random-restart-plus-inflation-ramp search is exactly what makes this
@@ -62,6 +63,13 @@ precomputed/cached ahead of time via utils/persistence/stretchy_cache.py
      data/output/Save/, both named from the source net's filename plus a
      timestamp.
 """
+import sys
+from pathlib import Path
+
+_APPS_DIR = Path(__file__).resolve().parent.parent
+if str(_APPS_DIR) not in sys.path:
+    sys.path.insert(0, str(_APPS_DIR))
+
 import glob
 import json
 import os
@@ -82,7 +90,8 @@ from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-from paths import STRETCHY_NETS_DIR, STRETCHY_CACHE_DIR, SAVE_DIR
+from common.paths import STRETCHY_NETS_DIR, SAVE_DIR
+from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 from utils.geometry3d.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, relax_once, per_face_volumes, is_orientation_consistent,
     EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
@@ -91,7 +100,10 @@ from utils.persistence.stretchy_cache import load_with_cache, is_cached, cache_p
 from utils.subdivisions.mesh_subdivide import load_fabric_spec, subdivide_mesh
 from utils.geometry2d.stretchy_net_layout import build_stretchy_net_layout
 from utils.subdivisions import subdivide as subdivide_polygon
-from polygon_fold_app import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
+
+# This app's OWN cache -- not shared with polyhedron_unfolder (a different
+# pipeline entirely) or with any other app.
+CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
 DEFAULT_NET_BASENAME = "cube_res3"
 
@@ -146,10 +158,10 @@ INFLATE_CHUNK_MAX = 200
 INFLATE_SAFETY_STEP_CAP = 5000
 
 
-class StretchyPolyhedronApp:
+class InflatePolyhedronApp:
     def __init__(self, root):
         self.root = root
-        root.title("Stretchy Polyhedron Init")
+        root.title("Inflate Polyhedron")
         root.geometry("1200x820")
         root.minsize(820, 600)
 
@@ -335,7 +347,7 @@ class StretchyPolyhedronApp:
         self.label_to_path = {}
         for path in paths:
             base_label = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
-            label = base_label if is_cached(path, cache_path_for(path, STRETCHY_CACHE_DIR)) else base_label + DISABLED_SUFFIX
+            label = base_label if is_cached(path, cache_path_for(path, CACHE_DIR)) else base_label + DISABLED_SUFFIX
             self.label_to_path[label] = path
 
         labels = list(self.label_to_path.keys())
@@ -410,7 +422,7 @@ class StretchyPolyhedronApp:
         # This app's own "Inflate" loop never does any of that solving
         # itself; it only continues from here.
         self._run_background(
-            load_with_cache, (path, cache_path_for(path, STRETCHY_CACHE_DIR)),
+            load_with_cache, (path, cache_path_for(path, CACHE_DIR)),
             self._on_loaded, "Loading precomputed starting shape...")
 
     def _on_loaded(self, payload):
@@ -717,7 +729,7 @@ class StretchyPolyhedronApp:
     # ---- drawing ----
 
     def _draw_box_wireframe(self, xlim, ylim, zlim, color):
-        """See polyhedral_net_app.py's identical helper for why this is
+        """See polyhedron_unfolder's identical helper for why this is
         needed instead of relying on mplot3d's default pane borders."""
         corners = list(itertools.product(xlim, ylim, zlim))
         edges = [(a, b) for i, a in enumerate(corners) for b in corners[i + 1:]
@@ -850,7 +862,7 @@ class StretchyPolyhedronApp:
 
 def main():
     root = tk.Tk()
-    StretchyPolyhedronApp(root)
+    InflatePolyhedronApp(root)
     root.mainloop()
 
 
