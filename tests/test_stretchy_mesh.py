@@ -333,3 +333,34 @@ def test_relax_once_stop_event_aborts_and_reports_not_converged():
     assert nfev >= 1
     assert optimality is None
     assert not converged
+
+
+def test_relax_once_stop_event_reported_nfev_is_capped_by_max_nfev():
+    # A Stop mid-call has no scipy sol.nfev to report, so it falls back to
+    # the residual wrapper's raw call count -- which counts every
+    # numerical-Jacobian perturbation, not just "steps", and can run well
+    # past whatever max_nfev the caller declared (see _residual's
+    # docstring). Reported nfev must never exceed that declared budget,
+    # so a caller tracking cumulative "steps" (e.g.
+    # stretchy_polyhedron_init.py's iteration counter) doesn't see a
+    # stopped call's cost look bigger than the caller's own request.
+    vol_target = _sphere_bound_volume(TETRAHEDRON_FACES, EDGE_LENGTH)
+    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    stop_event = threading.Event()
+
+    calls = [0]
+    real_wrapped = stretchy_mesh._residual
+
+    def counting_residual(*args, **kwargs):
+        calls[0] += 1
+        if calls[0] == 2:  # let the raw call count exceed max_nfev before stopping
+            stop_event.set()
+        return real_wrapped(*args, **kwargs)
+
+    import unittest.mock
+    with unittest.mock.patch.object(stretchy_mesh, "_residual", counting_residual):
+        _, nfev, _, _, optimality, converged = relax_once(
+            positions, TETRAHEDRON_FACES, EDGE_LENGTH,
+            pressure=3.0, volume_target=vol_target, max_nfev=1, stop_event=stop_event)
+    assert nfev <= 1
+    assert not converged

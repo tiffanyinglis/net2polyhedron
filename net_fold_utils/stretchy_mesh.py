@@ -744,10 +744,21 @@ def relax_once(positions, faces, edge_length, pressure=0.0, volume_target=0.0,
         optimality = float(sol.optimality)
         converged = sol.status in _CONVERGED_STATUSES
     except RelaxStopped:
-        # scipy never returned, so there's no sol.nfev -- fall back to
-        # the wrapper's own raw count, the only number available here.
+        # scipy never returned, so there's no sol.nfev -- the wrapper's
+        # own raw call count is the only number available here, but it
+        # counts every individual residual evaluation (including
+        # numerical-Jacobian perturbations), which can run to the
+        # hundreds or thousands for a single reported "step" (see
+        # _residual's docstring) -- reporting that raw count directly
+        # would make a Stop request look like it consumed far more
+        # "steps" than any step-counting caller (e.g.
+        # stretchy_polyhedron_init.py's iteration counter) actually
+        # means by that word. Capping it at max_nfev (the caller's own
+        # declared step budget for this call, when given) keeps a
+        # stopped call's reported cost bounded by something the caller
+        # chose, instead of an internal implementation detail.
         pts = last_x[0].reshape(-1, 3)
-        reported_nfev = raw_calls[0]
+        reported_nfev = min(raw_calls[0], max_nfev) if max_nfev is not None else raw_calls[0]
         optimality = None
         converged = False
 

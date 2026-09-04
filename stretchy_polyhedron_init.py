@@ -104,15 +104,31 @@ DEFAULT_PRESSURE = 3.0
 MAX_PRESSURE = 10.0
 PRESSURE_INCREMENT = 0.1
 
-# Each relax_once "step" (solver function evaluation) costs roughly 2s on
-# a resolution-4 subdivided cube (98 vertices) -- scipy's numerical
-# Jacobian for the pressure/volume residual needs close to one full
-# n_vars-sized finite-difference sweep per step, regardless of pressure
-# magnitude or how good the starting shape already is (measured: ~2-2.5s
-# per reported nfev whether pressure is 0.1 or 3.0). Default kept low so
-# a first "Inflate" click is a ~15-25s wait, not ~70-125s; raise it once
-# you have a feel for the pace.
 DEFAULT_STEPS = 10
+
+# on_inflate_clicked runs relax_once in a growing sequence of chunks
+# (5, 10, 20, ...) instead of one big max_nfev call, so the iteration
+# counter/plot update incrementally instead of jumping straight from the
+# start count to the end one. Doubling (rather than a small fixed chunk)
+# matters: relax_once's residual wrapper checked, EACH chunk is a fresh
+# least_squares call with no memory of the previous one's shrunk
+# trust-region radius, so a chunk size that's too small (measured: 1-5 on
+# a 294-variable mesh) can get stuck re-exploring the same neighborhood
+# forever without ever reaching real convergence, even after hundreds of
+# total steps. Starting small keeps early feedback frequent while step
+# counts are cheap, then growing the chunk lets later chunks actually be
+# large enough to finish the job -- measured on cube_res4.json: chunks of
+# 5/10/20 (35 total steps) converged in ~1.5s, matching one uncapped call
+# (28 steps, ~1.5s) almost exactly, while giving 3 live updates instead
+# of 1.
+INFLATE_CHUNK_START = 5
+INFLATE_CHUNK_MAX = 200
+# Hard stop for "iterate until convergence" mode in case a mesh/pressure
+# combination genuinely never reaches CONVERGENCE_GTOL (e.g. a topology
+# that can't hold that much pressure) -- without this, a run that plateaus
+# just short of convergence would loop forever instead of settling for
+# "as far as it got".
+INFLATE_SAFETY_STEP_CAP = 5000
 
 
 class StretchyPolyhedronApp:
@@ -165,6 +181,11 @@ class StretchyPolyhedronApp:
         pressure_row.pack(fill=tk.X)
         ttk.Label(pressure_row, text="Pressure:").pack(side=tk.LEFT, padx=(0, 4))
         self.pressure_var = tk.DoubleVar(value=DEFAULT_PRESSURE)
+        # A "converged" result is only converged AT this pressure -- if the
+        # user changes it, the gate on re-clicking Inflate (see
+        # _update_inflate_button_state) needs to lift, since the new
+        # pressure hasn't actually been tried yet.
+        self.pressure_var.trace_add("write", self._on_pressure_changed)
         self.pressure_spin = ttk.Spinbox(pressure_row, from_=0.0, to=MAX_PRESSURE,
                                           increment=PRESSURE_INCREMENT, width=6,
                                           textvariable=self.pressure_var, format="%.1f")
@@ -385,6 +406,7 @@ class StretchyPolyhedronApp:
         self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
                             "rms_stretch_pct": stats["rms_stretch_pct"],
                             "optimality": None, "converged": None}
+        self._update_inflate_button_state()
         self._set_status(
             f"Loaded {name}: precomputed starting shape ready (edges stretched up to "
             f"{stats['max_stretch_pct']:.2f}%, RMS {stats['rms_stretch_pct']:.2f}%). "
@@ -398,21 +420,45 @@ class StretchyPolyhedronApp:
         self.steps_spin.state(["!disabled"] if self.iterate_mode_var.get() == "steps"
                                else ["disabled"])
 
+    def _update_inflate_button_state(self):
+        """Greys out Inflate once self.last_stats reports the mesh already
+        converged at the current pressure -- clicking again would just
+        burn time without moving anything: a fresh least_squares call
+        from an already-converged point has no memory of how far its
+        trust region had already shrunk, so it doesn't just no-op, it
+        can genuinely wander for a while re-discovering the same spot
+        (measured: 10 wasted steps that moved nothing). Re-armed by
+        _on_pressure_changed, a new net load, or a Stop (which leaves
+        converged=False since it didn't run to completion)."""
+        if self.last_stats.get("converged"):
+            self.inflate_button.state(["disabled"])
+        else:
+            self.inflate_button.state(["!disabled"])
+
+    def _on_pressure_changed(self, *_args):
+        # A "converged" verdict only applies to the pressure it was
+        # reached at -- changing it means the new pressure hasn't
+        # actually been tried, so the gate must lift (back to "unknown",
+        # not "converged").
+        if self.last_stats.get("converged"):
+            self.last_stats["converged"] = None
+            self._update_inflate_button_state()
+
     def on_inflate_clicked(self):
-        if self.positions is None:
+        if self.positions is None or self.last_stats.get("converged"):
             return
         pressure = self.pressure_var.get()
-        max_nfev = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
-        status = (f"Inflating at pressure {pressure:.1f} for {max_nfev} steps..."
-                   if max_nfev is not None else
+        target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
+        status = (f"Inflating at pressure {pressure:.1f} for {target_steps} steps..."
+                   if target_steps is not None else
                    f"Inflating at pressure {pressure:.1f} until convergence...")
         self.stop_event = threading.Event()
-        self._run_background(
-            relax_once,
-            (self.positions, self.faces, self.edge_length, pressure,
-             self.volume_target, PLANARITY_WEIGHT, max_nfev, self.stop_event),
-            self._on_inflated, status)
+        self._set_controls_enabled(False)
         self.stop_button.state(["!disabled"])
+        self.progress.pack(side=tk.LEFT, padx=(10, 0))
+        self.progress.start(12)
+        self._set_status(status, "info")
+        self._run_inflate_stream(pressure, target_steps, self.stop_event)
 
     def on_stop_clicked(self):
         if self.stop_event is not None:
@@ -420,37 +466,111 @@ class StretchyPolyhedronApp:
             self.stop_button.state(["disabled"])  # one request is enough; avoid repeat clicks
             self._set_status("Stopping...", "warn")
 
-    def _on_inflated(self, result):
+    def _run_inflate_stream(self, pressure, target_steps, stop_event):
+        """Runs relax_once in a growing sequence of chunks (see
+        INFLATE_CHUNK_START's comment for why growing rather than one
+        call or a small fixed size) in a background thread, pushing a
+        "progress" message to the queue after every chunk so the main
+        thread can update the iteration counter/plot incrementally
+        instead of jumping straight from the start count to the end one.
+        Tk isn't thread-safe, so the worker only ever pushes to the
+        queue; the main thread (via the scheduled poll below) is the
+        only one that touches Tk widgets."""
+        q = queue.Queue()
+        faces, edge_length, volume_target = self.faces, self.edge_length, self.volume_target
+        start_positions = self.positions
+
+        def worker():
+            positions = start_positions
+            completed = 0
+            chunk = INFLATE_CHUNK_START
+            try:
+                while True:
+                    this_chunk = chunk if target_steps is None else min(chunk, target_steps - completed)
+                    result = relax_once(positions, faces, edge_length, pressure, volume_target,
+                                         PLANARITY_WEIGHT, max_nfev=this_chunk, stop_event=stop_event)
+                    positions, nfev, max_stretch, rms_stretch, optimality, converged = result
+                    completed += nfev
+                    q.put(("progress", result))
+                    stopped = stop_event is not None and stop_event.is_set()
+                    reached_target = target_steps is not None and completed >= target_steps
+                    safety_cap_hit = target_steps is None and completed >= INFLATE_SAFETY_STEP_CAP
+                    if converged or stopped or reached_target or safety_cap_hit:
+                        break
+                    chunk = min(chunk * 2, INFLATE_CHUNK_MAX)
+                q.put(("final", None))
+            except Exception as e:  # surface a solver crash instead of hanging forever
+                q.put(("error", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll():
+            try:
+                while True:
+                    kind, payload = q.get_nowait()
+                    if kind == "progress":
+                        self._apply_inflate_progress(payload)
+                    elif kind == "final":
+                        self._finish_inflate()
+                        return
+                    elif kind == "error":
+                        self.progress.stop()
+                        self.progress.pack_forget()
+                        self._set_controls_enabled(True)
+                        self._set_status(f"Failed: {payload}", "error")
+                        return
+            except queue.Empty:
+                pass
+            self.root.after(80, poll)
+
+        self.root.after(80, poll)
+
+    def _apply_inflate_progress(self, result):
         positions, nfev, max_stretch, rms_stretch, optimality, converged = result
-        was_stopped = self.stop_event is not None and self.stop_event.is_set()
         self.positions = positions
         self.iteration_count += nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged}
-        if was_stopped:
-            self._set_status(
-                f"Stopped after +{nfev} steps ({self.iteration_count} total): edges stretched "
-                f"up to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "warn")
-        else:
-            reached = "converged" if converged else "step cap reached"
-            self._set_status(
-                f"Inflated (+{nfev} steps, {self.iteration_count} total, {reached}): edges "
-                f"stretched up to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).",
-                "info")
+        self._set_status(f"Inflating... {self.iteration_count} steps so far "
+                          f"(edges stretched up to {max_stretch:.2f}%).", "info")
         self.draw()
 
-    # ---- background worker (shared by initial load + inflate) ----
+    def _finish_inflate(self):
+        self.progress.stop()
+        self.progress.pack_forget()
+        self._set_controls_enabled(True)
+        was_stopped = self.stop_event is not None and self.stop_event.is_set()
+        converged = self.last_stats.get("converged")
+        max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
+        rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
+        if was_stopped:
+            self._set_status(
+                f"Stopped ({self.iteration_count} total steps): edges stretched up to "
+                f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "warn")
+        elif converged:
+            self._set_status(
+                f"Converged after {self.iteration_count} total steps: edges stretched up to "
+                f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "success")
+        else:
+            self._set_status(
+                f"Inflated ({self.iteration_count} total steps, step cap reached): edges "
+                f"stretched up to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).",
+                "info")
+
+    # ---- background worker (used by the initial cache load) ----
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.inflate_button, self.pressure_spin,
+        for widget in (self.combo, self.pressure_spin,
                        self.steps_radio, self.convergence_radio, self.save_button):
             widget.state(state)
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
+            self._update_inflate_button_state()  # respect the converged-at-this-pressure gate
             self.stop_button.state(["disabled"])
         else:
             self.steps_spin.state(["disabled"])
+            self.inflate_button.state(["disabled"])
             # stop_button is armed separately by on_inflate_clicked (right
             # after this runs) -- other background jobs, like the initial
             # cache load, leave it disabled since there's nothing to
@@ -458,13 +578,13 @@ class StretchyPolyhedronApp:
 
     def _run_background(self, fn, args, on_done, status_text):
         """Run fn(*args) in a background thread and call on_done(result)
-        on the main thread once it finishes -- shared by the initial
-        relaxation and every "Inflate" click, both of which can take a
-        moment (see module docstring: no cache, no automatic search, so
-        every one of these actually does the solve). Tk isn't
-        thread-safe, so the worker only ever pushes to a queue; the main
-        thread (via the scheduled poll below) is the only one that
-        touches Tk widgets."""
+        on the main thread once it finishes -- used for the initial
+        precomputed-shape load (see module docstring), which can take a
+        moment on a cache miss. Tk isn't thread-safe, so the worker only
+        ever pushes to a queue; the main thread (via the scheduled poll
+        below) is the only one that touches Tk widgets. ("Inflate" has
+        its own streaming variant, _run_inflate_stream, since it reports
+        incremental progress rather than one final result.)"""
         self._set_controls_enabled(False)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
