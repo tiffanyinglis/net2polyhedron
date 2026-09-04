@@ -566,3 +566,55 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
                  max_stretch_pct=float(np.max(np.abs(stretch_pct))),
                  rms_stretch_pct=float(np.sqrt(np.mean(stretch_pct ** 2))))
     return positions, stats
+
+
+def _edge_setup(faces, edge_length):
+    """Shared setup for relax_once: vertex/edge index arrays plus a
+    per-edge length array (broadcastable from a scalar) and a
+    characteristic scalar scale (the array's min, or the scalar
+    itself)."""
+    vertex_ids = sorted({v for face in faces for v in face})
+    idx = {v: i for i, v in enumerate(vertex_ids)}
+    edges = mesh_edges(faces)
+    edge_ai, edge_bi = _pair_index_arrays(edges, idx)
+    if isinstance(edge_length, dict):
+        length_arr = np.array([edge_length[e] for e in edges])
+        scale = float(np.min(length_arr)) if len(length_arr) else 1.0
+    else:
+        length_arr = edge_length
+        scale = float(edge_length)
+    return vertex_ids, idx, edges, edge_ai, edge_bi, length_arr, scale
+
+
+def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
+    positions = {v: pts[i] for i, v in enumerate(vertex_ids)}
+    lengths = np.array([np.linalg.norm(positions[a] - positions[b]) for a, b in edges])
+    stretch_pct = 100 * (lengths - length_arr) / length_arr
+    return positions, float(np.max(np.abs(stretch_pct))), float(np.sqrt(np.mean(stretch_pct ** 2)))
+
+
+def relax_once(positions, faces, edge_length, pressure=0.0, volume_target=0.0,
+                planarity_weight=PLANARITY_WEIGHT, max_nfev=None):
+    """Run ONE relaxation pass from `positions` (a {vertex_id: [x, y, z]}
+    dict) at a fixed inflation `pressure` -- no automatic weight ramp, no
+    random restarts, no orientation-consistency retries (that machinery
+    lives in _inflate/solve_wireframe, for the "just find me a good
+    answer" use case; this is for the opposite one: the caller picks the
+    pressure and how much work to do, and can call this again with the
+    result to keep going, watching it evolve step by step).
+
+    `max_nfev` caps the number of solver function evaluations -- used as
+    a practical, always-available proxy for "how many steps to run"
+    (scipy's trust-region solvers don't expose a cleaner "N iterations"
+    knob); None runs to scipy's own convergence tolerance instead.
+
+    Returns (new_positions, nfev, max_stretch_pct, rms_stretch_pct)."""
+    vertex_ids, idx, edges, edge_ai, edge_bi, length_arr, _ = _edge_setup(faces, edge_length)
+    x0 = np.array([positions[v] for v in vertex_ids]).flatten()
+    sol = least_squares(_residual, x0,
+                         args=(edge_ai, edge_bi, faces, idx, length_arr,
+                               pressure, volume_target, planarity_weight),
+                         max_nfev=max_nfev)
+    pts = sol.x.reshape(-1, 3)
+    new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
+    return new_positions, sol.nfev, max_stretch, rms_stretch

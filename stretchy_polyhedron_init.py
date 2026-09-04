@@ -1,55 +1,70 @@
 """
-Stretchy polyhedron viewer: a copy of polyhedral_net_app.py's side-by-side
-layout, but for nets whose faces can't stay perfectly rigid and flat --
-where closing the shape needs edges to change length a little and/or
-faces to bend out of plane.
+Stretchy polyhedron viewer -- interactive fabric relaxation.
 
     python stretchy_polyhedron_init.py
 
-polygon_fold_app.py / polyhedral_net_app.py's whole pipeline (see
-polyhedron_spec.py, combinatorics.EdgeMap) assumes every face is a rigid
-regular polygon and derives fold angles that bring RIGID faces together
-exactly. That's provably impossible for some nets: if two flat faces
-share more than one edge, the >=3 shared (non-collinear) points force
-both faces into the SAME plane -- there's no dihedral fold left to make
-them distinct faces of a solid. combinatorics.EdgeMap can't even
-represent such a net (its face-adjacency graph is a plain networkx.Graph,
-so a face pair sharing multiple edges collapses to one graph edge and
-EdgeMap raises "duplicate edge in the edge list" -- see
-tests/test_stretchy_mesh.py for exactly this, worked out for the example
-net below).
-
 Nets here (stretchy_nets/*.json, see net_fold_utils/stretchy_mesh.py for
-the format) are instead specified directly as vertex loops -- shared
-vertex ids ARE the adjacency, so a face pair sharing several edges needs
-no special-casing. There's no flat-2D-net/fold-angle concept to derive at
-all: stretchy_mesh.solve_wireframe() just finds SOME 3D position for
-every vertex that keeps every edge close to unit length (a small
-least-squares "spring relaxation", not a hinge-and-rotate fold), with no
-constraint on face flatness -- letting edges stretch a little and faces
-bend is exactly what makes an otherwise-impossible net like this
-realizable. The left panel shows each face's undeformed regular-polygon
-target shape for reference; the right panel shows the actual (generally
-non-planar, edges not quite unit length) solved result.
+the vertex-loop format) are specified directly as vertex loops -- shared
+vertex ids ARE the adjacency, so a face pair sharing several edges (which
+would force two RIGID flat faces into the same plane -- see
+net_fold_utils/stretchy_mesh.py's module docstring) needs no special
+casing. A fabric-subdivided net (see net_fold_utils/mesh_subdivide.py and
+tools/generate_subdivided_stretchy_nets.py, e.g. stretchy_nets/cube_res4.json)
+additionally carries its original coarse polygons + a fine-triangle ->
+coarse-face mapping, used here to color every fine triangle by its
+original face and to show the coarse net (with a faint subdivision
+overlay) in the left "Target faces" panel.
 
-Like polygon_fold_app.py / polyhedral_net_app.py, solving is cached
-(net_fold_utils/stretchy_cache.py, in stretchy_cache/ next to
-stretchy_nets/) so picking an already-solved net is a fast JSON read
-instead of re-running the relaxation -- a bigger mesh (e.g. the
-dodecahedron's 20 vertices / 30 edges) can take tens of seconds, see
-solve_wireframe's docstring. "Compute All Wireframes" warms the cache for
-every net at once (also usable standalone via build_stretchy_cache.py);
-"Recompute Wireframe" deliberately bypasses the cache to show a
-*different* one of the many valid embeddings the underdetermined system
-admits, without overwriting the cached canonical one.
+This app's job is ONLY step 3 below -- interactive, user-driven
+inflation/relaxation -- because step 1 (coarse solve) and step 2
+(subdivide) are already reliable and fast on their own, and are
+precomputed/cached ahead of time via net_fold_utils/stretchy_cache.py
+(same cache build_stretchy_cache.py warms):
+
+1. The COARSE net is solved with stretchy_mesh.solve_wireframe -- its
+   random-restart-plus-inflation-ramp search is exactly what makes this
+   step reliable (it doesn't hang: a coarse net has few enough faces that
+   restarting from a different random start when one doesn't inflate
+   cleanly is cheap and effective -- see solve_wireframe's docstring).
+2. For a fabric-subdivided net (net_fold_utils/mesh_subdivide.py,
+   tools/generate_subdivided_stretchy_nets.py, e.g.
+   stretchy_nets/cube_res4.json), the fine mesh is then DRAPED over that
+   already-solved coarse shape (mesh_subdivide.solve_fabric_mesh) --
+   giving every fine vertex a starting position that's already properly
+   oriented and already roughly the right shape, then one light
+   edge-length relaxation pass to iron out any small discrepancies.
+   (Applying pressure directly to a raw random start, skipping 1 and 2,
+   was tried first -- it can hang for a very long time or never converge,
+   the same failure _inflate's docstring documents for a "cold" random
+   point cloud. Draping over an already-solved coarse shape sidesteps
+   that entirely.)
+3. THIS app loads that precomputed result (net_fold_utils/stretchy_cache.py's
+   load_with_cache -- instant on a cache hit, solved fresh and cached if
+   not) as iteration 0, then lets the user push further from there:
+   - The "Pressure" spinner + "Inflate" button apply ONE relaxation pass
+     (stretchy_mesh.relax_once) at a user-chosen, constant inflation
+     pressure, continuing from wherever the mesh currently is (not from
+     scratch) -- so repeated clicks let you watch/steer the shape settle
+     incrementally, rather than the program silently retrying different
+     random starts under the hood.
+   - The radio buttons control how much work each "Inflate" click does:
+     either a capped number of solver steps (relax_once's `max_nfev`, the
+     closest thing scipy's trust-region solver exposes to "N steps" --
+     there's no cleaner "run exactly N iterations" knob), or an uncapped
+     run to the solver's own convergence tolerance.
+   - "Save" writes the current vertex positions (plus iteration count,
+     pressure, and stretch stats) and a PNG of the current view to Save/,
+     both named from the source net's filename plus a timestamp.
 """
-import os
 import glob
-import itertools
+import json
+import os
 import queue
+import itertools
 import threading
+import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 
 import numpy as np
 import matplotlib
@@ -61,31 +76,51 @@ from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-from net_fold_utils.stretchy_mesh import load_stretchy_mesh, mesh_edges, solve_wireframe
-from net_fold_utils.stretchy_cache import load_with_cache, is_cached, build_all
+from net_fold_utils.stretchy_mesh import (
+    load_stretchy_mesh, mesh_edges, relax_once,
+    _sphere_bound_volume, EDGE_LENGTH, PLANARITY_WEIGHT,
+)
+from net_fold_utils.stretchy_cache import load_with_cache, is_cached
+from net_fold_utils.mesh_subdivide import load_fabric_spec, subdivide_mesh
 from net_fold_utils.polygon_geom import regular_polygon_vertices
-from net_fold_utils.mesh_subdivide import load_fabric_spec
 from subdivision_utils import subdivide as subdivide_polygon
 from polygon_fold_app import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
-from tooltip import Tooltip
 
 STRETCHY_NETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stretchy_nets")
-COMPUTE_ALL_TOOLTIP = ("Solves the wireframe for every net that hasn't been computed "
-                       "yet.\nThis may take a while -- bigger nets (like the "
-                       "dodecahedron)\ncan take up to a minute each.")
+SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Save")
+DEFAULT_NET_BASENAME = "cube_res4"
+
 # A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
 # subdivision reads as texture rather than a bold wireframe competing
 # with the per-coarse-face coloring -- see load_fabric_spec.
 SUBDIVISION_EDGE_ALPHA = 0.35
 SUBDIVISION_EDGE_WIDTH = 0.5
 
+# Pressure spinner bounds: 3.0 was the top (final, most-used) rung of the
+# old automatic INFLATION_WEIGHTS ramp in stretchy_mesh._inflate, so it's
+# the natural default here; the max gives headroom well beyond that for
+# experimentation without being unbounded.
+DEFAULT_PRESSURE = 3.0
+MAX_PRESSURE = 10.0
+PRESSURE_INCREMENT = 0.1
+
+# Each relax_once "step" (solver function evaluation) costs roughly 2s on
+# a resolution-4 subdivided cube (98 vertices) -- scipy's numerical
+# Jacobian for the pressure/volume residual needs close to one full
+# n_vars-sized finite-difference sweep per step, regardless of pressure
+# magnitude or how good the starting shape already is (measured: ~2-2.5s
+# per reported nfev whether pressure is 0.1 or 3.0). Default kept low so
+# a first "Inflate" click is a ~15-25s wait, not ~70-125s; raise it once
+# you have a feel for the pace.
+DEFAULT_STEPS = 10
+
 
 class StretchyPolyhedronApp:
     def __init__(self, root):
         self.root = root
         root.title("Stretchy Polyhedron Init")
-        root.geometry("1200x760")
-        root.minsize(820, 560)
+        root.geometry("1200x820")
+        root.minsize(820, 600)
 
         sv_ttk.set_theme("dark")
 
@@ -100,15 +135,6 @@ class StretchyPolyhedronApp:
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
-        self.recompute_button = ttk.Button(picker_row, text="Recompute Wireframe",
-                                            command=self.on_recompute_clicked)
-        self.recompute_button.pack(side=tk.LEFT, padx=(12, 0))
-
-        self.compute_all_button = ttk.Button(picker_row, text="Compute All Wireframes",
-                                              command=self.on_compute_all_clicked)
-        self.compute_all_button.pack(side=tk.LEFT, padx=(6, 0))
-        Tooltip(self.compute_all_button, COMPUTE_ALL_TOOLTIP)
-
         self.theme_button = ttk.Button(picker_row, text="Light Mode", width=10,
                                         command=self.on_toggle_theme)
         self.theme_button.pack(side=tk.RIGHT)
@@ -118,6 +144,40 @@ class StretchyPolyhedronApp:
                                            variable=self.show_axes_var,
                                            command=self.on_toggle_axes)
         self.axes_check.pack(side=tk.RIGHT, padx=(0, 12))
+
+        # ---- Inflation controls ----
+        inflate_row = ttk.Frame(net_frame)
+        inflate_row.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(inflate_row, text="Pressure:").pack(side=tk.LEFT, padx=(0, 4))
+        self.pressure_var = tk.DoubleVar(value=DEFAULT_PRESSURE)
+        self.pressure_spin = ttk.Spinbox(inflate_row, from_=0.0, to=MAX_PRESSURE,
+                                          increment=PRESSURE_INCREMENT, width=6,
+                                          textvariable=self.pressure_var, format="%.1f")
+        self.pressure_spin.pack(side=tk.LEFT, padx=(0, 14))
+        self.inflate_button = ttk.Button(inflate_row, text="Inflate",
+                                          command=self.on_inflate_clicked)
+        self.inflate_button.pack(side=tk.LEFT)
+
+        self.save_button = ttk.Button(inflate_row, text="Save", command=self.on_save_clicked)
+        self.save_button.pack(side=tk.RIGHT)
+
+        mode_row = ttk.Frame(net_frame)
+        mode_row.pack(fill=tk.X, pady=(8, 0))
+        self.iterate_mode_var = tk.StringVar(value="steps")
+        self.steps_radio = ttk.Radiobutton(mode_row, text="Iterate for", value="steps",
+                                            variable=self.iterate_mode_var,
+                                            command=self._update_mode_state)
+        self.steps_radio.pack(side=tk.LEFT)
+        self.steps_var = tk.IntVar(value=DEFAULT_STEPS)
+        self.steps_spin = ttk.Spinbox(mode_row, from_=1, to=1000000, width=7,
+                                       textvariable=self.steps_var)
+        self.steps_spin.pack(side=tk.LEFT, padx=(4, 4))
+        ttk.Label(mode_row, text="steps").pack(side=tk.LEFT, padx=(0, 18))
+        self.convergence_radio = ttk.Radiobutton(mode_row, text="Iterate until convergence",
+                                                  value="convergence",
+                                                  variable=self.iterate_mode_var,
+                                                  command=self._update_mode_state)
+        self.convergence_radio.pack(side=tk.LEFT)
 
         status_row = ttk.Frame(net_frame)
         status_row.pack(fill=tk.X, pady=(10, 0))
@@ -139,8 +199,12 @@ class StretchyPolyhedronApp:
         self.coarse_faces = None
         self.face_of_fine = None
         self.fabric_resolution = None
+        self.edge_length = None
+        self.volume_target = 0.0
+        self.positions = None
+        self.iteration_count = 0
+        self.last_stats = {}
         self.current_path = None
-        self.seed = 0
         self.current_label = None
         self.label_to_path = {}
         self.is_dark = True
@@ -195,7 +259,7 @@ class StretchyPolyhedronApp:
         return theme
 
     def _refresh_plot(self):
-        if self.faces is not None:
+        if self.positions is not None:
             self.draw()
         else:
             self._apply_plot_theme()
@@ -214,12 +278,11 @@ class StretchyPolyhedronApp:
 
     def refresh_net_list(self, keep_selection=True):
         """Rescan stretchy_nets/ and rebuild the dropdown -- a net with no
-        matching stretchy_cache/*.json gets a "(not computed)" suffix, same
-        wording as polyhedral_net_app.py, but (unlike that app) it's purely
-        informational here, not a selection guard: solving already runs in
-        a background thread with its own progress indicator (see
-        _solve_and_draw), so there's no need to force a separate "Compute"
-        step first just to pick a single fast net."""
+        matching stretchy_cache/*.json gets a "(not computed)" suffix
+        (purely informational: selecting it still works, it just means
+        the precomputed coarse-solve-then-drape starting point isn't
+        ready yet, so on_select_net's background load will solve it
+        fresh instead of an instant cache read -- see module docstring)."""
         paths = sorted(glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.json")))
         self.label_to_path = {}
         for path in paths:
@@ -236,10 +299,12 @@ class StretchyPolyhedronApp:
                 if path == previous_path:
                     self.current_label = label
                     break
-        elif labels:
-            self.current_label = labels[0]
         else:
-            self.current_label = None
+            # Default to DEFAULT_NET_BASENAME (cube_res4.json) if present,
+            # else just the first net alphabetically.
+            default_path = os.path.join(STRETCHY_NETS_DIR, DEFAULT_NET_BASENAME + ".json")
+            default_label = next((l for l, p in self.label_to_path.items() if p == default_path), None)
+            self.current_label = default_label or (labels[0] if labels else None)
 
         if self.current_label:
             self.combo.set(self.current_label)
@@ -254,140 +319,166 @@ class StretchyPolyhedronApp:
             self._set_status(str(e), "error")
             self.faces = None
             return
+
         # A fabric-subdivided net (see net_fold_utils/mesh_subdivide.py and
         # tools/generate_subdivided_stretchy_nets.py) carries its original
         # coarse polygons + a fine-triangle -> coarse-face mapping right in
         # the JSON -- used to color every fine triangle by its ORIGINAL
-        # face and to show the coarse net (not hundreds of fine triangles)
-        # in the left "Target faces" panel. An ordinary net has none of
-        # this, and renders exactly as before.
+        # face, to show the coarse net (not hundreds of fine triangles) in
+        # the left panel, and to give solving the true per-edge rest
+        # lengths instead of a uniform one (see mesh_subdivide.py's
+        # docstring for why that distinction matters). An ordinary net has
+        # none of this and renders/solves exactly as before.
         self.coarse_faces, self.fabric_resolution, self.face_of_fine = load_fabric_spec(path)
-        color_count = len(self.coarse_faces) if self.coarse_faces is not None else len(self.faces)
+        if self.coarse_faces is not None:
+            _, _, self.edge_length, _ = subdivide_mesh(self.coarse_faces, self.fabric_resolution)
+            self.volume_target = _sphere_bound_volume(self.coarse_faces, EDGE_LENGTH)
+            color_count = len(self.coarse_faces)
+        else:
+            self.edge_length = EDGE_LENGTH
+            self.volume_target = _sphere_bound_volume(self.faces, EDGE_LENGTH)
+            color_count = len(self.faces)
         self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(color_count)]
+
         self.current_path = path
-        self.seed = 0
-        self._solve_and_draw(use_cache=True)
+        self.iteration_count = 0
+        self.last_stats = {}
+        self.positions = None
+        # load_with_cache is the precomputed "step 1 + step 2" starting
+        # point (see module docstring): the coarse net solved with
+        # solve_wireframe's reliable random-restart search, then (for a
+        # fabric net) draped into the fine mesh -- instant on a cache hit,
+        # solved fresh and cached if not (net_fold_utils/stretchy_cache.py).
+        # This app's own "Inflate" loop never does any of that solving
+        # itself; it only continues from here.
+        self._run_background(
+            load_with_cache, (path,),
+            self._on_loaded, "Loading precomputed starting shape...")
 
-    def on_recompute_clicked(self):
-        if self.faces is None:
-            return
-        self.seed += 1  # try a different random restart sequence
-        self._solve_and_draw(use_cache=False)
-
-    def _solve_and_draw(self, use_cache):
-        """solve_wireframe's random-restart search can take a while on a
-        bigger mesh (the dodecahedron's 20 vertices / 30 edges sometimes
-        needs several full retries -- see solve_wireframe's docstring --
-        each one its own least_squares search), so it runs in a
-        background thread exactly like polygon_fold_app.py /
-        polyhedral_net_app.py's "Compute Folding Pattern" button: Tk
-        isn't thread-safe, so the worker only ever pushes to a queue, and
-        the main thread (via _poll_solve_queue, scheduled with `after`)
-        is the only one that ever touches a Tk widget.
-
-        use_cache=True (net selection) reads/writes stretchy_cache/ via
-        load_with_cache -- a cache hit makes this thread finish almost
-        immediately, but it's still backgrounded uniformly rather than
-        special-cased, since a miss can be slow. use_cache=False
-        ("Recompute Wireframe") calls solve_wireframe directly, bypassing
-        the cache entirely: it deliberately wants a *different* one of the
-        many valid embeddings, not the cached canonical one, and mustn't
-        overwrite it either."""
-        self.combo.state(["disabled"])
-        self.recompute_button.state(["disabled"])
-        self.compute_all_button.state(["disabled"])
-        self.progress.pack(side=tk.LEFT, padx=(10, 0))
-        self.progress.start(12)
-        self._set_status("Solving..." if not use_cache else "Loading...", "info")
-        faces, seed, path = self.faces, self.seed, self.current_path
-        self._solve_queue = queue.Queue()
-        threading.Thread(target=self._solve_worker, args=(faces, seed, path, use_cache),
-                          daemon=True).start()
-        self.root.after(100, self._poll_solve_queue)
-
-    def _solve_worker(self, faces, seed, path, use_cache):
-        try:
-            if use_cache:
-                _, positions, stats, _ = load_with_cache(path)
-            else:
-                positions, stats = solve_wireframe(faces, seed=seed)
-            self._solve_queue.put(("done", (positions, stats)))
-        except Exception as e:  # surface a solver crash instead of hanging forever
-            self._solve_queue.put(("error", str(e)))
-
-    def _poll_solve_queue(self):
-        try:
-            kind, payload = self._solve_queue.get_nowait()
-        except queue.Empty:
-            self.root.after(100, self._poll_solve_queue)
-            return
-
-        self.progress.stop()
-        self.progress.pack_forget()
-        self.combo.state(["!disabled"])
-        self.recompute_button.state(["!disabled"])
-        self.compute_all_button.state(["!disabled"])
-        if kind == "error":
-            self._set_status(f"Solve failed: {payload}", "error")
-            return
-
-        self.positions, self.stats = payload
+    def _on_loaded(self, payload):
+        _, positions, stats, name = payload
+        self.positions = positions
+        self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
+                            "rms_stretch_pct": stats["rms_stretch_pct"]}
         self._set_status(
-            f"Solved: edges stretched up to {self.stats['max_stretch_pct']:.2f}% "
-            f"from unit length (RMS {self.stats['rms_stretch_pct']:.2f}%).", "info")
-        self.refresh_net_list()  # the net just solved may have just gained a cache entry
+            f"Loaded {name}: precomputed starting shape ready (edges stretched up to "
+            f"{stats['max_stretch_pct']:.2f}%, RMS {stats['rms_stretch_pct']:.2f}%). "
+            f"Press Inflate to relax/inflate further.", "info")
+        self.refresh_net_list()  # the net just loaded may have just gained a cache entry
         self.draw()
 
-    # ---- compute-all cache warming ----
+    # ---- inflate ----
 
-    def on_compute_all_clicked(self):
-        self.compute_all_button.state(["disabled"])
-        self.recompute_button.state(["disabled"])
+    def _update_mode_state(self):
+        self.steps_spin.state(["!disabled"] if self.iterate_mode_var.get() == "steps"
+                               else ["disabled"])
+
+    def on_inflate_clicked(self):
+        if self.positions is None:
+            return
+        pressure = self.pressure_var.get()
+        max_nfev = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
+        status = (f"Inflating at pressure {pressure:.1f} for {max_nfev} steps..."
+                   if max_nfev is not None else
+                   f"Inflating at pressure {pressure:.1f} until convergence...")
+        self._run_background(
+            relax_once,
+            (self.positions, self.faces, self.edge_length, pressure,
+             self.volume_target, PLANARITY_WEIGHT, max_nfev),
+            self._on_inflated, status)
+
+    def _on_inflated(self, result):
+        positions, nfev, max_stretch, rms_stretch = result
+        self.positions = positions
+        self.iteration_count += nfev
+        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch}
+        self._set_status(
+            f"Inflated (+{nfev} steps, {self.iteration_count} total): edges stretched up to "
+            f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "info")
+        self.draw()
+
+    # ---- background worker (shared by initial relax + inflate) ----
+
+    def _set_controls_enabled(self, enabled):
+        state = ["!disabled"] if enabled else ["disabled"]
+        for widget in (self.combo, self.inflate_button, self.pressure_spin,
+                       self.steps_radio, self.convergence_radio, self.save_button):
+            widget.state(state)
+        if enabled:
+            self._update_mode_state()  # respect the steps/convergence choice
+        else:
+            self.steps_spin.state(["disabled"])
+
+    def _run_background(self, fn, args, on_done, status_text):
+        """Run fn(*args) in a background thread and call on_done(result)
+        on the main thread once it finishes -- shared by the initial
+        relaxation and every "Inflate" click, both of which can take a
+        moment (see module docstring: no cache, no automatic search, so
+        every one of these actually does the solve). Tk isn't
+        thread-safe, so the worker only ever pushes to a queue; the main
+        thread (via the scheduled poll below) is the only one that
+        touches Tk widgets."""
+        self._set_controls_enabled(False)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
-        self._set_status("Computing wireframes for every net, this may take a while...", "info")
-        self._compute_queue = queue.Queue()
-        threading.Thread(target=self._compute_all_worker, daemon=True).start()
-        self.root.after(100, self._poll_compute_all_queue)
+        self._set_status(status_text, "info")
+        q = queue.Queue()
 
-    def _compute_all_worker(self):
-        def on_progress(i, n, label, status, elapsed=None):
-            if status == "start":
-                self._compute_queue.put(
-                    ("progress", f"[{i}/{n}] solving {label}... (this can take a while)"))
+        def worker():
+            try:
+                q.put(("done", fn(*args)))
+            except Exception as e:  # surface a solver crash instead of hanging forever
+                q.put(("error", str(e)))
 
-        results = build_all(STRETCHY_NETS_DIR, force=False, on_progress=on_progress)
-        self._compute_queue.put(("done", results))
+        threading.Thread(target=worker, daemon=True).start()
 
-    def _poll_compute_all_queue(self):
-        try:
-            while True:
-                kind, payload = self._compute_queue.get_nowait()
-                if kind == "progress":
-                    self._set_status(payload, "info")
-                elif kind == "done":
-                    self._compute_all_finished(payload)
-                    return
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll_compute_all_queue)
+        def poll():
+            try:
+                kind, payload = q.get_nowait()
+            except queue.Empty:
+                self.root.after(100, poll)
+                return
+            self.progress.stop()
+            self.progress.pack_forget()
+            self._set_controls_enabled(True)
+            if kind == "error":
+                self._set_status(f"Failed: {payload}", "error")
+                return
+            on_done(payload)
 
-    def _compute_all_finished(self, results):
-        self.progress.stop()
-        self.progress.pack_forget()
-        self.compute_all_button.state(["!disabled"])
-        self.recompute_button.state(["!disabled"])
-        failures = [(os.path.basename(p), msg) for p, ok, msg in results if not ok]
-        if failures:
-            self._set_status(f"Done, but {len(failures)} net(s) failed -- see popup.", "error")
-            detail = "\n\n".join(f"{name}:\n{msg}" for name, msg in failures)
-            messagebox.showerror(
-                "Some nets failed to compute",
-                f"{len(failures)} net(s) could not be solved:\n\n{detail}",
-                parent=self.root)
-        else:
-            self._set_status("All wireframes computed." if results else "", "success")
-        self.refresh_net_list()
+        self.root.after(100, poll)
+
+    # ---- save ----
+
+    def on_save_clicked(self):
+        if self.positions is None:
+            return
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(self.current_path))[0]
+        stem = f"{base_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        json_path = os.path.join(SAVE_DIR, f"{stem}.json")
+        png_path = os.path.join(SAVE_DIR, f"{stem}.png")
+
+        data = {
+            "name": self.mesh_name,
+            "source": os.path.basename(self.current_path),
+            "iteration": self.iteration_count,
+            "pressure": self.pressure_var.get(),
+            "stats": self.last_stats,
+            "faces": [list(f) for f in self.faces],
+            "positions": {str(v): [float(c) for c in p] for v, p in self.positions.items()},
+        }
+        if self.coarse_faces is not None:
+            data["coarse_faces"] = [list(f) for f in self.coarse_faces]
+            data["resolution"] = self.fabric_resolution
+            data["face_of_fine"] = list(self.face_of_fine)
+        with open(json_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+
+        self.fig.savefig(png_path, dpi=150)
+        self._set_status(f"Saved {os.path.basename(json_path)} and "
+                          f"{os.path.basename(png_path)} to Save/.", "success")
 
     # ---- drawing ----
 
@@ -453,11 +544,11 @@ class StretchyPolyhedronApp:
         self.ax2d.set_title("Target faces (undeformed, unconnected)")
 
     def _draw_wireframe_result(self, theme):
-        """The actual solved result: possibly non-planar faces (drawn
+        """The actual current state: possibly non-planar faces (drawn
         translucent so the bend is visible) plus the raw vertex/edge
         wireframe on top, since a "face" here is just a rendering
-        convenience -- the thing that's actually being solved for is the
-        vertex positions and edge lengths.
+        convenience -- the thing actually being relaxed is the vertex
+        positions and edge lengths.
 
         For a fabric-subdivided net, colors every fine triangle by its
         ORIGINAL coarse face (self.face_of_fine, indexing the same
@@ -502,12 +593,24 @@ class StretchyPolyhedronApp:
         if self.show_axes_var.get():
             self._draw_box_wireframe(xlim, ylim, zlim, theme["fg"])
         self.ax3d.set_title("Wireframe result (fabric, subdivided)" if fabric else
-                             "Wireframe result (bent, edges stretched to fit)")
+                             "Wireframe result")
 
     def draw(self):
         theme = self._apply_plot_theme()
         self._draw_target_faces(theme)
         self._draw_wireframe_result(theme)
+        # fig.text accumulates across redraws unless the previous one is
+        # removed first -- this is the "Iteration: N" line shown under the
+        # image, embedded directly in the figure (rather than a separate
+        # Tk label) so it's also captured by on_save_clicked's savefig.
+        for txt in list(self.fig.texts):
+            txt.remove()
+        note = ""
+        if self.last_stats:
+            note = (f"   |   max stretch {self.last_stats['max_stretch_pct']:.2f}%, "
+                     f"RMS {self.last_stats['rms_stretch_pct']:.2f}%")
+        self.fig.text(0.5, 0.01, f"Iteration: {self.iteration_count}{note}",
+                       ha="center", va="bottom", color=theme["fg"], fontsize=10)
         self.canvas.draw_idle()
 
 

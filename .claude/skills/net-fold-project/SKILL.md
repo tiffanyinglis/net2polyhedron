@@ -426,11 +426,15 @@ hinge tree to write out) instead of the FACES/ROOT/FOLD text format.
 a different result for the same mesh**, e.g. adding the inflation stage.
 Without this, an on-disk cache from a previous algorithm version would
 keep being served forever, since its checksum only ever tracked the
-*source* `.json`, not how it was solved. The cache always stores
-`solve_wireframe(seed=0)`'s result (the one canonical answer);
-`stretchy_polyhedron_init.py`'s "Recompute Wireframe" button deliberately
-bypasses the cache (it wants a *different* one of the many valid
-embeddings) and never overwrites it.
+*source* `.json`, not how it was solved. The cache always stores seed=0's
+result (the one canonical answer) via `_solve` -- `solve_wireframe` for
+an ordinary net, or `mesh_subdivide.solve_fabric_mesh` for a fabric one
+(see `load_fabric_spec`) -- and is used by `build_stretchy_cache.py` and
+`build_all`. **`stretchy_polyhedron_init.py` itself no longer reads or
+writes this cache at all** (see "The app" below, a substantial rewrite
+from the earlier "pick a net, see the solved answer" design) -- caching
+still matters for warming `stretchy_cache/` ahead of time via
+`build_stretchy_cache.py`, just not for that app anymore.
 
 ### Fabric subdivision (`net_fold_utils/mesh_subdivide.py`, `tools/generate_subdivided_stretchy_nets.py`)
 
@@ -497,22 +501,92 @@ not wired into `generate_subdivided_stretchy_nets.py` right now, which
 takes the simpler (if slower and less faithful) route of the ordinary
 cache/solve pipeline instead.
 
-### The app (`stretchy_polyhedron_init.py`)
+### The app (`stretchy_polyhedron_init.py`) — precomputed starting shape, interactive from there
 
-Same `sv_ttk` shell as the rigid apps, but the two panels mean something
-different: left is each face's own **undeformed** regular-polygon target
-(unconnected, side by side — there's no flat "net" for bendable faces),
-right is the actual solved (generally non-planar, edges not quite unit
-length) wireframe, drawn as translucent faces + edge lines + vertex dots.
-There is no fabric-specific UI here — a subdivided net (see "Fabric
-subdivision" above) is just another `stretchy_nets/*.json` file and shows
-up in the same picker as anything else.
-Solving always runs in a background thread (`_solve_worker` +
-`queue.Queue`, same pattern as the rigid apps' "Compute" button) since a
-cache miss on a bigger mesh (e.g. the dodecahedron) can take ~10s+. Net
-selection tries the cache first (near-instant on a hit); "Compute All
-Wireframes" warms every net's cache at once, same idea as the rigid
-pipeline's "Compute Folding Pattern".
+Rewritten (through a couple of iterations -- see git history if the
+reasoning below seems oddly specific) from the original "pick a net, see
+the one automatically-solved answer" design into a **three-stage
+pipeline**, split between an offline precompute and an interactive app:
+
+1. **Coarse solve** -- `stretchy_mesh.solve_wireframe` on the
+   UN-subdivided coarse net. Its random-restart-plus-inflation-ramp
+   search is exactly what makes this reliable: a coarse net has few
+   enough faces that retrying a different random start when one doesn't
+   inflate cleanly is cheap.
+2. **Drape** -- for a fabric-subdivided net (see "Fabric subdivision"
+   above), `mesh_subdivide.solve_fabric_mesh` drapes the fine mesh over
+   that already-solved coarse shape, then does one light edge-length
+   relaxation pass. (Applying pressure directly to a raw random start,
+   skipping 1 and 2 entirely, was tried first and doesn't work: see
+   "known, accepted risk" below for what that looked like empirically.)
+3. **Interactive**: THIS app loads the result of 1+2 as iteration 0, then
+   lets the user push further.
+
+Steps 1-2 are precomputed/cached by `net_fold_utils/stretchy_cache.py`
+(same cache `build_stretchy_cache.py` warms -- see "Caching" above) --
+`on_select_net` calls `load_with_cache`, so opening the app on an
+already-cached net (e.g. `cube_res4.json`, already warm) lands on a fully
+rounded starting shape in about a second, not from a blank/random state.
+`refresh_net_list` shows the old "(not computed)" suffix again for any
+net that isn't cached yet (selecting it still works, it's just a fresh
+solve instead of an instant read).
+
+- **Net picker**: defaults to `stretchy_nets/cube_res4.json` if present
+  (`DEFAULT_NET_BASENAME`), else the first net alphabetically.
+- **"Pressure" spinner + "Inflate" button**: applies ONE relaxation pass
+  (`stretchy_mesh.relax_once`) at a user-chosen, CONSTANT pressure,
+  continuing from wherever `self.positions` currently is (not from
+  scratch) -- so repeated clicks let the user watch/steer the shape
+  incrementally, rather than the app silently retrying different random
+  starts under the hood. Default/max: 3.0 / 10.0.
+- **Radio buttons** control how much work one "Inflate" click does:
+  "Iterate for N steps" passes `max_nfev=N` to `relax_once` (the closest
+  thing scipy's trust-region solver exposes to "N steps" -- there's no
+  clean "run exactly N iterations" knob); "Iterate until convergence"
+  passes `max_nfev=None`, running to the solver's own tolerance.
+- **Performance, measured on `cube_res4.json` (98 vertices, 294
+  variables)**: each `relax_once` "step" costs roughly 2-2.5 seconds,
+  REGARDLESS of pressure magnitude (0.1 and 3.0 measured about the same)
+  or how good the starting shape already is -- scipy's numerical Jacobian
+  for this residual needs close to one full n_vars-sized finite-
+  difference sweep per step. `DEFAULT_STEPS = 10` (~15-25s per default
+  click) was chosen with this in mind; raising it trades a snappier UI
+  for more progress per click. This is a real, confirmed cost (not a
+  bug) -- if it ever needs to come down, `_mesh_volume`/
+  `_face_planarity_residual`'s per-face Python loop (with a dict lookup
+  per vertex, executed on every single residual evaluation -- i.e.
+  hundreds of times per step) is the obvious place to vectorize; not
+  done here since it was out of scope for this rewrite.
+- **Known, accepted history**: an earlier version of this app used a
+  literal random start (`stretchy_mesh.initial_relaxation`, since
+  removed) with NO coarse-solve-and-drape step at all, to keep the whole
+  pipeline restart-free end to end. That failed empirically: a random
+  stage-1 fit for `cube_res4.json` lands orientation-INCONSISTENT (volume
+  ≈ -0.03 against a target of ~1.38), and applying ANY nonzero pressure
+  to it made `least_squares` grind for 60-90+ seconds without returning,
+  for any `max_nfev` cap tried (scipy's cap does not reliably bound
+  wall-clock time on a badly-conditioned problem -- observed one case
+  where `max_nfev=10` was honored in `sol.nfev`'s final reported value,
+  yet the solver internally made 2068 actual calls to reach it). This is
+  exactly the failure mode `_inflate`'s docstring already documents
+  ("tried cold from a random point cloud... makes least_squares fail to
+  converge at all") -- which is why the CURRENT design (this section)
+  reintroduces the coarse solve's restart search as a precomputed,
+  cached, one-time setup step, while keeping the interactive "Inflate"
+  loop itself restart-free either way.
+- **"Save" button** writes the current vertex positions (plus
+  `iteration`, `pressure`, `stats`, `faces`, and -- for a fabric net --
+  `coarse_faces`/`resolution`/`face_of_fine`) to `Save/<source>_<timestamp>.json`,
+  and the current figure (which embeds "Iteration: N | max stretch
+  X%, RMS Y%" via `fig.text` at the bottom -- so it's part of the
+  rendered image, not just a separate Tk label, and gets captured by
+  `savefig` too) to `Save/<source>_<timestamp>.png` -- same stem, so the
+  two files are easy to pair up later.
+- Both the initial cache load and every "Inflate" click run in a
+  background thread via `_run_background` (one shared helper for both),
+  since either can take a while; Tk isn't thread-safe, so the worker only
+  ever pushes to a queue and the main thread (via a scheduled `after`
+  poll) is the only one touching widgets.
 
 ## Testing
 
@@ -538,7 +612,14 @@ instead. Includes `monkeypatch`-based tests of the orientation-consistency
 failure path (forcing `_is_orientation_consistent` to always return
 `False` to exercise the `ValueError`) and of the winding convention itself
 (reversing one face's loop and checking `_is_orientation_consistent`
-catches it).
+catches it). Also covers `relax_once` (the restart-free primitive
+`stretchy_polyhedron_init.py`'s interactive "Inflate" workflow is built
+on -- see "The app" above), continuing from a `solve_wireframe` result
+rather than a raw random start -- deliberately only on the small
+tetrahedron: a single `relax_once` call at nonzero pressure costs real
+wall-clock time roughly proportional to mesh size (see "The app"'s
+measured ~2-2.5s/step on a 98-vertex mesh), so a bigger mesh isn't safe
+to put in a fast test.
 
 `test_mesh_subdivide.py` covers the fabric-subdivision pipeline (see
 above): combinatorial closure of the fine mesh at several resolutions,

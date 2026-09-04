@@ -11,6 +11,7 @@ from net_fold_utils.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, solve_wireframe, STRETCH_CAP,
     _overall_3d_extent, _min_pairwise_separation, _mesh_volume, _sphere_bound_volume,
     _orientation_signs, _is_orientation_consistent,
+    relax_once, EDGE_LENGTH,
 )
 
 PENTAGONS_AND_SQUARE = "stretchy_nets/two_pentagons_and_a_square.json"
@@ -234,3 +235,38 @@ def test_solve_wireframe_on_a_cube_rounds_out_the_skew_not_just_the_edges():
     centroid = pts.mean(axis=0)
     radii = np.linalg.norm(pts - centroid, axis=1)
     assert radii.std() / radii.mean() < 0.05  # tightly clustered around one radius
+
+
+# ---- relax_once: manual, restart-free relaxation for
+# stretchy_polyhedron_init.py's interactive "Inflate" workflow, continuing
+# from an already-solved starting point (that app precomputes/caches the
+# starting point via solve_wireframe + mesh_subdivide.solve_fabric_mesh --
+# see its module docstring for why applying pressure directly to a raw
+# random start doesn't work well: it can hang for a very long time, the
+# same failure _inflate's docstring documents for a "cold" random point
+# cloud). Using solve_wireframe's own result as that starting point here
+# too keeps these tests representative of the real usage.
+
+def test_relax_once_continues_from_the_given_positions_not_from_scratch():
+    # solve_wireframe's tetrahedron result is already inflated a little
+    # past exact unit edge length (see
+    # test_solve_wireframe_on_a_tetrahedron_inflates_within_the_stretch_cap:
+    # a regular tetrahedron is already at max volume for 4 unit
+    # triangles, so inflation just stretches it slightly). A zero-pressure
+    # relax_once from THAT shape should pull the stretch back down close
+    # to 0% -- proving it genuinely continued refining the given shape
+    # rather than landing on some unrelated fresh embedding (which would
+    # have no reason to end up this well edge-length-fitted).
+    positions, stats = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    assert stats["max_stretch_pct"] > 0.5  # confirms it started non-trivially stretched
+    _, nfev, max_stretch, rms_stretch = relax_once(
+        positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=0.0, volume_target=0.0)
+    assert max_stretch < 0.1
+
+
+def test_relax_once_max_nfev_caps_reported_steps():
+    vol_target = _sphere_bound_volume(TETRAHEDRON_FACES, EDGE_LENGTH)
+    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    _, nfev, _, _ = relax_once(positions, TETRAHEDRON_FACES, EDGE_LENGTH,
+                                pressure=3.0, volume_target=vol_target, max_nfev=5)
+    assert nfev <= 5
