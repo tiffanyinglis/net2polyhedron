@@ -152,19 +152,65 @@ def _pair_index_arrays(pairs, idx):
     return a_idx, b_idx
 
 
-def _face_planarity_residual(face_pts):
-    """Signed distance of each of a face's points from that face's own
-    best-fit plane (via SVD -- the plane through the centroid whose
-    normal is the least-variance direction). A triangle (3 points) is
-    always exactly planar, so it contributes nothing."""
-    if len(face_pts) < 4:
+def _volume_indices(faces, idx):
+    """Precomputed fan-triangulation index arrays for _mesh_volume: for
+    every face, triangulated from its own first vertex into (v0, v_i,
+    v_{i+1}) triangles for i = 1..len(face)-2, flattened across all faces
+    into three parallel int arrays. Building this ONCE per solve (see
+    _edge_setup / solve_wireframe) rather than re-deriving it (a Python
+    loop over every face, with a dict lookup per vertex) on every single
+    _residual call matters a lot: _residual can run hundreds of times per
+    solver step (scipy's finite-difference Jacobian needs roughly
+    n_vars+1 evaluations each), so that loop used to execute an enormous
+    number of times over the course of any pressure-based relax."""
+    v0s, v1s, v2s = [], [], []
+    for face in faces:
+        face_idx = [idx[v] for v in face]
+        for i in range(1, len(face_idx) - 1):
+            v0s.append(face_idx[0])
+            v1s.append(face_idx[i])
+            v2s.append(face_idx[i + 1])
+    return (np.array(v0s, dtype=int), np.array(v1s, dtype=int), np.array(v2s, dtype=int))
+
+
+def _planarity_groups(faces, idx):
+    """Precomputed per-face-size index arrays for _face_planarity_residual:
+    {n: array of shape (num_faces_with_n_vertices, n)} for every face
+    with 4+ vertices (a triangle is always exactly planar and
+    contributes nothing, so it's excluded entirely). Grouping by size
+    lets _face_planarity_residual batch every same-size face into ONE
+    np.linalg.svd call instead of one per face -- built once per solve,
+    same rationale as _volume_indices above."""
+    groups = {}
+    for face in faces:
+        n = len(face)
+        if n < 4:
+            continue
+        groups.setdefault(n, []).append([idx[v] for v in face])
+    return {n: np.array(rows, dtype=int) for n, rows in groups.items()}
+
+
+def _face_planarity_residual(pts, planarity_groups):
+    """Signed distance of each (4+-vertex) face's points from that face's
+    own best-fit plane (via SVD -- the plane through the centroid whose
+    normal is the least-variance direction). `planarity_groups` (see
+    _planarity_groups) already excludes triangles, which are always
+    exactly planar and would contribute nothing; each group (all faces
+    sharing one vertex count) is handled with a single batched SVD call
+    (`np.linalg.svd` treats the leading dimension of a >2D array as a
+    batch of independent matrices) rather than one call per face."""
+    if not planarity_groups:
         return np.zeros(0)
-    centered = face_pts - face_pts.mean(axis=0)
-    normal = np.linalg.svd(centered)[2][-1]
-    return centered @ normal
+    parts = []
+    for group_idx in planarity_groups.values():
+        face_pts = pts[group_idx]  # (num_faces, n, 3)
+        centered = face_pts - face_pts.mean(axis=1, keepdims=True)
+        normals = np.linalg.svd(centered, full_matrices=False)[2][:, -1, :]  # (num_faces, 3)
+        parts.append(np.einsum('fij,fj->fi', centered, normals).ravel())
+    return np.concatenate(parts)
 
 
-def _mesh_volume(pts, faces, idx):
+def _mesh_volume(pts, volume_indices):
     """Signed volume enclosed by the mesh, via the divergence theorem:
     fan-triangulate every face from its own first vertex, and sum each
     resulting triangle's signed tetrahedron volume with the origin
@@ -173,14 +219,18 @@ def _mesh_volume(pts, faces, idx):
     same orientation convention load_stretchy_mesh already validates.
     Smooth and singularity-free everywhere (unlike, say, 1/distance),
     which is what makes it usable as a least_squares residual term even
-    from a poorly-conditioned starting point (see _inflate)."""
-    total = 0.0
-    for face in faces:
-        face_pts = pts[[idx[v] for v in face]]
-        v0 = face_pts[0]
-        for i in range(1, len(face_pts) - 1):
-            total += np.dot(v0, np.cross(face_pts[i], face_pts[i + 1]))
-    return total / 6.0
+    from a poorly-conditioned starting point (see _inflate).
+
+    `volume_indices` is the precomputed (v0_idx, v1_idx, v2_idx) triple
+    from _volume_indices -- computed once per solve, not re-derived here,
+    so this is a single vectorized sum with no per-face Python loop."""
+    v0_idx, v1_idx, v2_idx = volume_indices
+    if len(v0_idx) == 0:
+        return 0.0
+    v0 = pts[v0_idx]
+    v1 = pts[v1_idx]
+    v2 = pts[v2_idx]
+    return float(np.einsum('ij,ij->i', v0, np.cross(v1, v2)).sum() / 6.0)
 
 
 def _sphere_bound_volume(faces, edge_length):
@@ -202,7 +252,7 @@ def _sphere_bound_volume(faces, edge_length):
     return (4 / 3) * np.pi * r ** 3
 
 
-def _residual(flat, edge_ai, edge_bi, faces, idx, edge_length,
+def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
               inflation_weight=0.0, inflation_target=0.0, planarity_weight=0.0):
     """The full objective: RELATIVE edge-length error for every mesh edge
     (i.e. (actual - rest) / rest, not the raw difference), plus two
@@ -211,6 +261,15 @@ def _residual(flat, edge_ai, edge_bi, faces, idx, edge_length,
     (see _face_planarity_residual). Always returns edge residuals first,
     so callers can slice `result[:len(edge_ai)]` to get just the
     edge-length error without the other terms.
+
+    `volume_indices`/`planarity_groups` are the precomputed structures
+    from _volume_indices/_planarity_groups (built once per solve by the
+    caller, e.g. _edge_setup or solve_wireframe) -- NOT `faces`/`idx`
+    directly: this function is called extremely often (hundreds of times
+    per solver step, since scipy's finite-difference Jacobian needs
+    roughly n_vars+1 evaluations each), so re-deriving per-face vertex
+    indices via a Python loop + dict lookup on every call was measured as
+    a real bottleneck (see git history / the vectorize-mesh-volume task).
 
     `edge_length` may be a scalar (uniform rest length -- the original,
     still-default usage) or a per-edge array aligned with edge_ai/edge_bi
@@ -223,13 +282,10 @@ def _residual(flat, edge_ai, edge_bi, faces, idx, edge_length,
     pts = flat.reshape(-1, 3)
     parts = [(np.linalg.norm(pts[edge_ai] - pts[edge_bi], axis=1) - edge_length) / edge_length]
     if inflation_weight:
-        vol = _mesh_volume(pts, faces, idx)
+        vol = _mesh_volume(pts, volume_indices)
         parts.append(np.array([inflation_weight * (inflation_target - vol)]))
     if planarity_weight:
-        parts.append(np.concatenate([
-            planarity_weight * _face_planarity_residual(pts[[idx[v] for v in face]])
-            for face in faces
-        ]) if faces else np.zeros(0))
+        parts.append(planarity_weight * _face_planarity_residual(pts, planarity_groups))
     return np.concatenate(parts)
 
 
@@ -313,7 +369,7 @@ def _edge_stretch(residual, n_edges):
     return np.max(np.abs(residual[:n_edges])) if n_edges else 0.0
 
 
-def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_target=None):
+def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_indices, volume_target=None):
     """Gradually "blow up" an already-valid (edges ~= edge_length)
     point cloud into a rounder, more convex shape -- the fix for both
     problems a plain edge-length fit leaves on the table: a mesh with
@@ -367,6 +423,10 @@ def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_target=None
     the caller can reuse as-is for a final planarity pass, so that pass
     doesn't let the pressure relax back down.
 
+    `volume_indices` is the precomputed _volume_indices(faces, idx)
+    structure _mesh_volume needs -- built once by the caller rather than
+    re-derived on every _residual call (see _residual's docstring).
+
     `volume_target`, if given, overrides the target volume derived from
     `faces`/`edge_length` -- needed for a subdivided fabric mesh, where
     every face is a small triangle with no consistent side length for
@@ -381,7 +441,7 @@ def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_target=None
     weight_used = 0.0
     for w in INFLATION_WEIGHTS:
         sol = least_squares(_residual, cur.flatten(),
-                             args=(edge_ai, edge_bi, faces, idx, edge_length, w, target))
+                             args=(edge_ai, edge_bi, volume_indices, None, edge_length, w, target))
         pts = sol.x.reshape(-1, 3)
         err = _edge_stretch(sol.fun, n_edges)
         if err > STRETCH_CAP:
@@ -395,13 +455,16 @@ CANDIDATES_PER_ROUND = 8  # how many stage-1 starts to try inflating before givi
 
 
 def _inflate_from(pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges,
-                   volume_target=None, scale=None):
+                   volume_indices, planarity_groups, volume_target=None, scale=None):
     """Run _inflate from one stage-1 starting point, then (if it
     inflated at all) a light final planarity pass at the same pressure.
     Returns (pts, edge_stretch, weight_reached) -- weight_reached is 0.0
     if the very first pressure step was already rejected (see _inflate),
     meaning this start never actually inflated.
 
+    `volume_indices`/`planarity_groups` are the precomputed structures
+    _residual needs (see its docstring), forwarded to _inflate and used
+    directly in the final polish pass below.
     `volume_target` is forwarded to _inflate (see its docstring).
     `scale`, if given, is the characteristic edge length used for the
     MIN_3D_EXTENT threshold below in place of `edge_length` itself --
@@ -409,11 +472,12 @@ def _inflate_from(pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges,
     mesh) rather than a single scalar."""
     if scale is None:
         scale = edge_length
-    pts, residual, weight = _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_target)
+    pts, residual, weight = _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length,
+                                      volume_indices, volume_target)
     if weight:
         target = volume_target if volume_target is not None else _sphere_bound_volume(faces, edge_length)
         sol = least_squares(_residual, pts.flatten(),
-                             args=(edge_ai, edge_bi, faces, idx, edge_length,
+                             args=(edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
                                    weight, target, PLANARITY_WEIGHT))
         polished = sol.x.reshape(-1, 3)
         err = _edge_stretch(sol.fun, n_edges)
@@ -510,6 +574,10 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
     n = len(vertex_ids)
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
     n_edges = len(edges)
+    # Built once here rather than re-derived on every _residual call --
+    # see _residual's docstring for why that matters.
+    volume_indices = _volume_indices(faces, idx)
+    planarity_groups = _planarity_groups(faces, idx)
 
     if isinstance(edge_length, dict):
         if volume_target is None:
@@ -527,13 +595,14 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
     while best is None and attempted < MAX_ORIENTATION_ATTEMPTS:
         for _ in range(min(budget, MAX_ORIENTATION_ATTEMPTS - attempted)):
             x0 = rng.normal(scale=scale, size=3 * n)
-            sol = least_squares(_residual, x0, args=(edge_ai, edge_bi, faces, idx, length_arr))
+            sol = least_squares(_residual, x0,
+                                 args=(edge_ai, edge_bi, volume_indices, planarity_groups, length_arr))
             pts0 = sol.x.reshape(-1, 3)
             attempted += 1
 
             pts, residual, weight = _inflate_from(
                 pts0, faces, edge_ai, edge_bi, idx, length_arr, n_edges,
-                volume_target=volume_target, scale=scale)
+                volume_indices, planarity_groups, volume_target=volume_target, scale=scale)
             if (weight and _is_orientation_consistent(pts, faces, idx)
                     and _min_pairwise_separation(pts) > MIN_SEPARATION_FRACTION * scale):
                 # the first success is kept as-is, not compared against
@@ -569,21 +638,26 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
 
 
 def _edge_setup(faces, edge_length):
-    """Shared setup for relax_once: vertex/edge index arrays plus a
-    per-edge length array (broadcastable from a scalar) and a
-    characteristic scalar scale (the array's min, or the scalar
-    itself)."""
+    """Shared setup for relax_once: vertex/edge index arrays, the
+    precomputed structures _residual needs for its pressure/planarity
+    terms (see _volume_indices/_planarity_groups -- built once here
+    rather than re-derived on every _residual call), plus a per-edge
+    length array (broadcastable from a scalar) and a characteristic
+    scalar scale (the array's min, or the scalar itself)."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(faces)
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
+    volume_indices = _volume_indices(faces, idx)
+    planarity_groups = _planarity_groups(faces, idx)
     if isinstance(edge_length, dict):
         length_arr = np.array([edge_length[e] for e in edges])
         scale = float(np.min(length_arr)) if len(length_arr) else 1.0
     else:
         length_arr = edge_length
         scale = float(edge_length)
-    return vertex_ids, idx, edges, edge_ai, edge_bi, length_arr, scale
+    return (vertex_ids, idx, edges, edge_ai, edge_bi, volume_indices, planarity_groups,
+            length_arr, scale)
 
 
 def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
@@ -593,8 +667,27 @@ def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
     return positions, float(np.max(np.abs(stretch_pct))), float(np.sqrt(np.mean(stretch_pct ** 2)))
 
 
+# scipy.optimize.least_squares' own default gtol -- passed explicitly
+# (rather than relying on scipy's default) so relax_once's caller can
+# always know and display the exact tolerance a reported `optimality`
+# value is being compared against, without it silently drifting if a
+# future scipy version ever changes its default.
+CONVERGENCE_GTOL = 1e-8
+
+# Status codes least_squares returns when it stopped because ITS OWN
+# tolerance (gtol/ftol/xtol) was satisfied, as opposed to exhausting
+# max_nfev (0) or a Stop request cutting it off early.
+_CONVERGED_STATUSES = (1, 2, 3, 4)
+
+
+class RelaxStopped(Exception):
+    """Raised internally by relax_once's residual wrapper when the given
+    stop_event is set -- never escapes relax_once itself."""
+
+
 def relax_once(positions, faces, edge_length, pressure=0.0, volume_target=0.0,
-                planarity_weight=PLANARITY_WEIGHT, max_nfev=None):
+                planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
+                gtol=CONVERGENCE_GTOL):
     """Run ONE relaxation pass from `positions` (a {vertex_id: [x, y, z]}
     dict) at a fixed inflation `pressure` -- no automatic weight ramp, no
     random restarts, no orientation-consistency retries (that machinery
@@ -608,13 +701,55 @@ def relax_once(positions, faces, edge_length, pressure=0.0, volume_target=0.0,
     (scipy's trust-region solvers don't expose a cleaner "N iterations"
     knob); None runs to scipy's own convergence tolerance instead.
 
-    Returns (new_positions, nfev, max_stretch_pct, rms_stretch_pct)."""
-    vertex_ids, idx, edges, edge_ai, edge_bi, length_arr, _ = _edge_setup(faces, edge_length)
+    `stop_event`, if given (a threading.Event), is checked on every
+    residual evaluation -- setting it from another thread (e.g. a "Stop"
+    button) aborts at the next evaluation and returns whatever position
+    was just evaluated, rather than waiting for scipy's own stopping
+    criteria or max_nfev.
+
+    Returns (new_positions, nfev, max_stretch_pct, rms_stretch_pct,
+    optimality, converged). `optimality` is scipy's first-order
+    optimality measure (a gradient-norm-like quantity that should
+    approach 0 at a stationary point -- compare against `gtol`); it's
+    None if a stop was requested before scipy ever returned a result.
+    `converged` is True only if scipy's own tolerance (gtol/ftol/xtol)
+    was what stopped it, False if the step cap or a stop request did."""
+    vertex_ids, idx, edges, edge_ai, edge_bi, volume_indices, planarity_groups, length_arr, _ = \
+        _edge_setup(faces, edge_length)
     x0 = np.array([positions[v] for v in vertex_ids]).flatten()
-    sol = least_squares(_residual, x0,
-                         args=(edge_ai, edge_bi, faces, idx, length_arr,
-                               pressure, volume_target, planarity_weight),
-                         max_nfev=max_nfev)
-    pts = sol.x.reshape(-1, 3)
+
+    last_x = [x0]
+    raw_calls = [0]
+
+    def wrapped_residual(x, *args):
+        raw_calls[0] += 1
+        last_x[0] = x
+        if stop_event is not None and stop_event.is_set():
+            raise RelaxStopped()
+        return _residual(x, *args)
+
+    try:
+        sol = least_squares(wrapped_residual, x0,
+                             args=(edge_ai, edge_bi, volume_indices, planarity_groups, length_arr,
+                                   pressure, volume_target, planarity_weight),
+                             max_nfev=max_nfev, gtol=gtol)
+        pts = sol.x.reshape(-1, 3)
+        # scipy's own nfev -- NOT wrapped_residual's raw call count, which
+        # can run well past max_nfev's nominal value before scipy checks
+        # the cap again (e.g. mid Jacobian estimate): using sol.nfev here
+        # keeps a "N steps" request corresponding to roughly N reported
+        # steps, matching what the caller (and the app's iteration
+        # counter) actually asked for.
+        reported_nfev = sol.nfev
+        optimality = float(sol.optimality)
+        converged = sol.status in _CONVERGED_STATUSES
+    except RelaxStopped:
+        # scipy never returned, so there's no sol.nfev -- fall back to
+        # the wrapper's own raw count, the only number available here.
+        pts = last_x[0].reshape(-1, 3)
+        reported_nfev = raw_calls[0]
+        optimality = None
+        converged = False
+
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
-    return new_positions, sol.nfev, max_stretch, rms_stretch
+    return new_positions, reported_nfev, max_stretch, rms_stretch, optimality, converged

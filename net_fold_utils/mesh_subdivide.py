@@ -224,7 +224,9 @@ def _relax_seed(fine_faces, edge_lengths, seed_positions):
     length_arr = np.array([edge_lengths[e] for e in edges])
 
     pts0 = np.array([seed_positions[v] for v in vertex_ids])
-    sol = least_squares(_residual, pts0.flatten(), args=(edge_ai, edge_bi, fine_faces, idx, length_arr))
+    # volume_indices/planarity_groups are unused at zero inflation/planarity
+    # weight (both default to 0.0 below), so there's nothing to precompute.
+    sol = least_squares(_residual, pts0.flatten(), args=(edge_ai, edge_bi, None, None, length_arr))
     pts = sol.x.reshape(-1, 3)
     positions = {v: pts[i] for i, v in enumerate(vertex_ids)}
 

@@ -78,11 +78,11 @@ import sv_ttk
 
 from net_fold_utils.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, relax_once,
-    _sphere_bound_volume, EDGE_LENGTH, PLANARITY_WEIGHT,
+    _sphere_bound_volume, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from net_fold_utils.stretchy_cache import load_with_cache, is_cached
 from net_fold_utils.mesh_subdivide import load_fabric_spec, subdivide_mesh
-from net_fold_utils.polygon_geom import regular_polygon_vertices
+from net_fold_utils.stretchy_net_layout import build_stretchy_net_layout
 from subdivision_utils import subdivide as subdivide_polygon
 from polygon_fold_app import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 
@@ -135,6 +135,9 @@ class StretchyPolyhedronApp:
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
+        self.save_button = ttk.Button(picker_row, text="Save", command=self.on_save_clicked)
+        self.save_button.pack(side=tk.LEFT, padx=(12, 0))
+
         self.theme_button = ttk.Button(picker_row, text="Light Mode", width=10,
                                         command=self.on_toggle_theme)
         self.theme_button.pack(side=tk.RIGHT)
@@ -145,23 +148,29 @@ class StretchyPolyhedronApp:
                                            command=self.on_toggle_axes)
         self.axes_check.pack(side=tk.RIGHT, padx=(0, 12))
 
-        # ---- Inflation controls ----
-        inflate_row = ttk.Frame(net_frame)
-        inflate_row.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(inflate_row, text="Pressure:").pack(side=tk.LEFT, padx=(0, 4))
+        status_row = ttk.Frame(net_frame)
+        status_row.pack(fill=tk.X, pady=(10, 0))
+        self.progress = ttk.Progressbar(status_row, mode="indeterminate", length=160)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(status_row, textvariable=self.status_var)
+        self.status_label.pack(side=tk.LEFT)
+
+        # ---- Inflation: everything about running relax_once lives here,
+        # in the order it's used -- pick a pressure, pick how much work to
+        # do, then Inflate (or Stop one that's already running). ----
+        inflate_frame = ttk.LabelFrame(root, text="Inflate", padding=12)
+        inflate_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+
+        pressure_row = ttk.Frame(inflate_frame)
+        pressure_row.pack(fill=tk.X)
+        ttk.Label(pressure_row, text="Pressure:").pack(side=tk.LEFT, padx=(0, 4))
         self.pressure_var = tk.DoubleVar(value=DEFAULT_PRESSURE)
-        self.pressure_spin = ttk.Spinbox(inflate_row, from_=0.0, to=MAX_PRESSURE,
+        self.pressure_spin = ttk.Spinbox(pressure_row, from_=0.0, to=MAX_PRESSURE,
                                           increment=PRESSURE_INCREMENT, width=6,
                                           textvariable=self.pressure_var, format="%.1f")
-        self.pressure_spin.pack(side=tk.LEFT, padx=(0, 14))
-        self.inflate_button = ttk.Button(inflate_row, text="Inflate",
-                                          command=self.on_inflate_clicked)
-        self.inflate_button.pack(side=tk.LEFT)
+        self.pressure_spin.pack(side=tk.LEFT)
 
-        self.save_button = ttk.Button(inflate_row, text="Save", command=self.on_save_clicked)
-        self.save_button.pack(side=tk.RIGHT)
-
-        mode_row = ttk.Frame(net_frame)
+        mode_row = ttk.Frame(inflate_frame)
         mode_row.pack(fill=tk.X, pady=(8, 0))
         self.iterate_mode_var = tk.StringVar(value="steps")
         self.steps_radio = ttk.Radiobutton(mode_row, text="Iterate for", value="steps",
@@ -179,12 +188,14 @@ class StretchyPolyhedronApp:
                                                   command=self._update_mode_state)
         self.convergence_radio.pack(side=tk.LEFT)
 
-        status_row = ttk.Frame(net_frame)
-        status_row.pack(fill=tk.X, pady=(10, 0))
-        self.progress = ttk.Progressbar(status_row, mode="indeterminate", length=160)
-        self.status_var = tk.StringVar(value="")
-        self.status_label = ttk.Label(status_row, textvariable=self.status_var)
-        self.status_label.pack(side=tk.LEFT)
+        button_row = ttk.Frame(inflate_frame)
+        button_row.pack(fill=tk.X, pady=(8, 0))
+        self.inflate_button = ttk.Button(button_row, text="Inflate",
+                                          command=self.on_inflate_clicked)
+        self.inflate_button.pack(side=tk.LEFT)
+        self.stop_button = ttk.Button(button_row, text="Stop", command=self.on_stop_clicked)
+        self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.stop_button.state(["disabled"])
 
         # ---- Target faces (left) + wireframe result (right) ----
         view_frame = ttk.Frame(root)
@@ -201,9 +212,11 @@ class StretchyPolyhedronApp:
         self.fabric_resolution = None
         self.edge_length = None
         self.volume_target = 0.0
+        self.target_layout = None
         self.positions = None
         self.iteration_count = 0
         self.last_stats = {}
+        self.stop_event = None
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
@@ -340,10 +353,21 @@ class StretchyPolyhedronApp:
             color_count = len(self.faces)
         self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(color_count)]
 
+        # Precomputed once per net selection (see build_stretchy_net_layout's
+        # docstring): a breadth-first spanning tree over shared edges,
+        # attaching each face to whichever neighbor discovers it first --
+        # the same idea net_fold_utils/net_layout.py uses for the rigid
+        # pipeline. _draw_target_faces just reuses this on every redraw
+        # rather than recomputing the BFS every time.
+        self.target_layout = build_stretchy_net_layout(self.coarse_faces
+                                                         if self.coarse_faces is not None
+                                                         else self.faces)
+
         self.current_path = path
         self.iteration_count = 0
         self.last_stats = {}
         self.positions = None
+        self.stop_event = None
         # load_with_cache is the precomputed "step 1 + step 2" starting
         # point (see module docstring): the coarse net solved with
         # solve_wireframe's reliable random-restart search, then (for a
@@ -359,7 +383,8 @@ class StretchyPolyhedronApp:
         _, positions, stats, name = payload
         self.positions = positions
         self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
-                            "rms_stretch_pct": stats["rms_stretch_pct"]}
+                            "rms_stretch_pct": stats["rms_stretch_pct"],
+                            "optimality": None, "converged": None}
         self._set_status(
             f"Loaded {name}: precomputed starting shape ready (edges stretched up to "
             f"{stats['max_stretch_pct']:.2f}%, RMS {stats['rms_stretch_pct']:.2f}%). "
@@ -381,23 +406,40 @@ class StretchyPolyhedronApp:
         status = (f"Inflating at pressure {pressure:.1f} for {max_nfev} steps..."
                    if max_nfev is not None else
                    f"Inflating at pressure {pressure:.1f} until convergence...")
+        self.stop_event = threading.Event()
         self._run_background(
             relax_once,
             (self.positions, self.faces, self.edge_length, pressure,
-             self.volume_target, PLANARITY_WEIGHT, max_nfev),
+             self.volume_target, PLANARITY_WEIGHT, max_nfev, self.stop_event),
             self._on_inflated, status)
+        self.stop_button.state(["!disabled"])
+
+    def on_stop_clicked(self):
+        if self.stop_event is not None:
+            self.stop_event.set()
+            self.stop_button.state(["disabled"])  # one request is enough; avoid repeat clicks
+            self._set_status("Stopping...", "warn")
 
     def _on_inflated(self, result):
-        positions, nfev, max_stretch, rms_stretch = result
+        positions, nfev, max_stretch, rms_stretch, optimality, converged = result
+        was_stopped = self.stop_event is not None and self.stop_event.is_set()
         self.positions = positions
         self.iteration_count += nfev
-        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch}
-        self._set_status(
-            f"Inflated (+{nfev} steps, {self.iteration_count} total): edges stretched up to "
-            f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "info")
+        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
+                            "optimality": optimality, "converged": converged}
+        if was_stopped:
+            self._set_status(
+                f"Stopped after +{nfev} steps ({self.iteration_count} total): edges stretched "
+                f"up to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "warn")
+        else:
+            reached = "converged" if converged else "step cap reached"
+            self._set_status(
+                f"Inflated (+{nfev} steps, {self.iteration_count} total, {reached}): edges "
+                f"stretched up to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).",
+                "info")
         self.draw()
 
-    # ---- background worker (shared by initial relax + inflate) ----
+    # ---- background worker (shared by initial load + inflate) ----
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
@@ -406,8 +448,13 @@ class StretchyPolyhedronApp:
             widget.state(state)
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
+            self.stop_button.state(["disabled"])
         else:
             self.steps_spin.state(["disabled"])
+            # stop_button is armed separately by on_inflate_clicked (right
+            # after this runs) -- other background jobs, like the initial
+            # cache load, leave it disabled since there's nothing to
+            # usefully interrupt there.
 
     def _run_background(self, fn, args, on_done, status_text):
         """Run fn(*args) in a background thread and call on_done(result)
@@ -492,11 +539,12 @@ class StretchyPolyhedronApp:
             self.ax3d.add_collection3d(Line3DCollection([edge], colors=color, linewidths=0.8))
 
     def _draw_target_faces(self, theme):
-        """Each face's UNDEFORMED regular polygon, drawn standalone (not
-        connected to its neighbors) side by side purely for reference --
-        there's no flat "net" for a mesh whose faces are allowed to bend,
-        so this just shows what each face would look like if it weren't
-        being stretched/bent to make the whole thing close up.
+        """The UNDEFORMED net: every face laid out flat and CONNECTED to
+        its neighbors (self.target_layout, precomputed once per net
+        selection by a breadth-first search over shared edges -- see
+        build_stretchy_net_layout) -- what the mesh would look like cut
+        out of paper and unfolded flat, before any stretching/bending
+        closes it up into the solved 3D shape on the right.
 
         For a fabric-subdivided net (self.coarse_faces set, see
         load_fabric_spec), shows the COARSE polygons here -- not the
@@ -507,14 +555,11 @@ class StretchyPolyhedronApp:
         self._style_2d_axis(self.ax2d, theme)
         fabric = self.coarse_faces is not None
         faces = self.coarse_faces if fabric else self.faces
-        gap = 0.6
-        x_cursor = 0.0
         all_pts = []
-        for face, color in zip(faces, self.colors):
-            verts = regular_polygon_vertices(len(face))
-            width = max(p[0] for p in verts) - min(p[0] for p in verts)
-            offset = np.array([x_cursor - min(p[0] for p in verts), 0.0])
-            placed = [p + offset for p in verts]
+        for face_idx in sorted(self.target_layout):
+            face = faces[face_idx]
+            color = self.colors[face_idx % len(self.colors)]
+            placed = self.target_layout[face_idx]
             self.ax2d.add_patch(Polygon(placed, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
             if fabric:
@@ -528,20 +573,15 @@ class StretchyPolyhedronApp:
                 self.ax2d.add_collection(LineCollection(
                     segments, colors="k", linewidths=SUBDIVISION_EDGE_WIDTH,
                     alpha=SUBDIVISION_EDGE_ALPHA, zorder=3))
-            cx = np.mean([p[0] for p in placed])
-            top_y = max(p[1] for p in placed)
-            self.ax2d.text(cx, top_y + 0.15, str(face), ha="center", va="bottom",
-                            color=theme["fg"], fontsize=8)
             all_pts.extend(placed)
-            x_cursor += width + gap
 
         all_pts = np.array(all_pts)
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
         pad = 0.6
         self.ax2d.set_xlim(lo[0] - pad, hi[0] + pad)
-        self.ax2d.set_ylim(lo[1] - pad, hi[1] + pad * 1.8)
+        self.ax2d.set_ylim(lo[1] - pad, hi[1] + pad)
         self.ax2d.set_aspect("equal")
-        self.ax2d.set_title("Target faces (undeformed, unconnected)")
+        self.ax2d.set_title("Target faces (net)")
 
     def _draw_wireframe_result(self, theme):
         """The actual current state: possibly non-planar faces (drawn
@@ -607,8 +647,15 @@ class StretchyPolyhedronApp:
             txt.remove()
         note = ""
         if self.last_stats:
+            optimality = self.last_stats.get("optimality")
+            converged = self.last_stats.get("converged")
+            if optimality is not None:
+                conv_str = "converged" if converged else "not converged"
+                opt_note = f"optimality {optimality:.2e} vs. tol {CONVERGENCE_GTOL:.0e} ({conv_str})"
+            else:
+                opt_note = "optimality n/a"
             note = (f"   |   max stretch {self.last_stats['max_stretch_pct']:.2f}%, "
-                     f"RMS {self.last_stats['rms_stretch_pct']:.2f}%")
+                    f"RMS {self.last_stats['rms_stretch_pct']:.2f}%   |   {opt_note}")
         self.fig.text(0.5, 0.01, f"Iteration: {self.iteration_count}{note}",
                        ha="center", va="bottom", color=theme["fg"], fontsize=10)
         self.canvas.draw_idle()

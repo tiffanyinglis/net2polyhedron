@@ -33,7 +33,7 @@ points share pieces of this:
 - `polygon_subdivide.py` — 2D-only fine-triangle-mesh demo (see below); shares only `PLOT_THEME` with the fold apps
 - `stretchy_polyhedron_init.py` — the stretchy-mesh viewer (see below); imports `STATUS_COLORS`/`PLOT_THEME`/`FACE_COLORS`/`DISABLED_SUFFIX` from `polygon_fold_app.py`, everything else is its own pipeline
 - `tooltip.py` — small generic hover-tooltip helper for Tkinter (not net-fold-specific)
-- `net_fold_utils/` — the reusable library (see below), including `mesh_subdivide.py` — builds a fine "fabric" triangulation of a stretchy net (see "Fabric subdivision" below)
+- `net_fold_utils/` — the reusable library (see below), including `mesh_subdivide.py` — builds a fine "fabric" triangulation of a stretchy net (see "Fabric subdivision" below) — and `stretchy_net_layout.py` — lays a stretchy mesh's faces out as a flat, connected net via BFS over shared edges (see "The app" below)
 - `subdivision_utils/` — the (separate, simpler) fine-mesh library `polygon_subdivide.py` (and now `net_fold_utils/mesh_subdivide.py`) uses
 - `tools/generate_subdivided_stretchy_nets.py` — writes `stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below)
 - `nets/*.json` — **human-authored** RIGID net specs; the only files meant to be hand-edited (for that pipeline)
@@ -533,17 +533,50 @@ solve instead of an instant read).
 
 - **Net picker**: defaults to `stretchy_nets/cube_res4.json` if present
   (`DEFAULT_NET_BASENAME`), else the first net alphabetically.
-- **"Pressure" spinner + "Inflate" button**: applies ONE relaxation pass
-  (`stretchy_mesh.relax_once`) at a user-chosen, CONSTANT pressure,
-  continuing from wherever `self.positions` currently is (not from
-  scratch) -- so repeated clicks let the user watch/steer the shape
-  incrementally, rather than the app silently retrying different random
-  starts under the hood. Default/max: 3.0 / 10.0.
-- **Radio buttons** control how much work one "Inflate" click does:
-  "Iterate for N steps" passes `max_nfev=N` to `relax_once` (the closest
-  thing scipy's trust-region solver exposes to "N steps" -- there's no
-  clean "run exactly N iterations" knob); "Iterate until convergence"
-  passes `max_nfev=None`, running to the solver's own tolerance.
+- **The "Inflate" `LabelFrame`** groups everything about running
+  `relax_once`, top to bottom in the order it's used: Pressure spinner,
+  then the iterate-mode radio buttons, then the Inflate/Stop buttons.
+  ("Save" and the net picker live in the "Net" frame above it instead --
+  not inflation controls.)
+  - **"Pressure" spinner**: a user-chosen, CONSTANT pressure passed to
+    `relax_once`, continuing from wherever `self.positions` currently is
+    (not from scratch) -- so repeated clicks let the user watch/steer the
+    shape incrementally, rather than the app silently retrying different
+    random starts under the hood. Default/max: 3.0 / 10.0.
+  - **Radio buttons** control how much work one "Inflate" click does:
+    "Iterate for N steps" passes `max_nfev=N` to `relax_once` (the
+    closest thing scipy's trust-region solver exposes to "N steps" --
+    there's no clean "run exactly N iterations" knob); "Iterate until
+    convergence" passes `max_nfev=None`, running to the solver's own
+    tolerance (`stretchy_mesh.CONVERGENCE_GTOL = 1e-8`, passed explicitly
+    to `least_squares` so it's a known, displayable value rather than
+    relying on scipy's own default staying put across versions).
+  - **"Stop" button** sets a `threading.Event` (`self.stop_event`,
+    created fresh per Inflate click) that `relax_once`'s residual wrapper
+    checks on every evaluation, raising `stretchy_mesh.RelaxStopped`
+    internally to abort at the next evaluation rather than waiting for
+    scipy's own stopping criteria or the step cap -- returns whatever
+    position was last evaluated. Disabled except while an Inflate is
+    actually running (armed by `on_inflate_clicked`, disabled again by
+    `_set_controls_enabled(True)` once any background job finishes --
+    only `on_inflate_clicked` arms it, so it stays disabled during the
+    initial cache load, which isn't usefully interruptible).
+  - `relax_once`'s reported step count is scipy's own `sol.nfev`, NOT the
+    residual wrapper's raw call count -- the wrapper counts every actual
+    invocation (including numerical-Jacobian perturbations), which can
+    run to hundreds or thousands past `max_nfev`'s nominal value before
+    scipy checks the cap again; `sol.nfev` is what keeps a "10 steps"
+    request corresponding to a reported step count near 10, not some much
+    larger multiple. The raw count is used as a fallback ONLY when a Stop
+    request aborts before scipy ever returns a result (no `sol` to read
+    `nfev` from in that case).
+  - The bottom-of-figure annotation (`draw()`, via `fig.text` -- see
+    below) shows `optimality` (scipy's first-order optimality measure,
+    should approach 0) against `CONVERGENCE_GTOL`, plus whether THIS
+    press actually converged by scipy's own tolerance vs. hit the step
+    cap (or a Stop request) first -- `optimality` is `None`/shown as
+    "n/a" right after loading (before any Inflate press) or after a
+    Stop, since neither path has a real scipy result to read it from.
 - **Performance, measured on `cube_res4.json` (98 vertices, 294
   variables)**: each `relax_once` "step" costs roughly 2-2.5 seconds,
   REGARDLESS of pressure magnitude (0.1 and 3.0 measured about the same)
@@ -574,19 +607,38 @@ solve instead of an instant read).
   reintroduces the coarse solve's restart search as a precomputed,
   cached, one-time setup step, while keeping the interactive "Inflate"
   loop itself restart-free either way.
-- **"Save" button** writes the current vertex positions (plus
-  `iteration`, `pressure`, `stats`, `faces`, and -- for a fabric net --
+- **"Save" button** (in the "Net" frame, not "Inflate" -- it isn't an
+  inflation control) writes the current vertex positions (plus
+  `iteration`, `pressure`, `stats` -- including `optimality`/`converged`
+  -- `faces`, and -- for a fabric net --
   `coarse_faces`/`resolution`/`face_of_fine`) to `Save/<source>_<timestamp>.json`,
-  and the current figure (which embeds "Iteration: N | max stretch
-  X%, RMS Y%" via `fig.text` at the bottom -- so it's part of the
-  rendered image, not just a separate Tk label, and gets captured by
-  `savefig` too) to `Save/<source>_<timestamp>.png` -- same stem, so the
-  two files are easy to pair up later.
+  and the current figure (which embeds the "Iteration: N | ..." line via
+  `fig.text` at the bottom -- so it's part of the rendered image, not
+  just a separate Tk label, and gets captured by `savefig` too) to
+  `Save/<source>_<timestamp>.png` -- same stem, so the two files are easy
+  to pair up later.
 - Both the initial cache load and every "Inflate" click run in a
   background thread via `_run_background` (one shared helper for both),
   since either can take a while; Tk isn't thread-safe, so the worker only
   ever pushes to a queue and the main thread (via a scheduled `after`
   poll) is the only one touching widgets.
+- **Left panel is a real connected net, not disconnected islands**:
+  `on_select_net` precomputes `self.target_layout` once via
+  `net_fold_utils/stretchy_net_layout.py`'s `build_stretchy_net_layout` --
+  a breadth-first search over faces sharing an edge (derived directly
+  from each face's own vertex-loop order, no separate combinatorics step
+  needed -- unlike the rigid pipeline's `combinatorics.EdgeMap`, which
+  can't represent a stretchy mesh's multi-shared-edge face pairs at all),
+  attaching each newly-discovered face to whichever neighbor's edge found
+  it first via `polygon_geom.attach_polygon` (reversed, so it unfolds
+  outward -- same convention `net_layout.py` uses for the rigid pipeline).
+  A face pair sharing MORE than one edge just means extra entries that
+  BFS never uses for placement (only the first edge to a still-unplaced
+  face matters), same as an `edges.extra` edge would be ignored for
+  layout in the rigid `.json` format. `_draw_target_faces` just reuses
+  the precomputed `self.target_layout` on every redraw rather than
+  recomputing the BFS each time; the per-face raw-vertex-id text label
+  (e.g. "[4, 0, 2, 6]") that stood in for a real layout before is gone.
 
 ## Testing
 
@@ -630,6 +682,16 @@ distinct rest lengths (rim vs. spoke, not a uniform one), and that
 already-rigid coarse net (tetrahedron) and a genuinely bendy one
 (`two_pentagons_and_a_square.json`) — fast (~5s total) since the
 drape-then-relax approach never needs the slow random-restart search.
+
+`test_stretchy_net_layout.py` covers `build_stretchy_net_layout` (see
+"The app" above) across every net in `stretchy_nets/`: every face gets
+placed, every placed face keeps its exact unit-edge regular-polygon shape
+(rotation/translation only, no distortion), and -- reproducing the same
+BFS the function itself does -- every edge the tree actually attaches
+through lands its two faces' shared corners on the same two 2D points
+(the ones it DOESN'T attach through, for a face pair sharing more than
+one edge, are deliberately not checked -- see the module docstring for
+why that's expected, not a bug).
 
 ## Conventions worth knowing before editing
 

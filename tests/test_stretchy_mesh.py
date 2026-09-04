@@ -1,4 +1,5 @@
 import json
+import threading
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ from net_fold_utils import stretchy_mesh
 from net_fold_utils.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, solve_wireframe, STRETCH_CAP,
     _overall_3d_extent, _min_pairwise_separation, _mesh_volume, _sphere_bound_volume,
+    _volume_indices, _planarity_groups, _face_planarity_residual,
     _orientation_signs, _is_orientation_consistent,
     relax_once, EDGE_LENGTH,
 )
@@ -85,7 +87,45 @@ def _unit_edge_tetrahedron_points():
 def test_mesh_volume_matches_the_true_regular_tetrahedron_volume():
     pts, faces = _unit_edge_tetrahedron_points()
     idx = {i: i for i in range(len(pts))}
-    assert np.isclose(_mesh_volume(pts, faces, idx), TRUE_VOLUME["tetrahedron"], atol=1e-6)
+    volume_indices = _volume_indices(faces, idx)
+    assert np.isclose(_mesh_volume(pts, volume_indices), TRUE_VOLUME["tetrahedron"], atol=1e-6)
+
+
+def test_face_planarity_residual_is_zero_for_all_triangle_faces():
+    # every face here has exactly 3 vertices, always exactly planar --
+    # _planarity_groups should exclude them entirely (no size-4+ group).
+    pts, faces = _unit_edge_tetrahedron_points()
+    idx = {i: i for i in range(len(pts))}
+    groups = _planarity_groups(faces, idx)
+    assert groups == {}
+    assert _face_planarity_residual(pts, groups).size == 0
+
+
+def test_face_planarity_residual_flags_a_non_planar_quad():
+    # a square face lifted out of plane at one corner should give a
+    # nonzero residual for that face; a perfectly flat square should not.
+    flat = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
+    bent = flat.copy()
+    bent[0, 2] = 0.5  # lift one corner out of plane
+    idx = {i: i for i in range(4)}
+    face = [0, 1, 2, 3]
+    groups = _planarity_groups([face], idx)
+    assert set(groups) == {4}
+    assert np.allclose(_face_planarity_residual(flat, groups), 0.0, atol=1e-9)
+    assert np.max(np.abs(_face_planarity_residual(bent, groups))) > 0.05
+
+
+def test_planarity_groups_batches_multiple_face_sizes_independently():
+    # two squares + one pentagon: two groups (size 4 with 2 faces, size 5
+    # with 1), each internally batched, and no cross-contamination.
+    square_a = [0, 1, 2, 3]
+    square_b = [4, 5, 6, 7]
+    pentagon = [8, 9, 10, 11, 12]
+    idx = {i: i for i in range(13)}
+    groups = _planarity_groups([square_a, square_b, pentagon], idx)
+    assert set(groups) == {4, 5}
+    assert groups[4].shape == (2, 4)
+    assert groups[5].shape == (1, 5)
 
 
 @pytest.mark.parametrize("name,sides_each,n_faces", [
@@ -259,14 +299,37 @@ def test_relax_once_continues_from_the_given_positions_not_from_scratch():
     # have no reason to end up this well edge-length-fitted).
     positions, stats = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     assert stats["max_stretch_pct"] > 0.5  # confirms it started non-trivially stretched
-    _, nfev, max_stretch, rms_stretch = relax_once(
+    _, nfev, max_stretch, rms_stretch, optimality, converged = relax_once(
         positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=0.0, volume_target=0.0)
     assert max_stretch < 0.1
+    assert converged
+    assert optimality is not None and optimality < 1e-4
 
 
 def test_relax_once_max_nfev_caps_reported_steps():
+    # nfev is counted by relax_once's own wrapper (every actual call,
+    # including numerical-Jacobian perturbations), so it can overshoot
+    # max_nfev a little -- scipy only checks the cap between its own
+    # internal steps, not mid-Jacobian-estimate -- but a small budget
+    # should still cut off well short of an unbounded run.
     vol_target = _sphere_bound_volume(TETRAHEDRON_FACES, EDGE_LENGTH)
     positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
-    _, nfev, _, _ = relax_once(positions, TETRAHEDRON_FACES, EDGE_LENGTH,
-                                pressure=3.0, volume_target=vol_target, max_nfev=5)
-    assert nfev <= 5
+    _, nfev, _, _, _, converged = relax_once(
+        positions, TETRAHEDRON_FACES, EDGE_LENGTH,
+        pressure=3.0, volume_target=vol_target, max_nfev=5)
+    assert nfev < 30
+    assert not converged  # stopped by the step cap, not scipy's own tolerance
+
+
+def test_relax_once_stop_event_aborts_and_reports_not_converged():
+    vol_target = _sphere_bound_volume(TETRAHEDRON_FACES, EDGE_LENGTH)
+    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    stop_event = threading.Event()
+    stop_event.set()  # already set: should abort at the very first evaluation
+    new_positions, nfev, _, _, optimality, converged = relax_once(
+        positions, TETRAHEDRON_FACES, EDGE_LENGTH,
+        pressure=3.0, volume_target=vol_target, stop_event=stop_event)
+    assert set(new_positions) == set(positions)
+    assert nfev >= 1
+    assert optimality is None
+    assert not converged
