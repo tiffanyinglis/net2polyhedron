@@ -85,8 +85,8 @@ shared across more than one of them:
     `DISABLED_SUFFIX`/`COMPUTE_TOOLTIP`, extracted here (they used to
     live in `polygon_fold_app.py`, imported by the other apps from it)
     specifically so no app depends on another app's module
-  - `generate_platonic_nets.py` — (re)generates `data/input/nets/*.json` for the 5 Platonic solids + the truncated icosahedron from canonical 3D coordinates (`utils/geometry3d/solid_coords.py`) via `hull_to_spec.polyhedron_from_vertices`'s CCW face loops directly written out (no spanning tree to compute here — `net_unfolder.NetUnfolder` derives its own at load time, see "Pipeline" below)
-  - `generate_stretchy_platonic_nets.py` — (re)generates `data/input/stretchy_nets/*.json` for the 5 Platonic solids from the *same* coordinates, via `hull_to_spec.polyhedron_from_vertices`'s CCW face loops directly (no spanning tree needed — vertex-loop format has no hinge/root concept)
+  - `generate_platonic_nets.py` — (re)generates `data/input/nets/*.json` for the 5 Platonic solids + the truncated icosahedron from the ready-built `model.Polyhedron` objects in `utils/model/platonic_polyhedra.py` (their vertices/CCW face loops are already derived via `hull_to_spec.polyhedron_from_vertices` at construction time — no spanning tree to compute here — `net_unfolder.NetUnfolder` derives its own at load time, see "Pipeline" below)
+  - `generate_stretchy_platonic_nets.py` — (re)generates `data/input/stretchy_nets/*.json` for the 5 Platonic solids from the *same* `platonic_polyhedra.py` objects' already-derived CCW face loops (no spanning tree needed — vertex-loop format has no hinge/root concept)
   - `generate_open_dodecahedron_nets.py` — generates the two open-net examples (`data/input/nets/half_dodecahedron.json`, `data/input/nets/dodecahedron_minus_one.json`) by writing out a face SUBSET of the full dodecahedron's coordinates (remapped to only the vertices those faces reference)
   - `generate_subdivided_stretchy_nets.py` — writes `data/input/stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below). These 4 `generate_*.py` scripts aren't imported by anything (each is its own CLI entry point); they live in `common/` anyway since they're maintenance tooling shared across whichever apps read the `data/input/` specs they produce, and neither `utils/` (no `__main__` scripts there, see Conventions) nor `ui/` fit
 - `ui/` — generic Tkinter/matplotlib widgets, not net-fold domain logic:
@@ -96,9 +96,9 @@ shared across more than one of them:
 `src/utils/` — the reusable library, split by concern (see each
 sub-package's own `__init__.py` docstring for its module list):
 - `geometry2d/` — flat 2D polygon geometry: `polygon_geom.py`, `stretchy_net_layout.py`
-- `geometry3d/` — the rigid fold engine, stretchy-mesh solving, coordinates: `net_fold_core.py`, `stretchy_mesh.py`, `solid_coords.py`, `hull_to_spec.py`
+- `geometry3d/` — the rigid fold engine, stretchy-mesh solving, coordinate derivation: `net_fold_core.py`, `stretchy_mesh.py`, `hull_to_spec.py`
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
-- `model/` — `Polyhedron`: pure 3D solid geometry (shared, indexed vertices; CCW vertex-index faces; derived edges), with **no** awareness of nets, hinges, roots, fold progress, or color — used by both the rigid and stretchy pipelines. Unfolding-specific logic/objects live in `net_unfolder/` instead, never here.
+- `model/` — `Polyhedron`: pure 3D solid geometry (shared, indexed vertices; CCW vertex-index faces; derived edges), with **no** awareness of nets, hinges, roots, fold progress, or color — used by both the rigid and stretchy pipelines. Unfolding-specific logic/objects live in `net_unfolder/` instead, never here. Also `platonic_polyhedra.py` — `Polyhedron` subclasses for the 5 Platonic solids + the truncated icosahedron (`Tetrahedron`, `Cube`, `Octahedron`, `Icosahedron`, `Dodecahedron`, `TruncatedIcosahedron`, plus a `PLATONIC_SOLIDS` name->class dict), each instantiable directly (e.g. `Cube()`) as a ready-to-use `Polyhedron` — vertices/CCW faces are derived via `geometry3d/hull_to_spec.py` once, at construction, rather than every caller separately running raw coordinates through `polyhedron_from_vertices` (the old `geometry3d/solid_coords.py` design, since removed — see git history).
 - `net_unfolder/` — `NetUnfolder`: derives a net (spanning tree, unfoldable flat layout, fold angles) from an already-built `Polyhedron` — see "Pipeline" below. Also `hinge.py` (`Hinge`). No cache module — nothing here is cached, see "Caching" below.
 - `persistence/` — `polyhedron_spec.py` parses/writes the on-disk rigid `.json` format; `checksums.py` (`source_checksum`) and `stretchy_cache.py` are used only by the stretchy pipeline's cache (`inflate_polyhedron_app`) — the rigid pipeline has nothing to checksum against since it never caches
 
@@ -1025,7 +1025,7 @@ why that's expected, not a bug).
   own. The RIGID pipeline has no such requirement anymore -- since
   `NetUnfolder` reads real, already-given coordinates (`data/input/nets/*.json`),
   edge length is simply whatever the input `Polyhedron` says (e.g.
-  `solid_coords.cube()`'s raw canonical coordinates have edge length 2,
+  `platonic_polyhedra.Cube()`'s raw canonical coordinates have edge length 2,
   not 1) -- `polygon_geom.EDGE_LENGTH` (still 1.0) is now only a default
   used by `regular_polygon_vertices`/`attach_polygon`, which the stretchy
   pipeline's `stretchy_net_layout.py` still calls, not anything in the

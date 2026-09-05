@@ -9,9 +9,9 @@ instead of repeating the same coordinate/face-loop setup inline.
 """
 import numpy as np
 
-from utils.geometry3d.solid_coords import tetrahedron as _tetrahedron_coords
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
 from utils.model.polyhedron import Polyhedron
+from utils.model.platonic_polyhedra import Tetrahedron
 from utils.net_unfolder import NetUnfolder
 
 
@@ -23,7 +23,7 @@ class TetraNetSpec:
 
     @staticmethod
     def _face_loops():
-        vertices = _tetrahedron_coords()
+        vertices = Tetrahedron.raw_vertices()
         _, _, face_loops = polyhedron_from_vertices(vertices)
         return [np.array(v, dtype=float) for v in vertices], face_loops
 

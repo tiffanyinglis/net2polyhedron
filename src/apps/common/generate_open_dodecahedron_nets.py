@@ -11,7 +11,7 @@ model.Polyhedron.is_closed).
 import os
 
 from paths import NETS_DIR
-from utils.geometry3d.solid_coords import dodecahedron
+from utils.model.platonic_polyhedra import Dodecahedron
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
 from utils.persistence.polyhedron_spec import write_polyhedron_spec
 
@@ -37,7 +37,7 @@ def _write_face_subset(vertices, face_loops, keep_faces, name):
 
 
 def main():
-    vertices = dodecahedron()
+    vertices = Dodecahedron.raw_vertices()
     _, edges, face_loops = polyhedron_from_vertices(vertices)
     adj = {f: set() for f in range(len(face_loops))}
     for a, b in edges:

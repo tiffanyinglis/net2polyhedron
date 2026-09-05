@@ -1,17 +1,13 @@
 import numpy as np
 import pytest
 
-from utils.geometry3d.solid_coords import SOLIDS
-from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
 from utils.model.polyhedron import Polyhedron
+from utils.model.platonic_polyhedra import PLATONIC_SOLIDS
 from utils.net_unfolder import NetUnfolder
 
 
 def _polyhedron(name):
-    vertices = SOLIDS[name]()
-    _, _, face_loops = polyhedron_from_vertices(vertices)
-    return Polyhedron(vertices=[np.array(v, dtype=float) for v in vertices],
-                       faces=[tuple(loop) for loop in face_loops], name=name)
+    return PLATONIC_SOLIDS[name]()
 
 
 def test_spanning_tree_reaches_every_face_of_a_cube():
@@ -60,7 +56,7 @@ def test_fold_at_t1_reproduces_the_original_closed_polyhedron():
 
     # every original edge length is preserved by the fold, since
     # fold_transforms applies rigid rotations to a rigid layout -- a real
-    # reconstruction, not an approximation. (solid_coords.py's raw
+    # reconstruction, not an approximation. (platonic_polyhedra.py's raw
     # canonical coordinates aren't normalized to edge length 1 -- a cube's
     # corners at (+-1,+-1,+-1) have edge length 2 -- so compare against
     # the ORIGINAL polyhedron's own edge length, not a hardcoded 1.0.)

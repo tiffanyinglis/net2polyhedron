@@ -6,17 +6,19 @@ Modules:
                      distinct_vertices(), face_normal(), is_closed_solid())
   stretchy_mesh  -- the stretchy (non-rigid) mesh solver: edge-length fit +
                      pressure-based inflation, plus the interactive relax_once
-  solid_coords   -- canonical vertex coordinates for the Platonic solids
   hull_to_spec   -- derive a face spec from a convex polyhedron's 3D vertices
+
+Canonical Platonic-solid coordinates now live as model.Polyhedron
+subclasses in utils.model.platonic_polyhedra (e.g. Cube, Dodecahedron),
+not here -- see that module's docstring.
 """
 from .net_fold_core import (
     fold, fold_transforms, flatten_net, distinct_vertices, face_normal, is_closed_solid)
 from .stretchy_mesh import load_stretchy_mesh, solve_wireframe, relax_once
-from .solid_coords import SOLIDS
 from .hull_to_spec import polyhedron_from_vertices
 
 __all__ = [
     "fold", "fold_transforms", "flatten_net", "distinct_vertices", "face_normal", "is_closed_solid",
     "load_stretchy_mesh", "solve_wireframe", "relax_once",
-    "SOLIDS", "polyhedron_from_vertices",
+    "polyhedron_from_vertices",
 ]

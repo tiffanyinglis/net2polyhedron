@@ -1,5 +1,5 @@
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from utils.geometry3d.solid_coords import tetrahedron, cube, octahedron
+from utils.model.platonic_polyhedra import Tetrahedron, Cube, Octahedron
 
 
 def _assert_euler_consistent(vertices, degrees, edges):
@@ -8,7 +8,7 @@ def _assert_euler_consistent(vertices, degrees, edges):
 
 
 def test_tetrahedron_from_vertices():
-    verts = tetrahedron()
+    verts = Tetrahedron.raw_vertices()
     degrees, edges, _ = polyhedron_from_vertices(verts)
     assert degrees == [3, 3, 3, 3]
     assert len(edges) == 6
@@ -16,7 +16,7 @@ def test_tetrahedron_from_vertices():
 
 
 def test_cube_from_vertices():
-    verts = cube()
+    verts = Cube.raw_vertices()
     degrees, edges, _ = polyhedron_from_vertices(verts)
     assert degrees == [4] * 6
     assert len(edges) == 12
@@ -24,7 +24,7 @@ def test_cube_from_vertices():
 
 
 def test_octahedron_from_vertices():
-    verts = octahedron()
+    verts = Octahedron.raw_vertices()
     degrees, edges, _ = polyhedron_from_vertices(verts)
     assert degrees == [3] * 8
     assert len(edges) == 12

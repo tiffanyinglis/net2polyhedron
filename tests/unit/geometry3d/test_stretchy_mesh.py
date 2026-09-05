@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from utils.geometry3d.solid_coords import tetrahedron as tetrahedron_coords
+from utils.model.platonic_polyhedra import Tetrahedron
 from utils.geometry3d import stretchy_mesh
 from utils.subdivisions.mesh_subdivide import solve_fabric_mesh
 from utils.geometry3d.stretchy_mesh import (
@@ -64,7 +64,7 @@ def test_mesh_edges_deduplicates_and_sorts():
 # ---- _mesh_volume / _sphere_bound_volume ----
 
 def _unit_edge_tetrahedron_points():
-    verts = np.array(tetrahedron_coords())
+    verts = np.array(Tetrahedron.raw_vertices())
     degrees, edges, face_loops = polyhedron_from_vertices(verts)
     edge_length = np.linalg.norm(verts[face_loops[0][0]] - verts[face_loops[0][1]])
     return verts / edge_length, face_loops
@@ -170,8 +170,8 @@ def test_solve_wireframe_on_a_tetrahedron_inflates_within_the_stretch_cap():
 
 
 # name -> (num_faces, num_vertices, num_edges, sides_per_face), generated
-# by tools/generate_stretchy_platonic_nets.py from the same coordinates
-# (utils/geometry3d/solid_coords.py) the RIGID nets/*.json specs use.
+# by src/apps/common/generate_stretchy_platonic_nets.py from the same
+# solids (utils/model/platonic_polyhedra.py) the RIGID nets/*.json specs use.
 PLATONIC_STRETCHY_NETS = {
     "tetrahedron": (4, 4, 6, 3),
     "cube": (6, 8, 12, 4),
