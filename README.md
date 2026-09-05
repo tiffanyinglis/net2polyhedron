@@ -121,14 +121,14 @@ arguments straight through to pytest, e.g. `python tests/run_tests.py -k stretch
 src/
   utils/                          the reusable library
     geometry2d/                    flat 2D polygon geometry and net layout
-    geometry3d/                    3D fold engine, stretchy-mesh solving,
-                                    hull-to-spec coordinate derivation, and
-                                    Polyhedron (pure 3D solid geometry)
+    geometry3d/                    stretchy-mesh solving and hull-to-spec
+                                    coordinate derivation
     subdivisions/                  fine-triangle-mesh subdivision (2D
                                     preview + 3D fabric)
-    polyhedron_unfolder/           NetUnfolder: derives a net's spanning
-                                    tree, flat layout, and fold angles
-                                    from an already-built Polyhedron
+    polyhedron_unfolder/           Polyhedron (pure 3D solid geometry) plus
+                                    UnfoldablePolyhedron: derives a net's
+                                    spanning tree, flat layout, and fold
+                                    angles from an already-built Polyhedron
     persistence/                   parse/write the on-disk .json formats,
                                     plus the stretchy pipeline's own
                                     checksummed cache (the rigid pipeline

@@ -11,9 +11,37 @@ These files are considered DONE -- the user has finished them and
 deliberately doesn't want them touched, since editing them (even
 additively) risks messing up code structure they've already settled on:
 
-- `src/utils/geometry3d/polyhedron.py` (moved here from the now-deleted `src/utils/model/`)
-- `src/apps/polyhedron_unfolder/app.py`
-- `src/utils/polyhedron_unfolder/polyhedron_unfolder.py` (`NetUnfolder`, `Hinge`, `is_closed`; the package used to be named `net_unfolder`)
+- `src/utils/geometry2d/polygon_geom.py`
+- `src/apps/ui/tooltip.py`
+- `src/apps/ui/cullable_face.py`
+- `src/apps/ui/__init__.py`
+- `src/apps/common/bounding_box.py`
+- `src/apps/common/ui_theme.py`
+- `.gitignore`
+- `requirements.txt`
+- `pytest.ini`
+- `.claude/settings.local.json`
+- `tests/unit/apps_common/test_bounding_box.py`
+- `tests/unit/geometry2d/test_polygon_geom.py`
+
+(This batch is synced from the sibling `polyhedron-unfolder` project --
+each is either byte-identical there or differs only in import paths for
+net2polyhedron's package layout, verified file-by-file. Files there that
+have genuinely diverged, e.g. `src/apps/common/paths.py`, were deliberately
+NOT synced since `polyhedron-unfolder`'s version lacks functionality
+net2polyhedron depends on.
+
+**The entire rigid-unfolding pipeline (`src/apps/polyhedron_unfolder/`,
+`src/utils/polyhedron_unfolder/`, `src/utils/persistence/polyhedron_spec.py`,
+their tests, and `data/input/nets/*.json`) has been DELETED from this
+project** -- that functionality now lives solely in the sibling
+`polyhedron-unfolder` project, so it no longer needs to be duplicated or
+synced here. `tests/unit/geometry3d/test_hull_to_spec.py` and
+`tests/unit/geometry3d/test_stretchy_mesh.py` had their own borrowed copies
+of rigid-net vertex coordinates (used only as fixture data, not a real
+functional dependency) inlined directly so they didn't need to change
+behavior. `src/apps/common/paths.py` still defines `NETS_DIR` even though
+nothing reads it anymore -- harmless, but a cleanup candidate.)
 
 Do not read these as a target for changes and do not modify them --
 adding, removing, or "just cleaning up" anything in them is off limits --
@@ -106,9 +134,9 @@ shared across more than one of them:
     specifically so no app depends on another app's module
   - `bounding_box.py` — `bounding_box(vertices)`: `(lo, hi)` over a list/array
     of 3D points, used by `polyhedron_unfolder`'s `_draw_solid` to center
-    and size its 3D view. Lives here rather than as a `geometry3d.Polyhedron`
+    and size its 3D view. Lives here rather than as a `polyhedron_unfolder.Polyhedron`
     method since it's a rendering concern, not domain geometry the fold
-    pipeline itself needs — see `geometry3d/`'s own bullet below.
+    pipeline itself needs — see `polyhedron_unfolder/`'s own bullet below.
   There USED TO be a `sample_polyhedra.py` here (`SamplePolyhedron`/`OpenSamplePolyhedron`
   subclasses -- `Tetrahedron`, `Cube`, ..., `TruncatedIcosahedron`, `HalfDodecahedron`,
   `DodecahedronMinusOne` -- deriving vertices/CCW faces from raw coordinates via
@@ -131,20 +159,75 @@ shared across more than one of them:
 `src/utils/` — the reusable library, split by concern (see each
 sub-package's own `__init__.py` docstring for its module list):
 - `geometry2d/` — flat 2D polygon geometry: `polygon_geom.py`, `stretchy_net_layout.py`
-- `geometry3d/` — the rigid fold engine, stretchy-mesh solving, coordinate derivation, and `Polyhedron`: `net_fold_core.py`, `stretchy_mesh.py`, `hull_to_spec.py`, `polyhedron.py`. `Polyhedron` (pure 3D solid geometry — shared, indexed vertices; CCW vertex-index faces; derived edges — **no** awareness of nets, hinges, roots, fold progress, or color, used by both the rigid and stretchy pipelines) used to live in its own `utils/model/` package; folded in here since `geometry3d` was its only real dependency (`face_normal`) and `model/` had nothing else in it, so the extra package bought no separation. Unfolding-specific logic/objects still live in `polyhedron_unfolder/` instead, never here — that's why `is_closed` is `polyhedron_unfolder.is_closed(polyhedron)` (closure is a fold-progress fact), not a `Polyhedron` property, and why `bounding_box()` is a rendering helper in `apps/common/bounding_box.py`, not a `Polyhedron` method. Sample solids (Platonic, etc.) are just loaded directly from `data/input/nets/*.json` wherever needed — see the (now-removed) `sample_polyhedra.py` note in `apps/common/`'s own bullet above. **`polyhedron.py` is on the untouchable-files list** (see top of this doc) — don't edit it without asking first.
+- `geometry3d/` — stretchy-mesh solving and coordinate derivation ONLY:
+  `stretchy_mesh.py`, `hull_to_spec.py`. No longer holds the rigid fold
+  engine or `Polyhedron` at all — both moved into `polyhedron_unfolder/`
+  (see that bullet below) once the rigid pipeline was rewritten around
+  real, already-given coordinates instead of solving for fold angles (see
+  "Pipeline" below); `geometry3d/__init__.py` now only re-exports
+  `load_stretchy_mesh, solve_wireframe, relax_once, polyhedron_from_vertices`.
+  Sample solids (Platonic, etc.) are just loaded directly from
+  `data/input/nets/*.json` wherever needed — see the (now-removed)
+  `sample_polyhedra.py` note in `apps/common/`'s own bullet above.
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
-- `polyhedron_unfolder/` — `NetUnfolder`: derives a net (spanning tree, unfoldable flat layout, fold angles) from an already-built `Polyhedron` — see "Pipeline" below. Also `Hinge` and `is_closed(polyhedron)`, both defined in `polyhedron_unfolder.py` itself (no separate `hinge.py` module -- `Hinge` used to live there but had no consumers outside `NetUnfolder`, so it was folded in rather than kept as its own one-class file). Package (and its one module) used to be named `net_unfolder` -- renamed to match `apps/polyhedron_unfolder/`'s naming (a distinct, unrelated directory under `apps/` rather than `utils/` — same name, different package, no import collision, but worth knowing when searching for "polyhedron_unfolder" in this codebase). No cache module — nothing here is cached, see "Caching" below.
-- `persistence/` — `polyhedron_spec.py` parses/writes the on-disk rigid `.json` format; `checksums.py` (`source_checksum`) and `stretchy_cache.py` are used only by the stretchy pipeline's cache (`inflate_polyhedron_app`) — the rigid pipeline has nothing to checksum against since it never caches
+- `polyhedron_unfolder/` — the rigid pipeline's whole object model, split
+  into four modules (see `__init__.py`'s own docstring for this same
+  breakdown):
+  - `polyhedron.py` — class `Polyhedron`: pure 3D solid geometry — shared,
+    indexed vertices; CCW vertex-index faces; derived `.edges`; **no**
+    awareness of nets, hinges, roots, fold progress, or color. Also
+    `.face_vertices()`, `.face_normal()`, `.is_closed()` (now an
+    INSTANCE METHOD — a purely combinatorial check, does every edge, by
+    shared vertex index, appear in exactly 2 faces? — not a free
+    function, since it's cheap enough and general enough to just live on
+    the class itself now that there's no separate "fold progress" object
+    it would otherwise have to reach into), and
+    `.compute_face_adjacency()` (for every polygon edge, is there another
+    face with the same two vertices in the opposite order — the
+    CCW-from-outside convention). **This file is on the untouchable-files
+    list** (see top of this doc) — don't edit it without asking first.
+  - `polyhedron_unfolder.py` — the fold engine: `Hinge` (parent/child face
+    index, parent/child edge index, `.angle` set directly — no
+    `to_legacy_dict()` or similar), `hinge_transform()` (the 4x4
+    affine-matrix builder for one hinge's rotation), `face_normal()` (a
+    free function operating on raw point arrays — what `Polyhedron.face_normal`
+    calls internally), and `fold_transforms()` (walks a hinge list in BFS
+    order, giving each face one cumulative 4x4 transform — see "Pipeline"
+    below). **Also on the untouchable-files list.**
+  - `unfoldable_polyhedron.py` — class `UnfoldablePolyhedron(polyhedron,
+    spanning_tree, root=0)`: given a `Polyhedron` and a spanning tree over
+    its face adjacency, builds the flat layout once and folds at any
+    progress via `.get_unfolded_state(amount_unfolded, fold_signs=None)`
+    (0 = fully folded, 1 = fully flat — see "Pipeline" below for why this
+    convention is inverted from the old `NetUnfolder.fold(t)`'s). Has
+    `.hinges` (list of `Hinge`, angles filled in) and `.flat` (a
+    `Polyhedron` at z=0). Classmethod `.load(path)` is the one public
+    loading entry point for a `.json` spec — no `cache_dir` argument,
+    since nothing here is cached (see "No caching" below).
+  - `spanning_tree.py` — `create_spanning_tree_BFS(node_indices,
+    adjacencies, root)`, a generic BFS spanning tree over abstract nodes
+    and edge "ports" (it knows nothing about polyhedra; callers translate
+    their own adjacency into `(node_a, port_a, node_b, port_b)` tuples).
+    Returns a list of tree-edge dicts (`{parent, child, parent_edge_idx,
+    child_edge_idx}`), raising `ValueError` if any node is unreachable
+    from `root`.
+  - `__init__.py` re-exports `Polyhedron`, `UnfoldablePolyhedron`,
+    `Hinge`, `hinge_transform`, `face_normal`, `fold_transforms`,
+    `create_spanning_tree_BFS` — everything else in this package's own
+    modules is an implementation detail.
+  No cache module anywhere in this package — nothing here is cached, see
+  "No caching" below.
+- `persistence/` — `polyhedron_spec.py` (`load_polyhedron_spec`/`write_polyhedron_spec`) parses/writes the on-disk rigid `.json` format; `checksums.py` (`source_checksum`) and `stretchy_cache.py` are used only by the stretchy pipeline's cache (`inflate_polyhedron_app`) — the rigid pipeline has nothing to checksum against since it never caches. Note: this module's own name is a deliberate exception to `polyhedron_unfolder/`'s naming — it's shared with `inflate_polyhedron_app`'s tests too, so it kept its net2polyhedron-original name rather than being renamed; `UnfoldablePolyhedron.load()` just calls into it.
 
 `data/` — everything on-disk that isn't code (input specs and app output
 ONLY — no caches; those are per-app, under `src/apps/<app>/cache/`, see
 above):
-- `input/nets/*.json` — RIGID net specs: a direct encoding of a `geometry3d.Polyhedron` (real 3D vertex positions + CCW face loops). These are the canonical, hand-kept inputs for the 5 Platonic solids, the truncated icosahedron, and two open dodecahedron-derived nets — nothing regenerates them (the old `sample_polyhedra.py`/`generate_*.py` approach for deriving them from raw coordinates via hull_to_spec was removed once these files were settled, see `common/`'s own bullet above); anything that needs one of these solids loads it straight from here
+- `input/nets/*.json` — RIGID net specs: a direct encoding of a `polyhedron_unfolder.Polyhedron` (real 3D vertex positions + CCW face loops). These are the canonical, hand-kept inputs for the 5 Platonic solids, the truncated icosahedron, and two open dodecahedron-derived nets — nothing regenerates them (the old `sample_polyhedra.py`/`generate_*.py` approach for deriving them from raw coordinates via hull_to_spec was removed once these files were settled, see `common/`'s own bullet above); anything that needs one of these solids loads it straight from here
 - `input/stretchy_nets/*.json` — **human-authored** STRETCHY net specs (vertex-loop format, see below) — a parallel, differently-shaped set of input files, not interchangeable with `input/nets/*.json`
 - `output/` — user-generated saves from `inflate_polyhedron_app`'s "Save" button (see "The app" below), created on demand
 
 `tests/` — pytest suite (see Testing below):
-- `unit/<category>/` — one test file per `src/utils/<category>/` module, mirroring `src/utils/`'s own sub-package layout exactly (so `unit/geometry3d/test_polyhedron.py` tests `geometry3d/polyhedron.py`, and `unit/polyhedron_unfolder/*.py` tests the `polyhedron_unfolder/` package -- both moved/renamed together with their source when those did)
+- `unit/<category>/` — one test file per `src/utils/<category>/` module, mirroring `src/utils/`'s own sub-package layout exactly (so `unit/polyhedron_unfolder/test_polyhedron.py` tests `polyhedron_unfolder/polyhedron.py`, `unit/polyhedron_unfolder/test_polyhedron_unfolder.py` tests `polyhedron_unfolder/polyhedron_unfolder.py` — `Hinge`/`hinge_transform`/`face_normal`/`fold_transforms` together — and `unit/polyhedron_unfolder/test_unfoldable_polyhedron.py` tests `unfoldable_polyhedron.py` -- all three moved/renamed together with their source when the rigid pipeline was rewritten, see "Pipeline" below)
 - `unit/apps_common/` — the (currently one-file) exception: covers `src/apps/common/` helpers that are plain functions/classes with no Tkinter/matplotlib dependency (e.g. `bounding_box.py`) -- not a `src/utils/` category, so it doesn't fit the mirroring rule above; the rest of `src/apps/` stays untested per this project's existing convention (see "The apps" below).
 - `integration/` — tests that deliberately exercise multiple `utils` sub-packages together, plus `helpers.py`, shared fixture-builder classes that keep an integration test reading as "build a net, load it, check a property" rather than repeating multi-argument setup calls inline
 - `run_tests.py` — `python tests/run_tests.py [pytest args...]`
@@ -157,7 +240,7 @@ Top level:
 ## The `.json` format (RIGID pipeline)
 
 Full grammar lives in `src/utils/persistence/polyhedron_spec.py`'s docstring --
-a direct encoding of a `geometry3d.Polyhedron`, nothing more:
+a direct encoding of a `polyhedron_unfolder.Polyhedron`, nothing more:
 
 ```json
 {
@@ -170,7 +253,7 @@ a direct encoding of a `geometry3d.Polyhedron`, nothing more:
 `vertices` is real 3D positions; `faces` is each face's CCW
 (viewed-from-outside) vertex-index loop. There's no root, no net/extra
 edge split, no per-face degree list, no coordinates-vs-combinatorics
-distinction at all -- `polyhedron_unfolder.NetUnfolder` (see "Pipeline" below)
+distinction at all -- `UnfoldablePolyhedron` (see "Pipeline" below)
 derives the spanning tree, flat layout, and every fold angle itself from
 whatever geometry is given here. This is a deliberate simplification from
 an earlier abstract faces/edges spec format (no coordinates, fold angles
@@ -183,113 +266,147 @@ given (see "Pipeline" below for exactly why).
 
 An "open" net (one that doesn't fold up into a closed solid) is simply a
 spec whose `"faces"` list is a face SUBSET of some solid's -- no special
-field or bookkeeping needed, since `NetUnfolder` derives face adjacency
-directly from whichever faces are actually listed; a face that would be
-adjacent to an omitted one just ends up with a boundary edge instead of a
-hinge. The one rule: only include the vertices the listed faces actually
-reference (an unreferenced vertex would still count toward
-`apps/common/bounding_box.py`'s `bounding_box()`, silently enlarging it
-around an invisible point). `data/input/nets/half_dodecahedron.json` and
+field or bookkeeping needed, since `Polyhedron.compute_face_adjacency()`
+derives face adjacency directly from whichever faces are actually listed;
+a face that would be adjacent to an omitted one just ends up with a
+boundary edge instead of a hinge. The one rule: only include the vertices
+the listed faces actually reference (an unreferenced vertex would still
+count toward `apps/common/bounding_box.py`'s `bounding_box()`, silently
+enlarging it around an invisible point). `data/input/nets/half_dodecahedron.json` and
 `data/input/nets/dodecahedron_minus_one.json` are worked examples --
 settled, hand-kept files (like every other net in this directory now, see
 `common/`'s own bullet above), remapped to reference a face subset of the
 same vertices `data/input/nets/dodecahedron.json` uses instead of the full set.
 
 An open net's fold is generally an **open, non-convex** shape even at
-t=1 -- `polyhedron_unfolder.is_closed(polyhedron)` checks this directly and purely
+full fold -- `Polyhedron.is_closed()` checks this directly and purely
 combinatorially (does every edge, by shared vertex INDEX, appear in
 exactly 2 faces?) once vertices are merged into indices (see
 "Pipeline" below) -- no float tolerance involved at that point at all.
-It lives in `polyhedron_unfolder`, not as a `geometry3d.Polyhedron` property, since
-closure is a fact about fold progress (a flat/mid-fold/open-net result
-isn't closed; a fully-folded closed spec is), not a static geometric fact
-`Polyhedron` itself should have an opinion about.
+It's an instance method on `Polyhedron` itself now (not a free function
+keyed on fold progress the way the old implementation had it) since it's
+just as meaningful to ask of the input polyhedron, the flat net, or any
+partially-folded state in between -- `UnfoldablePolyhedron.get_unfolded_state()`
+returns a `Polyhedron` at every one of those, and `.is_closed()` works the
+same way on any of them.
 `polyhedron_unfolder` (the app) checks it (both tabs, independently) before applying
 `_CullableFace` backface culling (see below), which is only valid for a
 closed convex solid.
 
-## Pipeline (`src/utils/polyhedron_unfolder/polyhedron_unfolder.py: NetUnfolder`)
+## Pipeline (`src/utils/polyhedron_unfolder/`)
 
-The object model is split by concern, not into two packages anymore:
-`src/utils/geometry3d/polyhedron.py` holds `Polyhedron` -- pure 3D-mesh
-geometry (shared, indexed `vertices`, CCW vertex-index `faces`, derived
-`edges`) with **no** awareness of nets, hinges, roots, fold progress, or
-color (it used to live in its own `utils/model/` package, since folded
-into `geometry3d/` -- see that sub-package's own bullet in "Directory
-layout" above) -- while `src/utils/polyhedron_unfolder/` holds everything
-unfolding-specific: `Hinge` (parent/child face indices, edge indices,
-angle) and `NetUnfolder` itself. `Polyhedron` describes BOTH the pre-fold
-flat net (`NetUnfolder.flat`, at z=0) and every fold stage in between and
-after (`NetUnfolder.fold(t)`), not just the final closed solid -- this
-works because an unfolded net is exactly the kind of mesh `Polyhedron`
-already handles without modification: a hinge-glued edge is *genuinely*
-shared (two faces meet there at any `t`, even `t=0`), while a non-hinge
-closure edge is *not yet* shared (its two faces only coincide once
-folded) -- "one edge becomes two, one vertex becomes several" until
-folding brings them together, and `polyhedron_unfolder.is_closed(...)`
-simply reports this honestly at whatever `t` you ask.
+The object model is split by concern, across the four modules of this one
+package (see that package's own bullet in "Directory layout" above for
+the full per-file breakdown): `polyhedron.py` holds `Polyhedron` -- pure
+3D-mesh geometry (shared, indexed `vertices`, CCW vertex-index `faces`,
+derived `.edges`) with **no** awareness of nets, hinges, roots, fold
+progress, or color -- while `polyhedron_unfolder.py` (`Hinge`,
+`hinge_transform()`, `face_normal()`, `fold_transforms()`) and
+`unfoldable_polyhedron.py` (`UnfoldablePolyhedron`) hold everything
+unfolding-specific. `Polyhedron` describes BOTH the pre-fold flat net
+(`UnfoldablePolyhedron.flat`, at z=0) and every fold stage in between and
+after (`UnfoldablePolyhedron.get_unfolded_state(amount_unfolded)`), not
+just the final closed solid -- this works because an unfolded net is
+exactly the kind of mesh `Polyhedron` already handles without
+modification: a hinge-glued edge is *genuinely* shared (two faces meet
+there at any fold amount, even fully flat), while a non-hinge closure
+edge is *not yet* shared (its two faces only coincide once folded) --
+"one edge becomes two, one vertex becomes several" until folding brings
+them together, and `Polyhedron.is_closed()` simply reports this honestly
+on whatever `Polyhedron` you ask it of.
 
-`NetUnfolder.load(path, cache_dir=None)` is the one public loading entry
-point for a `.json` spec (via the cache, see below); `NetUnfolder.for_polyhedron(polyhedron, root=0, cache_path=None)`
-is the same thing for an already-built `Polyhedron` with no source file.
-Both funnel into `NetUnfolder._compute`, which derives everything fresh:
+`UnfoldablePolyhedron.load(path)` is the one public loading entry point
+for a `.json` spec -- no `cache_dir`/`cache_path` argument, since nothing
+here is cached (see "No caching" below). It parses the spec via
+`persistence.polyhedron_spec.load_polyhedron_spec`, builds a `Polyhedron`,
+derives a spanning tree over its face adjacency (root always face index
+0), and constructs the `UnfoldablePolyhedron`. Building one directly from
+an already-built `Polyhedron` (no source file) is just
+`UnfoldablePolyhedron(polyhedron, spanning_tree, root=0)` -- the caller
+supplies its own spanning tree (typically via
+`polyhedron.compute_face_adjacency()` +
+`spanning_tree.create_spanning_tree_BFS(...)`, exactly what `.load()`
+does internally). `UnfoldablePolyhedron.__init__` derives everything
+fresh at construction time:
 
-1. **Face adjacency** (`_face_adjacency`) -- for every polygon edge of
-   every face, is there another face with the SAME two vertices in the
-   OPPOSITE order (the CCW-from-outside convention: a shared edge is
-   v->w on one face, w->v on the other)? Read directly off the given
-   `Polyhedron`'s own face loops, in O(total edges) -- no planar
-   embedding, no `networkx`, no possibility of "duplicate edge" failure
-   for a face pair sharing more than one edge (that combinatorial
+1. **Face adjacency** (`Polyhedron.compute_face_adjacency()`) -- for
+   every polygon edge of every face, is there another face with the SAME
+   two vertices in the OPPOSITE order (the CCW-from-outside convention: a
+   shared edge is v->w on one face, w->v on the other)? Read directly off
+   the given `Polyhedron`'s own face loops, in O(total edges) -- no
+   planar embedding, no `networkx`, no possibility of "duplicate edge"
+   failure for a face pair sharing more than one edge (that combinatorial
    ambiguity only existed because the OLD abstract format had no
    coordinates to disambiguate with; a real `Polyhedron` already knows
-   exactly which edge is which).
-2. **Spanning tree** (`_spanning_tree`) -- BFS from `root` (always face
-   index 0; any face works equally well as root, same reasoning as the
-   old format's root selection) over that adjacency, giving a list of
-   hinges (parent/child face index, parent/child edge index) -- an
-   unreached face after the BFS (some faces disconnected by shared
-   edges) raises.
-3. **Flat layout** (`_build_flat_layout`) -- each face's own REAL 3D
-   corners are projected into an orthonormal 2D basis within its own
-   plane (`_project_face_to_2d`; u = first edge direction, w = face
-   normal, v = w x u -- exact same edge lengths as the real face, works
-   for irregular faces too, not just regular polygons), then BFS-attached
-   to its parent's already-placed shared edge, reversed, via
+   exactly which edge is which). An edge with no match (an open net's
+   boundary edge) is simply omitted.
+2. **Spanning tree** (`spanning_tree.create_spanning_tree_BFS`) -- BFS
+   from `root` (always face index 0 via `.load()`; any face works equally
+   well as root) over that adjacency, giving a list of tree-edge dicts
+   (`{parent, child, parent_edge_idx, child_edge_idx}`) -- an unreached
+   face after the BFS (some faces disconnected by shared edges) raises
+   `ValueError`. This function itself is domain-agnostic (it knows
+   nothing about polyhedra, just abstract nodes and edge "ports") -- the
+   polyhedron-specific translation from `compute_face_adjacency()`'s
+   `(face_a, edge_idx_a, face_b, edge_idx_b)` tuples into that generic
+   `(node_a, port_a, node_b, port_b)` shape happens in the caller.
+3. **Flat layout** (`unfoldable_polyhedron._build_flat_layout`) -- each
+   face's own REAL 3D corners are projected into an orthonormal 2D basis
+   within its own plane (`_project_face_to_2d`; u = first edge direction,
+   w = face normal, v = w x u -- exact same edge lengths as the real
+   face, works for irregular faces too, not just regular polygons), then
+   BFS-attached to its parent's already-placed shared edge, reversed, via
    `polygon_geom.rigid_transform_2d`/`apply_rigid` (the same rigid-2D-attach
-   math the old regular-polygon-only net layout used). The result is
-   wrapped into a `net_fold_core.Net` and passed through
-   `net_fold_core.flatten_net` -- z=0-padding + clustering coincident
-   corners into shared vertex indices (unchanged, see step 5) -- giving
-   `NetUnfolder.flat`, a `Polyhedron` at z=0.
-4. **Fold angle** (`_hinge_fold_angle`) -- `arccos(dot(face_normal(parent), face_normal(child)))`,
-   read directly off the GIVEN geometry's two adjacent face normals. This
-   is this project's existing rotation-from-flat convention exactly (90°
-   for a cube's self-supplementary 90° dihedral, 109.47° for a
-   tetrahedron's 70.53° dihedral -- see "Conventions" below) -- there is
-   nothing to *solve* for, since the dihedral angle is already known.
-   This is the whole reason the old `fold_solver.py` (scipy
-   `least_squares`, a 17-point restart sweep, exact Jacobian sparsity,
-   rejecting "collapsed" self-intersecting solutions -- see this
-   project's git history if you're ever tempted to reintroduce a
-   solving step) doesn't exist anymore: it solved for something that's
-   directly measurable once real coordinates are given.
-5. `net_fold_core.fold_transforms()` is the actual rotation engine --
-   walks the hinge tree in BFS order, giving each face one cumulative 4x4
-   affine transform matrix (`scipy.spatial.transform.Rotation` builds
+   math the old regular-polygon-only net layout used). Each face keeps
+   its own private, duplicated 2D corners rather than merging into shared
+   vertex indices -- a hinge-glued pair of corners always lands at the
+   identical 3D position anyway once folded, by construction, so there's
+   nothing to gain from bookkeeping the shared index. The result is
+   wrapped straight into `UnfoldablePolyhedron.flat`, a `Polyhedron` at
+   z=0 (no separate `Net`/`flatten_net` step -- `_build_flat_layout`
+   returns `(vertices, faces)` in exactly the shape `Polyhedron.__init__`
+   wants).
+4. **Fold angle** (`unfoldable_polyhedron._hinge_fold_angle`) --
+   `arccos(dot(face_normal(parent), face_normal(child)))`, read directly
+   off the GIVEN geometry's two adjacent face normals. This is this
+   project's existing rotation-from-flat convention exactly (90° for a
+   cube's self-supplementary 90° dihedral, 109.47° for a tetrahedron's
+   70.53° dihedral -- see "Conventions" below) -- there is nothing to
+   *solve* for, since the dihedral angle is already known. This is the
+   whole reason the old `fold_solver.py` (scipy `least_squares`, a
+   17-point restart sweep, exact Jacobian sparsity, rejecting "collapsed"
+   self-intersecting solutions -- see this project's git history if
+   you're ever tempted to reintroduce a solving step) doesn't exist
+   anymore: it solved for something that's directly measurable once real
+   coordinates are given. Each tree edge becomes a `Hinge` with this
+   angle filled in (`unfoldable_polyhedron._compute_fold_angles`),
+   stored on `UnfoldablePolyhedron.hinges`.
+5. `fold_transforms()` (in `polyhedron_unfolder.py`) is the actual
+   rotation engine -- walks the hinge list in BFS order (the order
+   `self.hinges` is already in, since it's built directly from the
+   spanning tree's own tree-edge order), giving each face one cumulative
+   4x4 affine transform matrix (`scipy.spatial.transform.Rotation` builds
    each hinge's rotation; `hinge_transform()` embeds it into a 4x4 that
    also pivots around the hinge's axis point, so it composes with the
    parent's matrix via plain matrix multiplication: `M_child = hinge_M @
-   M_parent`). A nested hinge's axis is the parent's own flat edge
-   (a pair of shared vertex indices) mapped through the parent's
-   already-computed matrix, which is exactly why hinges must be
-   processed in BFS order. `fold()` is a thin wrapper that applies each
-   face's matrix to that face's own flat (z=0) points, returning
-   `dict[face_index -> (N,3) ndarray]`. `NetUnfolder.fold(t)` goes one
-   step further: `net_fold_core.cluster_faces_into_mesh()` merges the
-   per-face-corner points this produces into a proper indexed mesh
-   (shared vertices, CCW vertex-index faces) -- the SAME merge used to
-   build `NetUnfolder.flat` in step 3, reused rather than reinvented.
+   M_parent`). A nested hinge's axis is the parent's own flat edge (a
+   pair of shared vertex indices) mapped through the parent's
+   already-computed matrix, which is exactly why hinges must be processed
+   in BFS order. `UnfoldablePolyhedron.get_unfolded_state(amount_unfolded,
+   fold_signs=None)` is the public entry point: 0 returns
+   `self.polyhedron` (fully folded) unchanged, 1 returns `self.flat`
+   (fully flat) unchanged, and anything in between converts
+   `amount_unfolded` to `t = 1 - amount_unfolded` (the rotation-from-flat
+   fraction `fold_transforms` itself works in, where `t=0` is flat and
+   `t=1` is fully rotated to the folded position -- **note the inverted
+   convention from the old `NetUnfolder.fold(t)`, which took `t=0` as
+   folded**), calls `fold_transforms(self.flat, self.root, self.hinges, t,
+   fold_signs=fold_signs)`, and applies each face's resulting matrix to
+   that face's own flat (z=0) vertices, returning a fresh `Polyhedron`
+   with the same face list as `self.flat` (so no separate
+   "cluster corner points into a mesh" merge step is needed here either
+   -- the flat layout's shared-vertex-block structure, from step 3,
+   already carries through).
 
 Since solving is gone, this whole pipeline is now fast even for the
 bushiest net -- the 32-face, 31-hinge truncated icosahedron went from
@@ -297,19 +414,19 @@ the old solving pipeline's ~30-45s down to ~0.07s.
 
 ## No caching (rigid pipeline)
 
-`NetUnfolder.load()`/`for_polyhedron()` recompute fresh on every call --
-there used to be a checksummed JSON cache (`polyhedron_unfolder/cache.py`,
-mirroring the stretchy pipeline's `stretchy_cache.py`) but it was removed
-once the numerical solver went away: caching exists to avoid redundant
-*expensive* work, and ~0.07s worst-case for the bushiest real net isn't
-expensive enough to justify a cache's staleness-tracking complexity. If a
-future net is bushy enough that this stops being true, reintroducing a
-cache (or memoizing per-`Polyhedron` in-process) is the fix -- see git
-history for the removed module's shape if resurrecting it.
+`UnfoldablePolyhedron.load()`/`__init__` recompute fresh on every call --
+there used to be a checksummed JSON cache (mirroring the stretchy
+pipeline's `stretchy_cache.py`) but it was removed once the numerical
+solver went away: caching exists to avoid redundant *expensive* work, and
+~0.07s worst-case for the bushiest real net isn't expensive enough to
+justify a cache's staleness-tracking complexity. If a future net is
+bushy enough that this stops being true, reintroducing a cache (or
+memoizing per-`Polyhedron` in-process) is the fix -- see git history for
+the removed module's shape if resurrecting it.
 
-`polyhedron_unfolder`'s `on_select_net` still runs `NetUnfolder.load()` in
-a background `threading.Thread` (communicating via a `queue.Queue` polled
-from the main thread with `root.after`, the same pattern the old
+`polyhedron_unfolder`'s `on_select_net` still runs `UnfoldablePolyhedron.load()`
+in a background `threading.Thread` (communicating via a `queue.Queue`
+polled from the main thread with `root.after`, the same pattern the old
 compute-cache button used) even though it's fast -- Tk is single-threaded,
 so ANY blocking call on the main thread would freeze the UI for its
 duration, and this keeps the app responsive without needing to reason
@@ -345,7 +462,7 @@ redraws just the "Animated Fold" tab.
   the combo box and showing an indeterminate `ttk.Progressbar` +
   "Loading..." status for the duration) so the UI never blocks, then
   polls a `queue.Queue` via `root.after` on the main thread to pick up the
-  finished `NetUnfolder` (or a caught exception, reported via
+  finished `UnfoldablePolyhedron` (or a caught exception, reported via
   `messagebox.showerror`) and redraw -- see "No caching" above for why
   this thread exists even though loading is fast.
 - `_apply_plot_theme` recolors BOTH tabs' figures/axes to match
@@ -398,7 +515,7 @@ redraws just the "Animated Fold" tab.
   side hides it, and no two visible faces of a convex solid ever overlap
   in projection either, so nothing else needs sorting) -- never apply it
   to an open/non-convex net. `_draw_solid` therefore only uses it when
-  `is_closed(solid)` (`utils.polyhedron_unfolder.is_closed`) is true (for the
+  `solid.is_closed()` (the `Polyhedron` instance method) is true (for the
   "Animated Fold" tab this in practice also means `t == 1.0`, since
   mid-fold edges don't yet coincide and an open net -- a face subset --
   never closes even at t=1; for the "Flat vs Folded" tab, always at
@@ -406,9 +523,9 @@ redraws just the "Animated Fold" tab.
   plain `Poly3DCollection`.
   `Polyhedron.face_normal()` computes each face's outward unit normal
   via the cross product of its first two edges -- verified (see
-  `test_net_fold_core.py`) to be consistently outward-pointing for every
-  face of every net in `data/input/nets/`, relying on the net's CCW winding
-  convention (see Conventions below).
+  `unit/polyhedron_unfolder/test_polyhedron.py`) to be consistently
+  outward-pointing for every face of every net in `data/input/nets/`,
+  relying on the net's CCW winding convention (see Conventions below).
   **Gotcha**: `_CullableFace` applies visibility by writing straight to
   `_facecolor3d`/`_edgecolor3d`, not via `set_alpha()`/`set_edgecolor()`.
   `Poly3DCollection.set_alpha()` only refreshes `_facecolor3d` -- it
@@ -477,9 +594,9 @@ polygons share ≥3 non-collinear points, both must lie in the one plane
 those points determine — there's no dihedral fold left to make them
 distinct faces of a solid. This is a genuine geometric impossibility, not
 just a representational limitation of some rigid-pipeline data structure
-— the rigid pipeline's own `Polyhedron`/`NetUnfolder` could combinatorially
-describe such a face pair without any trouble (there's no more `EdgeMap`
-planar-embedding step to reject it, see "Pipeline" above), but attempting
+— the rigid pipeline's own `Polyhedron`/`UnfoldablePolyhedron` could
+combinatorially describe such a face pair without any trouble (there's no
+`EdgeMap`-style planar-embedding step to reject it, see "Pipeline" above), but attempting
 to actually unfold one would still fail geometrically at the flat-layout
 step (two faces sharing >1 edge can't both come out flat and rigid). So
 this remains a genuinely different data model and solver, not an
@@ -982,7 +1099,7 @@ solve instead of an instant read).
   reason this stretchy path exists, not a representational one),
   attaching each newly-discovered face to whichever neighbor's edge found
   it first via `polygon_geom.attach_polygon` (reversed, so it unfolds
-  outward -- same convention `polyhedron_unfolder.py`'s `_build_flat_layout`
+  outward -- same convention `unfoldable_polyhedron.py`'s `_build_flat_layout`
   uses for the rigid pipeline).
   A face pair sharing MORE than one edge just means extra entries that
   BFS never uses for placement (only the first edge to a still-unplaced
@@ -1002,25 +1119,37 @@ after their own sys.path bootstrap -- currently only exercised by
 mirrors `src/utils/`'s own sub-package split exactly, one test file per
 module; `tests/integration/` holds the tests that deliberately cross
 sub-package boundaries (currently just `test_open_nets.py` — see below)
-plus `helpers.py`'s shared fixture-builder classes. The **rigid**-pipeline suite is fast (no
-numerical solver left to run at all — see "Pipeline" above) and still
-deliberately only exercises small nets directly (tetrahedron, cube, a
-synthetic paper-cube net, a tiny open net); there's no test that builds
-the icosahedron/truncated-icosahedron by hand, though `NetUnfolder` is
-exercised against every real net in `data/input/nets/` via
-`build_cache.py`/the app itself. Files map roughly 1:1 to `src/utils/`
-modules (`unit/geometry2d/test_polygon_geom.py`,
-`unit/geometry3d/test_net_fold_core.py`, `unit/persistence/test_polyhedron_spec.py`,
-`unit/geometry3d/test_hull_to_spec.py`, `integration/test_open_nets.py`,
-`unit/subdivisions/test_polygon_subdivisions.py`), plus `unit/geometry3d/test_polyhedron.py`
-(the pure-geometry class, index-based `edges`, no unfolding knowledge --
-`is_closed` and `bounding_box` are deliberately NOT here, see `geometry3d/`'s
-own bullet above) and `unit/polyhedron_unfolder/*.py` (one file per
-`Hinge`/`NetUnfolder`/`is_closed` class or function, covering
-spanning-tree derivation, flat-layout vertex sharing, fold angles
-matching known dihedral angles, folding at several `t`, and
-`cache.py`'s reuse/staleness contract, which mirrors
-`unit/persistence/test_stretchy_cache.py`'s for the stretchy pipeline).
+plus `helpers.py`'s shared fixture-builder classes (currently
+`TetraNetSpec`, building both a closed and an open tetrahedron
+`Polyhedron`/`UnfoldablePolyhedron` pair from `data/input/nets/tetrahedron.json`
+via `persistence.polyhedron_spec.load_polyhedron_spec`). The
+**rigid**-pipeline suite is fast (no numerical solver left to run at
+all — see "Pipeline" above) and still deliberately only exercises small
+nets directly (tetrahedron, cube, a synthetic square-face net, a tiny
+open net); there's no test that builds the icosahedron/truncated-icosahedron
+by hand, though `UnfoldablePolyhedron` is exercised against every real
+net in `data/input/nets/` via the app itself. Files map roughly 1:1 to
+`src/utils/` modules (`unit/geometry2d/test_polygon_geom.py`,
+`unit/persistence/test_polyhedron_spec.py`, `unit/geometry3d/test_hull_to_spec.py`,
+`integration/test_open_nets.py`, `unit/subdivisions/test_polygon_subdivisions.py`),
+plus `unit/polyhedron_unfolder/` (one file per module in that package):
+`test_polyhedron.py` (the pure-geometry class -- `face_vertices`,
+`face_normal`, index-based cached `edges`, `is_closed()` as an instance
+method, `compute_face_adjacency()` -- `bounding_box` is deliberately NOT
+here, see `apps/common/`'s own bullet above, since it's a rendering
+helper, not domain geometry), `test_polyhedron_unfolder.py` (`Hinge`,
+`hinge_transform()`, the free-function `face_normal()`, and
+`fold_transforms()` together -- hinge-transform correctness about an
+offset axis, root-is-always-identity), and `test_unfoldable_polyhedron.py`
+(spanning-tree derivation via a helper that mirrors `.load()`'s own two
+internal steps, flat-layout vertex sharing, fold angles matching known
+dihedral angles for all 5 Platonic solids, folding at several unfold
+amounts, edge-length preservation, an open net staying open, and a
+disconnected polyhedron being rejected with `ValueError`). No cache
+reuse/staleness contract to test here at all — that
+kind of test only exists for the stretchy pipeline's
+`unit/persistence/test_stretchy_cache.py`, since the rigid pipeline
+caches nothing (see "No caching" above).
 
 The **stretchy**-pipeline suite (`unit/geometry3d/test_stretchy_mesh.py`) is slower
 (~30-60s) since even the small Platonic solids run the real
@@ -1069,26 +1198,27 @@ why that's expected, not a bug).
   (`stretchy_mesh.EDGE_LENGTH`, capped stretch via `STRETCH_CAP`) since
   its nets are hand-authored combinatorics with no coordinates of their
   own. The RIGID pipeline has no such requirement anymore -- since
-  `NetUnfolder` reads real, already-given coordinates (`data/input/nets/*.json`),
+  `UnfoldablePolyhedron` reads real, already-given coordinates (`data/input/nets/*.json`),
   edge length is simply whatever the input `Polyhedron` says (e.g.
   `data/input/nets/cube.json`'s raw canonical coordinates have edge length 2,
   not 1) -- `polygon_geom.EDGE_LENGTH` (still 1.0) is now only a default
   used by `regular_polygon_vertices`/`attach_polygon`, which the stretchy
   pipeline's `stretchy_net_layout.py` still calls, not anything in the
-  rigid pipeline's own `polyhedron_unfolder.py`.
+  rigid pipeline's own `polyhedron_unfolder/` package.
 - Polygons are CCW as seen from outside the solid, in **both** pipelines
-  (rigid: `polyhedron_unfolder._face_adjacency`/`_build_flat_layout` — a shared
-  edge appears as `v -> w` in one face's loop and `w -> v` in the other's,
-  and a child face attaches to its parent via a *reversed* edge mapping,
-  matching how a physical paper net unfolds to the outside; stretchy:
-  `stretchy_mesh.py`'s module docstring — the same `v -> w`/`w -> v`
-  convention).
+  (rigid: `Polyhedron.compute_face_adjacency()`/`unfoldable_polyhedron._build_flat_layout`
+  — a shared edge appears as `v -> w` in one face's loop and `w -> v` in
+  the other's, and a child face attaches to its parent via a *reversed*
+  edge mapping, matching how a physical paper net unfolds to the outside;
+  stretchy: `stretchy_mesh.py`'s module docstring — the same
+  `v -> w`/`w -> v` convention).
 - A stored "fold angle" (rigid pipeline only) is the rotation *from flat*
   (180° between coplanar faces), not the dihedral angle itself — e.g. cube
   hinges rotate 90° (dihedral is also 90°, self-supplementary), tetrahedron
   hinges rotate 109.47° (dihedral is 70.53°). Read directly off the given
-  geometry now (`polyhedron_unfolder._hinge_fold_angle`), not solved for.
-- `net_fold_core.py` and `stretchy_mesh.py`/`stretchy_cache.py` have no
+  geometry now (`unfoldable_polyhedron._hinge_fold_angle`), not solved for.
+- `polyhedron_unfolder.py`/`unfoldable_polyhedron.py` and
+  `stretchy_mesh.py`/`stretchy_cache.py` have no
   `if __name__ == "__main__"` demo blocks — that logic lives in `tests/`.
   Add new ad hoc verification as a real test, not a script block.
 - Rigid nets (`data/input/nets/*.json`) and stretchy nets (`data/input/stretchy_nets/*.json`) are

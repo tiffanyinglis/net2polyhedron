@@ -3,14 +3,13 @@ app in src/apps/.
 
 Sub-packages, grouped by concern:
   geometry2d          -- flat 2D polygon geometry
-  geometry3d          -- the rigid fold engine, stretchy-mesh solving,
-                          coordinates, and Polyhedron (pure 3D solid
-                          geometry, no unfolding knowledge)
+  geometry3d          -- stretchy-mesh solving and coordinate derivation
   subdivisions        -- fine-triangle-mesh subdivision (2D preview + 3D fabric)
-  polyhedron_unfolder -- NetUnfolder: derives a net (spanning tree, flat
-                          layout, fold angles) from a Polyhedron;
-                          NetUnfolder.load() is the public loading entry
-                          point for the rigid pipeline
+  polyhedron_unfolder -- Polyhedron (pure 3D solid geometry) plus the rigid
+                          fold engine: UnfoldablePolyhedron derives a net
+                          (spanning tree, flat layout, fold angles) from a
+                          Polyhedron; UnfoldablePolyhedron.load() is the
+                          public loading entry point for the rigid pipeline
   persistence         -- parse/write the on-disk .json formats, plus shared
                           checksum utilities
 

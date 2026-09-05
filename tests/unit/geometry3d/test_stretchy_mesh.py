@@ -4,7 +4,6 @@ import threading
 import numpy as np
 import pytest
 
-from utils.persistence.polyhedron_spec import load_polyhedron_spec
 from utils.geometry3d import stretchy_mesh
 from utils.subdivisions.mesh_subdivide import solve_fabric_mesh
 from utils.geometry3d.stretchy_mesh import (
@@ -16,9 +15,20 @@ from utils.geometry3d.stretchy_mesh import (
 )
 
 PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json"
-TETRAHEDRON_NET = "data/input/nets/tetrahedron.json"
 
 TETRAHEDRON_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
+
+# A real, unit-edge-length regular tetrahedron (CCW-from-outside faces) --
+# inlined here (rather than loaded from a rigid net .json) since this is the
+# only place in the stretchy pipeline that needs real coordinates rather
+# than just combinatorics.
+_RIGID_TETRAHEDRON_VERTICES = [
+    [1.0, 1.0, 1.0],
+    [1.0, -1.0, -1.0],
+    [-1.0, 1.0, -1.0],
+    [-1.0, -1.0, 1.0],
+]
+_RIGID_TETRAHEDRON_FACES = [[2, 0, 1], [3, 0, 2], [2, 1, 3], [1, 0, 3]]
 
 # Closed-form volumes of the regular Platonic solids at unit edge length.
 TRUE_VOLUME = {
@@ -64,8 +74,8 @@ def test_mesh_edges_deduplicates_and_sorts():
 # ---- _mesh_volume / _sphere_bound_volume ----
 
 def _unit_edge_tetrahedron_points():
-    vertices, faces, _ = load_polyhedron_spec(TETRAHEDRON_NET)
-    verts = np.array(vertices)
+    verts = np.array(_RIGID_TETRAHEDRON_VERTICES)
+    faces = _RIGID_TETRAHEDRON_FACES
     edge_length = np.linalg.norm(verts[faces[0][0]] - verts[faces[0][1]])
     return verts / edge_length, faces
 
