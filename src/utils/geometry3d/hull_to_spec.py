@@ -1,17 +1,18 @@
-"""Derive a polyhedron-net spec (face degrees + adjacency edges) from a
-convex polyhedron's 3D vertex coordinates.
+"""Derive a Polyhedron from a convex polyhedron's 3D vertex coordinates.
 
 This is a reusable on-ramp: given nothing but the vertices of a convex
-polyhedron with regular-polygon faces, it recovers which faces exist, their
-degrees, and which faces are adjacent -- everything polyhedron_spec.py needs
-to write out a faces/edges JSON spec. scipy's convex hull always
-triangulates non-triangular facets, so coplanar triangles are merged back
-into their true polygonal face first.
+polyhedron with regular-polygon faces, it recovers which faces exist and
+builds a Polyhedron from them -- face degrees and face adjacency are then
+just `polyhedron.faces`/`polyhedron.compute_face_adjacency()`. scipy's
+convex hull always triangulates non-triangular facets, so coplanar
+triangles are merged back into their true polygonal face first.
 """
 from collections import defaultdict
 
 import numpy as np
 from scipy.spatial import ConvexHull
+
+from .polyhedron import Polyhedron
 
 PLANE_TOL = 1e-6
 _PLANE_DECIMALS = round(-np.log10(PLANE_TOL))
@@ -45,29 +46,14 @@ def _order_face_loop(points, vertex_ids):
     return [vid for _, vid in angles]
 
 
-def polyhedron_from_vertices(vertices):
+def polyhedron_from_vertices(vertices, name=None):
     """vertices: (N, 3) array-like of a convex polyhedron's corner points.
-    Returns (degrees, edges, face_loops):
-      degrees   -- list, degrees[f] = number of sides of face f
-      edges     -- list of (f1, f2) for every pair of faces sharing an edge
-      face_loops -- list of each face's vertex-index loop (for inspection)
-    """
+    Returns a Polyhedron built from those vertices and the CCW face loops
+    recovered from their convex hull -- `.faces` gives face degrees,
+    `.compute_face_adjacency()` gives which faces are adjacent, and
+    `.is_closed()`/`.face_normal()` come for free."""
     points = np.asarray(vertices, dtype=float)
     hull = ConvexHull(points)
     vertex_groups = _merge_coplanar_facets(hull)
     face_loops = [_order_face_loop(points, vids) for vids in vertex_groups]
-
-    degrees = [len(loop) for loop in face_loops]
-
-    edge_owner = {}  # frozenset({vertex_a, vertex_b}) -> face index
-    edges = []
-    for fid, loop in enumerate(face_loops):
-        k = len(loop)
-        for i in range(k):
-            e = frozenset((loop[i], loop[(i + 1) % k]))
-            if e in edge_owner:
-                edges.append((edge_owner[e], fid))
-            else:
-                edge_owner[e] = fid
-
-    return degrees, edges, face_loops
+    return Polyhedron(vertices=list(points), faces=face_loops, name=name)

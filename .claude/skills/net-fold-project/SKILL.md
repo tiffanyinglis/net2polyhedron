@@ -159,16 +159,32 @@ shared across more than one of them:
 `src/utils/` — the reusable library, split by concern (see each
 sub-package's own `__init__.py` docstring for its module list):
 - `geometry2d/` — flat 2D polygon geometry: `polygon_geom.py`, `stretchy_net_layout.py`
-- `geometry3d/` — stretchy-mesh solving and coordinate derivation ONLY:
-  `stretchy_mesh.py`, `hull_to_spec.py`. No longer holds the rigid fold
-  engine or `Polyhedron` at all — both moved into `polyhedron_unfolder/`
-  (see that bullet below) once the rigid pipeline was rewritten around
-  real, already-given coordinates instead of solving for fold angles (see
-  "Pipeline" below); `geometry3d/__init__.py` now only re-exports
-  `load_stretchy_mesh, solve_wireframe, relax_once, polyhedron_from_vertices`.
-  Sample solids (Platonic, etc.) are just loaded directly from
-  `data/input/nets/*.json` wherever needed — see the (now-removed)
-  `sample_polyhedra.py` note in `apps/common/`'s own bullet above.
+- `geometry3d/` — stretchy-mesh solving and coordinate derivation:
+  `stretchy_mesh.py`, `hull_to_spec.py`, `polyhedron.py`.
+  - `polyhedron.py` — class `Polyhedron`: pure 3D solid geometry — shared,
+    indexed vertices; CCW vertex-index faces; derived `.edges`; `.face_vertices()`,
+    `.face_normal()`, `.is_closed()`, `.compute_face_adjacency()`. No
+    awareness of nets, hinges, fold progress, or color. Re-added here after
+    the rigid-unfolding pipeline (which used to own the only `Polyhedron` in
+    this project, under a now-deleted `polyhedron_unfolder/` package) was
+    removed entirely — this copy is self-contained (`face_normal` is
+    inlined rather than shared with a fold engine, since this project no
+    longer has one).
+  - `hull_to_spec.py` — `polyhedron_from_vertices(vertices, name=None)`
+    builds and returns a `Polyhedron` straight from a convex solid's raw 3D
+    coordinates (via `scipy.spatial.ConvexHull`, merging back the
+    triangulated facets into their true polygonal faces) — face degrees and
+    adjacency are then just `.faces`/`.compute_face_adjacency()`, not a
+    separately-returned tuple.
+  - `geometry3d/__init__.py` re-exports `load_stretchy_mesh, solve_wireframe,
+    relax_once, polyhedron_from_vertices, Polyhedron`.
+  Sample solids (Platonic, etc.) have no on-disk source in this project
+  anymore (the old `data/input/nets/*.json` + `sample_polyhedra.py`
+  approach was removed along with the rigid pipeline) — anything that needs
+  one now either has its own inline vertex coordinates (see
+  `tests/unit/geometry3d/test_hull_to_spec.py`,
+  `tests/unit/geometry3d/test_stretchy_mesh.py`) or loads a stretchy net
+  from `data/input/stretchy_nets/*.json` instead.
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
 - `polyhedron_unfolder/` — the rigid pipeline's whole object model, split
   into four modules (see `__init__.py`'s own docstring for this same
