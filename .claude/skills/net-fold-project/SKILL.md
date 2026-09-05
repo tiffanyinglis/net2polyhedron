@@ -109,30 +109,21 @@ shared across more than one of them:
     and size its 3D view. Lives here rather than as a `geometry3d.Polyhedron`
     method since it's a rendering concern, not domain geometry the fold
     pipeline itself needs — see `geometry3d/`'s own bullet below.
-  - `sample_polyhedra.py` — ready-to-use `geometry3d.Polyhedron` objects: `SamplePolyhedron`
-    subclasses for 5 Platonic solids + the (Archimedean, not Platonic) truncated
-    icosahedron (`Tetrahedron`, `Cube`, `Octahedron`, `Icosahedron`, `Dodecahedron`,
-    `TruncatedIcosahedron`, plus a `SAMPLE_SOLIDS` name->class dict), each instantiable
-    directly (e.g. `Cube()`) with vertices/CCW faces already derived via
-    `geometry3d/hull_to_spec.py` at construction — replaces the old `geometry3d/solid_coords.py`
-    (removed — see git history), which only handed back raw coordinate tuples. Also
-    `OpenSamplePolyhedron` subclasses `HalfDodecahedron`/`DodecahedronMinusOne`
-    (plus an `OPEN_SAMPLE_POLYHEDRA` name->class dict) — each a face SUBSET of a
-    `Dodecahedron()`, remapped to only the vertices those kept faces reference (see
-    "Open nets" below). Named "sample", not "platonic" (an earlier name, since renamed)
-    -- `TruncatedIcosahedron` isn't Platonic, so the collection couldn't honestly
-    claim that name for all its members. Lives in `apps/common/`, not `utils/geometry3d/`,
-    since this is sample/demo content the apps and their generator scripts consume,
-    not reusable fold-pipeline domain logic (`utils/` depends on nothing under
-    `apps/`, never the reverse) — it duplicates `paths.py`'s own tiny sys.path
-    bootstrap (rather than importing `paths` for that side effect) so its `utils...`
-    imports resolve reliably whether it's reached via a bare sibling `import
-    sample_polyhedra` (a script run directly) or `from common.sample_polyhedra
-    import ...` (pytest, or an app) — see its own top-of-file comment.
-  - `generate_platonic_nets.py` — (re)generates `data/input/nets/*.json` for the 5 Platonic solids + the truncated icosahedron from `sample_polyhedra.py`'s ready-built `geometry3d.Polyhedron` objects (their vertices/CCW face loops are already derived via `hull_to_spec.polyhedron_from_vertices` at construction time — no spanning tree to compute here — `polyhedron_unfolder.NetUnfolder` derives its own at load time, see "Pipeline" below)
-  - `generate_stretchy_platonic_nets.py` — (re)generates `data/input/stretchy_nets/*.json` for the 5 Platonic solids from the *same* `sample_polyhedra.py` objects' already-derived CCW face loops (no spanning tree needed — vertex-loop format has no hinge/root concept)
-  - `generate_open_dodecahedron_nets.py` — (re)generates the two open-net examples (`data/input/nets/half_dodecahedron.json`, `data/input/nets/dodecahedron_minus_one.json`) from `sample_polyhedra.py`'s `HalfDodecahedron`/`DodecahedronMinusOne` (`OPEN_SAMPLE_POLYHEDRA`) — face-subset remapping now happens once, in those classes, not in this script
-  - `generate_subdivided_stretchy_nets.py` — writes `data/input/stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below). These 4 `generate_*.py` scripts aren't imported by anything (each is its own CLI entry point); they live in `common/` anyway since they're maintenance tooling shared across whichever apps read the `data/input/` specs they produce, and neither `utils/` (no `__main__` scripts there, see Conventions) nor `ui/` fit
+  There USED TO be a `sample_polyhedra.py` here (`SamplePolyhedron`/`OpenSamplePolyhedron`
+  subclasses -- `Tetrahedron`, `Cube`, ..., `TruncatedIcosahedron`, `HalfDodecahedron`,
+  `DodecahedronMinusOne` -- deriving vertices/CCW faces from raw coordinates via
+  `hull_to_spec.polyhedron_from_vertices` at construction), plus three `generate_*.py`
+  scripts (`generate_platonic_nets.py`, `generate_stretchy_platonic_nets.py`,
+  `generate_open_dodecahedron_nets.py`) that used it to (re)generate `data/input/nets/*.json`
+  and `data/input/stretchy_nets/*.json`. All four are DELETED now: the user settled on
+  treating those `.json` files as the canonical, hand-kept inputs in their own right
+  rather than regenerated artifacts, so nothing needs to re-derive them from raw
+  coordinates anymore -- anything that needs one of these solids (apps, tests) loads
+  it straight from its `.json` via `persistence.polyhedron_spec.load_polyhedron_spec`
+  instead. See git history (`sample_polyhedra`/`generate_platonic_nets`, etc.) if a
+  genuinely NEW sample solid with no existing `.json` ever needs the old
+  raw-coordinates-via-hull_to_spec approach again.
+  - `generate_subdivided_stretchy_nets.py` — writes `data/input/stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below); reads an existing stretchy net's own faces directly, no dependency on the now-removed `sample_polyhedra.py`. This is the one remaining `generate_*.py` script; it isn't imported by anything (it's its own CLI entry point) and lives in `common/` anyway since it's maintenance tooling shared across whichever apps read the `data/input/` specs it produces, and neither `utils/` (no `__main__` scripts there, see Conventions) nor `ui/` fit
 - `ui/` — generic Tkinter/matplotlib widgets, not net-fold domain logic:
   - `tooltip.py` — `Tooltip`, a small generic hover-tooltip helper for Tkinter (not net-fold-specific)
   - `cullable_face.py` — `_CullableFace` (see "The apps" below), extracted here since `polyhedron_unfolder` is now the only user but the class itself is still generic matplotlib/3D rendering logic, not fold-solving logic
@@ -140,7 +131,7 @@ shared across more than one of them:
 `src/utils/` — the reusable library, split by concern (see each
 sub-package's own `__init__.py` docstring for its module list):
 - `geometry2d/` — flat 2D polygon geometry: `polygon_geom.py`, `stretchy_net_layout.py`
-- `geometry3d/` — the rigid fold engine, stretchy-mesh solving, coordinate derivation, and `Polyhedron`: `net_fold_core.py`, `stretchy_mesh.py`, `hull_to_spec.py`, `polyhedron.py`. `Polyhedron` (pure 3D solid geometry — shared, indexed vertices; CCW vertex-index faces; derived edges — **no** awareness of nets, hinges, roots, fold progress, or color, used by both the rigid and stretchy pipelines) used to live in its own `utils/model/` package; folded in here since `geometry3d` was its only real dependency (`face_normal`) and `model/` had nothing else in it, so the extra package bought no separation. Unfolding-specific logic/objects still live in `polyhedron_unfolder/` instead, never here — that's why `is_closed` is `polyhedron_unfolder.is_closed(polyhedron)` (closure is a fold-progress fact), not a `Polyhedron` property, and why `bounding_box()` is a rendering helper in `apps/common/bounding_box.py`, not a `Polyhedron` method. Sample/demo `Polyhedron` instances (Platonic solids, etc.) live in `apps/common/sample_polyhedra.py`, not here either — see that module's own bullet above and its docstring for why. **`polyhedron.py` is on the untouchable-files list** (see top of this doc) — don't edit it without asking first.
+- `geometry3d/` — the rigid fold engine, stretchy-mesh solving, coordinate derivation, and `Polyhedron`: `net_fold_core.py`, `stretchy_mesh.py`, `hull_to_spec.py`, `polyhedron.py`. `Polyhedron` (pure 3D solid geometry — shared, indexed vertices; CCW vertex-index faces; derived edges — **no** awareness of nets, hinges, roots, fold progress, or color, used by both the rigid and stretchy pipelines) used to live in its own `utils/model/` package; folded in here since `geometry3d` was its only real dependency (`face_normal`) and `model/` had nothing else in it, so the extra package bought no separation. Unfolding-specific logic/objects still live in `polyhedron_unfolder/` instead, never here — that's why `is_closed` is `polyhedron_unfolder.is_closed(polyhedron)` (closure is a fold-progress fact), not a `Polyhedron` property, and why `bounding_box()` is a rendering helper in `apps/common/bounding_box.py`, not a `Polyhedron` method. Sample solids (Platonic, etc.) are just loaded directly from `data/input/nets/*.json` wherever needed — see the (now-removed) `sample_polyhedra.py` note in `apps/common/`'s own bullet above. **`polyhedron.py` is on the untouchable-files list** (see top of this doc) — don't edit it without asking first.
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
 - `polyhedron_unfolder/` — `NetUnfolder`: derives a net (spanning tree, unfoldable flat layout, fold angles) from an already-built `Polyhedron` — see "Pipeline" below. Also `Hinge` and `is_closed(polyhedron)`, both defined in `polyhedron_unfolder.py` itself (no separate `hinge.py` module -- `Hinge` used to live there but had no consumers outside `NetUnfolder`, so it was folded in rather than kept as its own one-class file). Package (and its one module) used to be named `net_unfolder` -- renamed to match `apps/polyhedron_unfolder/`'s naming (a distinct, unrelated directory under `apps/` rather than `utils/` — same name, different package, no import collision, but worth knowing when searching for "polyhedron_unfolder" in this codebase). No cache module — nothing here is cached, see "Caching" below.
 - `persistence/` — `polyhedron_spec.py` parses/writes the on-disk rigid `.json` format; `checksums.py` (`source_checksum`) and `stretchy_cache.py` are used only by the stretchy pipeline's cache (`inflate_polyhedron_app`) — the rigid pipeline has nothing to checksum against since it never caches
@@ -148,13 +139,13 @@ sub-package's own `__init__.py` docstring for its module list):
 `data/` — everything on-disk that isn't code (input specs and app output
 ONLY — no caches; those are per-app, under `src/apps/<app>/cache/`, see
 above):
-- `input/nets/*.json` — RIGID net specs: a direct encoding of a `geometry3d.Polyhedron` (real 3D vertex positions + CCW face loops), hand-editable but usually generated from known coordinates (see `generate_platonic_nets.py` above)
+- `input/nets/*.json` — RIGID net specs: a direct encoding of a `geometry3d.Polyhedron` (real 3D vertex positions + CCW face loops). These are the canonical, hand-kept inputs for the 5 Platonic solids, the truncated icosahedron, and two open dodecahedron-derived nets — nothing regenerates them (the old `sample_polyhedra.py`/`generate_*.py` approach for deriving them from raw coordinates via hull_to_spec was removed once these files were settled, see `common/`'s own bullet above); anything that needs one of these solids loads it straight from here
 - `input/stretchy_nets/*.json` — **human-authored** STRETCHY net specs (vertex-loop format, see below) — a parallel, differently-shaped set of input files, not interchangeable with `input/nets/*.json`
 - `output/` — user-generated saves from `inflate_polyhedron_app`'s "Save" button (see "The app" below), created on demand
 
 `tests/` — pytest suite (see Testing below):
 - `unit/<category>/` — one test file per `src/utils/<category>/` module, mirroring `src/utils/`'s own sub-package layout exactly (so `unit/geometry3d/test_polyhedron.py` tests `geometry3d/polyhedron.py`, and `unit/polyhedron_unfolder/*.py` tests the `polyhedron_unfolder/` package -- both moved/renamed together with their source when those did)
-- `unit/apps_common/` — the (currently one-file) exception: covers `src/apps/common/` helpers that are plain functions/classes with no Tkinter/matplotlib dependency (e.g. `bounding_box.py`) -- not a `src/utils/` category, so it doesn't fit the mirroring rule above; the rest of `src/apps/` stays untested per this project's existing convention (see "The apps" below). `sample_polyhedra.py` (also `apps/common/`, also untested by Tkinter/matplotlib) has no dedicated file here -- its existing tests, scattered across `unit/geometry3d/`, `unit/polyhedron_unfolder/`, and `integration/` (from before it moved out of `utils/model/`), already import it as `from common.sample_polyhedra import ...` and were left where they are rather than relocated for their own sake.
+- `unit/apps_common/` — the (currently one-file) exception: covers `src/apps/common/` helpers that are plain functions/classes with no Tkinter/matplotlib dependency (e.g. `bounding_box.py`) -- not a `src/utils/` category, so it doesn't fit the mirroring rule above; the rest of `src/apps/` stays untested per this project's existing convention (see "The apps" below).
 - `integration/` — tests that deliberately exercise multiple `utils` sub-packages together, plus `helpers.py`, shared fixture-builder classes that keep an integration test reading as "build a net, load it, check a property" rather than repeating multi-argument setup calls inline
 - `run_tests.py` — `python tests/run_tests.py [pytest args...]`
 
@@ -199,10 +190,10 @@ hinge. The one rule: only include the vertices the listed faces actually
 reference (an unreferenced vertex would still count toward
 `apps/common/bounding_box.py`'s `bounding_box()`, silently enlarging it
 around an invisible point). `data/input/nets/half_dodecahedron.json` and
-`data/input/nets/dodecahedron_minus_one.json` are worked examples
-(generated by `src/apps/common/generate_open_dodecahedron_nets.py` from
-the same dodecahedron coordinates the closed `data/input/nets/dodecahedron.json`
-uses, remapped to a face subset instead of the full set).
+`data/input/nets/dodecahedron_minus_one.json` are worked examples --
+settled, hand-kept files (like every other net in this directory now, see
+`common/`'s own bullet above), remapped to reference a face subset of the
+same vertices `data/input/nets/dodecahedron.json` uses instead of the full set.
 
 An open net's fold is generally an **open, non-convex** shape even at
 t=1 -- `polyhedron_unfolder.is_closed(polyhedron)` checks this directly and purely
@@ -1080,7 +1071,7 @@ why that's expected, not a bug).
   own. The RIGID pipeline has no such requirement anymore -- since
   `NetUnfolder` reads real, already-given coordinates (`data/input/nets/*.json`),
   edge length is simply whatever the input `Polyhedron` says (e.g.
-  `sample_polyhedra.Cube()` (from `apps/common/`)'s raw canonical coordinates have edge length 2,
+  `data/input/nets/cube.json`'s raw canonical coordinates have edge length 2,
   not 1) -- `polygon_geom.EDGE_LENGTH` (still 1.0) is now only a default
   used by `regular_polygon_vertices`/`attach_polygon`, which the stretchy
   pipeline's `stretchy_net_layout.py` still calls, not anything in the

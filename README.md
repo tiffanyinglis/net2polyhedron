@@ -81,11 +81,9 @@ for the full format reference, and the existing files in
 `data/input/nets/` for more examples.
 
 If you already know a solid's exact 3D vertex coordinates and just want a
-`.json` file generated from them, see `src/utils/geometry3d/hull_to_spec.py`
-and `src/apps/common/generate_platonic_nets.py` for a worked example (the
-sample solids that script writes out are defined as ready-to-use
-`Polyhedron` objects in `src/apps/common/sample_polyhedra.py`, e.g.
-`Cube()`, `Dodecahedron()`).
+`.json` file generated from them, `src/utils/geometry3d/hull_to_spec.py`'s
+`polyhedron_from_vertices` derives each face's vertex-index loop straight
+from the raw coordinates via a convex hull — see its docstring.
 
 ## Other apps
 
@@ -151,10 +149,9 @@ src/
                                     (NOT caches -- those are per-app, above)
       ui_theme.py                    shared Tk/matplotlib look-and-feel constants
       bounding_box.py                bounding_box(vertices): a rendering helper
-      sample_polyhedra.py            ready-to-use sample Polyhedron objects
-                                    (Tetrahedron, Cube, ..., plus two open nets)
-      generate_*.py                  one-off scripts that (re)generate the
-                                    data/input/ specs the apps read
+      generate_subdivided_stretchy_nets.py
+                                    one-off script that writes fine-triangulated
+                                    variants of an existing stretchy net
     ui/                            generic Tk/matplotlib widgets, not domain logic
       tooltip.py                     Tooltip: hover-tooltip for any Tk widget
       cullable_face.py                _CullableFace: backface culling for a

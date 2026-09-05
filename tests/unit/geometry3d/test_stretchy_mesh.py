@@ -4,8 +4,7 @@ import threading
 import numpy as np
 import pytest
 
-from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from common.sample_polyhedra import Tetrahedron
+from utils.persistence.polyhedron_spec import load_polyhedron_spec
 from utils.geometry3d import stretchy_mesh
 from utils.subdivisions.mesh_subdivide import solve_fabric_mesh
 from utils.geometry3d.stretchy_mesh import (
@@ -17,6 +16,7 @@ from utils.geometry3d.stretchy_mesh import (
 )
 
 PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json"
+TETRAHEDRON_NET = "data/input/nets/tetrahedron.json"
 
 TETRAHEDRON_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
 
@@ -64,10 +64,10 @@ def test_mesh_edges_deduplicates_and_sorts():
 # ---- _mesh_volume / _sphere_bound_volume ----
 
 def _unit_edge_tetrahedron_points():
-    verts = np.array(Tetrahedron.raw_vertices())
-    degrees, edges, face_loops = polyhedron_from_vertices(verts)
-    edge_length = np.linalg.norm(verts[face_loops[0][0]] - verts[face_loops[0][1]])
-    return verts / edge_length, face_loops
+    vertices, faces, _ = load_polyhedron_spec(TETRAHEDRON_NET)
+    verts = np.array(vertices)
+    edge_length = np.linalg.norm(verts[faces[0][0]] - verts[faces[0][1]])
+    return verts / edge_length, faces
 
 
 def test_mesh_volume_matches_the_true_regular_tetrahedron_volume():
@@ -169,9 +169,9 @@ def test_solve_wireframe_on_a_tetrahedron_inflates_within_the_stretch_cap():
     assert _overall_3d_extent(pts) > 0.1
 
 
-# name -> (num_faces, num_vertices, num_edges, sides_per_face), generated
-# by src/apps/common/generate_stretchy_platonic_nets.py from the same
-# solids (src/apps/common/sample_polyhedra.py) the RIGID nets/*.json specs use.
+# name -> (num_faces, num_vertices, num_edges, sides_per_face) -- these
+# stretchy nets share the same combinatorial structure as the RIGID
+# data/input/nets/*.json specs for the same solids.
 PLATONIC_STRETCHY_NETS = {
     "tetrahedron": (4, 4, 6, 3),
     "cube": (6, 8, 12, 4),

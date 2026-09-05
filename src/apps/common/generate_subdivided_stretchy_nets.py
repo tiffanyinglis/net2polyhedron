@@ -40,9 +40,8 @@ from utils.subdivisions.mesh_subdivide import subdivide_mesh
 
 # (source net basename, resolution) pairs to generate -- add more here to
 # try other nets/resolutions; subdivide_mesh does the actual work for
-# whatever's listed. Kept as an editable list (like
-# generate_stretchy_platonic_nets.py's PLATONIC_SOLIDS) rather than CLI
-# args, since this is meant to be tweaked and rerun during exploration.
+# whatever's listed. Kept as an editable list rather than CLI args, since
+# this is meant to be tweaked and rerun during exploration.
 #
 # "cube" at resolution 3 (not 4): SUBDIVISIONS[4] switched from a
 # 2-triangle diagonal split to a 4-triangle centroid fan (see

@@ -1,13 +1,18 @@
 import numpy as np
 import pytest
 
+from common.paths import NETS_DIR
 from utils.geometry3d.polyhedron import Polyhedron
-from common.sample_polyhedra import SAMPLE_SOLIDS
+from utils.persistence.polyhedron_spec import load_polyhedron_spec
 from utils.polyhedron_unfolder import NetUnfolder, is_closed
 
 
 def _polyhedron(name):
-    return SAMPLE_SOLIDS[name]()
+    """Loaded straight from data/input/nets/<name>.json -- these settled,
+    checked-in files ARE the canonical sample solids now, so nothing here
+    re-derives them from raw coordinates."""
+    vertices, faces, net_name = load_polyhedron_spec(NETS_DIR / f"{name}.json")
+    return Polyhedron(vertices=vertices, faces=faces, name=net_name)
 
 
 def test_is_closed_true_for_a_real_closed_solid():
@@ -66,11 +71,12 @@ def test_fold_at_t1_reproduces_the_original_closed_polyhedron():
 
     # every original edge length is preserved by the fold, since
     # fold_transforms applies rigid rotations to a rigid layout -- a real
-    # reconstruction, not an approximation. (sample_polyhedra.py's raw
-    # canonical coordinates aren't normalized to edge length 1 -- a cube's
-    # corners at (+-1,+-1,+-1) have edge length 2 -- so compare against
-    # the ORIGINAL polyhedron's own edge length, not a hardcoded 1.0.)
-    p0, p1 = polyhedron.vertices[polyhedron.faces[0][0]], polyhedron.vertices[polyhedron.faces[0][1]]
+    # reconstruction, not an approximation. (cube.json's raw canonical
+    # coordinates aren't normalized to edge length 1 -- a cube's corners
+    # at (+-1,+-1,+-1) have edge length 2 -- so compare against the
+    # ORIGINAL polyhedron's own edge length, not a hardcoded 1.0.)
+    p0 = np.array(polyhedron.vertices[polyhedron.faces[0][0]])
+    p1 = np.array(polyhedron.vertices[polyhedron.faces[0][1]])
     edge_length = np.linalg.norm(p1 - p0)
     for face in solid.faces:
         k = len(face)
