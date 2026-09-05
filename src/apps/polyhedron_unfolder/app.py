@@ -59,14 +59,21 @@ class PolyhedronUnfolderApp:
     def __init__(self, root):
         self.root = root
         root.title("Polyhedron Unfolder")
-        root.geometry("1200x820")
+        # Taller than it is wide-relative-to-height on purpose: Axes3D
+        # always renders as a square (matplotlib hard-codes this in
+        # Axes3D.apply_aspect -- it's not something this app's own layout
+        # controls), so the 3D view's rendered size is capped by whichever
+        # of the tab's available width/height is smaller. This window is
+        # wide, so that's height -- the taller the window, the bigger that
+        # square gets and the less empty margin sits on either side of it.
+        root.geometry("1200x784")
         root.minsize(860, 620)
 
         sv_ttk.set_theme("dark")
 
         # ---- Net selection (shared by both tabs) ----
-        net_frame = ttk.LabelFrame(root, text="Net", padding=12)
-        net_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
+        net_frame = ttk.LabelFrame(root, text="Net", padding=10)
+        net_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(10, 6))
 
         picker_row = ttk.Frame(net_frame)
         picker_row.pack(fill=tk.X)
@@ -87,7 +94,7 @@ class PolyhedronUnfolderApp:
         # loaded at a time, shared across tabs, so switching tabs never
         # re-solves or re-picks anything.
         self.notebook = ttk.Notebook(root)
-        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(6, 14))
+        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(4, 10))
         self._build_fold_tab()
         self._build_compare_tab()
 
@@ -116,8 +123,8 @@ class PolyhedronUnfolderApp:
         # tab -- the slider was there, just pushed below the visible
         # area). Packing side=BOTTOM chrome first and side=TOP/expanding
         # content last is the general fix for that failure mode.
-        slider_frame = ttk.LabelFrame(tab, text="Fold", padding=12)
-        slider_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        slider_frame = ttk.LabelFrame(tab, text="Fold", padding=8)
+        slider_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         slider_row = ttk.Frame(slider_frame)
         slider_row.pack(fill=tk.X)
         ttk.Label(slider_row, text="Flat").pack(side=tk.LEFT)
@@ -130,7 +137,7 @@ class PolyhedronUnfolderApp:
             side=tk.LEFT, padx=(10, 0))
 
         view_frame = ttk.Frame(tab)
-        view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
+        view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(4, 0))
         self.fold_fig = plt.figure(figsize=(6, 6))
         self.fold_ax = self.fold_fig.add_subplot(111, projection="3d")
         self.fold_canvas = FigureCanvasTkAgg(self.fold_fig, master=view_frame)
@@ -283,12 +290,16 @@ class PolyhedronUnfolderApp:
     # the way in.
     BOX_PADDING = 1.03
     # The on-screen projected half-extent (in Axes3D.get_proj()'s output
-    # units, NOT normalized to [-1, 1] -- see _fit_zoom) that just fills
-    # the plot without clipping, calibrated once against a fully-folded
-    # cube (a shape that already touches every corner of its own bounding
-    # box, i.e. has zero slack to spare) and reused as the target for
-    # every shape/fold-stage.
-    TARGET_SCREEN_EXTENT = 0.108
+    # units, NOT normalized to [-1, 1] -- see _fit_zoom) that fills the
+    # plot without clipping for a fully-folded cube (a shape that already
+    # touches every corner of its own bounding box, i.e. has zero slack to
+    # spare): 0.108. That's reused as the target for every shape/fold
+    # stage, but a cube at t=1 turns out to be the BEST case, not a worst
+    # case -- other nets/fold-stages project a bit further than their own
+    # bounding box would suggest (e.g. a face's far corner swinging wide
+    # mid-fold) and were getting clipped at the full 0.108 target. Scaled
+    # down to 75% of that so every shape keeps a visible margin instead.
+    TARGET_SCREEN_EXTENT = 0.108 * 0.75
 
     def _fit_zoom(self, ax, half, points):
         """Solve for the Axes3D.set_box_aspect `zoom` that makes `points`
