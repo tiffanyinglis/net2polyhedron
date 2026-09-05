@@ -7,7 +7,6 @@ this test doesn't need those files to exist or be pre-cached."""
 import numpy as np
 
 from helpers import TetraNetSpec
-from utils.polyhedron_unfolder import is_closed
 
 
 def test_open_net_unfolds_and_builds_only_the_kept_faces():
@@ -23,8 +22,8 @@ def test_open_net_stays_open_at_full_fold():
     polyhedron = TetraNetSpec.build_open()
     net = TetraNetSpec.unfold(polyhedron)
 
-    solid = net.fold(t=1.0)
-    assert not is_closed(solid)
+    solid = net.get_unfolded_state(amount_unfolded=0.0)
+    assert not solid.is_closed()
 
     # but the sole non-hinge closure edge (the two hinge children share an
     # edge in the original tetrahedron, even though they're not directly
@@ -39,8 +38,8 @@ def test_open_net_stays_open_at_full_fold():
     assert np.isclose(dists.min(), 0.0, atol=1e-6)
 
 
-def test_closed_tetrahedron_net_is_closed_solid_for_comparison():
+def test_closed_tetrahedron_net_is_closed_for_comparison():
     polyhedron = TetraNetSpec.build_closed()
     net = TetraNetSpec.unfold(polyhedron)
-    solid = net.fold(t=1.0)
-    assert is_closed(solid)
+    solid = net.get_unfolded_state(amount_unfolded=0.0)
+    assert solid.is_closed()

@@ -1,9 +1,5 @@
-"""Parser and writer for the polyhedron spec format (JSON) -- a direct
-encoding of a model.Polyhedron: real 3D vertex positions plus CCW
-(viewed-from-outside) face vertex-index loops. No combinatorics to derive
-(no root, no net/extra edge split, no per-face degree list) -- NetUnfolder
-(src/utils/polyhedron_unfolder/) figures out the spanning tree, flat layout, and
-fold angles itself from whatever geometry is given here.
+"""Parser/writer for the polyhedron JSON spec: real 3D vertex positions
+plus CCW (viewed-from-outside) face vertex-index loops.
 
     {
       "name": "Cube",
@@ -11,18 +7,13 @@ fold angles itself from whatever geometry is given here.
       "faces": [[0, 1, 2, 3], [4, 5, 6, 7], ...]
     }
 
-An "open" net (a solid with some faces deliberately missing) is just a spec
-whose "faces" list is a subset -- there's no separate omit/hidden-edge
-bookkeeping needed, since NetUnfolder derives face adjacency straight from
-whichever faces ARE listed. Only include the vertices actually referenced
-by "faces": an unreferenced vertex would still count toward
-apps/common/bounding_box.py's bounding_box(), silently enlarging it around
-a point nothing actually renders.
+An "open" net just lists a subset of a solid's faces; only include
+vertices actually referenced by "faces".
 """
 import json
 
 
-def load_polyhedron_spec(path):
+def load_polyhedron_json(path):
     """Returns (vertices, faces, name) -- vertices: list[list[float]] (each
     length 3), faces: list[list[int]] (each a CCW vertex-index loop),
     name: str or None."""
@@ -56,7 +47,7 @@ def _json_array(items, item_indent, closing_indent):
     return f"[\n{body}\n{closing_indent}]"
 
 
-def write_polyhedron_spec(path, vertices, faces, name=None):
+def write_polyhedron_json(path, vertices, faces, name=None):
     lines = ["{"]
     if name:
         lines.append(f"  {json.dumps('name')}: {json.dumps(name)},")

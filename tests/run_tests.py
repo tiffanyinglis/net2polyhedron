@@ -1,7 +1,7 @@
 """Run the full test suite.
 
     python tests/run_tests.py
-    python tests/run_tests.py -k stretchy   # any extra args are passed to pytest
+    python tests/run_tests.py -k cube -v   # any extra args are passed to pytest
 """
 import sys
 

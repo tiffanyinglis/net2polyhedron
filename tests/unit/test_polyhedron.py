@@ -1,6 +1,6 @@
 import numpy as np
 
-from utils.geometry3d.polyhedron import Polyhedron
+from utils.polyhedron import Polyhedron
 
 # A regular tetrahedron: 4 shared vertices, 4 triangular faces as
 # vertex-index tuples (CCW from outside) -- every edge appears in exactly
@@ -44,3 +44,13 @@ def test_edges_property_is_cached_and_reflects_faces_at_construction():
     solid = _closed_tetra()
     first = solid.edges
     assert solid.edges is first  # same cached list object, not recomputed
+
+
+def test_is_closed_true_for_a_real_closed_solid():
+    assert _closed_tetra().is_closed()
+
+
+def test_is_closed_false_when_a_face_is_missing():
+    tetra = _closed_tetra()
+    open_tetra = Polyhedron(vertices=tetra.vertices, faces=tetra.faces[:-1])
+    assert not open_tetra.is_closed()

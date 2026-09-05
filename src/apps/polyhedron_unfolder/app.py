@@ -8,18 +8,18 @@ explore how it folds, via two tabs that share one net picker:
     side by side at once (drag the 3D panel with the mouse to rotate it;
     matplotlib's own 3D navigation). Also handles **open** nets (a
     polyhedron spec whose faces are a subset of a solid's -- see
-    polyhedron_spec.py's module docstring), which the "Animated Fold" tab
+    polyhedron_json_parser.py's module docstring), which the "Animated Fold" tab
     can load too.
 
     python src/apps/polyhedron_unfolder/app.py
 
-Add your own nets by dropping a new .json file (see polyhedron_spec.py
+Add your own nets by dropping a new .json file (see polyhedron_json_parser.py
 for the format -- a direct encoding of a model.Polyhedron, real vertex
 positions plus CCW face loops -- or any file in data/input/nets/ for
 reference) into that folder -- it'll show up in the dropdown
-automatically. utils.polyhedron_unfolder.NetUnfolder derives the spanning tree,
-flat layout, and fold angles itself from whatever geometry is given;
-there's nothing to hand-author beyond the polyhedron's own shape.
+automatically. utils.polyhedron_unfolder.UnfoldablePolyhedron derives the
+spanning tree, flat layout, and fold angles itself from whatever geometry
+is given; there's nothing to hand-author beyond the polyhedron's own shape.
 
 Unfolding a net is cheap (no numerical solving -- see polyhedron_unfolder.py's
 docstring), so there's no cache and no precompute step: picking a net
@@ -53,7 +53,7 @@ from common.paths import NETS_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from common.bounding_box import bounding_box
 from ui.cullable_face import _CullableFace
-from utils.polyhedron_unfolder import NetUnfolder, is_closed
+from utils.unfoldable_polyhedron import UnfoldablePolyhedron
 
 
 class PolyhedronUnfolderApp:
@@ -223,7 +223,7 @@ class PolyhedronUnfolderApp:
             self.combo.set(self.current_label)
 
     def on_select_net(self, event=None):
-        """Load the chosen net's NetUnfolder in a background thread so the
+        """Load the chosen net's UnfoldablePolyhedron in a background thread so the
         UI stays responsive even for the (rare, bushy) net that takes
         longer than a frame to unfold -- the combo box is disabled for the
         duration so a second selection can't race the first's load. Tk is
@@ -245,7 +245,7 @@ class PolyhedronUnfolderApp:
 
     def _load_worker(self, path):
         try:
-            net = NetUnfolder.load(path)
+            net = UnfoldablePolyhedron.load(path)
             self._load_queue.put(("done", net))
         except Exception as exc:
             self._load_queue.put(("error", str(exc)))
@@ -270,7 +270,7 @@ class PolyhedronUnfolderApp:
         self.net = payload
         # Colors are a plain, position-indexed list -- a Polyhedron's own
         # face list has no id concept of its own, and self.net.flat/
-        # solid.faces (from self.net.fold()) always correspond to
+        # solid.faces (from self.net.get_unfolded_state()) always correspond to
         # self.net.polyhedron.faces position-for-position (see
         # polyhedron_unfolder.py), so this is safe, not fragile.
         n_faces = len(self.net.polyhedron.faces)
@@ -332,7 +332,7 @@ class PolyhedronUnfolderApp:
         return zoom
 
     def _draw_solid(self, ax, solid, title):
-        """Shared by both tabs: render `solid` (a NetUnfolder.fold()
+        """Shared by both tabs: render `solid` (an UnfoldablePolyhedron.get_unfolded_state()
         result -- a model.Polyhedron, pure geometry with no color of its
         own) as one Poly3DCollection per face onto `ax`, backface-culled
         (_CullableFace) only when it's actually a closed convex solid --
@@ -343,7 +343,7 @@ class PolyhedronUnfolderApp:
         indexed by."""
         ax.cla()
         self._style_3d_axis(ax)
-        use_culling = is_closed(solid)
+        use_culling = solid.is_closed()
         all_pts = []
         for i in range(len(solid.faces)):
             pts3d = solid.face_vertices(i)
@@ -383,13 +383,16 @@ class PolyhedronUnfolderApp:
     def draw_fold(self, t):
         """"Animated Fold" tab: the single 3D view at fold progress t."""
         self._apply_plot_theme()
-        solid = self.net.fold(t)
+        # self.net (an UnfoldablePolyhedron) uses amount_unfolded=0..1
+        # (0=folded, 1=flat) -- inverted from this tab's own t=0..1
+        # (0=flat, 1=folded, matching the "Flat"/"Folded" slider labels).
+        solid = self.net.get_unfolded_state(1.0 - t)
         # Backface culling (_CullableFace, applied inside _draw_solid) only
         # makes sense once the shape is a closed convex solid -- mid-fold
         # it's an open, generally non-convex shape whose edges don't yet
-        # coincide, so is_closed(solid) is already false there in practice
+        # coincide, so solid.is_closed() is already false there in practice
         # (an OPEN net -- some faces omitted -- stays false even at t=1).
-        # _draw_solid's own is_closed(solid) check is what actually gates
+        # _draw_solid's own solid.is_closed() check is what actually gates
         # this, not t itself.
         self._draw_solid(self.fold_ax, solid,
                           f"{self.current_label}  (fold {t*100:.0f}%)")
@@ -400,7 +403,7 @@ class PolyhedronUnfolderApp:
         solid (right) at once."""
         self._apply_plot_theme()
         self._draw_flat_net()
-        solid = self.net.fold(1.0)
+        solid = self.net.get_unfolded_state(0.0)  # fully folded
         self._draw_solid(self.ax3d, solid, "Folded solid")
         self.compare_canvas.draw_idle()
 
