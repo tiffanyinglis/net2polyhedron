@@ -24,7 +24,10 @@ positions -- not an abstract combinatorial spec), derives its own net:
    no coordinates to read angles from.
 
 NetUnfolder.fold(t)/face_transforms(t) then reuse net_fold_core's fold
-engine exactly as before.
+engine exactly as before. None of this is cached: every step above is
+cheap (no numerical solving anywhere), so NetUnfolder.load()/for_polyhedron()
+just recompute fresh every time rather than adding cache-staleness
+complexity for a negligible speedup.
 """
 from collections import deque
 
@@ -161,40 +164,24 @@ class NetUnfolder:
         return cls(polyhedron, root, hinges, flat)
 
     @classmethod
-    def _load_or_compute(cls, polyhedron, checksum, root, cache_path):
-        from . import cache as _cache
-        if cache_path is not None:
-            cached = _cache._valid_cache_or_clear_stale(cache_path, checksum, polyhedron)
-            if cached is not None:
-                return cached
-        net = cls._compute(polyhedron, root)
-        if cache_path is not None:
-            _cache.write_cache(cache_path, checksum, net)
-        return net
+    def for_polyhedron(cls, polyhedron, root=0):
+        """Compute the spanning tree, flat layout, and fold angles for an
+        already-built Polyhedron. No caching -- this is fast enough
+        (microseconds to low-milliseconds even for a bushy net, since
+        nothing is numerically solved for, see this module's docstring)
+        that recomputing on every load isn't worth the complexity a cache
+        would add."""
+        return cls._compute(polyhedron, root)
 
     @classmethod
-    def for_polyhedron(cls, polyhedron, root=0, cache_path=None):
-        """Compute (or read from cache.py if cache_path is given and
-        still valid) the spanning tree, flat layout, and fold angles for
-        an already-built Polyhedron."""
-        from . import cache as _cache
-        checksum = _cache.content_checksum(polyhedron) if cache_path is not None else None
-        return cls._load_or_compute(polyhedron, checksum, root, cache_path)
-
-    @classmethod
-    def load(cls, path, cache_dir=None):
+    def load(cls, path):
         """Parse `path` (persistence.polyhedron_spec's vertices+faces
-        format) into a Polyhedron, then for_polyhedron() it -- checksummed
-        against the source file, same caching contract as before."""
+        format) into a Polyhedron, then for_polyhedron() it."""
         from ..persistence.polyhedron_spec import load_polyhedron_spec
-        from ..persistence.checksums import source_checksum
-        from . import cache as _cache
 
         vertices, faces, name = load_polyhedron_spec(path)
         polyhedron = Polyhedron(vertices=vertices, faces=faces, name=name)
-        cache_path = _cache.cache_path_for(path, cache_dir)
-        checksum = source_checksum(path)
-        return cls._load_or_compute(polyhedron, checksum, root=0, cache_path=cache_path)
+        return cls.for_polyhedron(polyhedron, root=0)
 
     # ---- queries ----
 

@@ -6,9 +6,9 @@ Modules:
   net_unfolder  -- NetUnfolder: takes a Polyhedron, computes its spanning
                     tree/flat layout/fold angles (reading angles directly
                     off the given geometry -- see its module docstring),
-                    and folds at any progress t
-  cache         -- checksummed cache for a NetUnfolder's computed net, so
-                    an unchanged source .json is just a fast parse
+                    and folds at any progress t. Nothing is cached --
+                    computing all of this is cheap enough (no numerical
+                    solving anywhere) that it isn't worth the complexity.
 """
 from .hinge import Hinge
 from .net_unfolder import NetUnfolder

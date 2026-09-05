@@ -1,7 +1,6 @@
 """
 Polyhedron Unfolder -- pick a **rigid** net from data/input/nets/ and
-explore how it folds, via two tabs that share one net picker / compute-
-cache control bar:
+explore how it folds, via two tabs that share one net picker:
 
   - "Animated Fold" -- drag a slider from flat (0%) to fully folded
     (100%).
@@ -22,13 +21,10 @@ automatically. utils.net_unfolder.NetUnfolder derives the spanning tree,
 flat layout, and fold angles itself from whatever geometry is given;
 there's nothing to hand-author beyond the polyhedron's own shape.
 
-A .json net with no matching cache file (in this app's OWN cache/ folder,
-next to this file -- not shared with any other app) hasn't been unfolded
-yet and shows up greyed out and unselectable; use the "Compute Folding
-Pattern" button (or run build_cache.py from the command line) to compute
-it -- this is now a fast, direct geometric computation (no numerical
-solving), so mostly avoids redundant recomputation rather than an
-expensive solve.
+Unfolding a net is cheap (no numerical solving -- see net_unfolder.py's
+docstring), so there's no cache and no precompute step: picking a net
+just unfolds it on the spot, in a background thread (see on_select_net)
+so the UI never blocks even momentarily.
 """
 import sys
 from pathlib import Path
@@ -56,17 +52,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
 from common.paths import NETS_DIR
-from common.ui_theme import (STATUS_COLORS, PLOT_THEME, FACE_COLORS,
-                              DISABLED_SUFFIX, COMPUTE_TOOLTIP)
-from ui.tooltip import Tooltip
+from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from ui.cullable_face import _CullableFace
 from utils.net_unfolder import NetUnfolder
-from utils.net_unfolder.cache import is_cached, build_all, cache_path_for
-
-# This app's OWN cache -- not shared with inflate_polyhedron_app (a
-# different pipeline entirely) or with any other app, so nothing here
-# ever depends on another app's cache directory.
-CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
 
 class PolyhedronUnfolderApp:
@@ -88,11 +76,6 @@ class PolyhedronUnfolderApp:
         self.combo = ttk.Combobox(picker_row, state="readonly", width=30)
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
-
-        self.compute_button = ttk.Button(picker_row, text="Compute Folding Pattern",
-                                          command=self.on_compute_clicked)
-        self.compute_button.pack(side=tk.LEFT, padx=(12, 0))
-        Tooltip(self.compute_button, COMPUTE_TOOLTIP)
 
         self.theme_button = ttk.Button(picker_row, text="Light Mode", width=10,
                                         command=self.on_toggle_theme)
@@ -124,7 +107,6 @@ class PolyhedronUnfolderApp:
         self.colors = []
         self.current_label = None
         self.label_to_path = {}
-        self.label_enabled = {}
         self.is_dark = True
         self._apply_plot_theme()
         self.refresh_net_list()
@@ -137,13 +119,16 @@ class PolyhedronUnfolderApp:
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="Animated Fold")
 
-        view_frame = ttk.Frame(tab)
-        view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
-        self.fold_fig = plt.figure(figsize=(6, 6))
-        self.fold_ax = self.fold_fig.add_subplot(111, projection="3d")
-        self.fold_canvas = FigureCanvasTkAgg(self.fold_fig, master=view_frame)
-        self.fold_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
+        # The slider bar is packed BEFORE the (expanding) 3D view, so Tk
+        # reserves its natural height first -- packed the other way
+        # around, the 3D view's `expand=True` greedily claims the whole
+        # cavity as soon as it's packed, leaving the slider bar, packed
+        # second, squeezed to nothing whenever the window isn't tall
+        # enough for both at their natural sizes (which is exactly what
+        # happened once this tab had to share the window with a second
+        # tab -- the slider was there, just pushed below the visible
+        # area). Packing side=BOTTOM chrome first and side=TOP/expanding
+        # content last is the general fix for that failure mode.
         slider_frame = ttk.LabelFrame(tab, text="Fold", padding=12)
         slider_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
         slider_row = ttk.Frame(slider_frame)
@@ -156,6 +141,13 @@ class PolyhedronUnfolderApp:
         self.pct_var = tk.StringVar(value="0%")
         ttk.Label(slider_row, textvariable=self.pct_var, width=5, anchor="e").pack(
             side=tk.LEFT, padx=(10, 0))
+
+        view_frame = ttk.Frame(tab)
+        view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.fold_fig = plt.figure(figsize=(6, 6))
+        self.fold_ax = self.fold_fig.add_subplot(111, projection="3d")
+        self.fold_canvas = FigureCanvasTkAgg(self.fold_fig, master=view_frame)
+        self.fold_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
     def _build_compare_tab(self):
         tab = ttk.Frame(self.notebook)
@@ -242,24 +234,19 @@ class PolyhedronUnfolderApp:
     # ---- net picker ----
 
     def refresh_net_list(self, keep_selection=True):
-        """Rescan data/input/nets/, figure out which are already solved (a
-        valid cache file exists in this app's OWN cache folder), and
-        rebuild the dropdown -- unsolved .json nets get a "(not computed)"
-        suffix and are rejected on selection instead of being loaded."""
+        """Rescan data/input/nets/ and rebuild the dropdown. Every .json
+        there is selectable -- unfolding is cheap enough (see this
+        module's docstring) that nothing needs precomputing ahead of
+        time."""
         paths = sorted(glob.glob(os.path.join(NETS_DIR, "*.json")))
 
-        self.label_to_path = {}
-        self.label_enabled = {}
-        for path in paths:
-            base_label = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
-            enabled = is_cached(path, cache_path_for(path, CACHE_DIR))
-            label = base_label if enabled else base_label + DISABLED_SUFFIX
-            self.label_to_path[label] = path
-            self.label_enabled[label] = enabled
+        self.label_to_path = {
+            os.path.splitext(os.path.basename(path))[0].replace("_", " ").title(): path
+            for path in paths
+        }
 
         labels = list(self.label_to_path.keys())
         self.combo["values"] = labels
-        self._style_disabled_items()
 
         previous_path = self.label_to_path.get(self.current_label)
         if keep_selection and previous_path:
@@ -268,41 +255,59 @@ class PolyhedronUnfolderApp:
                     self.current_label = label
                     break
         elif labels:
-            enabled_labels = [l for l in labels if self.label_enabled[l]]
-            self.current_label = enabled_labels[0] if enabled_labels else labels[0]
+            self.current_label = labels[0]
         else:
             self.current_label = None
 
         if self.current_label:
             self.combo.set(self.current_label)
 
-    def _style_disabled_items(self):
-        """Best-effort: grey out disabled entries in the dropdown's popup
-        list. Reaches into ttk's Tcl internals, so it's wrapped so a
-        failure here (e.g. on an unusual Tk build) never breaks the app --
-        the " (not computed)" suffix and selection guard already make
-        disabled nets unmistakable and unselectable without it."""
-        try:
-            popdown = self.combo.tk.eval(f"ttk::combobox::PopdownWindow {self.combo}")
-            listbox = f"{popdown}.f.l"
-            for i, label in enumerate(self.combo["values"]):
-                color = "grey60" if not self.label_enabled.get(label, True) else ""
-                self.combo.tk.call(listbox, "itemconfigure", i, "-foreground", color)
-        except tk.TclError:
-            pass
-
     def on_select_net(self, event=None):
+        """Load the chosen net's NetUnfolder in a background thread so the
+        UI stays responsive even for the (rare, bushy) net that takes
+        longer than a frame to unfold -- the combo box is disabled for the
+        duration so a second selection can't race the first's load. Tk is
+        not thread-safe: the worker thread only ever pushes to `_load_queue`,
+        and the main thread (via `_poll_load_queue`, scheduled with
+        `after`) is the only one that touches any Tk widget."""
         chosen = self.combo.get()
-        if not self.label_enabled.get(chosen, False):
-            self._set_status(f'"{chosen.replace(DISABLED_SUFFIX, "")}" hasn\'t '
-                              f'been folded yet -- click Compute Folding Pattern.', "warn")
-            self.combo.set(self.current_label)
+        self.current_label = chosen
+        path = self.label_to_path[chosen]
+
+        self.combo.state(["disabled"])
+        self.progress.pack(side=tk.LEFT, padx=(10, 0))
+        self.progress.start(12)
+        self._set_status(f'Loading "{chosen}"...', "info")
+
+        self._load_queue = queue.Queue()
+        threading.Thread(target=self._load_worker, args=(path,), daemon=True).start()
+        self.root.after(50, self._poll_load_queue)
+
+    def _load_worker(self, path):
+        try:
+            net = NetUnfolder.load(path)
+            self._load_queue.put(("done", net))
+        except Exception as exc:
+            self._load_queue.put(("error", str(exc)))
+
+    def _poll_load_queue(self):
+        try:
+            kind, payload = self._load_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(50, self._poll_load_queue)
+            return
+
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.combo.state(["!disabled"])
+
+        if kind == "error":
+            self._set_status(f'Failed to load "{self.current_label}": {payload}', "error")
+            messagebox.showerror("Failed to load net", payload, parent=self.root)
             return
 
         self._set_status("")
-        self.current_label = chosen
-        path = self.label_to_path[chosen]
-        self.net = NetUnfolder.load(path, cache_dir=CACHE_DIR)
+        self.net = payload
         # Colors are a plain, position-indexed list -- a Polyhedron's own
         # face list has no id concept of its own, and self.net.flat/
         # solid.faces (from self.net.fold()) always correspond to
@@ -313,58 +318,6 @@ class PolyhedronUnfolderApp:
         self.slider.set(0)
         self.draw_fold(0.0)
         self.draw_compare()
-
-    # ---- compute cache ----
-
-    def on_compute_clicked(self):
-        self.compute_button.state(["disabled"])
-        self.progress.pack(side=tk.LEFT, padx=(10, 0))
-        self.progress.start(12)
-        self._set_status("Computing folding patterns, this may take a few minutes...", "info")
-        # Tk is not thread-safe: the worker thread only ever pushes to this
-        # queue, and the main thread (via _poll_compute_queue, scheduled
-        # with `after`) is the only one that touches any Tk widget.
-        self._compute_queue = queue.Queue()
-        threading.Thread(target=self._compute_worker, daemon=True).start()
-        self.root.after(100, self._poll_compute_queue)
-
-    def _compute_worker(self):
-        def on_progress(i, n, label, status, elapsed=None):
-            if status == "start":
-                self._compute_queue.put(
-                    ("progress", f"[{i}/{n}] solving {label}... (this can take a while)"))
-
-        results = build_all(NETS_DIR, cache_dir=CACHE_DIR, force=False, on_progress=on_progress)
-        self._compute_queue.put(("done", results))
-
-    def _poll_compute_queue(self):
-        try:
-            while True:
-                kind, payload = self._compute_queue.get_nowait()
-                if kind == "progress":
-                    self._set_status(payload, "info")
-                elif kind == "done":
-                    self._compute_finished(payload)
-                    return  # worker is finished, stop polling
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll_compute_queue)
-
-    def _compute_finished(self, results):
-        self.progress.stop()
-        self.progress.pack_forget()
-        self.compute_button.state(["!disabled"])
-        failures = [(os.path.basename(p), msg) for p, ok, msg in results if not ok]
-        if failures:
-            self._set_status(f"Done, but {len(failures)} net(s) failed -- see popup.", "error")
-            detail = "\n\n".join(f"{name}:\n{msg}" for name, msg in failures)
-            messagebox.showerror(
-                "Some nets failed to compute",
-                f"{len(failures)} net(s) could not be folded:\n\n{detail}",
-                parent=self.root)
-        else:
-            self._set_status("All nets computed." if results else "", "success")
-        self.refresh_net_list()
 
     def on_slider(self, value):
         self.pct_var.set(f"{float(value):.0f}%")

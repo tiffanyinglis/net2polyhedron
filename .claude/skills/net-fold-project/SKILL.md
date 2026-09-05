@@ -12,16 +12,18 @@ solved for (see "Pipeline" below). Three Tkinter entry points share pieces
 of this:
 
 - `polyhedron_unfolder` (`src/apps/polyhedron_unfolder/app.py`) — pick a
-  **rigid** net; two tabs share one net picker / compute-cache control
-  bar: "Animated Fold" (drag a slider from flat to fully folded) and "Flat
-  vs Folded" (the flat 2D net and the fully folded 3D solid side by side
-  at once — the 3D panel is mouse-rotatable via matplotlib's own 3D
-  navigation). Also handles **open** nets (a polyhedron spec whose faces
-  are a subset of a solid's — see "Open nets" below). Originally two separate apps
+  **rigid** net; two tabs share one net picker: "Animated Fold" (drag a
+  slider from flat to fully folded) and "Flat vs Folded" (the flat 2D net
+  and the fully folded 3D solid side by side at once — the 3D panel is
+  mouse-rotatable via matplotlib's own 3D navigation). Also handles
+  **open** nets (a polyhedron spec whose faces are a subset of a solid's
+  — see "Open nets" below). Originally two separate apps
   (`polygon_fold_app.py` / `polyhedral_net_app.py`), merged into one
-  tabbed app since they shared almost all of their net-picker/compute-
-  cache/theme-toggle machinery and always used the exact same rigid
-  cache — see "The apps" below.
+  tabbed app since they shared almost all of their net-picker/theme-toggle
+  machinery — see "The apps" below. Has no cache and no precompute step:
+  unfolding is cheap enough (no numerical solving, see "Pipeline" below)
+  that picking a net just unfolds it on the spot, in a background thread
+  so the UI stays responsive.
 - `polygon_subdivision_app` (`src/apps/polygon_subdivision_app/app.py`) —
   unrelated to folding: a 2D-only demo that splits a triangle/square/.../
   8-gon into a fine triangular mesh (see "Polygon subdivision demo" below).
@@ -29,14 +31,10 @@ of this:
   DIFFERENT solver entirely, for nets that can't stay rigid and flat at
   all (e.g. a face sharing more than one edge with a neighbor). See
   "Stretchy meshes" below — this is the most algorithmically involved
-  part of the project.
-
-Each app that needs a solve cache keeps it in its own `cache/` folder,
-next to its `app.py` (`src/apps/polyhedron_unfolder/cache/`,
-`src/apps/inflate_polyhedron_app/cache/`) — never shared between apps,
-so no app depends on another app's cache directory, even though
-`polyhedron_unfolder`'s own two tabs share one cache (they're the same
-app now, not two apps coordinating).
+  part of the project, and the only one that still needs a solve cache
+  (`src/apps/inflate_polyhedron_app/cache/`, warmed by its own
+  `build_cache.py`) since its solve is a genuine numerical optimization,
+  unlike the rigid pipeline's.
 
 ## Directory layout
 
@@ -51,20 +49,16 @@ itself, only its import paths and (for apps) its data-directory constants.
 shared across more than one of them:
 - `polyhedron_unfolder/` — the merged rigid-pipeline app (see above)
   - `app.py` — entry point, class `PolyhedronUnfolderApp`. Builds ONE
-    shared control bar (net picker, "Compute Folding Pattern", theme
-    toggle, "Show Axes", status line) plus a `ttk.Notebook` with two
-    tabs, each with its own matplotlib figure/canvas but reading the
-    SAME loaded `self.net`/`self.colors` state — switching tabs never
-    re-picks or re-solves anything. This consolidation is *why* the
-    merge made sense: the two original apps duplicated all of that
-    control-bar wiring on purpose (see git history), a tradeoff that
-    stopped paying for itself once they became tabs of one app instead
-    of two independent scripts.
-  - `build_cache.py` — precompute/refresh this app's OWN unfolding cache
-    (was the top-level `build_fold_cache.py`)
-  - `cache/*.json` — the actual cache files (was `data/cache/fold_cache/`)
-    — not shared with `inflate_polyhedron_app` (a different pipeline
-    entirely) or any other app
+    shared control bar (net picker, theme toggle, "Show Axes", status
+    line) plus a `ttk.Notebook` with two tabs, each with its own
+    matplotlib figure/canvas but reading the SAME loaded
+    `self.net`/`self.colors` state — switching tabs never re-picks or
+    re-loads anything. This consolidation is *why* the merge made sense:
+    the two original apps duplicated all of that control-bar wiring on
+    purpose (see git history), a tradeoff that stopped paying for itself
+    once they became tabs of one app instead of two independent scripts.
+    No cache, no `build_cache.py`, no `cache/` folder — see "Caching"
+    below for why the rigid pipeline doesn't need one.
 - `inflate_polyhedron_app/` — the stretchy-mesh viewer (see "Stretchy meshes" below)
   - `app.py` — entry point, class `InflatePolyhedronApp`
   - `build_cache.py` — precompute/refresh this app's OWN solve cache
@@ -105,8 +99,8 @@ sub-package's own `__init__.py` docstring for its module list):
 - `geometry3d/` — the rigid fold engine, stretchy-mesh solving, coordinates: `net_fold_core.py`, `stretchy_mesh.py`, `solid_coords.py`, `hull_to_spec.py`
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
 - `model/` — `Polyhedron`: pure 3D solid geometry (shared, indexed vertices; CCW vertex-index faces; derived edges), with **no** awareness of nets, hinges, roots, fold progress, or color — used by both the rigid and stretchy pipelines. Unfolding-specific logic/objects live in `net_unfolder/` instead, never here.
-- `net_unfolder/` — `NetUnfolder`: derives a net (spanning tree, unfoldable flat layout, fold angles) from an already-built `Polyhedron` — see "Pipeline" below. Also `hinge.py` (`Hinge`) and `cache.py` (checksummed cache for the computed net).
-- `persistence/` — parse/write the on-disk `.json` polyhedron-spec format, plus shared checksum utilities: `polyhedron_spec.py`, `checksums.py`, `stretchy_cache.py`. `net_unfolder.cache.build_all` (and the stretchy-cache equivalent) take an explicit optional `cache_dir` param, threaded in by each app's own `CACHE_DIR` constant — `cache_path_for`'s OLD default (still used when `cache_dir` is omitted, e.g. in tests with `tmp_path`) derives the cache directory as a sibling of the net's own parent directory, which doesn't hold once caches live per-app under `src/apps/<app>/cache/` instead
+- `net_unfolder/` — `NetUnfolder`: derives a net (spanning tree, unfoldable flat layout, fold angles) from an already-built `Polyhedron` — see "Pipeline" below. Also `hinge.py` (`Hinge`). No cache module — nothing here is cached, see "Caching" below.
+- `persistence/` — `polyhedron_spec.py` parses/writes the on-disk rigid `.json` format; `checksums.py` (`source_checksum`) and `stretchy_cache.py` are used only by the stretchy pipeline's cache (`inflate_polyhedron_app`) — the rigid pipeline has nothing to checksum against since it never caches
 
 `data/` — everything on-disk that isn't code (input specs and app output
 ONLY — no caches; those are per-app, under `src/apps/<app>/cache/`, see
@@ -258,65 +252,58 @@ Both funnel into `NetUnfolder._compute`, which derives everything fresh:
 
 Since solving is gone, this whole pipeline is now fast even for the
 bushiest net -- the 32-face, 31-hinge truncated icosahedron went from
-the old solving pipeline's ~30-45s down to ~0.07s. Caching (below) is
-therefore more "avoid redundant recomputation" than "avoid an expensive
-solve" now, but the contract is unchanged.
+the old solving pipeline's ~30-45s down to ~0.07s.
 
-## Caching (`src/utils/net_unfolder/cache.py`)
+## No caching (rigid pipeline)
 
-A cache file (in `src/apps/polyhedron_unfolder/cache/`, not
-`data/input/nets/`) is plain JSON: the flat layout's 2D vertices/faces,
-the hinge list (parent/child/edge indices/angle in degrees), and a
-`checksum` of the source `.json`. `NetUnfolder.load()` transparently
-reuses the cache if the checksum still matches, else recomputes and
-rewrites it.
+`NetUnfolder.load()`/`for_polyhedron()` recompute fresh on every call --
+there used to be a checksummed JSON cache (`net_unfolder/cache.py`,
+mirroring the stretchy pipeline's `stretchy_cache.py`) but it was removed
+once the numerical solver went away: caching exists to avoid redundant
+*expensive* work, and ~0.07s worst-case for the bushiest real net isn't
+expensive enough to justify a cache's staleness-tracking complexity. If a
+future net is bushy enough that this stops being true, reintroducing a
+cache (or memoizing per-`Polyhedron` in-process) is the fix -- see git
+history for the removed module's shape if resurrecting it.
 
-- `is_cached(net_path)` -- read-only check, never mutates anything, and
-  never needs to construct a `Polyhedron` (just compares the cache file's
-  own stored checksum field) -- safe to call just to decide how to render
-  a net (e.g. in the app's net list).
-- `_clear_stale_cache` -- the same cheap, `Polyhedron`-free checksum
-  check `is_cached` uses; when a cache's checksum no longer matches its
-  source (the `.json` was edited, possibly into something that no longer
-  even parses), the stale cache file is **deleted immediately**, before
-  the source is even parsed. This means a failed recompute never leaves a
-  misleading stale cache behind; the net correctly falls back to "not
-  computed" instead. `_valid_cache_or_clear_stale` does the same check
-  but additionally reconstructs a ready `NetUnfolder` (needs an
-  already-parsed `Polyhedron`, unlike the cheap checksum-only variants
-  above) -- what `NetUnfolder.load`/`for_polyhedron` need for an actual
-  cache hit.
-- `build_all(nets_dir, cache_dir=None, force=False, on_progress=None)` --
-  computes/refreshes every net's cache; shared by `build_cache.py` (CLI,
-  prints progress) and the app's "Compute Folding Pattern" button (runs
-  in a background thread, reports via a `queue.Queue` polled from the
-  main thread -- Tk widgets must only ever be touched from the main
-  thread).
-- Run `python src/apps/polyhedron_unfolder/build_cache.py` after editing a `.json` file to warm the
-  cache ahead of time (`--force` recomputes unconditionally); otherwise it
-  happens lazily on first load.
+`polyhedron_unfolder`'s `on_select_net` still runs `NetUnfolder.load()` in
+a background `threading.Thread` (communicating via a `queue.Queue` polled
+from the main thread with `root.after`, the same pattern the old
+compute-cache button used) even though it's fast -- Tk is single-threaded,
+so ANY blocking call on the main thread would freeze the UI for its
+duration, and this keeps the app responsive without needing to reason
+about exactly how fast is "fast enough" to skip threading.
 
 ## The apps (`polyhedron_unfolder`)
 
 Tkinter UI on the `sv_ttk` theme (dark by default, light/dark toggle
 button). ONE shared `LabelFrame`-grouped control bar sits on top: net
-picker + Compute button + "Show Axes" checkbox (off by default) + theme
-button + status line — built once in `PolyhedronUnfolderApp.__init__`,
-not duplicated per tab. Below it, a `ttk.Notebook` with two tabs, each
-built by its own `_build_*_tab` method: "Animated Fold" (a single 3D plot
-plus the fold slider) and "Flat vs Folded" (a flat-net panel beside a
+picker + "Show Axes" checkbox (off by default) + theme button + status
+line — built once in `PolyhedronUnfolderApp.__init__`, not duplicated per
+tab. Below it, a `ttk.Notebook` with two tabs, each built by its own
+`_build_*_tab` method: "Animated Fold" (the fold slider, packed FIRST so
+its fixed height is always reserved at the bottom, then the 3D plot,
+packed second to fill whatever's left above it -- packing the expanding
+matplotlib canvas first, as an earlier version did, let it claim the
+tab's entire cavity and squeeze the slider out of the visible window
+whenever height was tight, e.g. once this tab had to share the window
+with a second tab) and "Flat vs Folded" (a flat-net panel beside a
 folded-3D panel, always at `t=1.0`, no slider). Both tabs read the same
 `self.net`/`self.colors`/etc. state, set once by `on_select_net`, and are
 redrawn together (`_refresh_plot` calls both `draw_fold`/`draw_compare`)
 on any state change (net selection, theme, axes) — only the slider,
 `on_slider`, redraws just the "Animated Fold" tab.
 
-- Nets without a valid cache file show a `(not computed)` suffix and are
-  greyed out in the dropdown (`_style_disabled_items` — a best-effort
-  reach into ttk's Tcl popdown-listbox internals, wrapped in try/except
-  since it's not public API; the text suffix + a selection guard in
-  `on_select_net` are what actually make them unselectable, independent of
-  whether the grey styling succeeds).
+- Every `.json` in `data/input/nets/` is always selectable in the
+  dropdown -- there's no cache to be missing (see "No caching" above), so
+  nothing is ever greyed out or rejected on selection.
+- `on_select_net` loads the chosen net in a background thread (disabling
+  the combo box and showing an indeterminate `ttk.Progressbar` +
+  "Loading..." status for the duration) so the UI never blocks, then
+  polls a `queue.Queue` via `root.after` on the main thread to pick up the
+  finished `NetUnfolder` (or a caught exception, reported via
+  `messagebox.showerror`) and redraw -- see "No caching" above for why
+  this thread exists even though loading is fast.
 - `_apply_plot_theme` recolors BOTH tabs' figures/axes to match sv_ttk's
   theme (`common.ui_theme.PLOT_THEME`, mirroring sv_ttk's own `-bg`
   colors) and honors the "Show Axes" toggle; `draw_fold`/`draw_compare`
@@ -372,10 +359,6 @@ on any state change (net selection, theme, axes) — only the slider,
   with an isolated repro (`get_edgecolor()` unchanged after `set_alpha(0)`
   + `do_3d_projection()`) before switching to writing `_edgecolor3d`
   directly, which does update what's actually drawn.
-- "Compute Folding Pattern" runs `build_all` in a background thread with an
-  indeterminate `ttk.Progressbar` and status-line updates; on completion,
-  any failures are reported via `messagebox.showerror` listing each failed
-  net and its error message (not just the status line).
 - `_set_status(text, kind)` centralizes status-line coloring (`info` /
   `success` / `error` / `warn` → `common.ui_theme.STATUS_COLORS`).
 
@@ -577,8 +560,10 @@ to keep distinct vertices apart.
 
 ### Caching (`src/utils/persistence/stretchy_cache.py`)
 
-Mirrors `net_unfolder/cache.py` for the rigid pipeline, but recording just
-a positions + stats dict (no hinge tree/fold angles to write out).
+The rigid pipeline no longer has an equivalent (see "No caching" above) --
+this one still earns its keep because `solve_wireframe` is a genuine
+numerical optimization, not a direct geometric read. Records just a
+positions + stats dict (no hinge tree/fold angles to write out).
 `ALGORITHM_VERSION` (in `stretchy_mesh.py`) is folded into the cache key
 (`stretchy_cache.source_checksum` = file hash + `"+algo{VERSION}"`) —
 **bump it whenever `solve_wireframe`'s algorithm changes enough to produce
