@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from utils.model.polyhedron import Polyhedron
+from utils.geometry3d.polyhedron import Polyhedron
 from common.sample_polyhedra import SAMPLE_SOLIDS
-from utils.net_unfolder import NetUnfolder, is_closed
+from utils.polyhedron_unfolder import NetUnfolder, is_closed
 
 
 def _polyhedron(name):
@@ -50,7 +50,7 @@ def test_flat_layout_shares_hinge_vertices_but_not_closure_vertices():
 ])
 def test_fold_angle_matches_the_known_dihedral_angle(name, expected_angle_deg):
     """fold_angle = 180 - dihedral, read directly off the given geometry
-    -- no numerical solving involved (see net_unfolder.py's docstring)."""
+    -- no numerical solving involved (see polyhedron_unfolder.py's docstring)."""
     net = NetUnfolder.for_polyhedron(_polyhedron(name))
     angles = {round(np.degrees(h.angle), 4) for h in net.hinges}
     assert angles == {expected_angle_deg}

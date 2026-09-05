@@ -3,17 +3,17 @@ CCW (viewed from outside) vertex-index tuples; edges as vertex-index pairs,
 derived from faces. Knows nothing about nets, hinges, roots, fold progress,
 or color -- those all belong to PolyhedralNet (the pre-fold flat net + hinge
 tree) and to whatever renders a Polyhedron, not to this class. In that
-spirit, whether a Polyhedron is actually closed is a net_unfolder concern
-(net_unfolder.is_closed(polyhedron) -- closure is a fact about fold
-progress, not about the geometry alone), and bounding_box() is a rendering
-helper (apps/common/bounding_box.py) rather than a method here.
+spirit, whether a Polyhedron is actually closed is a polyhedron_unfolder
+concern (polyhedron_unfolder.is_closed(polyhedron) -- closure is a fact
+about fold progress, not about the geometry alone), and bounding_box() is
+a rendering helper (apps/common/bounding_box.py) rather than a method here.
 
 PolyhedralNet.fold(t) is what produces one of these, at any fold progress t
 (not just t=1) -- see its docstring for how per-face-corner points get
 merged into this class's shared vertex indices."""
 import numpy as np
 
-from ..geometry3d.net_fold_core import face_normal as _face_normal
+from .net_fold_core import face_normal as _face_normal
 
 
 class Polyhedron:

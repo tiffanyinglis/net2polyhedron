@@ -1,10 +1,10 @@
 """Sample solids (and a couple of OPEN nets carved from one of them) as
-ready-to-use model.Polyhedron objects, for the generate_*.py scripts and
+ready-to-use geometry3d.Polyhedron objects, for the generate_*.py scripts and
 tests to instantiate directly rather than hand-building coordinates --
 replaces the old geometry3d/solid_coords.py, which only handed back raw
 coordinate tuples and left every caller to separately run those through
 hull_to_spec.polyhedron_from_vertices to get CCW face loops. Lives in
-apps/common/ (not utils/model/) since this is sample/demo content the
+apps/common/ (not utils/geometry3d/) since this is sample/demo content the
 apps and their generator scripts consume, not reusable fold-pipeline
 domain logic itself.
 
@@ -35,7 +35,7 @@ for _p in (_SRC_DIR, _APPS_DIR):
 
 import numpy as np
 
-from utils.model.polyhedron import Polyhedron
+from utils.geometry3d.polyhedron import Polyhedron
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
 
 PHI = (1 + np.sqrt(5)) / 2
@@ -166,7 +166,7 @@ class OpenSamplePolyhedron(Polyhedron):
     These exist to exercise/validate the apps against nets that don't
     fold up into a closed solid -- which polyhedron_unfolder's backface
     culling (ui.cullable_face._CullableFace) must NOT be applied to
-    (checked via utils.net_unfolder.is_closed)."""
+    (checked via utils.polyhedron_unfolder.is_closed)."""
 
     name = None
     base_cls = None  # a SamplePolyhedron subclass this is carved from

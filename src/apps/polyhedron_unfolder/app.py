@@ -17,11 +17,11 @@ Add your own nets by dropping a new .json file (see polyhedron_spec.py
 for the format -- a direct encoding of a model.Polyhedron, real vertex
 positions plus CCW face loops -- or any file in data/input/nets/ for
 reference) into that folder -- it'll show up in the dropdown
-automatically. utils.net_unfolder.NetUnfolder derives the spanning tree,
+automatically. utils.polyhedron_unfolder.NetUnfolder derives the spanning tree,
 flat layout, and fold angles itself from whatever geometry is given;
 there's nothing to hand-author beyond the polyhedron's own shape.
 
-Unfolding a net is cheap (no numerical solving -- see net_unfolder.py's
+Unfolding a net is cheap (no numerical solving -- see polyhedron_unfolder.py's
 docstring), so there's no cache and no precompute step: picking a net
 just unfolds it on the spot, in a background thread (see on_select_net)
 so the UI never blocks even momentarily.
@@ -53,7 +53,7 @@ from common.paths import NETS_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from common.bounding_box import bounding_box
 from ui.cullable_face import _CullableFace
-from utils.net_unfolder import NetUnfolder, is_closed
+from utils.polyhedron_unfolder import NetUnfolder, is_closed
 
 
 class PolyhedronUnfolderApp:
@@ -272,7 +272,7 @@ class PolyhedronUnfolderApp:
         # face list has no id concept of its own, and self.net.flat/
         # solid.faces (from self.net.fold()) always correspond to
         # self.net.polyhedron.faces position-for-position (see
-        # net_unfolder.py), so this is safe, not fragile.
+        # polyhedron_unfolder.py), so this is safe, not fragile.
         n_faces = len(self.net.polyhedron.faces)
         self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(n_faces)]
         self.slider.set(0)
@@ -339,7 +339,7 @@ class PolyhedronUnfolderApp:
         see ui.cullable_face's docstring for why that check matters.
 
         solid.faces[i] always corresponds to self.net.polyhedron.faces[i]
-        (see net_unfolder.py), which is exactly what self.colors is
+        (see polyhedron_unfolder.py), which is exactly what self.colors is
         indexed by."""
         ax.cla()
         self._style_3d_axis(ax)

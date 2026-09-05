@@ -1,5 +1,6 @@
-"""NetUnfolder: given an already-built model.Polyhedron (real 3D vertex
-positions -- not an abstract combinatorial spec), derives its own net:
+"""NetUnfolder: given an already-built geometry3d.Polyhedron (real 3D
+vertex positions -- not an abstract combinatorial spec), derives its own
+net:
 
 1. Face adjacency, read directly off the Polyhedron's own face loops (no
    planar-embedding/EdgeMap needed -- a real Polyhedron already knows
@@ -33,12 +34,41 @@ from collections import deque
 
 import numpy as np
 
-from ..model.polyhedron import Polyhedron
+from ..geometry3d.polyhedron import Polyhedron
 from ..geometry2d.polygon_geom import rigid_transform_2d, apply_rigid
 from ..geometry3d.net_fold_core import (
     Net, flatten_net, fold as _fold, fold_transforms as _fold_transforms,
     cluster_faces_into_mesh)
-from .hinge import Hinge
+
+
+class Hinge:
+    """One fold hinge, joining a parent face to a child face along one
+    edge of each. `parent_id`/`child_id` are positions in a Polyhedron's
+    own `faces` list (there's no separate "id" concept above that -- see
+    this module's docstring/geometry3d.Polyhedron). Canonically identified
+    by `child_id` (matching how fold_angles keys things in
+    net_fold_core.py's fold engine) -- the scipy optimization vector's
+    positional indexing that used to live in the now-deleted
+    fold_solver.py is gone entirely, since fold angles are read directly
+    off the given geometry now."""
+
+    def __init__(self, parent_id, child_id, parent_edge_idx, child_edge_idx, angle=None):
+        self.parent_id = parent_id
+        self.child_id = child_id
+        self.parent_edge_idx = parent_edge_idx
+        self.child_edge_idx = child_edge_idx
+        self.angle = angle  # radians, rotation-from-flat, i.e. the dihedral-derived fold angle
+
+    def to_legacy_dict(self):
+        """The dict shape net_fold_core.fold()/fold_transforms() expect --
+        used only at the boundary into that unchanged code."""
+        return dict(parent=self.parent_id, child=self.child_id,
+                     parent_edge_idx=self.parent_edge_idx,
+                     child_edge_idx=self.child_edge_idx)
+
+    def __repr__(self):
+        return (f"Hinge(parent={self.parent_id}, child={self.child_id}, "
+                f"angle={self.angle!r})")
 
 
 def _face_adjacency(polyhedron):
@@ -148,7 +178,7 @@ def is_closed(polyhedron):
     fact about fold progress (a flat net or a mid-fold/open solid isn't
     closed; NetUnfolder.fold(1.0) of a closed spec is), which is why it
     lives here rather than as a plain geometric property of Polyhedron --
-    see model/polyhedron.py's own docstring."""
+    see geometry3d/polyhedron.py's own docstring."""
     counts = {}
     for face in polyhedron.faces:
         k = len(face)
@@ -164,7 +194,7 @@ class NetUnfolder:
         self.polyhedron = polyhedron   # the given closed (or open) solid
         self.root = root               # face index, always 0
         self.hinges = hinges            # list[Hinge]
-        self.flat = flat                # model.Polyhedron, the unfoldable net at z=0
+        self.flat = flat                # geometry3d.Polyhedron, the unfoldable net at z=0
         self._hinge_by_child = {h.child_id: h for h in hinges}
 
     # ---- construction ----
@@ -216,10 +246,10 @@ class NetUnfolder:
     # ---- folding ----
 
     def fold(self, t=1.0, fold_signs=None):
-        """Return a model.Polyhedron at fold progress t (not just t=1 --
-        every intermediate slider position is an equally valid Polyhedron,
-        with is_closed() simply reporting False until the fold actually
-        completes)."""
+        """Return a geometry3d.Polyhedron at fold progress t (not just
+        t=1 -- every intermediate slider position is an equally valid
+        Polyhedron, with is_closed() simply reporting False until the
+        fold actually completes)."""
         legacy_hinges = [h.to_legacy_dict() for h in self.hinges]
         verts3d = _fold(self.flat, self.root, legacy_hinges, self.fold_angles,
                          t, fold_signs=fold_signs)

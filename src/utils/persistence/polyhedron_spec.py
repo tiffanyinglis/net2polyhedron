@@ -2,7 +2,7 @@
 encoding of a model.Polyhedron: real 3D vertex positions plus CCW
 (viewed-from-outside) face vertex-index loops. No combinatorics to derive
 (no root, no net/extra edge split, no per-face degree list) -- NetUnfolder
-(src/utils/net_unfolder/) figures out the spanning tree, flat layout, and
+(src/utils/polyhedron_unfolder/) figures out the spanning tree, flat layout, and
 fold angles itself from whatever geometry is given here.
 
     {

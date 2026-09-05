@@ -1,6 +1,6 @@
 """Cache the (expensive) result of solve_wireframe()-ing a stretchy .json
 mesh, so re-loading an unchanged net is just a fast JSON parse instead of
-a full least-squares relaxation -- the same idea as net_unfolder/cache.py
+a full least-squares relaxation -- the same idea as polyhedron_unfolder/cache.py
 for the rigid pipeline, just recording per-vertex 3D positions and the
 summary stats solve_wireframe returns instead of a flat layout/hinge tree.
 

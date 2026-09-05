@@ -1,4 +1,4 @@
-from utils.net_unfolder.hinge import Hinge
+from utils.polyhedron_unfolder import Hinge
 
 
 def test_to_legacy_dict_matches_net_fold_core_shape():

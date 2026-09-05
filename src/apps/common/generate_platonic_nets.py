@@ -1,7 +1,7 @@
 """One-off generator: writes data/input/nets/<solid>.json for each of the 5
 Platonic solids (plus the truncated icosahedron), from the ready-built
 model.Polyhedron objects in sample_polyhedra.py (this directory).
-NetUnfolder (src/utils/net_unfolder/) derives its own spanning tree/flat
+NetUnfolder (src/utils/polyhedron_unfolder/) derives its own spanning tree/flat
 layout/fold angles at load time, so nothing about the net itself needs
 deriving here -- this just writes out each polyhedron's own geometry.
 

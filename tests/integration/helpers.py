@@ -1,7 +1,7 @@
 """Shared fixture builders for tests/integration/.
 
 An integration test exercises several utils sub-packages together (here:
-geometry3d.hull_to_spec -> model.Polyhedron -> net_unfolder.NetUnfolder),
+geometry3d.hull_to_spec -> geometry3d.Polyhedron -> polyhedron_unfolder.NetUnfolder),
 so its setup tends to be a multi-line construction rather than a single
 call into one function. These small classes package that setup up so a
 test itself reads as "build a polyhedron, unfold it, check a property"
@@ -10,9 +10,9 @@ instead of repeating the same coordinate/face-loop setup inline.
 import numpy as np
 
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from utils.model.polyhedron import Polyhedron
+from utils.geometry3d.polyhedron import Polyhedron
 from common.sample_polyhedra import Tetrahedron
-from utils.net_unfolder import NetUnfolder
+from utils.polyhedron_unfolder import NetUnfolder
 
 
 class TetraNetSpec:

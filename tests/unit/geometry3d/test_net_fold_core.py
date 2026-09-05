@@ -3,8 +3,8 @@ import numpy as np
 from utils.geometry3d.net_fold_core import (
     Net, flatten_net, fold, fold_transforms, hinge_transform, cluster_faces_into_mesh,
     distinct_vertices, face_normal, is_closed_solid)
-from utils.model.polyhedron import Polyhedron
-from utils.net_unfolder import is_closed
+from utils.geometry3d.polyhedron import Polyhedron
+from utils.polyhedron_unfolder import is_closed
 
 
 def _square(x0, y0, s=1.0):

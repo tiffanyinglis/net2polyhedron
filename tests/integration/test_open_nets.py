@@ -7,7 +7,7 @@ this test doesn't need those files to exist or be pre-cached."""
 import numpy as np
 
 from helpers import TetraNetSpec
-from utils.net_unfolder import is_closed
+from utils.polyhedron_unfolder import is_closed
 
 
 def test_open_net_unfolds_and_builds_only_the_kept_faces():
