@@ -93,8 +93,8 @@ import sv_ttk
 from common.paths import STRETCHY_NETS_DIR, SAVE_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 from utils.geometry3d.stretchy_mesh import (
-    load_stretchy_mesh, mesh_edges, relax_once, per_face_volumes, is_orientation_consistent,
-    EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
+    load_stretchy_mesh, relax_once, per_face_volumes, is_orientation_consistent,
+    mesh_to_polyhedron, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from utils.persistence.stretchy_cache import load_with_cache, is_cached, cache_path_for
 from utils.subdivisions.mesh_subdivide import load_fabric_spec, subdivide_mesh
@@ -785,7 +785,14 @@ class InflatePolyhedronApp:
         edges thin and faint (see SUBDIVISION_EDGE_ALPHA/WIDTH) so the
         subdivision reads as texture rather than a bold wireframe, and no
         per-vertex scatter dots (there can be hundreds of fine
-        vertices)."""
+        vertices).
+
+        Wraps the current (positions, faces) into a Polyhedron -- its
+        .edges gives the wireframe segments below (positions re-indexed to
+        Polyhedron's own dense 0..N-1 space, so `polyhedron.vertices[i]`
+        is the position for edge endpoint `i` directly, no dict lookup
+        needed), and .is_closed() reports in the title whether the current
+        shape is a genuinely closed solid or still an open mesh."""
         self.ax3d.cla()
         self._style_3d_axis(self.ax3d, theme)
 
@@ -793,13 +800,16 @@ class InflatePolyhedronApp:
         face_colors = ([self.colors[c % len(self.colors)] for c in self.face_of_fine]
                         if fabric else self.colors)
 
+        polyhedron = mesh_to_polyhedron(self.positions, self.faces)
+
         all_pts = np.array(list(self.positions.values()))
         for face, color in zip(self.faces, face_colors):
             pts = np.array([self.positions[v] for v in face])
             self.ax3d.add_collection3d(
                 Poly3DCollection([pts], facecolor=color, edgecolor="none", alpha=0.55))
 
-        edge_segments = [(self.positions[a], self.positions[b]) for a, b in mesh_edges(self.faces)]
+        edge_segments = [(polyhedron.vertices[a], polyhedron.vertices[b])
+                          for a, b in polyhedron.edges]
         self.ax3d.add_collection3d(Line3DCollection(
             edge_segments, colors=theme["fg"],
             linewidths=SUBDIVISION_EDGE_WIDTH if fabric else 1.6,
@@ -820,8 +830,9 @@ class InflatePolyhedronApp:
         self.ax3d.set_box_aspect([1, 1, 1])
         if self.show_axes_var.get():
             self._draw_box_wireframe(xlim, ylim, zlim, theme["fg"])
-        self.ax3d.set_title("Wireframe result (fabric, subdivided)" if fabric else
-                             "Wireframe result")
+        closed_note = "closed" if polyhedron.is_closed() else "open"
+        self.ax3d.set_title(f"Wireframe result (fabric, subdivided, {closed_note})" if fabric else
+                             f"Wireframe result ({closed_note})")
 
     def draw(self):
         theme = self._apply_plot_theme()

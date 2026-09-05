@@ -80,6 +80,8 @@ import json
 import numpy as np
 from scipy.optimize import least_squares
 
+from .polyhedron import Polyhedron
+
 EDGE_LENGTH = 1.0
 
 # Bump whenever solve_wireframe's algorithm changes enough to produce a
@@ -137,6 +139,21 @@ def mesh_edges(faces):
     """The mesh's unique undirected edges, as (a, b) with a < b."""
     edges = {tuple(sorted(e)) for face in faces for e in _face_edges(face)}
     return sorted(edges)
+
+
+def mesh_to_polyhedron(positions, faces, name=None):
+    """Wrap a solved stretchy mesh (`positions`: {vertex_id: np.ndarray(3,)},
+    `faces`: vertex-id loops) into a Polyhedron, for callers that want its
+    `.edges`/`.is_closed()`/`.face_normal()`/`.compute_face_adjacency()`
+    rather than reimplementing them against the mesh's own dict-keyed
+    representation. Vertex ids need not be contiguous from 0 -- they're
+    remapped to Polyhedron's own dense 0..N-1 index space here, the same
+    way `_edge_setup` remaps them for `relax_once`."""
+    vertex_ids = sorted(positions)
+    idx = {v: i for i, v in enumerate(vertex_ids)}
+    vertices = [positions[v] for v in vertex_ids]
+    remapped_faces = [tuple(idx[v] for v in face) for face in faces]
+    return Polyhedron(vertices=vertices, faces=remapped_faces, name=name)
 
 
 def _pair_index_arrays(pairs, idx):

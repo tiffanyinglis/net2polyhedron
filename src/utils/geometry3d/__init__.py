@@ -20,11 +20,11 @@ were removed along with the rigid pipeline. Nothing in this project currently
 needs a sample solid's real vertices except hull_to_spec's own tests, which
 inline the coordinates they need directly.
 """
-from .stretchy_mesh import load_stretchy_mesh, solve_wireframe, relax_once
+from .stretchy_mesh import load_stretchy_mesh, solve_wireframe, relax_once, mesh_to_polyhedron
 from .hull_to_spec import polyhedron_from_vertices
 from .polyhedron import Polyhedron
 
 __all__ = [
-    "load_stretchy_mesh", "solve_wireframe", "relax_once",
+    "load_stretchy_mesh", "solve_wireframe", "relax_once", "mesh_to_polyhedron",
     "polyhedron_from_vertices", "Polyhedron",
 ]

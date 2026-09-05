@@ -12,6 +12,12 @@ deliberately doesn't want them touched, since editing them (even
 additively) risks messing up code structure they've already settled on:
 
 - `src/utils/geometry2d/polygon_geom.py`
+- `src/utils/geometry3d/polyhedron.py` (`Polyhedron`: pure 3D solid geometry
+  -- shared, indexed vertices; CCW faces; derived `.edges`; `.face_vertices()`,
+  `.face_normal()`, `.is_closed()`, `.compute_face_adjacency()`. Ported over
+  from the sibling `polyhedron-unfolder` project's own `Polyhedron`, with
+  `face_normal` inlined rather than imported from a fold engine, since this
+  project doesn't have one.)
 - `src/apps/ui/tooltip.py`
 - `src/apps/ui/cullable_face.py`
 - `src/apps/ui/__init__.py`
@@ -176,8 +182,21 @@ sub-package's own `__init__.py` docstring for its module list):
     triangulated facets into their true polygonal faces) — face degrees and
     adjacency are then just `.faces`/`.compute_face_adjacency()`, not a
     separately-returned tuple.
+  - `stretchy_mesh.py`'s `mesh_to_polyhedron(positions, faces, name=None)`
+    is the bridge from the stretchy pipeline's own dict-keyed mesh
+    representation (`positions`: `{vertex_id: np.ndarray(3,)}`, `faces`:
+    vertex-id loops -- see this module's docstring) into a `Polyhedron`:
+    vertex ids are remapped to `Polyhedron`'s dense 0..N-1 index space the
+    same way `_edge_setup` does for `relax_once`, so `polyhedron.vertices[i]`
+    is the position for edge/face-index `i` directly. The solve/relax
+    internals themselves stay on the dict representation (vertices are
+    relaxed by id, and a mid-solve mesh isn't reliably closed/convex, so
+    `Polyhedron`'s dense-index assumption doesn't fit there) -- this bridge
+    is for callers that want a *finished* mesh's `.edges`/`.is_closed()`/
+    `.face_normal()` rather than reimplementing them, e.g.
+    `inflate_polyhedron_app`'s `_draw_wireframe_result` (see "The app" below).
   - `geometry3d/__init__.py` re-exports `load_stretchy_mesh, solve_wireframe,
-    relax_once, polyhedron_from_vertices, Polyhedron`.
+    relax_once, mesh_to_polyhedron, polyhedron_from_vertices, Polyhedron`.
   Sample solids (Platonic, etc.) have no on-disk source in this project
   anymore (the old `data/input/nets/*.json` + `sample_polyhedra.py`
   approach was removed along with the rigid pipeline) — anything that needs
@@ -1124,6 +1143,20 @@ solve instead of an instant read).
   the precomputed `self.target_layout` on every redraw rather than
   recomputing the BFS each time; the per-face raw-vertex-id text label
   (e.g. "[4, 0, 2, 6]") that stood in for a real layout before is gone.
+- `_draw_wireframe_result` (the right-hand 3D panel showing the CURRENT
+  state) wraps `self.positions`/`self.faces` into a `Polyhedron` via
+  `geometry3d.stretchy_mesh.mesh_to_polyhedron` on every redraw: `.edges`
+  gives the wireframe line segments (`polyhedron.vertices[i]` is the
+  position for edge endpoint `i` directly, since `mesh_to_polyhedron`
+  already remapped vertex ids to `Polyhedron`'s dense index space --
+  no `self.positions[...]` dict lookup needed), and `.is_closed()`
+  annotates the panel title ("Wireframe result (closed)" vs "(open)") so
+  it's visible at a glance whether the current shape -- coarse OR fine
+  fabric mesh, mid-relax or fully settled -- is a genuinely closed solid
+  yet. This is purely a rendering/reporting convenience: the solve/relax
+  internals (`solve_wireframe`, `relax_once`, etc.) stay on the
+  dict-keyed representation throughout, since vertices are relaxed by id
+  and a mid-solve mesh isn't reliably closed or convex.
 
 ## Testing
 

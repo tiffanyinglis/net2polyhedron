@@ -7,12 +7,13 @@ import pytest
 from utils.geometry3d import stretchy_mesh
 from utils.subdivisions.mesh_subdivide import solve_fabric_mesh
 from utils.geometry3d.stretchy_mesh import (
-    load_stretchy_mesh, mesh_edges, solve_wireframe, STRETCH_CAP,
+    load_stretchy_mesh, mesh_edges, mesh_to_polyhedron, solve_wireframe, STRETCH_CAP,
     _overall_3d_extent, _min_pairwise_separation, _mesh_volume, _sphere_bound_volume,
     _volume_indices, _planarity_groups, _face_planarity_residual,
     _orientation_signs, _is_orientation_consistent,
     relax_once, EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
 )
+from utils.geometry3d.polyhedron import Polyhedron
 
 PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json"
 
@@ -69,6 +70,30 @@ def test_mesh_edges_deduplicates_and_sorts():
     assert edges == sorted(set(edges))
     assert all(a < b for a, b in edges)
     assert len(edges) == 7  # 3 shared A-B + 2 A-S + 2 B-S
+
+
+def test_mesh_to_polyhedron_wraps_a_solved_mesh():
+    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    solid = mesh_to_polyhedron(positions, TETRAHEDRON_FACES, name="tetra")
+    assert isinstance(solid, Polyhedron)
+    assert solid.name == "tetra"
+    assert len(solid.vertices) == len(positions)
+    assert len(solid.faces) == len(TETRAHEDRON_FACES)
+    assert solid.is_closed()
+    assert len(solid.edges) == len(mesh_edges(TETRAHEDRON_FACES))
+
+
+def test_mesh_to_polyhedron_handles_non_contiguous_vertex_ids():
+    # vertex ids 10/20/30 instead of 0/1/2 -- Polyhedron itself needs a
+    # dense 0..N-1 index space, so mesh_to_polyhedron must remap them.
+    positions = {10: np.array([0.0, 0.0, 0.0]), 20: np.array([1.0, 0.0, 0.0]),
+                 30: np.array([0.0, 1.0, 0.0])}
+    faces = [[10, 20, 30]]
+    solid = mesh_to_polyhedron(positions, faces)
+    assert solid.faces == [(0, 1, 2)]
+    assert np.array_equal(solid.vertices[0], positions[10])
+    assert np.array_equal(solid.vertices[1], positions[20])
+    assert np.array_equal(solid.vertices[2], positions[30])
 
 
 # ---- _mesh_volume / _sphere_bound_volume ----
