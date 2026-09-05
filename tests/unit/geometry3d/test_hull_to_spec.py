@@ -1,5 +1,5 @@
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from utils.model.platonic_polyhedra import Tetrahedron, Cube, Octahedron
+from common.sample_polyhedra import Tetrahedron, Cube, Octahedron
 
 
 def _assert_euler_consistent(vertices, degrees, edges):

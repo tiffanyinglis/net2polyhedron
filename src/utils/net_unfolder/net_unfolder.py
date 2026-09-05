@@ -140,6 +140,25 @@ def _hinge_fold_angle(polyhedron, parent_idx, child_idx):
     return np.arccos(np.clip(np.dot(n_p, n_c), -1.0, 1.0))
 
 
+def is_closed(polyhedron):
+    """True iff every edge (by vertex-index pair) of `polyhedron` appears
+    in exactly 2 faces -- pure integer counting, no float tolerance
+    anywhere (unlike net_fold_core.is_closed_solid, which has to match raw
+    3D points since it has no vertex indices to work with). This is a
+    fact about fold progress (a flat net or a mid-fold/open solid isn't
+    closed; NetUnfolder.fold(1.0) of a closed spec is), which is why it
+    lives here rather than as a plain geometric property of Polyhedron --
+    see model/polyhedron.py's own docstring."""
+    counts = {}
+    for face in polyhedron.faces:
+        k = len(face)
+        for i in range(k):
+            a, b = face[i], face[(i + 1) % k]
+            key = (a, b) if a < b else (b, a)
+            counts[key] = counts.get(key, 0) + 1
+    return all(count == 2 for count in counts.values())
+
+
 class NetUnfolder:
     def __init__(self, polyhedron, root, hinges, flat):
         self.polyhedron = polyhedron   # the given closed (or open) solid
@@ -199,7 +218,7 @@ class NetUnfolder:
     def fold(self, t=1.0, fold_signs=None):
         """Return a model.Polyhedron at fold progress t (not just t=1 --
         every intermediate slider position is an equally valid Polyhedron,
-        with .is_closed simply reporting False until the fold actually
+        with is_closed() simply reporting False until the fold actually
         completes)."""
         legacy_hinges = [h.to_legacy_dict() for h in self.hinges]
         verts3d = _fold(self.flat, self.root, legacy_hinges, self.fold_angles,

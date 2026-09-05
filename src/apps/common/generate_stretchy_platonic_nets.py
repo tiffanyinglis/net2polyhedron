@@ -2,7 +2,7 @@
 of the 5 Platonic solids, in the vertex-loop format
 utils/geometry3d/stretchy_mesh.py expects (see its module docstring) --
 reusing the CCW, outward-oriented face loops that each
-utils/model/platonic_polyhedra.py solid already derives (via
+sample_polyhedra.py (this directory) solid already derives (via
 hull_to_spec.polyhedron_from_vertices) at construction time. That's the
 SAME source generate_platonic_nets.py builds the rigid
 data/input/nets/*.json specs from; this is just a different (and, for
@@ -23,7 +23,7 @@ import json
 import os
 
 from paths import STRETCHY_NETS_DIR
-from utils.model.platonic_polyhedra import (
+from sample_polyhedra import (
     Tetrahedron, Cube, Octahedron, Icosahedron, Dodecahedron)
 
 PLATONIC_SOLIDS = {

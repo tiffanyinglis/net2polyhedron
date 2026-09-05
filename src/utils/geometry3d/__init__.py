@@ -8,9 +8,10 @@ Modules:
                      pressure-based inflation, plus the interactive relax_once
   hull_to_spec   -- derive a face spec from a convex polyhedron's 3D vertices
 
-Canonical Platonic-solid coordinates now live as model.Polyhedron
-subclasses in utils.model.platonic_polyhedra (e.g. Cube, Dodecahedron),
-not here -- see that module's docstring.
+Canonical sample-solid coordinates now live as model.Polyhedron
+subclasses in apps/common/sample_polyhedra.py (e.g. Cube, Dodecahedron)
+-- demo/sample content the apps consume, not reusable geometry3d logic --
+not here. See that module's docstring.
 """
 from .net_fold_core import (
     fold, fold_transforms, flatten_net, distinct_vertices, face_normal, is_closed_solid)

@@ -40,21 +40,6 @@ def test_edges_derived_from_faces_are_unique_and_unordered_pairs():
         assert a < b
 
 
-def test_is_closed_true_for_a_real_closed_solid():
-    assert _closed_tetra().is_closed
-
-
-def test_is_closed_false_when_a_face_is_missing():
-    solid = Polyhedron(vertices=TETRA_VERTICES, faces=TETRA_FACES[:-1])
-    assert not solid.is_closed
-
-
-def test_bounding_box_matches_the_tetrahedron_extent():
-    lo, hi = _closed_tetra().bounding_box()
-    assert np.allclose(lo, [-1.0, -1.0, -1.0])
-    assert np.allclose(hi, [1.0, 1.0, 1.0])
-
-
 def test_edges_property_is_cached_and_reflects_faces_at_construction():
     solid = _closed_tetra()
     first = solid.edges

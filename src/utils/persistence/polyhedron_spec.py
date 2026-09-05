@@ -16,8 +16,8 @@ whose "faces" list is a subset -- there's no separate omit/hidden-edge
 bookkeeping needed, since NetUnfolder derives face adjacency straight from
 whichever faces ARE listed. Only include the vertices actually referenced
 by "faces": an unreferenced vertex would still count toward
-Polyhedron.bounding_box(), silently enlarging it around a point nothing
-actually renders.
+apps/common/bounding_box.py's bounding_box(), silently enlarging it around
+a point nothing actually renders.
 """
 import json
 

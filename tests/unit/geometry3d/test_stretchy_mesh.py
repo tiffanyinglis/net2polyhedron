@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from utils.model.platonic_polyhedra import Tetrahedron
+from common.sample_polyhedra import Tetrahedron
 from utils.geometry3d import stretchy_mesh
 from utils.subdivisions.mesh_subdivide import solve_fabric_mesh
 from utils.geometry3d.stretchy_mesh import (
@@ -171,7 +171,7 @@ def test_solve_wireframe_on_a_tetrahedron_inflates_within_the_stretch_cap():
 
 # name -> (num_faces, num_vertices, num_edges, sides_per_face), generated
 # by src/apps/common/generate_stretchy_platonic_nets.py from the same
-# solids (utils/model/platonic_polyhedra.py) the RIGID nets/*.json specs use.
+# solids (src/apps/common/sample_polyhedra.py) the RIGID nets/*.json specs use.
 PLATONIC_STRETCHY_NETS = {
     "tetrahedron": (4, 4, 6, 3),
     "cube": (6, 8, 12, 4),

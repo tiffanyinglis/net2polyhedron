@@ -2,12 +2,22 @@ import numpy as np
 import pytest
 
 from utils.model.polyhedron import Polyhedron
-from utils.model.platonic_polyhedra import PLATONIC_SOLIDS
-from utils.net_unfolder import NetUnfolder
+from common.sample_polyhedra import SAMPLE_SOLIDS
+from utils.net_unfolder import NetUnfolder, is_closed
 
 
 def _polyhedron(name):
-    return PLATONIC_SOLIDS[name]()
+    return SAMPLE_SOLIDS[name]()
+
+
+def test_is_closed_true_for_a_real_closed_solid():
+    assert is_closed(_polyhedron("tetrahedron"))
+
+
+def test_is_closed_false_when_a_face_is_missing():
+    tetra = _polyhedron("tetrahedron")
+    open_tetra = Polyhedron(vertices=tetra.vertices, faces=tetra.faces[:-1])
+    assert not is_closed(open_tetra)
 
 
 def test_spanning_tree_reaches_every_face_of_a_cube():
@@ -28,7 +38,7 @@ def test_flat_layout_shares_hinge_vertices_but_not_closure_vertices():
     # of corners (2 -> 1), so 24 - 5*2 = 14 distinct vertices remain --
     # same count verified for the old regular-polygon-based net layout.
     assert len(net.flat.vertices) == 14
-    assert not net.flat.is_closed  # not a real solid until folded
+    assert not is_closed(net.flat)  # not a real solid until folded
 
 
 @pytest.mark.parametrize("name,expected_angle_deg", [
@@ -50,13 +60,13 @@ def test_fold_at_t1_reproduces_the_original_closed_polyhedron():
     polyhedron = _polyhedron("cube")
     net = NetUnfolder.for_polyhedron(polyhedron)
     solid = net.fold(1.0)
-    assert solid.is_closed
+    assert is_closed(solid)
     assert len(solid.vertices) == len(polyhedron.vertices)
     assert len(solid.faces) == len(polyhedron.faces)
 
     # every original edge length is preserved by the fold, since
     # fold_transforms applies rigid rotations to a rigid layout -- a real
-    # reconstruction, not an approximation. (platonic_polyhedra.py's raw
+    # reconstruction, not an approximation. (sample_polyhedra.py's raw
     # canonical coordinates aren't normalized to edge length 1 -- a cube's
     # corners at (+-1,+-1,+-1) have edge length 2 -- so compare against
     # the ORIGINAL polyhedron's own edge length, not a hardcoded 1.0.)
@@ -83,7 +93,7 @@ def test_open_polyhedron_stays_open_when_folded():
     net = NetUnfolder.for_polyhedron(open_polyhedron)
     assert len(net.hinges) == 2
     solid = net.fold(1.0)
-    assert not solid.is_closed
+    assert not is_closed(solid)
 
 
 def test_disconnected_polyhedron_is_rejected():

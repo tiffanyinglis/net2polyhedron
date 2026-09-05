@@ -11,7 +11,7 @@ import numpy as np
 
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
 from utils.model.polyhedron import Polyhedron
-from utils.model.platonic_polyhedra import Tetrahedron
+from common.sample_polyhedra import Tetrahedron
 from utils.net_unfolder import NetUnfolder
 
 

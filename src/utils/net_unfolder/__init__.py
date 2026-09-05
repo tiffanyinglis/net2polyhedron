@@ -9,8 +9,12 @@ Modules:
                     and folds at any progress t. Nothing is cached --
                     computing all of this is cheap enough (no numerical
                     solving anywhere) that it isn't worth the complexity.
+                    Also is_closed(polyhedron) -- whether a Polyhedron is
+                    closed is a fact about fold progress, not pure static
+                    geometry, so it lives here rather than as a property
+                    on model.Polyhedron itself.
 """
 from .hinge import Hinge
-from .net_unfolder import NetUnfolder
+from .net_unfolder import NetUnfolder, is_closed
 
-__all__ = ["Hinge", "NetUnfolder"]
+__all__ = ["Hinge", "NetUnfolder", "is_closed"]

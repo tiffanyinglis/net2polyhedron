@@ -2,26 +2,19 @@
 pipelines.
 
 Modules:
-  polyhedron         -- Polyhedron: shared, indexed vertices; faces as CCW
-                        vertex-index tuples; derived edges. Knows nothing
-                        about nets, hinges, roots, fold progress, or color
-                        -- see its own docstring. Unfolding logic/objects
-                        (Hinge, NetUnfolder) live in utils.net_unfolder,
-                        not here.
-  platonic_polyhedra -- Polyhedron subclasses for the 5 Platonic solids
-                        plus the truncated icosahedron (Tetrahedron, Cube,
-                        Octahedron, Icosahedron, Dodecahedron,
-                        TruncatedIcosahedron), each instantiable directly
-                        (e.g. `Cube()`) with vertices/faces already
-                        derived via hull_to_spec -- see its own docstring.
+  polyhedron -- Polyhedron: shared, indexed vertices; faces as CCW
+                vertex-index tuples; derived edges. Knows nothing about
+                nets, hinges, roots, fold progress, or color -- see its
+                own docstring. Unfolding logic/objects (Hinge, NetUnfolder)
+                live in utils.net_unfolder, not here.
+
+Sample Polyhedron instances (the 5 Platonic solids, the truncated
+icosahedron, and a couple of open dodecahedron-derived nets) live in
+apps/common/sample_polyhedra.py, not here -- they're demo/sample content
+the apps and their generator scripts consume, not reusable fold-pipeline
+domain logic, so utils/ (which apps/ depends on, never the reverse) is
+the wrong place for them.
 """
 from .polyhedron import Polyhedron
-from .platonic_polyhedra import (
-    PlatonicPolyhedron, Tetrahedron, Cube, Octahedron, Icosahedron,
-    Dodecahedron, TruncatedIcosahedron, PLATONIC_SOLIDS)
 
-__all__ = [
-    "Polyhedron",
-    "PlatonicPolyhedron", "Tetrahedron", "Cube", "Octahedron", "Icosahedron",
-    "Dodecahedron", "TruncatedIcosahedron", "PLATONIC_SOLIDS",
-]
+__all__ = ["Polyhedron"]

@@ -4,6 +4,7 @@ from utils.geometry3d.net_fold_core import (
     Net, flatten_net, fold, fold_transforms, hinge_transform, cluster_faces_into_mesh,
     distinct_vertices, face_normal, is_closed_solid)
 from utils.model.polyhedron import Polyhedron
+from utils.net_unfolder import is_closed
 
 
 def _square(x0, y0, s=1.0):
@@ -113,7 +114,7 @@ def test_flatten_net_shares_hinge_vertices_but_not_extra_edge_vertices():
     # corners into 1 (4 corners -> 2 shared), so 24 - 5*2 = 14 distinct
     # vertices remain (the wrap-around/non-hinge edges stay unmerged).
     assert len(flat.vertices) == 14
-    assert not flat.is_closed  # not a real solid yet -- that's the point
+    assert not is_closed(flat)  # not a real solid yet -- that's the point
 
 
 def test_cluster_faces_into_mesh_builds_a_proper_cube():

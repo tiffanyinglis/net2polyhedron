@@ -51,8 +51,9 @@ import sv_ttk
 
 from common.paths import NETS_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
+from common.bounding_box import bounding_box
 from ui.cullable_face import _CullableFace
-from utils.net_unfolder import NetUnfolder
+from utils.net_unfolder import NetUnfolder, is_closed
 
 
 class PolyhedronUnfolderApp:
@@ -342,7 +343,7 @@ class PolyhedronUnfolderApp:
         indexed by."""
         ax.cla()
         self._style_3d_axis(ax)
-        use_culling = solid.is_closed
+        use_culling = is_closed(solid)
         all_pts = []
         for i in range(len(solid.faces)):
             pts3d = solid.face_vertices(i)
@@ -369,7 +370,7 @@ class PolyhedronUnfolderApp:
         # way, based on the shape's ACTUAL projected footprint rather than
         # just its bounding box -- see that method's docstring for why a
         # fixed zoom constant isn't enough on its own.
-        lo, hi = solid.bounding_box()
+        lo, hi = bounding_box(solid.vertices)
         center = (lo + hi) / 2
         half = (hi - lo) / 2 * self.BOX_PADDING + 1e-6
         ax.set_xlim(center[0] - half[0], center[0] + half[0])
@@ -386,9 +387,9 @@ class PolyhedronUnfolderApp:
         # Backface culling (_CullableFace, applied inside _draw_solid) only
         # makes sense once the shape is a closed convex solid -- mid-fold
         # it's an open, generally non-convex shape whose edges don't yet
-        # coincide, so solid.is_closed is already false there in practice
+        # coincide, so is_closed(solid) is already false there in practice
         # (an OPEN net -- some faces omitted -- stays false even at t=1).
-        # _draw_solid's own solid.is_closed check is what actually gates
+        # _draw_solid's own is_closed(solid) check is what actually gates
         # this, not t itself.
         self._draw_solid(self.fold_ax, solid,
                           f"{self.current_label}  (fold {t*100:.0f}%)")
