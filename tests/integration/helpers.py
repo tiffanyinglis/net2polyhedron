@@ -1,42 +1,43 @@
 """Shared fixture builders for tests/integration/.
 
 An integration test exercises several utils sub-packages together (here:
-persistence.polyhedron_spec -> model.PolyhedralNet -> geometry3d.net_fold_core),
-so its setup tends to be a multi-line net spec rather than a single call
-into one function. These small classes package that setup up so a test
-itself reads as "build a net, load it, check a property" instead of
-repeating write_polyhedron_spec's full argument list inline.
+geometry3d.hull_to_spec -> model.Polyhedron -> net_unfolder.NetUnfolder),
+so its setup tends to be a multi-line construction rather than a single
+call into one function. These small classes package that setup up so a
+test itself reads as "build a polyhedron, unfold it, check a property"
+instead of repeating the same coordinate/face-loop setup inline.
 """
-from utils.persistence.polyhedron_spec import write_polyhedron_spec
-from utils.model import PolyhedralNet
+import numpy as np
+
+from utils.geometry3d.solid_coords import tetrahedron as _tetrahedron_coords
+from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
+from utils.model.polyhedron import Polyhedron
+from utils.net_unfolder import NetUnfolder
 
 
 class TetraNetSpec:
-    """A minimal 4-triangle tetrahedron net, in both its normal closed form
-    and an OPEN form with the 4th face omitted (an open triangular tray) --
-    see polyhedron_spec.py's module docstring for what "omit"/"hidden" mean.
-    """
-    DEGREES = [3, 3, 3, 3]
+    """A minimal 4-triangle tetrahedron, in both its normal closed form
+    and an OPEN form with the 4th face omitted (an open triangular tray)
+    -- see polyhedron_spec.py's module docstring for what an "open" net
+    is under the vertices+faces format."""
 
     @staticmethod
-    def write_open(path):
-        # Face 3 omitted: net/extra span only faces 0-2 (a spanning tree of
-        # 2 edges over 3 kept faces), hidden carries every edge touching the
-        # omitted face -- same shape of spec tools/generate_open_dodecahedron_nets.py
-        # produces for half_dodecahedron.json / dodecahedron_minus_one.json.
-        write_polyhedron_spec(str(path), TetraNetSpec.DEGREES, [(0, 1), (0, 2)], [(1, 2)],
-                               name="Open Tetra", omitted={3},
-                               hidden_edges=[(0, 3), (1, 3), (2, 3)])
+    def _face_loops():
+        vertices = _tetrahedron_coords()
+        _, _, face_loops = polyhedron_from_vertices(vertices)
+        return [np.array(v, dtype=float) for v in vertices], face_loops
 
     @staticmethod
-    def write_closed(path):
-        write_polyhedron_spec(str(path), TetraNetSpec.DEGREES,
-                               [(0, 1), (0, 2), (0, 3)], [(1, 2), (1, 3), (2, 3)],
-                               name="Closed Tetra")
+    def build_open():
+        """Drops the last face -- an open triangular tray, name 'Open Tetra'."""
+        vertices, face_loops = TetraNetSpec._face_loops()
+        return Polyhedron(vertices=vertices, faces=face_loops[:3], name="Open Tetra")
 
     @staticmethod
-    def load(path):
-        # The no-cache slow path (spec parse -> EdgeMap -> layout -> solve),
-        # not PolyhedralNet.load()'s .fold-cache-dispatching entry point --
-        # these tests don't want a cache directory created as a side effect.
-        return PolyhedralNet._load_json_uncached(str(path))
+    def build_closed():
+        vertices, face_loops = TetraNetSpec._face_loops()
+        return Polyhedron(vertices=vertices, faces=face_loops, name="Closed Tetra")
+
+    @staticmethod
+    def unfold(polyhedron):
+        return NetUnfolder.for_polyhedron(polyhedron)

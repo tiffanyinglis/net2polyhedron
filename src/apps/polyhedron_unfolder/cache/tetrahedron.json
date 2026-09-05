@@ -1,0 +1,76 @@
+{
+  "checksum": "sha256:96963dbfd9982e161573bb98517a1c147777b8bad364b75d06e9e3281e8a1f7a",
+  "name": "Tetrahedron",
+  "root": 0,
+  "flat_vertices": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      2.828427,
+      0.0
+    ],
+    [
+      1.414214,
+      2.44949
+    ],
+    [
+      1.414214,
+      -2.44949
+    ],
+    [
+      -1.414214,
+      2.44949
+    ],
+    [
+      4.242641,
+      2.44949
+    ]
+  ],
+  "flat_faces": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      3,
+      1,
+      0
+    ],
+    [
+      0,
+      2,
+      4
+    ],
+    [
+      2,
+      1,
+      5
+    ]
+  ],
+  "hinges": [
+    {
+      "parent": 0,
+      "child": 1,
+      "parent_edge_idx": 0,
+      "child_edge_idx": 1,
+      "angle_deg": 109.471221
+    },
+    {
+      "parent": 0,
+      "child": 3,
+      "parent_edge_idx": 1,
+      "child_edge_idx": 0,
+      "angle_deg": 109.471221
+    },
+    {
+      "parent": 0,
+      "child": 2,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 0,
+      "angle_deg": 109.471221
+    }
+  ]
+}

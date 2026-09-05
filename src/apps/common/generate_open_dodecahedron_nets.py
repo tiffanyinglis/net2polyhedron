@@ -1,11 +1,10 @@
 """One-off generator: writes data/input/nets/half_dodecahedron.json and
-data/input/nets/dodecahedron_minus_one.json -- OPEN nets (see
-polyhedron_spec.py's module docstring) that don't fold up into a closed
-solid, derived by marking a face subset of the full dodecahedron's
-combinatorics as omitted. They exist to exercise/validate the apps against
-nets that stay open at t=1, which polyhedron_unfolder's backface culling
-(ui.cullable_face._CullableFace) must NOT be applied to (see
-utils.geometry3d.is_closed_solid, which it checks first).
+data/input/nets/dodecahedron_minus_one.json -- OPEN nets (a Polyhedron spec
+whose faces are a subset of the full dodecahedron's) that don't fold up
+into a closed solid. They exist to exercise/validate the apps against nets
+that stay open at t=1, which polyhedron_unfolder's backface culling
+(ui.cullable_face._CullableFace) must NOT be applied to (checked via
+model.Polyhedron.is_closed).
 
     python src/apps/common/generate_open_dodecahedron_nets.py
 """
@@ -14,51 +13,33 @@ import os
 from paths import NETS_DIR
 from utils.geometry3d.solid_coords import dodecahedron
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from utils.combinatorics.spanning_tree import split_spanning_tree
 from utils.persistence.polyhedron_spec import write_polyhedron_spec
 
 
-def _write_open_subset(degrees, edges, keep_faces, root, name):
-    """Write a net spec for just `keep_faces` of the full dodecahedron
-    (global face ids, kept as-is -- NOT remapped to 0..k-1), marking
-    every other face "omit". Splits `edges` into net/extra (a spanning
-    tree over keep_faces, using only edges between two kept faces) and
-    hidden (everything else: any edge touching an omitted face) --
-    see polyhedron_spec.py for why hidden edges still have to be
-    listed. `root` only picks split_spanning_tree's BFS starting face
-    (which just shapes which edges land in net vs. extra); it's never
-    written into the spec -- the loader always derives the actual unfold
-    root as the first non-omitted face id, which for every net generated
-    here is `root` itself anyway (see polyhedron_spec.py's module
-    docstring for why the choice doesn't otherwise matter)."""
-    keep_faces = set(keep_faces)
-    omitted = set(range(len(degrees))) - keep_faces
-    kept_edges = [(a, b) for a, b in edges if a in keep_faces and b in keep_faces]
-    hidden_edges = [(a, b) for a, b in edges if a in omitted or b in omitted]
-
-    # split_spanning_tree needs a dense 0..k-1 node range, so remap just
-    # for this call, then map its result straight back to the original
-    # (global, gappy) face ids that the rest of the spec uses.
-    local_of = {g: i for i, g in enumerate(sorted(keep_faces))}
-    global_of = {i: g for g, i in local_of.items()}
-    local_edges = [(local_of[a], local_of[b]) for a, b in kept_edges]
-    net_local, extra_local = split_spanning_tree(
-        len(keep_faces), local_edges, root=local_of[root])
-    net_edges = [(global_of[a], global_of[b]) for a, b in net_local]
-    extra_edges = [(global_of[a], global_of[b]) for a, b in extra_local]
+def _write_face_subset(vertices, face_loops, keep_faces, name):
+    """Write a net spec containing only `keep_faces` (indices into
+    face_loops) of the full dodecahedron -- remapped to reference only the
+    vertices those faces actually use (an unreferenced vertex would still
+    count toward Polyhedron.bounding_box(), silently enlarging it around a
+    point nothing renders). NetUnfolder derives face adjacency/spanning
+    tree/fold angles from whichever faces are present -- no separate
+    omit/hidden-edge bookkeeping needed."""
+    kept_loops = [face_loops[f] for f in sorted(keep_faces)]
+    used = sorted({v for loop in kept_loops for v in loop})
+    remap = {old: new for new, old in enumerate(used)}
+    out_vertices = [vertices[v] for v in used]
+    out_faces = [[remap[v] for v in loop] for loop in kept_loops]
 
     out_path = os.path.join(NETS_DIR, f"{name}.json")
-    write_polyhedron_spec(out_path, degrees, net_edges, extra_edges,
-                           name=name.replace("_", " ").title(),
-                           omitted=omitted, hidden_edges=hidden_edges)
-    print(f"wrote {out_path}  ({len(keep_faces)} faces kept, {len(omitted)} omitted, "
-          f"{len(net_edges)} net edges, {len(extra_edges)} extra edges, "
-          f"{len(hidden_edges)} hidden edges)")
+    write_polyhedron_spec(out_path, out_vertices, out_faces,
+                           name=name.replace("_", " ").title())
+    print(f"wrote {out_path}  ({len(out_faces)} faces kept, {len(out_vertices)} vertices)")
 
 
 def main():
-    degrees, edges, _ = polyhedron_from_vertices(dodecahedron())
-    adj = {f: set() for f in range(len(degrees))}
+    vertices = dodecahedron()
+    _, edges, face_loops = polyhedron_from_vertices(vertices)
+    adj = {f: set() for f in range(len(face_loops))}
     for a, b in edges:
         adj[a].add(b)
         adj[b].add(a)
@@ -69,14 +50,13 @@ def main():
     # shallow bowl.
     center = 0
     half_faces = {center} | adj[center]
-    _write_open_subset(degrees, edges, half_faces, center, "half_dodecahedron")
+    _write_face_subset(vertices, face_loops, half_faces, "half_dodecahedron")
 
     # dodecahedron_minus_one: every face but one -- an almost-closed
     # solid with a single pentagon-shaped hole where that face was.
     removed = 0
-    all_but_one = set(range(len(degrees))) - {removed}
-    new_root = min(all_but_one)
-    _write_open_subset(degrees, edges, all_but_one, new_root, "dodecahedron_minus_one")
+    all_but_one = set(range(len(face_loops))) - {removed}
+    _write_face_subset(vertices, face_loops, all_but_one, "dodecahedron_minus_one")
 
 
 if __name__ == "__main__":

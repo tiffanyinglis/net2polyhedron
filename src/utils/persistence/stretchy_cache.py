@@ -1,9 +1,8 @@
 """Cache the (expensive) result of solve_wireframe()-ing a stretchy .json
 mesh, so re-loading an unchanged net is just a fast JSON parse instead of
-a full least-squares relaxation -- the same idea as fold_cache.py for the
-rigid pipeline, just a plain JSON file instead of the FACES/FOLD text
-format (there's no hinge tree or fold angle here to write out, just
-per-vertex 3D positions and the summary stats solve_wireframe returns).
+a full least-squares relaxation -- the same idea as net_unfolder/cache.py
+for the rigid pipeline, just recording per-vertex 3D positions and the
+summary stats solve_wireframe returns instead of a flat layout/hinge tree.
 
 A cache file records the settled `positions`, the `stats` dict
 (max/rms stretch, residual), and a CHECKSUM of the source .json it was
@@ -44,7 +43,7 @@ import time
 
 import numpy as np
 
-from .fold_cache import source_checksum as _file_checksum
+from .checksums import source_checksum as _file_checksum
 from ..geometry3d.stretchy_mesh import load_stretchy_mesh, solve_wireframe, ALGORITHM_VERSION
 from ..subdivisions.mesh_subdivide import load_fabric_spec, solve_fabric_mesh
 

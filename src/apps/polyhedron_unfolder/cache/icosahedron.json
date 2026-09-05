@@ -1,0 +1,332 @@
+{
+  "checksum": "sha256:9f0165137f8e860a77c0d7fb9ac9a890711aa043d3d9a724fdd429796642f1df",
+  "name": "Icosahedron",
+  "root": 0,
+  "flat_vertices": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      2.0,
+      -0.0
+    ],
+    [
+      1.0,
+      1.732051
+    ],
+    [
+      1.0,
+      -1.732051
+    ],
+    [
+      -1.0,
+      -1.732051
+    ],
+    [
+      3.0,
+      -1.732051
+    ],
+    [
+      2.0,
+      3.464102
+    ],
+    [
+      3.0,
+      1.732051
+    ],
+    [
+      4.0,
+      0.0
+    ],
+    [
+      -1.0,
+      1.732051
+    ],
+    [
+      -2.0,
+      -0.0
+    ],
+    [
+      -0.0,
+      3.464102
+    ],
+    [
+      -2.0,
+      3.464102
+    ],
+    [
+      -3.0,
+      1.732051
+    ],
+    [
+      -2.0,
+      -3.464102
+    ],
+    [
+      0.0,
+      -3.464102
+    ],
+    [
+      2.0,
+      -3.464102
+    ],
+    [
+      5.0,
+      1.732051
+    ],
+    [
+      3.0,
+      5.196152
+    ],
+    [
+      4.0,
+      3.464102
+    ],
+    [
+      3.0,
+      -5.196152
+    ],
+    [
+      4.0,
+      -3.464102
+    ]
+  ],
+  "flat_faces": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      3,
+      0,
+      4
+    ],
+    [
+      5,
+      1,
+      3
+    ],
+    [
+      3,
+      1,
+      0
+    ],
+    [
+      6,
+      2,
+      7
+    ],
+    [
+      7,
+      1,
+      8
+    ],
+    [
+      2,
+      1,
+      7
+    ],
+    [
+      0,
+      9,
+      10
+    ],
+    [
+      2,
+      9,
+      0
+    ],
+    [
+      11,
+      9,
+      2
+    ],
+    [
+      12,
+      9,
+      11
+    ],
+    [
+      10,
+      9,
+      13
+    ],
+    [
+      4,
+      14,
+      15
+    ],
+    [
+      4,
+      15,
+      3
+    ],
+    [
+      3,
+      16,
+      5
+    ],
+    [
+      8,
+      17,
+      7
+    ],
+    [
+      18,
+      6,
+      19
+    ],
+    [
+      19,
+      6,
+      7
+    ],
+    [
+      16,
+      20,
+      21
+    ],
+    [
+      5,
+      16,
+      21
+    ]
+  ],
+  "hinges": [
+    {
+      "parent": 0,
+      "child": 3,
+      "parent_edge_idx": 0,
+      "child_edge_idx": 1,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 0,
+      "child": 6,
+      "parent_edge_idx": 1,
+      "child_edge_idx": 0,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 0,
+      "child": 8,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 2,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 3,
+      "child": 2,
+      "parent_edge_idx": 0,
+      "child_edge_idx": 1,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 3,
+      "child": 1,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 0,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 6,
+      "child": 5,
+      "parent_edge_idx": 1,
+      "child_edge_idx": 0,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 6,
+      "child": 4,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 1,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 8,
+      "child": 9,
+      "parent_edge_idx": 0,
+      "child_edge_idx": 1,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 8,
+      "child": 7,
+      "parent_edge_idx": 1,
+      "child_edge_idx": 0,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 2,
+      "child": 14,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 2,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 1,
+      "child": 13,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 2,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 5,
+      "child": 15,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 2,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 4,
+      "child": 17,
+      "parent_edge_idx": 2,
+      "child_edge_idx": 1,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 9,
+      "child": 10,
+      "parent_edge_idx": 0,
+      "child_edge_idx": 1,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 7,
+      "child": 11,
+      "parent_edge_idx": 1,
+      "child_edge_idx": 0,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 14,
+      "child": 19,
+      "parent_edge_idx": 1,
+      "child_edge_idx": 0,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 13,
+      "child": 12,
+      "parent_edge_idx": 0,
+      "child_edge_idx": 2,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 17,
+      "child": 16,
+      "parent_edge_idx": 0,
+      "child_edge_idx": 1,
+      "angle_deg": 41.810315
+    },
+    {
+      "parent": 19,
+      "child": 18,
+      "parent_edge_idx": 1,
+      "child_edge_idx": 2,
+      "angle_deg": 41.810315
+    }
+  ]
+}

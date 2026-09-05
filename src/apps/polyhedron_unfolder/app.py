@@ -1,29 +1,34 @@
 """
-Polyhedron Unfolder -- pick a **rigid** net from data/input/nets/ (5
-Platonic solids included) and explore how it folds, via two tabs that
-share one net picker / compute-cache control bar:
+Polyhedron Unfolder -- pick a **rigid** net from data/input/nets/ and
+explore how it folds, via two tabs that share one net picker / compute-
+cache control bar:
 
   - "Animated Fold" -- drag a slider from flat (0%) to fully folded
     (100%).
   - "Flat vs Folded" -- the flat 2D net and the fully folded 3D solid
     side by side at once (drag the 3D panel with the mouse to rotate it;
-    matplotlib's own 3D navigation). Also handles **open** nets (some
-    faces deliberately omitted -- see polyhedron_spec.py's module
-    docstring), which the "Animated Fold" tab can load too.
+    matplotlib's own 3D navigation). Also handles **open** nets (a
+    polyhedron spec whose faces are a subset of a solid's -- see
+    polyhedron_spec.py's module docstring), which the "Animated Fold" tab
+    can load too.
 
     python src/apps/polyhedron_unfolder/app.py
 
 Add your own nets by dropping a new .json file (see polyhedron_spec.py
-for the format, or any file in data/input/nets/ for reference) into that
-folder -- it'll show up in the dropdown automatically. Legacy .txt files
-with explicit coordinates and fold angles (see
-utils.model.PolyhedralNet.load) are also supported.
+for the format -- a direct encoding of a model.Polyhedron, real vertex
+positions plus CCW face loops -- or any file in data/input/nets/ for
+reference) into that folder -- it'll show up in the dropdown
+automatically. utils.net_unfolder.NetUnfolder derives the spanning tree,
+flat layout, and fold angles itself from whatever geometry is given;
+there's nothing to hand-author beyond the polyhedron's own shape.
 
-A .json net with no matching cache/*.fold file (in this app's OWN cache/
-folder, next to this file -- not shared with any other app) hasn't been
-solved yet and shows up greyed out and unselectable; use the "Compute
-Folding Pattern" button (or run build_cache.py from the command line) to
-solve it.
+A .json net with no matching cache file (in this app's OWN cache/ folder,
+next to this file -- not shared with any other app) hasn't been unfolded
+yet and shows up greyed out and unselectable; use the "Compute Folding
+Pattern" button (or run build_cache.py from the command line) to compute
+it -- this is now a fast, direct geometric computation (no numerical
+solving), so mostly avoids redundant recomputation rather than an
+expensive solve.
 """
 import sys
 from pathlib import Path
@@ -55,9 +60,8 @@ from common.ui_theme import (STATUS_COLORS, PLOT_THEME, FACE_COLORS,
                               DISABLED_SUFFIX, COMPUTE_TOOLTIP)
 from ui.tooltip import Tooltip
 from ui.cullable_face import _CullableFace
-from utils.persistence import is_cached, build_all
-from utils.persistence.fold_cache import cache_path_for
-from utils.model import PolyhedralNet
+from utils.net_unfolder import NetUnfolder
+from utils.net_unfolder.cache import is_cached, build_all, cache_path_for
 
 # This app's OWN cache -- not shared with inflate_polyhedron_app (a
 # different pipeline entirely) or with any other app, so nothing here
@@ -117,6 +121,7 @@ class PolyhedronUnfolderApp:
         self._build_compare_tab()
 
         self.net = None
+        self.colors = []
         self.current_label = None
         self.label_to_path = {}
         self.label_enabled = {}
@@ -238,17 +243,16 @@ class PolyhedronUnfolderApp:
 
     def refresh_net_list(self, keep_selection=True):
         """Rescan data/input/nets/, figure out which are already solved (a
-        valid cache/*.fold exists in this app's OWN cache folder), and
+        valid cache file exists in this app's OWN cache folder), and
         rebuild the dropdown -- unsolved .json nets get a "(not computed)"
         suffix and are rejected on selection instead of being loaded."""
-        paths = sorted(glob.glob(os.path.join(NETS_DIR, "*.json")) +
-                        glob.glob(os.path.join(NETS_DIR, "*.txt")))
+        paths = sorted(glob.glob(os.path.join(NETS_DIR, "*.json")))
 
         self.label_to_path = {}
         self.label_enabled = {}
         for path in paths:
             base_label = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
-            enabled = path.endswith(".txt") or is_cached(path, cache_path_for(path, CACHE_DIR))
+            enabled = is_cached(path, cache_path_for(path, CACHE_DIR))
             label = base_label if enabled else base_label + DISABLED_SUFFIX
             self.label_to_path[label] = path
             self.label_enabled[label] = enabled
@@ -298,8 +302,14 @@ class PolyhedronUnfolderApp:
         self._set_status("")
         self.current_label = chosen
         path = self.label_to_path[chosen]
-        self.net = PolyhedralNet.load(path, cache_dir=CACHE_DIR)
-        self.net.assign_colors(FACE_COLORS)
+        self.net = NetUnfolder.load(path, cache_dir=CACHE_DIR)
+        # Colors are a plain, position-indexed list -- a Polyhedron's own
+        # face list has no id concept of its own, and self.net.flat/
+        # solid.faces (from self.net.fold()) always correspond to
+        # self.net.polyhedron.faces position-for-position (see
+        # net_unfolder.py), so this is safe, not fragile.
+        n_faces = len(self.net.polyhedron.faces)
+        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(n_faces)]
         self.slider.set(0)
         self.draw_fold(0.0)
         self.draw_compare()
@@ -385,23 +395,21 @@ class PolyhedronUnfolderApp:
             ax.add_collection3d(Line3DCollection([edge], colors=color, linewidths=0.8))
 
     def _draw_solid(self, ax, solid, theme, title):
-        """Shared by both tabs: render `solid` (a PolyhedralNet.fold()
+        """Shared by both tabs: render `solid` (a NetUnfolder.fold()
         result -- a model.Polyhedron, pure geometry with no color of its
         own) as one Poly3DCollection per face onto `ax`, backface-culled
         (_CullableFace) only when it's actually a closed convex solid --
         see ui.cullable_face's docstring for why that check matters.
 
-        solid.faces is ordered by ascending original net face id (see
-        PolyhedralNet.fold's docstring), so a plain positional zip against
-        sorted(self.net.faces) is exactly how a Polyhedron's i-th face
-        lines up with this net's own Face colors."""
+        solid.faces[i] always corresponds to self.net.polyhedron.faces[i]
+        (see net_unfolder.py), which is exactly what self.colors is
+        indexed by."""
         ax.cla()
         self._style_3d_axis(ax, theme)
         use_culling = solid.is_closed
-        colors = [self.net.faces[fid].color for fid in sorted(self.net.faces)]
         for i in range(len(solid.faces)):
             pts3d = solid.face_vertices(i)
-            color = colors[i]
+            color = self.colors[i]
             if use_culling:
                 poly = _CullableFace([pts3d], solid.face_normal(i), 0.9,
                                       facecolor=color, edgecolor="k")
@@ -455,16 +463,14 @@ class PolyhedronUnfolderApp:
 
     def _draw_flat_net(self, theme):
         """The flat net's geometry lives in self.net.flat (a Polyhedron at
-        z=0, see PolyhedralNet.flat) -- colors stay on self.net.faces
-        (per-original-face metadata), zipped in by ascending face id, same
-        convention _draw_solid uses for a folded Polyhedron."""
+        z=0) -- see _draw_solid's docstring for why self.colors already
+        lines up with it position-for-position."""
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
         flat = self.net.flat
-        colors = [self.net.faces[fid].color for fid in sorted(self.net.faces)]
         pts2d_per_face = [flat.face_vertices(i)[:, :2] for i in range(len(flat.faces))]
         all_pts = np.vstack(pts2d_per_face)
-        for pts2d, color in zip(pts2d_per_face, colors):
+        for pts2d, color in zip(pts2d_per_face, self.colors):
             self.ax2d.add_patch(Polygon(pts2d, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
 

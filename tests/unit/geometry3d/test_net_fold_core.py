@@ -12,11 +12,12 @@ def _square(x0, y0, s=1.0):
 
 def _cross_cube_net():
     """The classic cross-shaped cube net: a center square with four arms
-    plus one more square past the top arm. Returns
-    (net, flat, fid_to_index, root, hinges, face_ids) -- `net` (the raw
-    net_fold_core.Net) is kept around for building fold_angles dicts
-    keyed by face id; `flat`/`fid_to_index` are what fold()/fold_transforms()
-    actually take now (see flatten_net)."""
+    plus one more square past the top arm. Returns (net, flat, root,
+    hinges, face_ids) -- `net` (the raw net_fold_core.Net) is kept around
+    for building fold_angles dicts keyed by face id; `flat` is what
+    fold()/fold_transforms() actually take now (see flatten_net). Faces
+    are added in order with no explicit fid, so ids are already a dense
+    0..5 range -- exactly what flatten_net's positional indexing requires."""
     net = Net()
     bottom = net.add_face(_square(0, 0))
     front = net.add_face(_square(0, 1))
@@ -25,23 +26,23 @@ def _cross_cube_net():
     left = net.add_face(_square(-1, 1))
     right = net.add_face(_square(1, 1))
     root, hinges = net.build_tree(root=front)
-    vertices, faces, fid_to_index = flatten_net(net)
+    vertices, faces = flatten_net(net)
     flat = Polyhedron(vertices=vertices, faces=faces)
-    return net, flat, fid_to_index, root, hinges, dict(
+    return net, flat, root, hinges, dict(
         bottom=bottom, top=top, back=back, left=left, right=right)
 
 
 def test_cube_cross_net_finds_a_spanning_tree_of_five_hinges():
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     assert len(hinges) == 5
     assert {h["child"] for h in hinges} | {root} == set(net.faces)
 
 
 def test_cube_cross_net_folds_into_a_unit_cube():
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
 
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=1.0)
+    verts = fold(flat, root, hinges, fold_angles, t=1.0)
     pts = np.array(distinct_vertices(verts))
 
     # a unit cube has exactly 8 vertices, all edges (and thus all
@@ -57,9 +58,9 @@ def test_cube_cross_net_folds_into_a_unit_cube():
 
 
 def test_fold_at_t_zero_is_flat():
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=0.0)
+    verts = fold(flat, root, hinges, fold_angles, t=0.0)
     for pts in verts.values():
         assert np.allclose(pts[:, 2], 0.0)  # nothing has folded out of the z=0 plane
 
@@ -78,10 +79,10 @@ def test_hinge_transform_is_a_pure_rotation_about_an_offset_axis():
 
 
 def test_fold_transforms_root_is_always_identity():
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
     for t in (0.0, 0.5, 1.0):
-        transforms = fold_transforms(flat, fid_to_index, root, hinges, fold_angles, t=t)
+        transforms = fold_transforms(flat, root, hinges, fold_angles, t=t)
         assert np.allclose(transforms[root], np.eye(4))
 
 
@@ -89,17 +90,16 @@ def test_fold_transforms_applied_to_flat_points_matches_fold():
     """fold()'s per-face 3D points are just fold_transforms()'s matrices
     applied to that face's own flat (z=0) points -- verify the two agree,
     since fold() is now a thin wrapper over fold_transforms()."""
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
     t = 0.6
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=t)
-    transforms = fold_transforms(flat, fid_to_index, root, hinges, fold_angles, t=t)
+    verts = fold(flat, root, hinges, fold_angles, t=t)
+    transforms = fold_transforms(flat, root, hinges, fold_angles, t=t)
 
-    for fid, pos in fid_to_index.items():
-        face = flat.faces[pos]
-        pts_h = np.array([[*flat.vertices[i], 1.0] for i in face])
-        expected = (pts_h @ transforms[fid].T)[:, :3]
-        assert np.allclose(expected, verts[fid])
+    for i, face in enumerate(flat.faces):
+        pts_h = np.array([[*flat.vertices[v], 1.0] for v in face])
+        expected = (pts_h @ transforms[i].T)[:, :3]
+        assert np.allclose(expected, verts[i])
 
 
 def test_flatten_net_shares_hinge_vertices_but_not_extra_edge_vertices():
@@ -108,7 +108,7 @@ def test_flatten_net_shares_hinge_vertices_but_not_extra_edge_vertices():
     physically hinged) edges between non-adjacent arms should NOT be
     merged -- one edge becomes two, one vertex becomes several, until
     folding actually brings them together."""
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     # 6 quads x 4 corners = 24 raw corners; 5 hinges each merge 2 pairs of
     # corners into 1 (4 corners -> 2 shared), so 24 - 5*2 = 14 distinct
     # vertices remain (the wrap-around/non-hinge edges stay unmerged).
@@ -117,9 +117,9 @@ def test_flatten_net_shares_hinge_vertices_but_not_extra_edge_vertices():
 
 
 def test_cluster_faces_into_mesh_builds_a_proper_cube():
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=1.0)
+    verts = fold(flat, root, hinges, fold_angles, t=1.0)
 
     vertices, faces = cluster_faces_into_mesh(verts)
 
@@ -140,9 +140,9 @@ def test_cluster_faces_into_mesh_builds_a_proper_cube():
 
 
 def test_face_normal_points_outward_for_every_face_of_a_folded_cube():
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=1.0)
+    verts = fold(flat, root, hinges, fold_angles, t=1.0)
 
     center = np.mean([pts.mean(axis=0) for pts in verts.values()], axis=0)
     for pts in verts.values():
@@ -171,9 +171,9 @@ def test_add_face_with_explicit_id_preserves_it_and_avoids_future_collisions():
 
 
 def test_is_closed_solid_true_for_a_fully_folded_cube():
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=1.0)
+    verts = fold(flat, root, hinges, fold_angles, t=1.0)
     assert is_closed_solid(verts)
 
 
@@ -182,16 +182,16 @@ def test_is_closed_solid_false_for_a_flat_unfolded_net():
     # laid out), but the "wrap-around" edges between non-adjacent arms
     # (e.g. left/right) only meet once actually folded -- so the flat
     # net has unmatched (free) edges and isn't a closed solid.
-    net, flat, fid_to_index, root, hinges, _ = _cross_cube_net()
+    net, flat, root, hinges, _ = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=0.0)
+    verts = fold(flat, root, hinges, fold_angles, t=0.0)
     assert not is_closed_solid(verts)
 
 
 def test_is_closed_solid_false_when_a_face_is_missing():
-    net, flat, fid_to_index, root, hinges, faces = _cross_cube_net()
+    net, flat, root, hinges, faces = _cross_cube_net()
     fold_angles = {fid: np.pi / 2 for fid in net.faces if fid != root}
-    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=1.0)
+    verts = fold(flat, root, hinges, fold_angles, t=1.0)
     del verts[faces["top"]]  # simulate an open net missing one face
     assert not is_closed_solid(verts)
 

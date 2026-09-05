@@ -5,18 +5,19 @@ description: Architecture, file layout, and conventions for this polyhedron net-
 
 # Polyhedron net-folding project
 
-Takes a description of a polyhedron's net (which faces exist, how they're
-hinged flat, and which edges only meet once folded) and computes the exact
-3D fold: a 2D face layout plus a per-hinge fold angle. Three Tkinter entry
-points share pieces of this:
+Takes a polyhedron (real 3D vertex positions + CCW face loops) and derives
+how it unfolds: an auto-computed spanning tree of hinges, a flat 2D layout,
+and each hinge's fold angle -- read directly off the given geometry, not
+solved for (see "Pipeline" below). Three Tkinter entry points share pieces
+of this:
 
 - `polyhedron_unfolder` (`src/apps/polyhedron_unfolder/app.py`) — pick a
   **rigid** net; two tabs share one net picker / compute-cache control
   bar: "Animated Fold" (drag a slider from flat to fully folded) and "Flat
   vs Folded" (the flat 2D net and the fully folded 3D solid side by side
   at once — the 3D panel is mouse-rotatable via matplotlib's own 3D
-  navigation). Also handles **open** nets (some faces deliberately
-  omitted — see "Open nets" below). Originally two separate apps
+  navigation). Also handles **open** nets (a polyhedron spec whose faces
+  are a subset of a solid's — see "Open nets" below). Originally two separate apps
   (`polygon_fold_app.py` / `polyhedral_net_app.py`), merged into one
   tabbed app since they shared almost all of their net-picker/compute-
   cache/theme-toggle machinery and always used the exact same rigid
@@ -59,9 +60,9 @@ shared across more than one of them:
     control-bar wiring on purpose (see git history), a tradeoff that
     stopped paying for itself once they became tabs of one app instead
     of two independent scripts.
-  - `build_cache.py` — precompute/refresh this app's OWN fold cache
+  - `build_cache.py` — precompute/refresh this app's OWN unfolding cache
     (was the top-level `build_fold_cache.py`)
-  - `cache/*.fold` — the actual cache files (was `data/cache/fold_cache/`)
+  - `cache/*.json` — the actual cache files (was `data/cache/fold_cache/`)
     — not shared with `inflate_polyhedron_app` (a different pipeline
     entirely) or any other app
 - `inflate_polyhedron_app/` — the stretchy-mesh viewer (see "Stretchy meshes" below)
@@ -90,9 +91,9 @@ shared across more than one of them:
     `DISABLED_SUFFIX`/`COMPUTE_TOOLTIP`, extracted here (they used to
     live in `polygon_fold_app.py`, imported by the other apps from it)
     specifically so no app depends on another app's module
-  - `generate_platonic_nets.py` — (re)generates `data/input/nets/*.json` for the 5 Platonic solids + the truncated icosahedron from canonical 3D coordinates (`utils/geometry3d/solid_coords.py`)
+  - `generate_platonic_nets.py` — (re)generates `data/input/nets/*.json` for the 5 Platonic solids + the truncated icosahedron from canonical 3D coordinates (`utils/geometry3d/solid_coords.py`) via `hull_to_spec.polyhedron_from_vertices`'s CCW face loops directly written out (no spanning tree to compute here — `net_unfolder.NetUnfolder` derives its own at load time, see "Pipeline" below)
   - `generate_stretchy_platonic_nets.py` — (re)generates `data/input/stretchy_nets/*.json` for the 5 Platonic solids from the *same* coordinates, via `hull_to_spec.polyhedron_from_vertices`'s CCW face loops directly (no spanning tree needed — vertex-loop format has no hinge/root concept)
-  - `generate_open_dodecahedron_nets.py` — generates the two open-net examples (`data/input/nets/half_dodecahedron.json`, `data/input/nets/dodecahedron_minus_one.json`)
+  - `generate_open_dodecahedron_nets.py` — generates the two open-net examples (`data/input/nets/half_dodecahedron.json`, `data/input/nets/dodecahedron_minus_one.json`) by writing out a face SUBSET of the full dodecahedron's coordinates (remapped to only the vertices those faces reference)
   - `generate_subdivided_stretchy_nets.py` — writes `data/input/stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below). These 4 `generate_*.py` scripts aren't imported by anything (each is its own CLI entry point); they live in `common/` anyway since they're maintenance tooling shared across whichever apps read the `data/input/` specs they produce, and neither `utils/` (no `__main__` scripts there, see Conventions) nor `ui/` fit
 - `ui/` — generic Tkinter/matplotlib widgets, not net-fold domain logic:
   - `tooltip.py` — `Tooltip`, a small generic hover-tooltip helper for Tkinter (not net-fold-specific)
@@ -100,16 +101,17 @@ shared across more than one of them:
 
 `src/utils/` — the reusable library, split by concern (see each
 sub-package's own `__init__.py` docstring for its module list):
-- `geometry2d/` — flat 2D polygon geometry and net layout: `polygon_geom.py`, `net_layout.py`, `stretchy_net_layout.py`
-- `geometry3d/` — 3D fold solving, stretchy-mesh solving, coordinates: `net_fold_core.py`, `fold_solver.py`, `stretchy_mesh.py`, `solid_coords.py`, `hull_to_spec.py`
+- `geometry2d/` — flat 2D polygon geometry: `polygon_geom.py`, `stretchy_net_layout.py`
+- `geometry3d/` — the rigid fold engine, stretchy-mesh solving, coordinates: `net_fold_core.py`, `stretchy_mesh.py`, `solid_coords.py`, `hull_to_spec.py`
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
-- `combinatorics/` — face-adjacency graph algorithms, independent of any 2D/3D geometry: `edge_map.py` (renamed from `combinatorics.py`, same reason as above — names its one export, `EdgeMap`) and `spanning_tree.py`
-- `persistence/` — parse/load/write/cache the on-disk `.json`/`.fold` formats: `polyhedron_spec.py`, `net_io.py`, `fold_cache.py`, `stretchy_cache.py`. `fold_cache.build_all`/`net_io.load_net` (and the stretchy-cache equivalents) take an explicit optional `cache_dir` param, threaded in by each app's own `CACHE_DIR` constant — `cache_path_for`'s OLD default (still used when `cache_dir` is omitted, e.g. in tests with `tmp_path`) derives the cache directory as a sibling of the net's own parent directory, which doesn't hold once caches live per-app under `src/apps/<app>/cache/` instead
+- `model/` — `Polyhedron`: pure 3D solid geometry (shared, indexed vertices; CCW vertex-index faces; derived edges), with **no** awareness of nets, hinges, roots, fold progress, or color — used by both the rigid and stretchy pipelines. Unfolding-specific logic/objects live in `net_unfolder/` instead, never here.
+- `net_unfolder/` — `NetUnfolder`: derives a net (spanning tree, unfoldable flat layout, fold angles) from an already-built `Polyhedron` — see "Pipeline" below. Also `hinge.py` (`Hinge`) and `cache.py` (checksummed cache for the computed net).
+- `persistence/` — parse/write the on-disk `.json` polyhedron-spec format, plus shared checksum utilities: `polyhedron_spec.py`, `checksums.py`, `stretchy_cache.py`. `net_unfolder.cache.build_all` (and the stretchy-cache equivalent) take an explicit optional `cache_dir` param, threaded in by each app's own `CACHE_DIR` constant — `cache_path_for`'s OLD default (still used when `cache_dir` is omitted, e.g. in tests with `tmp_path`) derives the cache directory as a sibling of the net's own parent directory, which doesn't hold once caches live per-app under `src/apps/<app>/cache/` instead
 
 `data/` — everything on-disk that isn't code (input specs and app output
 ONLY — no caches; those are per-app, under `src/apps/<app>/cache/`, see
 above):
-- `input/nets/*.json` — **human-authored** RIGID net specs; the only files meant to be hand-edited (for that pipeline)
+- `input/nets/*.json` — RIGID net specs: a direct encoding of a `model.Polyhedron` (real 3D vertex positions + CCW face loops), hand-editable but usually generated from known coordinates (see `generate_platonic_nets.py` above)
 - `input/stretchy_nets/*.json` — **human-authored** STRETCHY net specs (vertex-loop format, see below) — a parallel, differently-shaped set of input files, not interchangeable with `input/nets/*.json`
 - `output/` — user-generated saves from `inflate_polyhedron_app`'s "Save" button (see "The app" below), created on demand
 
@@ -123,201 +125,172 @@ Top level:
 - `requirements.txt` — numpy, scipy, networkx, matplotlib, sv-ttk, (dev) pytest
 - `README.md` — user-facing usage doc (install, run the app, write a `.json` net, the cache, tests)
 
-## The `.json` format (human-writable input, RIGID pipeline)
+## The `.json` format (RIGID pipeline)
 
-Full grammar lives in `src/utils/persistence/polyhedron_spec.py`'s docstring. Shape:
+Full grammar lives in `src/utils/persistence/polyhedron_spec.py`'s docstring --
+a direct encoding of a `model.Polyhedron`, nothing more:
 
 ```json
 {
   "name": "...",
-  "faces": [{"id": 0, "sides": 4}, {"id": 1, "sides": 4}, ...],
-  "edges": {
-    "net": [[0, 1], ...],
-    "extra": [[1, 2], ...]
-  }
+  "vertices": [[1, 1, 1], [1, 1, -1], ...],
+  "faces": [[0, 1, 2, 3], [4, 5, 6, 7], ...]
 }
 ```
 
-`faces` gives each face's number of sides (k for a regular k-gon), with an
-explicit `id` per face -- checked against declaration order on load -- so
-faces stay easy to number and cross-reference even in a long list. The
-face the flat net is built outward from (the "root") is always the first
-(lowest-id) non-omitted face -- there's no field to override this, since
-any face works equally well as root (net_edges is a spanning tree, so BFS
-from any face reaches every other one); the choice only affects how the
-flat net happens to be arranged on paper, never whether it folds up
-correctly. `edges.net` is the (f1, f2) hinge edges forming the flat net; must be a
-spanning tree over every **non-omitted** face (see "Open nets" below —
-`len(net) == len(faces) - len(omitted) - 1`). `edges.extra` is the (f1, f2)
-edges that only meet once folded; these pin down the fold angles.
-
-No coordinates or angles are ever hand-written — both are derived.
+`vertices` is real 3D positions; `faces` is each face's CCW
+(viewed-from-outside) vertex-index loop. There's no root, no net/extra
+edge split, no per-face degree list, no coordinates-vs-combinatorics
+distinction at all -- `net_unfolder.NetUnfolder` (see "Pipeline" below)
+derives the spanning tree, flat layout, and every fold angle itself from
+whatever geometry is given here. This is a deliberate simplification from
+an earlier abstract faces/edges spec format (no coordinates, fold angles
+numerically solved for): seeing this project's own history is useful if
+you're wondering why a `fold_solver.py`-shaped module doesn't exist
+anymore -- there's nothing left to solve for once real coordinates are
+given (see "Pipeline" below for exactly why).
 
 ### Open nets
 
-A face can be marked `"omit": true` — it's never built into 2D/3D geometry
-or physically folded, but its combinatorics still matter: `edges.hidden`
-lists every edge touching an omitted face (needed so `edge_map.EdgeMap`
-sees the *complete* graph and gives the real, non-omitted faces their
-correct polygon-edge index — Whitney's theorem needs the full graph, not a
-hole-punched one) but is never used as a hinge or a fold-closure constraint,
-since an omitted face has no 3D position to hinge from or close against.
-`data/input/nets/half_dodecahedron.json` and `data/input/nets/dodecahedron_minus_one.json` are
-worked examples (generated by `src/apps/common/generate_open_dodecahedron_nets.py`
-from the same dodecahedron coordinates the closed `data/input/nets/dodecahedron.json`
-uses, just with some faces marked omitted instead of remapped away).
+An "open" net (one that doesn't fold up into a closed solid) is simply a
+spec whose `"faces"` list is a face SUBSET of some solid's -- no special
+field or bookkeeping needed, since `NetUnfolder` derives face adjacency
+directly from whichever faces are actually listed; a face that would be
+adjacent to an omitted one just ends up with a boundary edge instead of a
+hinge. The one rule: only include the vertices the listed faces actually
+reference (an unreferenced vertex would still count toward
+`Polyhedron.bounding_box()`, silently enlarging it around an invisible
+point). `data/input/nets/half_dodecahedron.json` and
+`data/input/nets/dodecahedron_minus_one.json` are worked examples
+(generated by `src/apps/common/generate_open_dodecahedron_nets.py` from
+the same dodecahedron coordinates the closed `data/input/nets/dodecahedron.json`
+uses, remapped to a face subset instead of the full set).
 
 An open net's fold is generally an **open, non-convex** shape even at
-t=1 — `utils.geometry3d.is_closed_solid(verts3d)` checks this directly and
-purely geometrically (does every folded edge match exactly one other
-face's edge at the same two 3D points?), with no dependency on the
-`omit`/`hidden` JSON fields, so it works for legacy `.txt` nets too.
+t=1 -- `model.Polyhedron.is_closed` checks this directly and purely
+combinatorially (does every edge, by shared vertex INDEX, appear in
+exactly 2 faces?) once vertices are merged into indices (see
+"Pipeline" below) -- no float tolerance involved at that point at all.
 `polyhedron_unfolder` checks it (both tabs, independently) before applying
 `_CullableFace` backface culling (see below), which is only valid for a
 closed convex solid.
 
-## Pipeline (`src/utils/model/polyhedral_net.py: PolyhedralNet.load`)
+## Pipeline (`src/utils/net_unfolder/net_unfolder.py: NetUnfolder`)
 
-The rigid pipeline's object model lives in `src/utils/model/` --
-`Face`/`Hinge`/`PolyhedralNet`/`Polyhedron`. `Face` is now pure
-per-original-face metadata (id, sides, color) -- **no geometry at all**;
-`Hinge` holds parent/child ids, edge indices, angle. `Polyhedron` is pure
-3D-mesh geometry (shared, indexed `vertices`, CCW vertex-index `faces`,
-derived `edges`) with **no** awareness of nets, hinges, roots, fold
-progress, or color -- and it describes BOTH the pre-fold flat net (as
-`PolyhedralNet.flat`, at z=0) and every fold stage in between and after
-(`PolyhedralNet.fold(t)`), not just the final closed solid. This works
-because an unfolded net is exactly the kind of mesh `Polyhedron` already
-handles without modification: a hinge-glued edge is *genuinely* shared
-(two faces meet there at any `t`, even `t=0`), while an "extra"/closure
-edge is *not yet* shared (its two faces only coincide once folded) --
-"one edge becomes two, one vertex becomes several" until folding brings
-them together, and `Polyhedron.is_closed` simply reports this honestly at
-whatever `t` you ask.
+The object model is split across two packages on purpose:
+`src/utils/model/` holds only `Polyhedron` -- pure 3D-mesh geometry
+(shared, indexed `vertices`, CCW vertex-index `faces`, derived `edges`)
+with **no** awareness of nets, hinges, roots, fold progress, or color --
+while `src/utils/net_unfolder/` holds everything unfolding-specific:
+`Hinge` (parent/child face indices, edge indices, angle) and `NetUnfolder`
+itself. `Polyhedron` describes BOTH the pre-fold flat net (`NetUnfolder.flat`,
+at z=0) and every fold stage in between and after (`NetUnfolder.fold(t)`),
+not just the final closed solid -- this works because an unfolded net is
+exactly the kind of mesh `Polyhedron` already handles without
+modification: a hinge-glued edge is *genuinely* shared (two faces meet
+there at any `t`, even `t=0`), while a non-hinge closure edge is *not yet*
+shared (its two faces only coincide once folded) -- "one edge becomes
+two, one vertex becomes several" until folding brings them together, and
+`Polyhedron.is_closed` simply reports this honestly at whatever `t` you
+ask.
 
-`PolyhedralNet.load(path, cache_dir=None)` is the one public loading
-entry point (dispatching `.json` via the cache, see below, or legacy
-`.txt` directly), building `self.flat` (a `Polyhedron`) and
-`self.fid_to_index` (original face id -> `flat.faces` position) once at
-load time. `PolyhedralNet.fold(t)` returns a *new* `Polyhedron` at fold
-progress `t` by folding each face's own flat corners (read from
-`self.flat`) to 3D (`net_fold_core.fold()`) and merging coincident
-corners into shared vertex indices (`net_fold_core.cluster_faces_into_mesh()`).
-Since a `Polyhedron`'s faces carry no original face id, both `self.flat`
-and any `fold(t)` result are ordered by ascending original-id, so a
-caller needing per-original-face metadata (e.g. `polyhedron_unfolder`'s
-per-face color) zips `solid.faces` (or `self.flat.faces`) against
-`sorted(net.faces)`. The combinatorial steps below are unchanged
-internally -- `PolyhedralNet._load_json_uncached` calls them in the same
-sequence, wrapping the result into `Face`/`Hinge` objects only at the
-very end:
+`NetUnfolder.load(path, cache_dir=None)` is the one public loading entry
+point for a `.json` spec (via the cache, see below); `NetUnfolder.for_polyhedron(polyhedron, root=0, cache_path=None)`
+is the same thing for an already-built `Polyhedron` with no source file.
+Both funnel into `NetUnfolder._compute`, which derives everything fresh:
 
-1. `polyhedron_spec.py` parses `faces`/`edges.net`/`edges.extra`/`edges.hidden`/`omit` from the JSON.
-2. `edge_map.py` (`EdgeMap`) turns the full edge list (net + extra +
-   hidden) into a per-face edge-index map via a `networkx` planar embedding.
-   By Whitney's theorem a 3-connected planar graph's embedding — hence the
-   cyclic edge order around each face — is unique up to a global mirror, so
-   edge indices never need to be given explicitly. This is also exactly why
-   `EdgeMap` **cannot** represent a face pair sharing more than one edge:
-   its graph is a plain `networkx.Graph`, so two faces glued along multiple
-   edges collapse to a single graph edge and it raises "duplicate edge in
-   the edge list" — this is the hard boundary between what the rigid
-   pipeline can express and what needs a stretchy mesh instead (see below).
-3. `net_layout.py` BFS-attaches regular polygons (`polygon_geom.py`) along
-   `net` edges to build the flat 2D net (skipping any `omitted` faces,
-   `Net.add_face` accepts an explicit `fid` so a face's original id is
-   preserved even when omitted ids leave gaps in the numbering — needed
-   for open nets, since `EdgeMap`'s indices are keyed on the *original*
-   ids) exactly as before, then its final step
-   (`net_fold_core.flatten_net`) z=0-pads and clusters those per-face
-   points into the Polyhedron-shaped `(vertices, faces, fid_to_index)`
-   `build_net_layout` now returns instead of a bare `net_fold_core.Net`
-   (`Net` itself is unchanged and still used internally here, and
-   separately by the legacy `.txt`/`.fold`-cache loading paths, which
-   reach the same Polyhedron-shaped data via the same `flatten_net` call
-   after their own `Net.build_tree()` coincident-point hinge derivation).
-4. `fold_solver.py` numerically solves (scipy `least_squares`) for the
-   hinge angle at every `net` edge such that every `extra` edge's two faces
-   coincide in 3D at fold progress `t=1`. Performance-critical internals:
-   - **Restart strategy**: tries a 17-point sweep of evenly-spaced,
-     all-hinges-equal starting guesses first; the 40-random-restart
-     fallback only fires if that sweep finds *no* valid solution at all —
-     it's not used to search for additional branches once one is found.
-   - **Known gotcha**: the same closure equations can have more than one
-     root. The icosahedron net, for instance, also algebraically closes
-     into a smaller, self-intersecting "collapsed" shape.
-     `fold_solver._is_embeddable` rejects any solution where two
-     non-adjacent vertices end up closer than one edge length (checked via
-     `net_fold_core.distinct_vertices`), then the smallest-total-rotation
-     surviving solution is chosen. (The stretchy-mesh solver hits this same
-     class of problem in a much sharper form — see "Orientation
-     consistency" below.)
-   - **`jac_sparsity`**: each closure residual only actually depends on the
-     hinge angles that are ancestors (root-path) of the two faces
-     involved — a sibling branch's angle provably can't affect it, so this
-     is an *exact* sparsity pattern, not an approximation
-     (`_ancestor_hinge_indices` / `_closure_jac_sparsity`). Only applied
-     when `n_hinges >= SPARSITY_MIN_HINGES` (15): below that, scipy's
-     forced switch to the sparse-only iterative `lsmr` trust-region solver
-     costs more than it saves (measured ~2x *slower* on the 7-hinge
-     octahedron); above it, it's a real win (~1.7x on a 31-hinge net).
-5. `net_fold_core.fold_transforms()` is the actual rotation engine — walks
-   the hinge tree in BFS order, giving each face one cumulative 4x4
+1. **Face adjacency** (`_face_adjacency`) -- for every polygon edge of
+   every face, is there another face with the SAME two vertices in the
+   OPPOSITE order (the CCW-from-outside convention: a shared edge is
+   v->w on one face, w->v on the other)? Read directly off the given
+   `Polyhedron`'s own face loops, in O(total edges) -- no planar
+   embedding, no `networkx`, no possibility of "duplicate edge" failure
+   for a face pair sharing more than one edge (that combinatorial
+   ambiguity only existed because the OLD abstract format had no
+   coordinates to disambiguate with; a real `Polyhedron` already knows
+   exactly which edge is which).
+2. **Spanning tree** (`_spanning_tree`) -- BFS from `root` (always face
+   index 0; any face works equally well as root, same reasoning as the
+   old format's root selection) over that adjacency, giving a list of
+   hinges (parent/child face index, parent/child edge index) -- an
+   unreached face after the BFS (some faces disconnected by shared
+   edges) raises.
+3. **Flat layout** (`_build_flat_layout`) -- each face's own REAL 3D
+   corners are projected into an orthonormal 2D basis within its own
+   plane (`_project_face_to_2d`; u = first edge direction, w = face
+   normal, v = w x u -- exact same edge lengths as the real face, works
+   for irregular faces too, not just regular polygons), then BFS-attached
+   to its parent's already-placed shared edge, reversed, via
+   `polygon_geom.rigid_transform_2d`/`apply_rigid` (the same rigid-2D-attach
+   math the old regular-polygon-only net layout used). The result is
+   wrapped into a `net_fold_core.Net` and passed through
+   `net_fold_core.flatten_net` -- z=0-padding + clustering coincident
+   corners into shared vertex indices (unchanged, see step 5) -- giving
+   `NetUnfolder.flat`, a `Polyhedron` at z=0.
+4. **Fold angle** (`_hinge_fold_angle`) -- `arccos(dot(face_normal(parent), face_normal(child)))`,
+   read directly off the GIVEN geometry's two adjacent face normals. This
+   is this project's existing rotation-from-flat convention exactly (90°
+   for a cube's self-supplementary 90° dihedral, 109.47° for a
+   tetrahedron's 70.53° dihedral -- see "Conventions" below) -- there is
+   nothing to *solve* for, since the dihedral angle is already known.
+   This is the whole reason the old `fold_solver.py` (scipy
+   `least_squares`, a 17-point restart sweep, exact Jacobian sparsity,
+   rejecting "collapsed" self-intersecting solutions -- see this
+   project's git history if you're ever tempted to reintroduce a
+   solving step) doesn't exist anymore: it solved for something that's
+   directly measurable once real coordinates are given.
+5. `net_fold_core.fold_transforms()` is the actual rotation engine --
+   walks the hinge tree in BFS order, giving each face one cumulative 4x4
    affine transform matrix (`scipy.spatial.transform.Rotation` builds
    each hinge's rotation; `hinge_transform()` embeds it into a 4x4 that
    also pivots around the hinge's axis point, so it composes with the
    parent's matrix via plain matrix multiplication: `M_child = hinge_M @
    M_parent`). A nested hinge's axis is the parent's own flat edge
-   mapped through the parent's already-computed matrix, which is exactly
-   why hinges must be processed in BFS order. `fold()` is a thin wrapper
-   that applies each face's matrix to that face's own flat (z=0) points,
-   returning the same `dict[face_id -> (N,3) ndarray]` shape it always
-   has. Works identically for both `.json`-derived and legacy `.txt`
-   nets. `model.PolyhedralNet.fold(t)` goes one step further:
-   `net_fold_core.cluster_faces_into_mesh()` merges the per-face-corner
-   points this produces into a proper indexed mesh (shared vertices,
-   CCW vertex-index faces) — see the "Object model" section below.
+   (a pair of shared vertex indices) mapped through the parent's
+   already-computed matrix, which is exactly why hinges must be
+   processed in BFS order. `fold()` is a thin wrapper that applies each
+   face's matrix to that face's own flat (z=0) points, returning
+   `dict[face_index -> (N,3) ndarray]`. `NetUnfolder.fold(t)` goes one
+   step further: `net_fold_core.cluster_faces_into_mesh()` merges the
+   per-face-corner points this produces into a proper indexed mesh
+   (shared vertices, CCW vertex-index faces) -- the SAME merge used to
+   build `NetUnfolder.flat` in step 3, reused rather than reinvented.
 
-Perf history (32-face truncated icosahedron, 31 hinges), from the
-original hand-rolled-Rodrigues-formula/batched-subtree-array
-implementation: ~78s naive → ~72s (subtree precompute) → ~42s (+
-`jac_sparsity`). Switching to the current per-face
-`scipy.spatial.transform.Rotation`-based affine-matrix engine (chosen for
-being explicit, composable, and library-backed rather than hand-rolled)
-measured ~45s — a real but modest regression from scipy's per-call
-overhead across the many thousands of `fold()` calls `least_squares`
-makes, accepted as a one-time cost of solving/caching a net (not a cost
-paid on every interactive redraw, which folds at a fixed, already-solved
-`t` and stays fast). Small nets (≤~15 hinges) were already sub-second
-either way and are unaffected by the `jac_sparsity` change (explicitly
-gated off for them).
+Since solving is gone, this whole pipeline is now fast even for the
+bushiest net -- the 32-face, 31-hinge truncated icosahedron went from
+the old solving pipeline's ~30-45s down to ~0.07s. Caching (below) is
+therefore more "avoid redundant recomputation" than "avoid an expensive
+solve" now, but the contract is unchanged.
 
-## Caching (`src/utils/persistence/fold_cache.py`)
+## Caching (`src/utils/net_unfolder/cache.py`)
 
-Solving is the slow part for bushy/large nets. A `.fold` cache file (in
-`src/apps/polyhedron_unfolder/cache/`, not `data/input/nets/`) mirrors the legacy explicit-coordinate format
-(2D vertex positions per face + fold angle per hinge) plus a
-`CHECKSUM sha256:...` of the source `.json`. `PolyhedralNet.load()`
-transparently reuses the cache if the checksum still matches, else
-re-solves and rewrites it (via `fold_cache.read_fold_cache`/
-`write_fold_cache`, which read/write a `PolyhedralNet` directly rather than
-a loose tuple). Face ids in the cache's `FACES` block are allowed to be
-non-contiguous (`0: ... \n 5: ... \n 6: ...`, strictly increasing but with
-gaps) to support open nets' omitted faces — `parse_net_body` validates
-strictly-increasing rather than exactly-sequential ids.
+A cache file (in `src/apps/polyhedron_unfolder/cache/`, not
+`data/input/nets/`) is plain JSON: the flat layout's 2D vertices/faces,
+the hinge list (parent/child/edge indices/angle in degrees), and a
+`checksum` of the source `.json`. `NetUnfolder.load()` transparently
+reuses the cache if the checksum still matches, else recomputes and
+rewrites it.
 
-- `is_cached(net_path)` — read-only check, never mutates anything (safe to
-  call just to decide how to render a net, e.g. in the app's net list).
-- `_valid_cache_or_clear_stale` — when a cache's checksum no longer matches
-  its source (the `.json` was edited), the stale `.fold` file is **deleted
-  immediately**, before any re-solve is attempted. This means a failed
-  re-solve never leaves a misleading stale cache behind; the net correctly
-  falls back to "not computed" instead.
-- `build_all(nets_dir, cache_dir=None, force=False, on_progress=None)` —
+- `is_cached(net_path)` -- read-only check, never mutates anything, and
+  never needs to construct a `Polyhedron` (just compares the cache file's
+  own stored checksum field) -- safe to call just to decide how to render
+  a net (e.g. in the app's net list).
+- `_clear_stale_cache` -- the same cheap, `Polyhedron`-free checksum
+  check `is_cached` uses; when a cache's checksum no longer matches its
+  source (the `.json` was edited, possibly into something that no longer
+  even parses), the stale cache file is **deleted immediately**, before
+  the source is even parsed. This means a failed recompute never leaves a
+  misleading stale cache behind; the net correctly falls back to "not
+  computed" instead. `_valid_cache_or_clear_stale` does the same check
+  but additionally reconstructs a ready `NetUnfolder` (needs an
+  already-parsed `Polyhedron`, unlike the cheap checksum-only variants
+  above) -- what `NetUnfolder.load`/`for_polyhedron` need for an actual
+  cache hit.
+- `build_all(nets_dir, cache_dir=None, force=False, on_progress=None)` --
   computes/refreshes every net's cache; shared by `build_cache.py` (CLI,
   prints progress) and the app's "Compute Folding Pattern" button (runs
   in a background thread, reports via a `queue.Queue` polled from the
-  main thread — Tk widgets must only ever be touched from the main
+  main thread -- Tk widgets must only ever be touched from the main
   thread).
 - Run `python src/apps/polyhedron_unfolder/build_cache.py` after editing a `.json` file to warm the
   cache ahead of time (`--force` recomputes unconditionally); otherwise it
@@ -338,7 +311,7 @@ redrawn together (`_refresh_plot` calls both `draw_fold`/`draw_compare`)
 on any state change (net selection, theme, axes) — only the slider,
 `on_slider`, redraws just the "Animated Fold" tab.
 
-- Nets without a valid `.fold` cache show a `(not computed)` suffix and are
+- Nets without a valid cache file show a `(not computed)` suffix and are
   greyed out in the dropdown (`_style_disabled_items` — a best-effort
   reach into ttk's Tcl popdown-listbox internals, wrapped in try/except
   since it's not public API; the text suffix + a selection guard in
@@ -376,12 +349,13 @@ on any state change (net selection, theme, axes) — only the slider,
   side hides it, and no two visible faces of a convex solid ever overlap
   in projection either, so nothing else needs sorting) -- never apply it
   to an open/non-convex net. `_draw_solid` therefore only uses it when
-  `is_closed_solid(verts)` is true (for the "Animated Fold" tab this in
-  practice also means `t == 1.0`, since mid-fold edges don't yet coincide
-  and an open net -- some faces omitted -- never closes even at t=1; for
-  the "Flat vs Folded" tab, always at `t = 1.0`, it's the ONLY gate); for
-  anything else it falls back to a plain `Poly3DCollection`.
-  `utils.geometry3d.face_normal()` computes each face's outward unit normal
+  `solid.is_closed` (a `model.Polyhedron` property) is true (for the
+  "Animated Fold" tab this in practice also means `t == 1.0`, since
+  mid-fold edges don't yet coincide and an open net -- a face subset --
+  never closes even at t=1; for the "Flat vs Folded" tab, always at
+  `t = 1.0`, it's the ONLY gate); for anything else it falls back to a
+  plain `Poly3DCollection`.
+  `Polyhedron.face_normal()` computes each face's outward unit normal
   via the cross product of its first two edges -- verified (see
   `test_net_fold_core.py`) to be consistently outward-pointing for every
   face of every net in `data/input/nets/`, relying on the net's CCW winding
@@ -456,9 +430,15 @@ For nets that **cannot** be realized with perfectly rigid, flat faces —
 most sharply, two faces glued along more than one shared edge. If two flat
 polygons share ≥3 non-collinear points, both must lie in the one plane
 those points determine — there's no dihedral fold left to make them
-distinct faces of a solid. `edge_map.EdgeMap` can't even represent
-this combinatorially (see "duplicate edge" above), so this is a genuinely
-different data model and solver, not an extension of the rigid one.
+distinct faces of a solid. This is a genuine geometric impossibility, not
+just a representational limitation of some rigid-pipeline data structure
+— the rigid pipeline's own `Polyhedron`/`NetUnfolder` could combinatorially
+describe such a face pair without any trouble (there's no more `EdgeMap`
+planar-embedding step to reject it, see "Pipeline" above), but attempting
+to actually unfold one would still fail geometrically at the flat-layout
+step (two faces sharing >1 edge can't both come out flat and rigid). So
+this remains a genuinely different data model and solver, not an
+extension of the rigid one.
 
 ### The vertex-loop format (`data/input/stretchy_nets/*.json`)
 
@@ -548,8 +528,10 @@ which is backwards for a human turning a pressure dial and expecting
 
 Plain edge-length fitting has no opinion about orientation, so a stage-1
 result is often already self-intersecting — one face folded inside-out
-relative to the rest (a sharper version of `fold_solver._is_embeddable`'s
-"collapsed branch" problem in the rigid pipeline). `_orientation_signs`
+relative to the rest (a sharper version of the "collapsed branch" problem
+the old rigid-pipeline fold solver used to reject via `_is_embeddable`,
+back when rigid fold angles were numerically solved for rather than read
+directly off given geometry — see "Pipeline" above). `_orientation_signs`
 detects this cheaply: for each face, the sign of `dot(face_normal,
 face_centroid - mesh_centroid)`; a consistent embedding has every face
 agree (all +1 or all -1 — an arbitrary global mirror choice that doesn't
@@ -595,8 +577,8 @@ to keep distinct vertices apart.
 
 ### Caching (`src/utils/persistence/stretchy_cache.py`)
 
-Mirrors `fold_cache.py`, but as plain JSON (positions + stats dict — no
-hinge tree to write out) instead of the FACES/FOLD text format.
+Mirrors `net_unfolder/cache.py` for the rigid pipeline, but recording just
+a positions + stats dict (no hinge tree/fold angles to write out).
 `ALGORITHM_VERSION` (in `stretchy_mesh.py`) is folded into the cache key
 (`stretchy_cache.source_checksum` = file hash + `"+algo{VERSION}"`) —
 **bump it whenever `solve_wireframe`'s algorithm changes enough to produce
@@ -944,11 +926,17 @@ solve instead of an instant read).
   `src/utils/geometry2d/stretchy_net_layout.py`'s `build_stretchy_net_layout` --
   a breadth-first search over faces sharing an edge (derived directly
   from each face's own vertex-loop order, no separate combinatorics step
-  needed -- unlike the rigid pipeline's `edge_map.EdgeMap`, which
-  can't represent a stretchy mesh's multi-shared-edge face pairs at all),
+  needed -- unlike the rigid pipeline's old `EdgeMap`-based planar
+  embedding, which couldn't represent a stretchy mesh's multi-shared-edge
+  face pairs at all; the rigid pipeline no longer needs a planar
+  embedding either, since it now reads face adjacency directly off a real
+  `Polyhedron`'s own geometry -- see "Pipeline" above -- but multi-shared-edge
+  face pairs still can't be laid out flat and rigid, which is the actual
+  reason this stretchy path exists, not a representational one),
   attaching each newly-discovered face to whichever neighbor's edge found
   it first via `polygon_geom.attach_polygon` (reversed, so it unfolds
-  outward -- same convention `net_layout.py` uses for the rigid pipeline).
+  outward -- same convention `net_unfolder.py`'s `_build_flat_layout`
+  uses for the rigid pipeline).
   A face pair sharing MORE than one edge just means extra entries that
   BFS never uses for placement (only the first edge to a still-unplaced
   face matters), same as an `edges.extra` edge would be ignored for
@@ -964,25 +952,23 @@ solve instead of an instant read).
 sub-package split exactly, one test file per module; `tests/integration/`
 holds the tests that deliberately cross sub-package boundaries (currently
 just `test_open_nets.py` — see below) plus `helpers.py`'s shared
-fixture-builder classes. The **rigid**-pipeline suite runs in ~3s; it
-deliberately only exercises small nets (tetrahedron, cube, a synthetic
-paper-cube net, a tiny open net) for the numerical solver so it stays
-fast — there's no test that runs the icosahedron/truncated-icosahedron
-solve. Files map roughly 1:1 to `src/utils/` modules
-(`unit/geometry2d/test_polygon_geom.py`, `unit/combinatorics/test_edge_map.py`,
-`unit/geometry2d/test_net_layout.py`, `unit/geometry3d/test_net_fold_core.py`,
-`unit/geometry3d/test_fold_solver.py`, `unit/persistence/test_polyhedron_spec.py`,
-`unit/persistence/test_fold_cache.py`, `unit/geometry3d/test_hull_to_spec.py`,
-`unit/combinatorics/test_spanning_tree.py`, `integration/test_open_nets.py`,
-`unit/subdivisions/test_polygon_subdivisions.py`), plus `unit/model/*.py`
-(one file per `Face`/`Hinge`/`Polyhedron`/`PolyhedralNet` class, covering
-both `.json` and legacy `.txt` loading, folding at several `t`,
-`assign_colors`, and `Polyhedron`'s pure index-based `is_closed`/`edges`).
-`unit/persistence/test_fold_cache.py` uses `tmp_path` + `monkeypatch` to
-verify cache reuse (patches `PolyhedralNet._load_json_uncached` to raise,
-proving a cache hit never calls it) and stale-cache deletion on a failed
-re-solve; `unit/persistence/test_stretchy_cache.py` mirrors this for the
-stretchy pipeline.
+fixture-builder classes. The **rigid**-pipeline suite is fast (no
+numerical solver left to run at all — see "Pipeline" above) and still
+deliberately only exercises small nets directly (tetrahedron, cube, a
+synthetic paper-cube net, a tiny open net); there's no test that builds
+the icosahedron/truncated-icosahedron by hand, though `NetUnfolder` is
+exercised against every real net in `data/input/nets/` via
+`build_cache.py`/the app itself. Files map roughly 1:1 to `src/utils/`
+modules (`unit/geometry2d/test_polygon_geom.py`,
+`unit/geometry3d/test_net_fold_core.py`, `unit/persistence/test_polyhedron_spec.py`,
+`unit/geometry3d/test_hull_to_spec.py`, `integration/test_open_nets.py`,
+`unit/subdivisions/test_polygon_subdivisions.py`), plus `unit/model/test_polyhedron.py`
+(the pure-geometry class, index-based `is_closed`/`edges`, no unfolding
+knowledge) and `unit/net_unfolder/*.py` (one file per `Hinge`/`NetUnfolder`
+class, covering spanning-tree derivation, flat-layout vertex sharing,
+fold angles matching known dihedral angles, folding at several `t`, and
+`cache.py`'s reuse/staleness contract, which mirrors
+`unit/persistence/test_stretchy_cache.py`'s for the stretchy pipeline).
 
 The **stretchy**-pipeline suite (`unit/geometry3d/test_stretchy_mesh.py`) is slower
 (~30-60s) since even the small Platonic solids run the real
@@ -1027,30 +1013,36 @@ why that's expected, not a bug).
 
 ## Conventions worth knowing before editing
 
-- All polygon edges have length 1 (`polygon_geom.EDGE_LENGTH` /
-  `stretchy_mesh.EDGE_LENGTH`) — faces are glued edge-to-edge exactly in
-  the rigid pipeline; the stretchy pipeline lets edges stretch a little
-  (capped at `STRETCH_CAP`) but still targets the same unit length.
+- The STRETCHY pipeline's polygon edges all have length 1
+  (`stretchy_mesh.EDGE_LENGTH`, capped stretch via `STRETCH_CAP`) since
+  its nets are hand-authored combinatorics with no coordinates of their
+  own. The RIGID pipeline has no such requirement anymore -- since
+  `NetUnfolder` reads real, already-given coordinates (`data/input/nets/*.json`),
+  edge length is simply whatever the input `Polyhedron` says (e.g.
+  `solid_coords.cube()`'s raw canonical coordinates have edge length 2,
+  not 1) -- `polygon_geom.EDGE_LENGTH` (still 1.0) is now only a default
+  used by `regular_polygon_vertices`/`attach_polygon`, which the stretchy
+  pipeline's `stretchy_net_layout.py` still calls, not anything in the
+  rigid pipeline's own `net_unfolder.py`.
 - Polygons are CCW as seen from outside the solid, in **both** pipelines
-  (rigid: `net_layout.py` — a child face attaches to its parent via a
-  *reversed* edge mapping, matching how a physical paper net unfolds to
-  the outside; stretchy: `stretchy_mesh.py`'s module docstring — a shared
-  edge appears as `v -> w` in one face's loop and `w -> v` in the other's).
+  (rigid: `net_unfolder._face_adjacency`/`_build_flat_layout` — a shared
+  edge appears as `v -> w` in one face's loop and `w -> v` in the other's,
+  and a child face attaches to its parent via a *reversed* edge mapping,
+  matching how a physical paper net unfolds to the outside; stretchy:
+  `stretchy_mesh.py`'s module docstring — the same `v -> w`/`w -> v`
+  convention).
 - A stored "fold angle" (rigid pipeline only) is the rotation *from flat*
   (180° between coplanar faces), not the dihedral angle itself — e.g. cube
   hinges rotate 90° (dihedral is also 90°, self-supplementary), tetrahedron
-  hinges rotate 109.47° (dihedral is 70.53°).
-- Legacy `.txt` nets (explicit coordinates + fold angles, no solving
-  needed) are still supported via `PolyhedralNet._load_legacy_txt`,
-  dispatched automatically by file extension in `PolyhedralNet.load`
-  (`.json` vs `.txt`).
-- `net_fold_core.py`, `fold_solver.py`, `fold_cache.py`, and
-  `stretchy_mesh.py`/`stretchy_cache.py` have no `if __name__ ==
-  "__main__"` demo blocks — that logic lives in `tests/`. Add new ad hoc
-  verification as a real test, not a script block.
+  hinges rotate 109.47° (dihedral is 70.53°). Read directly off the given
+  geometry now (`net_unfolder._hinge_fold_angle`), not solved for.
+- `net_fold_core.py` and `stretchy_mesh.py`/`stretchy_cache.py` have no
+  `if __name__ == "__main__"` demo blocks — that logic lives in `tests/`.
+  Add new ad hoc verification as a real test, not a script block.
 - Rigid nets (`data/input/nets/*.json`) and stretchy nets (`data/input/stretchy_nets/*.json`) are
   NOT interchangeable formats, even though both are JSON with a `"faces"`
-  key — one is `{"id", "sides", "omit"?}` objects with a
-  separate `edges.net`/`edges.extra`/`edges.hidden`, the other is plain
-  vertex-id-loop lists. Loading one with the other pipeline's loader will
-  fail (usually confusingly) rather than "just working".
+  key — one is `{"vertices": [[x,y,z], ...], "faces": [[i,j,k,...], ...]}`
+  (real coordinates + CCW vertex-index loops), the other is plain
+  vertex-id-loop lists with no coordinates at all. Loading one with the
+  other pipeline's loader will fail (usually confusingly) rather than
+  "just working".

@@ -4,7 +4,6 @@ import threading
 import numpy as np
 import pytest
 
-from utils.combinatorics.edge_map import EdgeMap
 from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
 from utils.geometry3d.solid_coords import tetrahedron as tetrahedron_coords
 from utils.geometry3d import stretchy_mesh
@@ -60,20 +59,6 @@ def test_mesh_edges_deduplicates_and_sorts():
     assert edges == sorted(set(edges))
     assert all(a < b for a, b in edges)
     assert len(edges) == 7  # 3 shared A-B + 2 A-S + 2 B-S
-
-
-def test_the_rigid_pipeline_rejects_this_topology_as_a_duplicate_edge():
-    """Reproduces exactly why polyhedron_unfolder can't fold the
-    pentagons-and-square net: its face-ADJACENCY graph (not
-    the vertex-loop mesh above, but the "which face touches which face"
-    view combinatorics.EdgeMap needs) has the pentagon pair (faces 0, 1)
-    joined by 3 separate edges and each pentagon joined to the square
-    (face 2) by 2 -- EdgeMap's graph is a plain networkx.Graph, which
-    can't represent a face pair sharing more than one edge at all."""
-    degrees = [5, 5, 4]
-    edges = [(0, 1), (0, 1), (0, 1), (0, 2), (0, 2), (1, 2), (1, 2)]
-    with pytest.raises(ValueError, match="duplicate edge"):
-        EdgeMap(degrees, edges)
 
 
 # ---- _mesh_volume / _sphere_bound_volume ----

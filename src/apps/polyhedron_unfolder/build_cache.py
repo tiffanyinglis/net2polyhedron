@@ -1,15 +1,14 @@
-"""Precompute and cache the fold for every net in data/input/nets/, so
-polyhedron_unfolder never has to run the (potentially slow) combinatorial
-+ numerical solve at load time -- it just reads back the cached result in
-this app's own cache/ folder (next to this file) if the source .json is
-unchanged.
+"""Precompute and cache the unfolding for every net in data/input/nets/, so
+polyhedron_unfolder doesn't recompute it at load time -- it just reads back
+the cached result in this app's own cache/ folder (next to this file) if
+the source .json is unchanged.
 
     python src/apps/polyhedron_unfolder/build_cache.py            # only nets whose cache is stale
     python src/apps/polyhedron_unfolder/build_cache.py --force     # recompute every net
 
 The same logic backs the "Compute Folding Pattern" button in app.py (see
-utils.persistence.fold_cache.build_all). This cache is this app's own --
-not shared with any other app.
+utils.net_unfolder.cache.build_all). This cache is this app's own -- not
+shared with any other app.
 """
 import sys
 from pathlib import Path
@@ -22,7 +21,7 @@ import argparse
 import os
 
 from common.paths import NETS_DIR
-from utils.persistence.fold_cache import build_all
+from utils.net_unfolder.cache import build_all
 
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
