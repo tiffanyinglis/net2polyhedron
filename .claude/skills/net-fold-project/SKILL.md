@@ -49,9 +49,9 @@ itself, only its import paths and (for apps) its data-directory constants.
 shared across more than one of them:
 - `polyhedron_unfolder/` — the merged rigid-pipeline app (see above)
   - `app.py` — entry point, class `PolyhedronUnfolderApp`. Builds ONE
-    shared control bar (net picker, theme toggle, "Show Axes", status
-    line) plus a `ttk.Notebook` with two tabs, each with its own
-    matplotlib figure/canvas but reading the SAME loaded
+    shared control bar (net picker, status line) plus a `ttk.Notebook`
+    with two tabs, each with its own matplotlib figure/canvas but
+    reading the SAME loaded
     `self.net`/`self.colors` state — switching tabs never re-picks or
     re-loads anything. This consolidation is *why* the merge made sense:
     the two original apps duplicated all of that control-bar wiring on
@@ -276,23 +276,26 @@ about exactly how fast is "fast enough" to skip threading.
 
 ## The apps (`polyhedron_unfolder`)
 
-Tkinter UI on the `sv_ttk` theme (dark by default, light/dark toggle
-button). ONE shared `LabelFrame`-grouped control bar sits on top: net
-picker + "Show Axes" checkbox (off by default) + theme button + status
-line — built once in `PolyhedronUnfolderApp.__init__`, not duplicated per
-tab. Below it, a `ttk.Notebook` with two tabs, each built by its own
-`_build_*_tab` method: "Animated Fold" (the fold slider, packed FIRST so
-its fixed height is always reserved at the bottom, then the 3D plot,
-packed second to fill whatever's left above it -- packing the expanding
-matplotlib canvas first, as an earlier version did, let it claim the
-tab's entire cavity and squeeze the slider out of the visible window
-whenever height was tight, e.g. once this tab had to share the window
-with a second tab) and "Flat vs Folded" (a flat-net panel beside a
+Tkinter UI on the `sv_ttk` theme -- dark only, no light mode and no theme
+toggle button in any of this project's three apps (`common.ui_theme.PLOT_THEME`
+is a single flat dict, not a light/dark pair; `sv_ttk.set_theme("dark")` is
+called once at startup and never toggled). ONE shared `LabelFrame`-grouped
+control bar sits on top: just the net picker + status line — built once
+in `PolyhedronUnfolderApp.__init__`, not duplicated per tab (no "Show
+Axes" checkbox either -- axes are always off, see `_style_3d_axis`/
+`_style_2d_axis`). Below it, a `ttk.Notebook` with two tabs, each built by
+its own `_build_*_tab` method: "Animated Fold" (the fold slider, packed
+FIRST so its fixed height is always reserved at the bottom, then the 3D
+plot, packed second to fill whatever's left above it -- packing the
+expanding matplotlib canvas first, as an earlier version did, let it
+claim the tab's entire cavity and squeeze the slider out of the visible
+window whenever height was tight, e.g. once this tab had to share the
+window with a second tab) and "Flat vs Folded" (a flat-net panel beside a
 folded-3D panel, always at `t=1.0`, no slider). Both tabs read the same
 `self.net`/`self.colors`/etc. state, set once by `on_select_net`, and are
-redrawn together (`_refresh_plot` calls both `draw_fold`/`draw_compare`)
-on any state change (net selection, theme, axes) — only the slider,
-`on_slider`, redraws just the "Animated Fold" tab.
+redrawn together (`draw_fold`/`draw_compare` both called from
+`on_select_net`) on any state change -- only the slider, `on_slider`,
+redraws just the "Animated Fold" tab.
 
 - Every `.json` in `data/input/nets/` is always selectable in the
   dropdown -- there's no cache to be missing (see "No caching" above), so
@@ -304,23 +307,41 @@ on any state change (net selection, theme, axes) — only the slider,
   finished `NetUnfolder` (or a caught exception, reported via
   `messagebox.showerror`) and redraw -- see "No caching" above for why
   this thread exists even though loading is fast.
-- `_apply_plot_theme` recolors BOTH tabs' figures/axes to match sv_ttk's
-  theme (`common.ui_theme.PLOT_THEME`, mirroring sv_ttk's own `-bg`
-  colors) and honors the "Show Axes" toggle; `draw_fold`/`draw_compare`
-  call it fresh every redraw since `ax.cla()` wipes all of it back to
-  matplotlib's defaults each time.
-- `_draw_solid` (shared by both tabs -- the "Animated Fold" tab's single
-  3D view and the "Flat vs Folded" tab's right-hand panel) centers the
+- `_apply_plot_theme` recolors BOTH tabs' figures/axes to match
+  `common.ui_theme.PLOT_THEME`'s fixed dark colors; `draw_fold`/
+  `draw_compare` call it fresh every redraw since `ax.cla()` wipes all of
+  it back to matplotlib's defaults each time.
+- **Filling the plot** (`_draw_solid`, shared by both tabs -- the
+  "Animated Fold" tab's single 3D view and the "Flat vs Folded" tab's
+  right-hand panel; `_draw_flat_net` for the 2D flat-net panel) used to
+  leave a lot of black space around the shape: `BOX_PADDING` centers the
   view on the shape's own bounding-box center (not its raw min/max) with
-  one shared half-width across all three axes, so the shape sits in the
-  middle of the cubic plot regardless of which direction the net layout
-  happens to extend, and `set_box_aspect([1, 1, 1])` isn't distorted by
-  unequal per-axis ranges.
-- `_draw_box_wireframe` manually draws all 12 edges of the bounding box
-  when axes are shown: matplotlib's default 3D pane borders only draw the
-  9 edges belonging to the 3 panes it renders for a fixed view angle, so
-  the near vertical corner where the two visible walls meet is otherwise
-  left undrawn.
+  its OWN per-axis half-width (not one shared cubic half-width forced
+  onto all three axes), so a shape that's flatter/narrower on some axis
+  than others (a bushy net mid-unfold, a nearly-flat net, two faces'
+  worth of thickness) doesn't waste render area being forced into a cube
+  it doesn't need -- `ax.set_box_aspect` is given those same three ratios
+  so the render stays undistorted (true units-per-data-unit scale on
+  every axis). On top of that, `_fit_zoom` iteratively solves for the
+  `zoom` (`Axes3D.set_box_aspect`'s own kwarg) that makes the shape's
+  ACTUAL vertices -- not just its bounding-box corners -- fill the plot
+  without clipping: `zoom` doesn't map to on-screen size in a way that
+  inverts in closed form (it interacts with mplot3d's fixed internal
+  perspective/camera-distance math), so this measures the real projected
+  footprint via `ax.get_proj()` and corrects proportionally, converging
+  within 2-3 iterations for every net in `data/input/nets/` at several
+  fold progresses each (see `_fit_zoom`'s docstring). A single fixed zoom
+  constant can't do this well for every shape: a closed, faceted solid
+  (a cube, a dodecahedron) touches nearly every corner of its own
+  bounding box, but a bushy mid-fold net or a sparse open net leaves much
+  more of that box empty, so whatever zoom is safe for the former looks
+  too conservative for the latter. Remaining empty space in a very wide
+  window (e.g. "Animated Fold" alone in a wide app window) is a separate,
+  inherent effect -- matplotlib centers a roughly square 3D plot inside a
+  wider rectangle rather than stretching (and thus distorting) it into a
+  non-square shape; verified this isn't fixable by forcing `ax.set_position`
+  to the full rectangle (same rendered size either way, just relocates
+  where the now-still-unused margin sits).
 - `_CullableFace` (`src/apps/ui/cullable_face.py`, imported by
   `polyhedron_unfolder`) fixes wrong-face-on-top glitches in the fully
   folded 3D view: mplot3d's `Poly3DCollection` only depth-sorts by one

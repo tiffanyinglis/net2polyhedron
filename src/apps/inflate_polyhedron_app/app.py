@@ -181,10 +181,6 @@ class InflatePolyhedronApp:
         self.save_button = ttk.Button(picker_row, text="Save", command=self.on_save_clicked)
         self.save_button.pack(side=tk.LEFT, padx=(12, 0))
 
-        self.theme_button = ttk.Button(picker_row, text="Light Mode", width=10,
-                                        command=self.on_toggle_theme)
-        self.theme_button.pack(side=tk.RIGHT)
-
         self.show_axes_var = tk.BooleanVar(value=False)
         self.axes_check = ttk.Checkbutton(picker_row, text="Show Axes",
                                            variable=self.show_axes_var,
@@ -267,7 +263,6 @@ class InflatePolyhedronApp:
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
-        self.is_dark = True
         self._apply_plot_theme()
         self.refresh_net_list()
         if self.current_label:
@@ -305,12 +300,12 @@ class InflatePolyhedronApp:
             ax.set_axis_off()
 
     def _apply_plot_theme(self):
-        """Recolor the figure/axes chrome to match the current sv_ttk theme
-        and the "Show Axes" toggle -- ax.cla() (called every draw()) resets
-        all of this to matplotlib's defaults, so it has to be re-applied on
-        every redraw, not just on toggle. Returns the active theme dict so
-        draw() can reuse its colors."""
-        theme = PLOT_THEME["dark" if self.is_dark else "light"]
+        """Recolor the figure/axes chrome to match the (fixed, dark-only)
+        plot theme and the "Show Axes" toggle -- ax.cla() (called every
+        draw()) resets all of this to matplotlib's defaults, so it has to
+        be re-applied on every redraw, not just on toggle. Returns the
+        theme dict so draw() can reuse its colors."""
+        theme = PLOT_THEME
         self.fig.patch.set_facecolor(theme["bg"])
         self.ax2d.set_facecolor(theme["bg"])
         self.ax3d.set_facecolor(theme["bg"])
@@ -324,12 +319,6 @@ class InflatePolyhedronApp:
         else:
             self._apply_plot_theme()
             self.canvas.draw_idle()
-
-    def on_toggle_theme(self):
-        sv_ttk.toggle_theme()
-        self.is_dark = sv_ttk.get_theme() == "dark"
-        self.theme_button.configure(text="Light Mode" if self.is_dark else "Dark Mode")
-        self._refresh_plot()
 
     def on_toggle_axes(self):
         self._refresh_plot()

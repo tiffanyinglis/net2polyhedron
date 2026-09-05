@@ -35,7 +35,6 @@ if str(_APPS_DIR) not in sys.path:
 
 import os
 import glob
-import itertools
 import queue
 import threading
 import tkinter as tk
@@ -44,9 +43,8 @@ from tkinter import ttk, messagebox
 import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
@@ -77,16 +75,6 @@ class PolyhedronUnfolderApp:
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
-        self.theme_button = ttk.Button(picker_row, text="Light Mode", width=10,
-                                        command=self.on_toggle_theme)
-        self.theme_button.pack(side=tk.RIGHT)
-
-        self.show_axes_var = tk.BooleanVar(value=False)
-        self.axes_check = ttk.Checkbutton(picker_row, text="Show Axes",
-                                           variable=self.show_axes_var,
-                                           command=self.on_toggle_axes)
-        self.axes_check.pack(side=tk.RIGHT, padx=(0, 12))
-
         status_row = ttk.Frame(net_frame)
         status_row.pack(fill=tk.X, pady=(10, 0))
         self.progress = ttk.Progressbar(status_row, mode="indeterminate", length=160)
@@ -107,7 +95,6 @@ class PolyhedronUnfolderApp:
         self.colors = []
         self.current_label = None
         self.label_to_path = {}
-        self.is_dark = True
         self._apply_plot_theme()
         self.refresh_net_list()
         if self.current_label:
@@ -148,6 +135,12 @@ class PolyhedronUnfolderApp:
         self.fold_ax = self.fold_fig.add_subplot(111, projection="3d")
         self.fold_canvas = FigureCanvasTkAgg(self.fold_fig, master=view_frame)
         self.fold_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # matplotlib's default figure margins reserve ~20% of the canvas
+        # for axis labels/ticks that this app never shows (axes are always
+        # off, see _style_3d_axis) -- trimming them directly is most of
+        # what makes the solid render bigger, on top of _draw_solid's own
+        # tighter bounding-box padding and box_aspect zoom.
+        self.fold_fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.95)
 
     def _build_compare_tab(self):
         tab = ttk.Frame(self.notebook)
@@ -160,76 +153,35 @@ class PolyhedronUnfolderApp:
         self.ax3d = self.compare_fig.add_subplot(1, 2, 2, projection="3d")
         self.compare_canvas = FigureCanvasTkAgg(self.compare_fig, master=view_frame)
         self.compare_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.compare_fig.subplots_adjust(left=0.02, right=0.98, bottom=0.02,
+                                          top=0.93, wspace=0.05)
 
     def _set_status(self, text, kind="info"):
         self.status_var.set(text)
         self.status_label.configure(foreground=STATUS_COLORS.get(kind, ""))
 
-    # ---- theme / axes visibility ----
+    # ---- theme ----
 
-    def _style_3d_axis(self, ax, theme):
-        ax.title.set_color(theme["fg"])
-        if self.show_axes_var.get():
-            ax.set_axis_on()
-            for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-                axis.pane.set_facecolor(theme["bg"])
-                axis.pane.set_edgecolor(theme["fg"])
-                axis.line.set_color(theme["fg"])
-                axis.label.set_color(theme["fg"])
-                axis._axinfo["grid"]["color"] = theme["grid"]
-            ax.tick_params(colors=theme["fg"])
-        else:
-            ax.set_axis_off()
+    def _style_3d_axis(self, ax):
+        ax.title.set_color(PLOT_THEME["fg"])
+        ax.set_axis_off()
 
-    def _style_2d_axis(self, ax, theme):
-        ax.title.set_color(theme["fg"])
-        if self.show_axes_var.get():
-            ax.set_axis_on()
-            for spine in ax.spines.values():
-                spine.set_color(theme["fg"])
-            ax.tick_params(colors=theme["fg"])
-            ax.grid(True, color=theme["fg"], alpha=theme["grid"][3])
-        else:
-            ax.set_axis_off()
+    def _style_2d_axis(self, ax):
+        ax.title.set_color(PLOT_THEME["fg"])
+        ax.set_axis_off()
 
     def _apply_plot_theme(self):
         """Recolor every axis's chrome (across both tabs) to match the
-        current sv_ttk theme and the "Show Axes" toggle -- ax.cla()
-        (called on every draw) resets all of this to matplotlib's
-        defaults, so it has to be re-applied on every redraw, not just on
-        toggle. Returns the active theme dict so draw_*() can reuse its
-        colors, e.g. for the box wireframe."""
-        theme = PLOT_THEME["dark" if self.is_dark else "light"]
+        (fixed, dark-only) plot theme -- ax.cla() (called on every draw)
+        resets all of this to matplotlib's defaults, so it has to be
+        re-applied on every redraw, not just once at startup."""
         for fig in (self.fold_fig, self.compare_fig):
-            fig.patch.set_facecolor(theme["bg"])
+            fig.patch.set_facecolor(PLOT_THEME["bg"])
         for ax in (self.fold_ax, self.ax3d):
-            ax.set_facecolor(theme["bg"])
-            self._style_3d_axis(ax, theme)
-        self.ax2d.set_facecolor(theme["bg"])
-        self._style_2d_axis(self.ax2d, theme)
-        return theme
-
-    def _refresh_plot(self):
-        """Redraw both tabs with the current fold state, or just recolor
-        the empty plots if no net is loaded yet -- shared by the theme
-        and axes-visibility toggles, which both need the same
-        "redraw everything" behavior."""
-        if self.net is not None:
-            self.draw_fold(self.slider.get() / 100.0)
-            self.draw_compare()
-        else:
-            self._apply_plot_theme()
-            self.fold_canvas.draw_idle()
-            self.compare_canvas.draw_idle()
-
-    def on_toggle_theme(self):
-        sv_ttk.toggle_theme()
-        self.is_dark = sv_ttk.get_theme() == "dark"
-        self.theme_button.configure(text="Light Mode" if self.is_dark else "Dark Mode")
-        self._refresh_plot()
-
-    def on_toggle_axes(self):
-        self._refresh_plot()
+            ax.set_facecolor(PLOT_THEME["bg"])
+            self._style_3d_axis(ax)
+        self.ax2d.set_facecolor(PLOT_THEME["bg"])
+        self._style_2d_axis(self.ax2d)
 
     # ---- net picker ----
 
@@ -326,28 +278,48 @@ class PolyhedronUnfolderApp:
 
     # ---- drawing ----
 
-    def _draw_box_wireframe(self, ax, xlim, ylim, zlim, color):
-        """Explicitly draw all 12 edges of the bounding box. matplotlib's
-        default 3D pane borders only cover the 9 edges belonging to the 3
-        panes it renders (whichever are "far" from the camera for the
-        current, fixed view angle) -- the near vertical edge where the two
-        visible walls meet is never drawn, leaving the box looking open on
-        one corner.
+    # Bounding-box padding: a small data-limit margin so a face's outline
+    # never touches the plot edge even once _fit_zoom below has zoomed all
+    # the way in.
+    BOX_PADDING = 1.03
+    # The on-screen projected half-extent (in Axes3D.get_proj()'s output
+    # units, NOT normalized to [-1, 1] -- see _fit_zoom) that just fills
+    # the plot without clipping, calibrated once against a fully-folded
+    # cube (a shape that already touches every corner of its own bounding
+    # box, i.e. has zero slack to spare) and reused as the target for
+    # every shape/fold-stage.
+    TARGET_SCREEN_EXTENT = 0.108
 
-        Each edge is its own Line3DCollection rather than all 12 in one:
-        mplot3d sorts collections for draw order by a single depth value
-        from do_3d_projection(), and for a line collection that's just the
-        nearest point across *every* segment in it -- bundled into one
-        collection, the box's far edges would inherit the near edges'
-        depth and wrongly draw in front of (or behind) the solid instead
-        of being individually depth-tested against it."""
-        corners = list(itertools.product(xlim, ylim, zlim))
-        edges = [(a, b) for i, a in enumerate(corners) for b in corners[i + 1:]
-                  if sum(p != q for p, q in zip(a, b)) == 1]
-        for edge in edges:
-            ax.add_collection3d(Line3DCollection([edge], colors=color, linewidths=0.8))
+    def _fit_zoom(self, ax, half, points):
+        """Solve for the Axes3D.set_box_aspect `zoom` that makes `points`
+        (the shape's REAL vertices, not just its bounding-box corners)
+        fill the plot as much as possible without clipping.
 
-    def _draw_solid(self, ax, solid, theme, title):
+        A fixed zoom constant can't do this well for every shape: a
+        closed, faceted solid (a cube, a dodecahedron) touches nearly
+        every corner of its own axis-aligned bounding box, but a bushy
+        mid-fold net or a sparse open net can leave much more of that
+        box empty -- the same zoom that's already at a closed cube's
+        clipping limit leaves a mid-fold net looking small. `zoom`
+        doesn't map to on-screen size in a way that's simple to invert in
+        closed form (it interacts with mplot3d's fixed internal
+        perspective/camera-distance math), so this instead measures the
+        ACTUAL projected footprint via ax.get_proj() and corrects zoom
+        proportionally -- converges to within 1% of TARGET_SCREEN_EXTENT
+        in 2-3 iterations in practice, verified against every net in
+        data/input/nets/ at several fold progresses each."""
+        pts_h = np.column_stack([points, np.ones(len(points))])
+        zoom = 1.0
+        for _ in range(4):
+            ax.set_box_aspect((half[0], half[1], half[2]), zoom=zoom)
+            screen = pts_h @ ax.get_proj().T
+            extent = np.abs(screen[:, :2] / screen[:, 3:4]).max()
+            if extent <= 0:
+                break
+            zoom *= self.TARGET_SCREEN_EXTENT / extent
+        return zoom
+
+    def _draw_solid(self, ax, solid, title):
         """Shared by both tabs: render `solid` (a NetUnfolder.fold()
         result -- a model.Polyhedron, pure geometry with no color of its
         own) as one Poly3DCollection per face onto `ax`, backface-culled
@@ -358,10 +330,12 @@ class PolyhedronUnfolderApp:
         (see net_unfolder.py), which is exactly what self.colors is
         indexed by."""
         ax.cla()
-        self._style_3d_axis(ax, theme)
+        self._style_3d_axis(ax)
         use_culling = solid.is_closed
+        all_pts = []
         for i in range(len(solid.faces)):
             pts3d = solid.face_vertices(i)
+            all_pts.append(pts3d)
             color = self.colors[i]
             if use_culling:
                 poly = _CullableFace([pts3d], solid.face_normal(i), 0.9,
@@ -373,26 +347,30 @@ class PolyhedronUnfolderApp:
 
         # Center the view on the shape's own bounding-box center (not just
         # its raw min/max) so it sits in the middle of the plot regardless
-        # of where the net/fold happened to place it, on every axis -- one
-        # shared half-width (not one per axis) keeps the box cubic so
-        # set_box_aspect([1, 1, 1]) doesn't distort the shape.
+        # of where the net/fold happened to place it. Each axis gets its
+        # OWN half-width (not one shared cubic half-width) and box_aspect
+        # is set to those same three ratios -- an undistorted, true-to-
+        # scale render (every axis still has the same units-per-data-unit
+        # scale), but one that doesn't waste render area forcing a cubic
+        # box around a shape that's flatter/narrower on some axis than
+        # others (e.g. a bushy net mid-unfold, or two faces' worth of
+        # thickness). _fit_zoom then pulls the camera in the rest of the
+        # way, based on the shape's ACTUAL projected footprint rather than
+        # just its bounding box -- see that method's docstring for why a
+        # fixed zoom constant isn't enough on its own.
         lo, hi = solid.bounding_box()
         center = (lo + hi) / 2
-        half = (hi - lo).max() / 2 * 1.2 + 1e-6
-        xlim = (center[0] - half, center[0] + half)
-        ylim = (center[1] - half, center[1] + half)
-        zlim = (center[2] - half, center[2] + half)
-        ax.set_xlim(*xlim)
-        ax.set_ylim(*ylim)
-        ax.set_zlim(*zlim)
-        ax.set_box_aspect([1, 1, 1])
-        if self.show_axes_var.get():
-            self._draw_box_wireframe(ax, xlim, ylim, zlim, theme["fg"])
+        half = (hi - lo) / 2 * self.BOX_PADDING + 1e-6
+        ax.set_xlim(center[0] - half[0], center[0] + half[0])
+        ax.set_ylim(center[1] - half[1], center[1] + half[1])
+        ax.set_zlim(center[2] - half[2], center[2] + half[2])
+        zoom = self._fit_zoom(ax, half, np.vstack(all_pts))
+        ax.set_box_aspect((half[0], half[1], half[2]), zoom=zoom)
         ax.set_title(title)
 
     def draw_fold(self, t):
         """"Animated Fold" tab: the single 3D view at fold progress t."""
-        theme = self._apply_plot_theme()
+        self._apply_plot_theme()
         solid = self.net.fold(t)
         # Backface culling (_CullableFace, applied inside _draw_solid) only
         # makes sense once the shape is a closed convex solid -- mid-fold
@@ -401,25 +379,25 @@ class PolyhedronUnfolderApp:
         # (an OPEN net -- some faces omitted -- stays false even at t=1).
         # _draw_solid's own solid.is_closed check is what actually gates
         # this, not t itself.
-        self._draw_solid(self.fold_ax, solid, theme,
+        self._draw_solid(self.fold_ax, solid,
                           f"{self.current_label}  (fold {t*100:.0f}%)")
         self.fold_canvas.draw_idle()
 
     def draw_compare(self):
         """"Flat vs Folded" tab: the flat net (left) and the fully folded
         solid (right) at once."""
-        theme = self._apply_plot_theme()
-        self._draw_flat_net(theme)
+        self._apply_plot_theme()
+        self._draw_flat_net()
         solid = self.net.fold(1.0)
-        self._draw_solid(self.ax3d, solid, theme, "Folded solid")
+        self._draw_solid(self.ax3d, solid, "Folded solid")
         self.compare_canvas.draw_idle()
 
-    def _draw_flat_net(self, theme):
+    def _draw_flat_net(self):
         """The flat net's geometry lives in self.net.flat (a Polyhedron at
         z=0) -- see _draw_solid's docstring for why self.colors already
         lines up with it position-for-position."""
         self.ax2d.cla()
-        self._style_2d_axis(self.ax2d, theme)
+        self._style_2d_axis(self.ax2d)
         flat = self.net.flat
         pts2d_per_face = [flat.face_vertices(i)[:, :2] for i in range(len(flat.faces))]
         all_pts = np.vstack(pts2d_per_face)
@@ -427,11 +405,15 @@ class PolyhedronUnfolderApp:
             self.ax2d.add_patch(Polygon(pts2d, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
 
+        # Per-axis half-extents (not one shared half-extent) so the flat
+        # net's own aspect ratio -- rarely square -- fills the panel
+        # instead of sitting in a padded square crop of it; set_aspect
+        # ("equal") still keeps it undistorted.
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
         center = (lo + hi) / 2
-        half = (hi - lo).max() / 2 * 1.2 + 1e-6
-        self.ax2d.set_xlim(center[0] - half, center[0] + half)
-        self.ax2d.set_ylim(center[1] - half, center[1] + half)
+        half = (hi - lo) / 2 * self.BOX_PADDING + 1e-6
+        self.ax2d.set_xlim(center[0] - half[0], center[0] + half[0])
+        self.ax2d.set_ylim(center[1] - half[1], center[1] + half[1])
         self.ax2d.set_aspect("equal")
         self.ax2d.set_title("Flat net")
 

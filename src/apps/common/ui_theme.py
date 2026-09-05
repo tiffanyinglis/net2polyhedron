@@ -16,15 +16,11 @@ STATUS_COLORS = {
     "warn": "#9a6700",
 }
 
-# Mirrors sv_ttk's own background colors (theme/{light,dark}.tcl -bg) so a
-# matplotlib plot doesn't look like a mismatched white box dropped onto a
-# dark window. fg/grid are the axis lines, ticks, labels and gridlines --
-# these need to flip to a light color in dark mode to stay visible against
-# -bg.
-PLOT_THEME = {
-    "light": {"bg": "#fafafa", "fg": "#1c1c1c", "grid": (0, 0, 0, 0.1)},
-    "dark": {"bg": "#1c1c1c", "fg": "#e0e0e0", "grid": (1, 1, 1, 0.15)},
-}
+# Every app is dark-mode only (no light mode/theme toggle) -- mirrors
+# sv_ttk's dark theme.tcl -bg so a matplotlib plot doesn't look like a
+# mismatched box dropped onto the window. fg/grid are the axis lines,
+# ticks, labels and gridlines (used only by apps that still show axes).
+PLOT_THEME = {"bg": "#1c1c1c", "fg": "#e0e0e0", "grid": (1, 1, 1, 0.15)}
 
 
 # A high-variety, fixed face-color palette (two named 8-color sets),

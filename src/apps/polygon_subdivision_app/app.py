@@ -87,7 +87,6 @@ class PolygonSubdivisionApp:
         root.minsize(700, 500)
 
         sv_ttk.set_theme("dark")
-        self.is_dark = True
 
         control_frame = ttk.LabelFrame(root, text="Options", padding=12)
         control_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
@@ -98,10 +97,6 @@ class PolygonSubdivisionApp:
             variable=self.show_subdivision_var, command=self.draw)
         self.subdivision_check.pack(side=tk.LEFT)
 
-        self.theme_button = ttk.Button(control_frame, text="Light Mode", width=10,
-                                        command=self.on_toggle_theme)
-        self.theme_button.pack(side=tk.RIGHT)
-
         view_frame = ttk.Frame(root)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
         self.fig, self.axes = plt.subplots(2, 3, figsize=(9, 6))
@@ -110,14 +105,8 @@ class PolygonSubdivisionApp:
 
         self.draw()
 
-    def on_toggle_theme(self):
-        sv_ttk.toggle_theme()
-        self.is_dark = sv_ttk.get_theme() == "dark"
-        self.theme_button.configure(text="Light Mode" if self.is_dark else "Dark Mode")
-        self.draw()
-
     def draw(self):
-        theme = PLOT_THEME["dark" if self.is_dark else "light"]
+        theme = PLOT_THEME
         self.fig.patch.set_facecolor(theme["bg"])
         show_subdivision = self.show_subdivision_var.get()
 
