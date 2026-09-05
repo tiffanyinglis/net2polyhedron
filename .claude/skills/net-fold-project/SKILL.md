@@ -5,6 +5,24 @@ description: Architecture, file layout, and conventions for this polyhedron net-
 
 # Polyhedron net-folding project
 
+## Untouchable files
+
+These files are considered DONE -- the user has finished them and
+deliberately doesn't want them touched, since editing them (even
+additively) risks messing up code structure they've already settled on:
+
+- `src/utils/model/polyhedron.py`
+- `src/apps/polyhedron_unfolder/app.py`
+
+Do not read these as a target for changes and do not modify them --
+adding, removing, or "just cleaning up" anything in them is off limits --
+UNLESS the user explicitly asks for a change to one of these files BY
+NAME or by unambiguous description in their current request. If a task
+would otherwise require touching one, stop and explicitly ask the user
+for permission first, naming the file and what change is needed, rather
+than proceeding or silently working around it. This list is expected to
+grow -- check it before editing anything in this project.
+
 Takes a polyhedron (real 3D vertex positions + CCW face loops) and derives
 how it unfolds: an auto-computed spanning tree of hinges, a flat 2D layout,
 and each hinge's fold angle -- read directly off the given geometry, not
