@@ -206,7 +206,7 @@ def distinct_vertices(verts3d, tol=1e-4):
     return [np.mean(c, axis=0) for c in clusters.values()]
 
 
-def fold_transforms(net, root, hinges, fold_angles, t, fold_signs=None):
+def fold_transforms(flat, fid_to_index, root, hinges, fold_angles, t, fold_signs=None):
     """Return dict face_id -> 4x4 np.ndarray: each face's cumulative
     affine transform at fold progress t in [0, 1], mapping that face's
     own flat (net-space, z=0) points to their 3D position at t. This IS
@@ -214,25 +214,35 @@ def fold_transforms(net, root, hinges, fold_angles, t, fold_signs=None):
     placement; t=0 gives every non-root face's transform as pure
     rotation-in-progress from flat, t=1 the fully folded pose.
 
+    flat: anything with .vertices (list of (3,) positions, z=0 for a
+          flat net) and .faces (list of vertex-index tuples) -- in
+          practice a model.Polyhedron (see flatten_net), though this
+          module has no dependency on that class, just its shape.
+    fid_to_index: dict face_id -> position in flat.faces.
     fold_angles: dict child_face_id -> target rotation-from-flat, radians
                  (e.g. pi/2 for a right-angle fold like a cube).
     fold_signs:  optional dict child_face_id -> +1/-1 to flip fold direction.
 
     Root gets the identity (it never moves). For a non-root face, a
-    nested hinge's axis is the PARENT's own flat edge
-    (net.faces[parent][pi]) mapped through the parent's already-computed
+    nested hinge's axis is the PARENT's own flat edge (a pair of shared
+    vertex indices) mapped through the parent's already-computed
     transform -- physically, the shared edge moves wherever the parent
     face has already rotated to, which is exactly why hinges must be
     processed in BFS order (each parent's transform is ready before its
-    children's hinges use it)."""
+    children's hinges use it). Since a hinge edge's two vertices are the
+    SAME indices in both the parent's and child's face tuples (see
+    flatten_net), and hinge_transform fixes every point on its own
+    axis, every face that references a hinge-shared vertex computes the
+    identical 3D position for it at any t -- "one matrix per vertex" is
+    well-defined, not just "one matrix per face"."""
     fold_signs = fold_signs or {}
     transforms = {root: np.eye(4)}
     for h in hinges:
         parent, child = h["parent"], h["child"]
         pi = h["parent_edge_idx"]
-        pts_parent = net.faces[parent]
-        p1 = np.array([*pts_parent[pi], 0.0, 1.0])
-        p2 = np.array([*pts_parent[(pi + 1) % len(pts_parent)], 0.0, 1.0])
+        parent_face = flat.faces[fid_to_index[parent]]
+        p1 = np.array([*flat.vertices[parent_face[pi]], 1.0])
+        p2 = np.array([*flat.vertices[parent_face[(pi + 1) % len(parent_face)]], 1.0])
 
         M_parent = transforms[parent]
         axis_point = (M_parent @ p1)[:3]
@@ -245,16 +255,37 @@ def fold_transforms(net, root, hinges, fold_angles, t, fold_signs=None):
     return transforms
 
 
-def fold(net, root, hinges, fold_angles, t, fold_signs=None):
+def fold(flat, fid_to_index, root, hinges, fold_angles, t, fold_signs=None):
     """Return dict face_id -> (N,3) np.array of folded 3D coordinates,
-    at fold progress t in [0, 1] -- each face's own flat points run
-    through its fold_transforms() matrix."""
-    transforms = fold_transforms(net, root, hinges, fold_angles, t, fold_signs)
+    at fold progress t in [0, 1] -- each face's own flat points (gathered
+    from `flat` via `fid_to_index`) run through its fold_transforms()
+    matrix. See fold_transforms for what `flat`/`fid_to_index` are."""
+    transforms = fold_transforms(flat, fid_to_index, root, hinges, fold_angles, t, fold_signs)
     result = {}
-    for fid, pts2d in net.faces.items():
-        pts_h = np.array([[x, y, 0.0, 1.0] for x, y in pts2d])
+    for fid, pos in fid_to_index.items():
+        face = flat.faces[pos]
+        pts_h = np.array([[*flat.vertices[i], 1.0] for i in face])
         result[fid] = (pts_h @ transforms[fid].T)[:, :3]
     return result
+
+
+def flatten_net(net, tol=1e-4):
+    """(vertices, faces, fid_to_index) -- z=0-pad `net`'s (a
+    net_fold_core.Net) per-face 2D points and cluster coincident corners
+    into shared vertex indices, via cluster_faces_into_mesh (the same
+    real-distance merge already used to build a folded solid). A hinge-
+    glued edge's two corners always coincide by construction (that's
+    what a hinge edge IS -- two faces physically glued along it, for
+    any/every fold state); an "extra"/closure edge's corners generally
+    don't yet, so they stay separate indices until folding brings them
+    together -- exactly the "one edge becomes two, one vertex becomes
+    several" shape an unfolded net has, describable with the same
+    (vertices, faces) shape as a fully closed solid."""
+    verts3d = {fid: np.array([[x, y, 0.0] for x, y in pts])
+               for fid, pts in net.faces.items()}
+    vertices, faces = cluster_faces_into_mesh(verts3d, tol=tol)
+    fid_to_index = {fid: i for i, fid in enumerate(sorted(net.faces))}
+    return vertices, faces, fid_to_index
 
 
 def cluster_faces_into_mesh(verts3d, tol=1e-4):

@@ -2,15 +2,17 @@
 net's spanning-tree edges and the polyhedron's combinatorial edge map."""
 from collections import defaultdict, deque
 
-from ..geometry3d.net_fold_core import Net
+from ..geometry3d.net_fold_core import Net, flatten_net
 from .polygon_geom import regular_polygon_vertices, attach_polygon
 
 
 def build_net_layout(degrees, net_edges, edge_map, root, omitted=frozenset()):
     """Lay out each face as a regular polygon, attaching children to their
     parent's shared edge (reversed, so the child unfolds to the outside --
-    the same convention a paper net uses). Returns (Net, hinges), where
-    hinges has the same shape as Net.build_tree()'s second return value.
+    the same convention a paper net uses). Returns
+    (vertices, faces, fid_to_index, hinges) -- Polyhedron-shaped flat-net
+    data (see net_fold_core.flatten_net) plus hinges, same shape as
+    Net.build_tree()'s second return value.
 
     `omitted` (see polyhedron_spec.py's module docstring) are face ids
     that exist only for edge_map's combinatorics -- an OPEN net's missing
@@ -49,4 +51,5 @@ def build_net_layout(degrees, net_edges, edge_map, root, omitted=frozenset()):
     net = Net()
     for fid in sorted(visited):
         net.add_face(placed[fid], fid=fid)
-    return net, hinges
+    vertices, faces, fid_to_index = flatten_net(net)
+    return vertices, faces, fid_to_index, hinges

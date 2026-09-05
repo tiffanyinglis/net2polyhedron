@@ -123,8 +123,9 @@ def test_face_transforms_root_is_always_identity(tmp_path):
 def test_face_transforms_at_t0_matches_fold_at_t0(tmp_path):
     net = _load_json(tmp_path)
     transforms = net.face_transforms(0.0)
-    for fid, face in net.faces.items():
-        pts2d = face.vertices2d
+    for fid in net.faces:
+        pos = net.fid_to_index[fid]
+        pts2d = net.flat.face_vertices(pos)[:, :2]
         pts_h = np.array([[x, y, 0.0, 1.0] for x, y in pts2d])
         expected = (pts_h @ transforms[fid].T)[:, :3]
         assert np.allclose(expected[:, 2], 0.0)

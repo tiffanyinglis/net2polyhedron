@@ -5,6 +5,7 @@ from utils.combinatorics.edge_map import EdgeMap
 from utils.geometry2d.net_layout import build_net_layout
 from utils.geometry3d.net_fold_core import fold, distinct_vertices
 from utils.geometry3d.fold_solver import solve_fold_angles
+from utils.model.polyhedron import Polyhedron
 
 TETRAHEDRON_DEGREES = [3, 3, 3, 3]
 TETRAHEDRON_EDGES = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
@@ -22,16 +23,17 @@ CUBE_EXTRA_EDGES = [e for e in CUBE_EDGES if frozenset(e) not in _cube_net_edge_
 
 def _solve(degrees, net_edges, extra_edges, root=0):
     edge_map = EdgeMap(degrees, net_edges + extra_edges)
-    net, hinges = build_net_layout(degrees, net_edges, edge_map, root)
-    fold_angles = solve_fold_angles(net, root, hinges, extra_edges, edge_map)
-    return net, root, hinges, fold_angles
+    vertices, faces, fid_to_index, hinges = build_net_layout(degrees, net_edges, edge_map, root)
+    flat = Polyhedron(vertices=vertices, faces=faces)
+    fold_angles = solve_fold_angles(flat, fid_to_index, root, hinges, extra_edges, edge_map)
+    return flat, fid_to_index, root, hinges, fold_angles
 
 
-def _check_solid(net, root, hinges, fold_angles, expected_angle_deg, expected_vertices):
+def _check_solid(flat, fid_to_index, root, hinges, fold_angles, expected_angle_deg, expected_vertices):
     angles = {round(np.degrees(a), 3) for a in fold_angles.values()}
     assert angles == {round(expected_angle_deg, 3)}
 
-    verts = fold(net, root, hinges, fold_angles, t=1.0)
+    verts = fold(flat, fid_to_index, root, hinges, fold_angles, t=1.0)
     pts = np.array(distinct_vertices(verts))
     assert len(pts) == expected_vertices
 
@@ -41,18 +43,23 @@ def _check_solid(net, root, hinges, fold_angles, expected_angle_deg, expected_ve
 
 
 def test_solve_tetrahedron():
-    net, root, hinges, fold_angles = _solve(
+    flat, fid_to_index, root, hinges, fold_angles = _solve(
         TETRAHEDRON_DEGREES, TETRAHEDRON_NET_EDGES, TETRAHEDRON_EXTRA_EDGES)
-    _check_solid(net, root, hinges, fold_angles, expected_angle_deg=109.4712, expected_vertices=4)
+    _check_solid(flat, fid_to_index, root, hinges, fold_angles,
+                 expected_angle_deg=109.4712, expected_vertices=4)
 
 
 def test_solve_cube():
-    net, root, hinges, fold_angles = _solve(CUBE_DEGREES, CUBE_NET_EDGES, CUBE_EXTRA_EDGES)
-    _check_solid(net, root, hinges, fold_angles, expected_angle_deg=90.0, expected_vertices=8)
+    flat, fid_to_index, root, hinges, fold_angles = _solve(
+        CUBE_DEGREES, CUBE_NET_EDGES, CUBE_EXTRA_EDGES)
+    _check_solid(flat, fid_to_index, root, hinges, fold_angles,
+                 expected_angle_deg=90.0, expected_vertices=8)
 
 
 def test_solve_without_extra_edges_is_underdetermined():
     edge_map = EdgeMap(TETRAHEDRON_DEGREES, TETRAHEDRON_EDGES)
-    net, hinges = build_net_layout(TETRAHEDRON_DEGREES, TETRAHEDRON_NET_EDGES, edge_map, root=0)
+    vertices, faces, fid_to_index, hinges = build_net_layout(
+        TETRAHEDRON_DEGREES, TETRAHEDRON_NET_EDGES, edge_map, root=0)
+    flat = Polyhedron(vertices=vertices, faces=faces)
     with pytest.raises(ValueError, match="underdetermined"):
-        solve_fold_angles(net, 0, hinges, [], edge_map)
+        solve_fold_angles(flat, fid_to_index, 0, hinges, [], edge_map)

@@ -454,12 +454,18 @@ class PolyhedronUnfolderApp:
         self.compare_canvas.draw_idle()
 
     def _draw_flat_net(self, theme):
+        """The flat net's geometry lives in self.net.flat (a Polyhedron at
+        z=0, see PolyhedralNet.flat) -- colors stay on self.net.faces
+        (per-original-face metadata), zipped in by ascending face id, same
+        convention _draw_solid uses for a folded Polyhedron."""
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
-        faces = self.net.faces.values()
-        all_pts = np.vstack([face.vertices2d for face in faces])
-        for face in faces:
-            self.ax2d.add_patch(Polygon(face.vertices2d, closed=True, facecolor=face.color,
+        flat = self.net.flat
+        colors = [self.net.faces[fid].color for fid in sorted(self.net.faces)]
+        pts2d_per_face = [flat.face_vertices(i)[:, :2] for i in range(len(flat.faces))]
+        all_pts = np.vstack(pts2d_per_face)
+        for pts2d, color in zip(pts2d_per_face, colors):
+            self.ax2d.add_patch(Polygon(pts2d, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
 
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)

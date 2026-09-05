@@ -93,7 +93,8 @@ def write_fold_cache(cache_path, checksum, net):
     lines.append(f"CHECKSUM {checksum}")
     lines.append("FACES")
     for fid in sorted(net.faces):
-        coords = " ".join(f"{p[0]:.6f},{p[1]:.6f}" for p in net.faces[fid].vertices2d)
+        pts2d = net.flat.face_vertices(net.fid_to_index[fid])[:, :2]
+        coords = " ".join(f"{p[0]:.6f},{p[1]:.6f}" for p in pts2d)
         lines.append(f"{fid}: {coords}")
     lines.append("")
     for h in net.hinges:

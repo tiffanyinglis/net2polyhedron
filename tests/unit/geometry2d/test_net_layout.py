@@ -11,23 +11,25 @@ TETRAHEDRON_NET_EDGES = [(0, 1), (0, 2), (0, 3)]
 
 def test_build_net_layout_places_every_face_with_touching_hinge_edges():
     edge_map = EdgeMap(TETRAHEDRON_DEGREES, TETRAHEDRON_EDGES)
-    net, hinges = build_net_layout(TETRAHEDRON_DEGREES, TETRAHEDRON_NET_EDGES, edge_map, root=0)
+    vertices, faces, fid_to_index, hinges = build_net_layout(
+        TETRAHEDRON_DEGREES, TETRAHEDRON_NET_EDGES, edge_map, root=0)
 
-    assert set(net.faces.keys()) == {0, 1, 2, 3}
+    assert set(fid_to_index) == {0, 1, 2, 3}
     assert len(hinges) == 3
     assert {h["child"] for h in hinges} == {1, 2, 3}
 
-    # each hinge's parent/child edge must physically coincide (reversed) in
-    # the flat layout -- that's what makes it a valid net hinge
+    # each hinge's parent/child edge shares the SAME vertex indices --
+    # not just numerically-coincident points -- since that's exactly what
+    # a hinge edge means (see net_fold_core.flatten_net).
     for h in hinges:
-        p_verts = net.faces[h["parent"]]
-        c_verts = net.faces[h["child"]]
-        p1 = p_verts[h["parent_edge_idx"]]
-        p2 = p_verts[(h["parent_edge_idx"] + 1) % len(p_verts)]
-        c1 = c_verts[h["child_edge_idx"]]
-        c2 = c_verts[(h["child_edge_idx"] + 1) % len(c_verts)]
-        assert np.allclose(c1, p2, atol=1e-9)
-        assert np.allclose(c2, p1, atol=1e-9)
+        parent_face = faces[fid_to_index[h["parent"]]]
+        child_face = faces[fid_to_index[h["child"]]]
+        p1 = parent_face[h["parent_edge_idx"]]
+        p2 = parent_face[(h["parent_edge_idx"] + 1) % len(parent_face)]
+        c1 = child_face[h["child_edge_idx"]]
+        c2 = child_face[(h["child_edge_idx"] + 1) % len(child_face)]
+        assert c1 == p2
+        assert c2 == p1
 
 
 def test_build_net_layout_rejects_disconnected_net_edges():
@@ -41,10 +43,10 @@ def test_build_net_layout_skips_omitted_faces():
     # omitted one recover their correct edge index -- only net_edges
     # (never touching face 3) says which faces actually get built.
     edge_map = EdgeMap(TETRAHEDRON_DEGREES, TETRAHEDRON_EDGES)
-    net, hinges = build_net_layout(TETRAHEDRON_DEGREES, [(0, 1), (0, 2)], edge_map,
-                                    root=0, omitted={3})
+    vertices, faces, fid_to_index, hinges = build_net_layout(
+        TETRAHEDRON_DEGREES, [(0, 1), (0, 2)], edge_map, root=0, omitted={3})
 
-    assert set(net.faces.keys()) == {0, 1, 2}
+    assert set(fid_to_index) == {0, 1, 2}
     assert {h["child"] for h in hinges} == {1, 2}
 
 
@@ -58,10 +60,10 @@ def test_build_net_layout_still_rejects_an_unreached_non_omitted_face():
 def test_build_net_layout_preserves_original_face_ids_with_a_gap():
     # faces are kept as their ORIGINAL ids (0, 1, 2), not renumbered to
     # close the gap left by the omitted face (3) -- hinges reference the
-    # same ids net.faces uses.
+    # same ids fid_to_index uses.
     edge_map = EdgeMap(TETRAHEDRON_DEGREES, TETRAHEDRON_EDGES)
-    net, hinges = build_net_layout(TETRAHEDRON_DEGREES, [(0, 1), (0, 2)], edge_map,
-                                    root=0, omitted={3})
+    vertices, faces, fid_to_index, hinges = build_net_layout(
+        TETRAHEDRON_DEGREES, [(0, 1), (0, 2)], edge_map, root=0, omitted={3})
     for h in hinges:
-        assert h["parent"] in net.faces
-        assert h["child"] in net.faces
+        assert h["parent"] in fid_to_index
+        assert h["child"] in fid_to_index

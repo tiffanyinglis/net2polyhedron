@@ -179,24 +179,34 @@ closed convex solid.
 ## Pipeline (`src/utils/model/polyhedral_net.py: PolyhedralNet.load`)
 
 The rigid pipeline's object model lives in `src/utils/model/` --
-`Face`/`Hinge`/`PolyhedralNet`/`Polyhedron`. `Face` (2D-only: id, sides,
-`vertices2d`, color) and `Hinge` (parent/child ids, edge indices, angle)
-describe the pre-fold flat net; `Polyhedron` is deliberately the opposite
-of that -- pure 3D geometry (shared, indexed `vertices`, CCW
-vertex-index `faces`, derived `edges`) with **no** awareness of nets,
-hinges, roots, fold progress, or color. `PolyhedralNet.load(path,
-cache_dir=None)` is the one public loading entry point (dispatching
-`.json` via the cache, see below, or legacy `.txt` directly);
-`PolyhedralNet.fold(t)` returns a `Polyhedron` at fold progress `t` (not
-just `t=1` -- every slider position is an equally valid one, with
-`.is_closed` simply false until the fold completes), by folding each
-face's own flat corners to 3D (`net_fold_core.fold()`) and then merging
-coincident corners into shared vertex indices
-(`net_fold_core.cluster_faces_into_mesh()`) -- see "Pipeline" step 5
-below for the fold engine itself. Since a `Polyhedron`'s faces carry no
-original face id, `PolyhedralNet.fold()` always emits them in ascending
-original-id order, so a caller needing per-original-face metadata (e.g.
-`polyhedron_unfolder`'s per-face color) zips `solid.faces` against
+`Face`/`Hinge`/`PolyhedralNet`/`Polyhedron`. `Face` is now pure
+per-original-face metadata (id, sides, color) -- **no geometry at all**;
+`Hinge` holds parent/child ids, edge indices, angle. `Polyhedron` is pure
+3D-mesh geometry (shared, indexed `vertices`, CCW vertex-index `faces`,
+derived `edges`) with **no** awareness of nets, hinges, roots, fold
+progress, or color -- and it describes BOTH the pre-fold flat net (as
+`PolyhedralNet.flat`, at z=0) and every fold stage in between and after
+(`PolyhedralNet.fold(t)`), not just the final closed solid. This works
+because an unfolded net is exactly the kind of mesh `Polyhedron` already
+handles without modification: a hinge-glued edge is *genuinely* shared
+(two faces meet there at any `t`, even `t=0`), while an "extra"/closure
+edge is *not yet* shared (its two faces only coincide once folded) --
+"one edge becomes two, one vertex becomes several" until folding brings
+them together, and `Polyhedron.is_closed` simply reports this honestly at
+whatever `t` you ask.
+
+`PolyhedralNet.load(path, cache_dir=None)` is the one public loading
+entry point (dispatching `.json` via the cache, see below, or legacy
+`.txt` directly), building `self.flat` (a `Polyhedron`) and
+`self.fid_to_index` (original face id -> `flat.faces` position) once at
+load time. `PolyhedralNet.fold(t)` returns a *new* `Polyhedron` at fold
+progress `t` by folding each face's own flat corners (read from
+`self.flat`) to 3D (`net_fold_core.fold()`) and merging coincident
+corners into shared vertex indices (`net_fold_core.cluster_faces_into_mesh()`).
+Since a `Polyhedron`'s faces carry no original face id, both `self.flat`
+and any `fold(t)` result are ordered by ascending original-id, so a
+caller needing per-original-face metadata (e.g. `polyhedron_unfolder`'s
+per-face color) zips `solid.faces` (or `self.flat.faces`) against
 `sorted(net.faces)`. The combinatorial steps below are unchanged
 internally -- `PolyhedralNet._load_json_uncached` calls them in the same
 sequence, wrapping the result into `Face`/`Hinge` objects only at the
@@ -214,11 +224,18 @@ very end:
    the edge list" — this is the hard boundary between what the rigid
    pipeline can express and what needs a stretchy mesh instead (see below).
 3. `net_layout.py` BFS-attaches regular polygons (`polygon_geom.py`) along
-   `net` edges to build the flat 2D net, skipping any `omitted` faces
-   (`Net.add_face` accepts an explicit `fid` so a face's original id is
+   `net` edges to build the flat 2D net (skipping any `omitted` faces,
+   `Net.add_face` accepts an explicit `fid` so a face's original id is
    preserved even when omitted ids leave gaps in the numbering — needed
    for open nets, since `EdgeMap`'s indices are keyed on the *original*
-   ids).
+   ids) exactly as before, then its final step
+   (`net_fold_core.flatten_net`) z=0-pads and clusters those per-face
+   points into the Polyhedron-shaped `(vertices, faces, fid_to_index)`
+   `build_net_layout` now returns instead of a bare `net_fold_core.Net`
+   (`Net` itself is unchanged and still used internally here, and
+   separately by the legacy `.txt`/`.fold`-cache loading paths, which
+   reach the same Polyhedron-shaped data via the same `flatten_net` call
+   after their own `Net.build_tree()` coincident-point hinge derivation).
 4. `fold_solver.py` numerically solves (scipy `least_squares`) for the
    hinge angle at every `net` edge such that every `extra` edge's two faces
    coincide in 3D at fold progress `t=1`. Performance-critical internals:
