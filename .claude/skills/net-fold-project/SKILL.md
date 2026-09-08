@@ -29,8 +29,16 @@ additively) risks messing up code structure they've already settled on:
 - `.claude/settings.local.json`
 - `tests/unit/apps_common/test_bounding_box.py`
 - `tests/unit/geometry/test_polygon_geom.py`
+- `src/apps/polygon_subdivision_app/app.py`
+- `src/utils/subdivisions/__init__.py`
+- `src/utils/subdivisions/polygon_subdivisions.py`
+- `src/utils/subdivisions/mesh_subdivide.py`
 
-(This batch is synced from the sibling `polyhedron-unfolder` project --
+(The `polygon_subdivision_app`/`utils/subdivisions/` entries above are
+NOT part of the polyhedron-unfolder sync described below -- they're this
+project's own polygon-subdivision demo, considered separately finished
+and settled by the user. Everything else in this list is synced from the
+sibling `polyhedron-unfolder` project --
 each is either byte-identical there or differs only in import paths for
 net2polyhedron's package layout, verified file-by-file. Files there that
 have genuinely diverged, e.g. `src/apps/common/paths.py`, were deliberately
