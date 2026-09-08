@@ -103,6 +103,7 @@ class PolygonSubdivisionApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=view_frame)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+        self._layout_done = False
         self.draw()
 
     def draw(self):
@@ -144,7 +145,16 @@ class PolygonSubdivisionApp:
                 ax.set_ylim(-AXIS_HALF_EXTENT, AXIS_HALF_EXTENT)
                 ax.set_axis_off()
 
-        self.fig.tight_layout()
+        # tight_layout() is not idempotent -- each call re-solves subplot
+        # spacing from the current renderer's text bounding boxes, and
+        # calling it again on every redraw (e.g. each "Show subdivision"
+        # toggle) creeps the subplots progressively closer together
+        # instead of settling. Nothing that affects layout (titles,
+        # axis-off, fixed limits) changes between redraws, so solve it
+        # only once.
+        if not self._layout_done:
+            self.fig.tight_layout()
+            self._layout_done = True
         self.canvas.draw_idle()
 
 
