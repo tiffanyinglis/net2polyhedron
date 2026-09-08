@@ -8,56 +8,61 @@ for the vertex-loop format) are specified directly as vertex loops --
 shared vertex ids ARE the adjacency, so a face pair sharing several edges
 (which would force two RIGID flat faces into the same plane -- see
 utils/inflate_polyhedron/stretchy_mesh.py's module docstring) needs no special
-casing. A fabric-subdivided net (see utils/subdivisions/mesh_subdivide.py
-and generate_subdivided_stretchy_nets.py, e.g.
-data/input/stretchy_nets/cube_res3.json) additionally carries its
-original coarse polygons + a fine-triangle -> coarse-face mapping, used
-here to color every fine triangle by its original face and to show the
-coarse net (with a faint subdivision overlay) in the left "Target faces"
-panel.
+casing.
 
-This app's job is ONLY step 3 below -- interactive, user-driven
-inflation/relaxation -- because step 1 (coarse solve) and step 2
-(subdivide) are already reliable and fast on their own, and are
-precomputed/cached ahead of time via utils/inflate_polyhedron/stretchy_cache.py
-(same cache this app's own build_cache.py warms -- see cache/, next to
-this file, not shared with any other app):
+Every net is always LOADED at its own base (level 0) resolution -- even a
+legacy fabric-subdivided file (one carrying baked-in "coarse_faces", see
+utils/subdivisions/mesh_subdivide.load_fabric_spec and
+generate_subdivided_stretchy_nets.py, e.g. data/input/stretchy_nets/cube_res3.json)
+starts from ITS OWN coarse_faces rather than its pre-baked fine mesh. The
+"Subdivide" button (see utils.inflate_polyhedron.mesh_levels) then refines
+the CURRENT mesh interactively, one nested level at a time (0..MAX_LEVEL),
+interpolating every new point from wherever the mesh's own nearby points
+currently sit -- so any inflation already done at one level carries
+forward as the next level's starting point, rather than being discarded
+and re-solved from scratch the way loading a fixed precomputed fine mesh
+used to. This supersedes the old fixed-resolution fabric-net files/
+build_cache precompute pipeline for this app's own workflow (they're
+unused by it now, though still valid stretchy-net .json files on their
+own terms).
 
-1. The COARSE net is solved with stretchy_mesh.solve_wireframe -- its
-   random-restart-plus-inflation-ramp search is exactly what makes this
-   step reliable (it doesn't hang: a coarse net has few enough faces that
-   restarting from a different random start when one doesn't inflate
-   cleanly is cheap and effective -- see solve_wireframe's docstring).
-2. For a fabric-subdivided net (utils/subdivisions/mesh_subdivide.py,
-   generate_subdivided_stretchy_nets.py, e.g.
-   data/input/stretchy_nets/cube_res3.json), the fine mesh is then DRAPED
-   over that already-solved coarse shape (mesh_subdivide.solve_fabric_mesh)
-   -- giving every fine vertex a starting position that's already properly
-   oriented and already roughly the right shape, then one light
-   edge-length relaxation pass to iron out any small discrepancies.
-   (Applying pressure directly to a raw random start, skipping 1 and 2,
-   was tried first -- it can hang for a very long time or never converge,
-   the same failure _inflate's docstring documents for a "cold" random
-   point cloud. Draping over an already-solved coarse shape sidesteps
-   that entirely.)
-3. THIS app loads that precomputed result (utils/inflate_polyhedron/stretchy_cache.py's
-   load_with_cache -- instant on a cache hit, solved fresh and cached if
-   not) as iteration 0, then lets the user push further from there:
-   - The "Pressure" spinner + "Inflate" button apply ONE relaxation pass
-     (stretchy_mesh.relax_once) at a user-chosen, constant inflation
-     pressure, continuing from wherever the mesh currently is (not from
-     scratch) -- so repeated clicks let you watch/steer the shape settle
-     incrementally, rather than the program silently retrying different
-     random starts under the hood. Unlike the precompute step's automatic
-     ramp (which targets a fixed, precomputed volume so it knows when to
-     stop on its own), this pressure has NO target to converge to --
-     genuinely more pressure asks for genuinely more stretch, with no
-     built-in ceiling (see stretchy_mesh._relax_residual's docstring).
+1. On selecting a net, its BASE (level 0) faces are solved with
+   stretchy_mesh.solve_wireframe -- its random-restart-plus-inflation-ramp
+   search is exactly what makes this reliable (it doesn't hang: a coarse
+   net has few enough faces that restarting from a different random start
+   when one doesn't inflate cleanly is cheap and effective -- see
+   solve_wireframe's docstring). An ordinary (non-fabric) net's solve is
+   still cached via utils/inflate_polyhedron/stretchy_cache.py
+   (load_with_cache -- instant on a cache hit); a legacy fabric file's
+   extracted coarse_faces are solved fresh instead, uncached, since a
+   coarse solve is already cheap.
+2. "Subdivide" (mesh_levels.subdivide_once) refines the CURRENT mesh by
+   one level: level 0 -> 1 triangulates every face via a centroid fan
+   (unchanged for an already-triangular face); each level after that
+   quarters every triangle by connecting edge midpoints. New points are
+   linearly interpolated from the current mesh's own nearby points; new
+   REST lengths (as opposed to positions) are derived analytically from
+   the original unit-edge flat reference geometry, so the ideal target
+   shape stays fixed as resolution increases (see mesh_levels' docstring)
+   -- letting "inflate, then increase resolution, then inflate again"
+   converge toward one consistent answer instead of each level chasing a
+   different target. Greyed out once MAX_LEVEL is reached.
+3. At ANY level, the "Pressure" spinner + "Inflate" button apply ONE
+   relaxation pass (stretchy_mesh.relax_once) at a user-chosen, constant
+   inflation pressure, continuing from wherever the mesh currently is --
+   so repeated clicks let you watch/steer the shape settle incrementally.
+   This pressure has NO target to converge to -- genuinely more pressure
+   asks for genuinely more stretch, with no built-in ceiling (see
+   stretchy_mesh._relax_residual's docstring).
    - The radio buttons control how much work each "Inflate" click does:
      either a capped number of solver steps (relax_once's `max_nfev`, the
      closest thing scipy's trust-region solver exposes to "N steps" --
      there's no cleaner "run exactly N iterations" knob), or an uncapped
-     run to the solver's own convergence tolerance.
+     run to the solver's own convergence tolerance (CONVERGENCE_GTOL --
+     tightened from the earlier 1e-8, since starting each level's relax
+     from an already-good interpolated shape, rather than a cold start,
+     makes a stricter tolerance reachable quickly instead of prohibitively
+     slow).
    - "Save" writes the current vertex positions (plus iteration count,
      pressure, and stretch stats) and a PNG of the current view to
      data/output/Save/, both named from the source net's filename plus a
@@ -93,11 +98,12 @@ import sv_ttk
 from common.paths import STRETCHY_NETS_DIR, SAVE_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, relax_once, per_face_volumes, is_orientation_consistent,
-    mesh_to_polyhedron, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
+    load_stretchy_mesh, solve_wireframe, relax_once, per_face_volumes, is_orientation_consistent,
+    mesh_to_polyhedron, mesh_edges, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from utils.inflate_polyhedron.stretchy_cache import load_with_cache, is_cached, cache_path_for
-from utils.subdivisions.mesh_subdivide import load_fabric_spec, subdivide_mesh
+from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
+from utils.subdivisions.mesh_subdivide import load_fabric_spec
 from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
 from utils.subdivisions import subdivide as subdivide_polygon
 
@@ -105,7 +111,7 @@ from utils.subdivisions import subdivide as subdivide_polygon
 # pipeline entirely) or with any other app.
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
-DEFAULT_NET_BASENAME = "cube_res3"
+DEFAULT_NET_BASENAME = "cube"
 
 # A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
 # subdivision reads as texture rather than a bold wireframe competing
@@ -158,6 +164,24 @@ INFLATE_CHUNK_MAX = 200
 INFLATE_SAFETY_STEP_CAP = 5000
 
 
+def _solve_level0(path, base_faces, is_legacy_fabric, cache_dir):
+    """The level-0 (coarse) starting shape for a just-selected net -- run
+    in a background thread by on_select_net via _run_background.
+    `is_legacy_fabric` (a file with baked-in "coarse_faces", see
+    load_fabric_spec): its own precomputed fine-mesh cache targeted a
+    fixed resolution from the old, now-superseded precompute pipeline, so
+    `base_faces` is solved fresh instead (cheap -- see solve_wireframe's
+    docstring) rather than via that stale cache. An ordinary net still
+    uses stretchy_cache normally. Returns (positions, stats, name) --
+    name is None for the fresh-solve path (the caller already has the
+    net's own name from load_stretchy_mesh)."""
+    if is_legacy_fabric:
+        positions, stats = solve_wireframe(base_faces, edge_length=EDGE_LENGTH, seed=0)
+        return positions, stats, None
+    _, positions, stats, name = load_with_cache(path, cache_path_for(path, cache_dir))
+    return positions, stats, name
+
+
 class InflatePolyhedronApp:
     def __init__(self, root):
         self.root = root
@@ -193,6 +217,18 @@ class InflatePolyhedronApp:
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(status_row, textvariable=self.status_var)
         self.status_label.pack(side=tk.LEFT)
+
+        # ---- Subdivision: nested-level mesh refinement (level 0 is the
+        # net's own base faces; each press adds one level, up to
+        # MAX_LEVEL -- see mesh_levels' docstring). ----
+        subdivide_frame = ttk.LabelFrame(root, text="Subdivide", padding=12)
+        subdivide_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+        self.subdivide_button = ttk.Button(subdivide_frame, text="Subdivide",
+                                            command=self.on_subdivide_clicked)
+        self.subdivide_button.pack(side=tk.LEFT)
+        self.subdivide_level_var = tk.StringVar(value="Level: 0")
+        ttk.Label(subdivide_frame, textvariable=self.subdivide_level_var).pack(
+            side=tk.LEFT, padx=(10, 0))
 
         # ---- Inflation: everything about running relax_once lives here,
         # in the order it's used -- pick a pressure, pick how much work to
@@ -251,9 +287,9 @@ class InflatePolyhedronApp:
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self.faces = None
-        self.coarse_faces = None
+        self.base_faces = None
         self.face_of_fine = None
-        self.fabric_resolution = None
+        self.subdivision_level = 0
         self.edge_length = None
         self.target_layout = None
         self.positions = None
@@ -363,67 +399,59 @@ class InflatePolyhedronApp:
         self.current_label = chosen
         path = self.label_to_path[chosen]
         try:
-            self.faces, self.mesh_name = load_stretchy_mesh(path)
+            faces, self.mesh_name = load_stretchy_mesh(path)
         except ValueError as e:
             self._set_status(str(e), "error")
             self.faces = None
             return
 
-        # A fabric-subdivided net (see utils/subdivisions/mesh_subdivide.py and
-        # generate_subdivided_stretchy_nets.py) carries its original
-        # coarse polygons + a fine-triangle -> coarse-face mapping right in
-        # the JSON -- used to color every fine triangle by its ORIGINAL
-        # face, to show the coarse net (not hundreds of fine triangles) in
-        # the left panel, and to give solving the true per-edge rest
-        # lengths instead of a uniform one (see mesh_subdivide.py's
-        # docstring for why that distinction matters). An ordinary net has
-        # none of this and renders/solves exactly as before.
-        self.coarse_faces, self.fabric_resolution, self.face_of_fine = load_fabric_spec(path)
-        if self.coarse_faces is not None:
-            _, _, self.edge_length, _ = subdivide_mesh(self.coarse_faces, self.fabric_resolution)
-            color_count = len(self.coarse_faces)
-        else:
-            self.edge_length = EDGE_LENGTH
-            color_count = len(self.faces)
-        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(color_count)]
+        # A LEGACY fabric-subdivided net (one carrying baked-in
+        # "coarse_faces", see utils/subdivisions/mesh_subdivide.load_fabric_spec
+        # and generate_subdivided_stretchy_nets.py, e.g.
+        # data/input/stretchy_nets/cube_res3.json) is loaded at ITS OWN
+        # coarse_faces -- i.e. always level 0 -- rather than its pre-baked
+        # fine mesh; the new "Subdivide" button refines it interactively
+        # from there instead (see module docstring). An ordinary net has
+        # no coarse_faces and its own "faces" already are level 0.
+        legacy_coarse_faces, _, _ = load_fabric_spec(path)
+        self.base_faces = legacy_coarse_faces if legacy_coarse_faces is not None else faces
+        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.base_faces))]
 
         # Precomputed once per net selection (see build_stretchy_net_layout's
         # docstring): a breadth-first spanning tree over shared edges,
         # attaching each face to whichever neighbor discovers it first --
         # the same idea utils/inflate_polyhedron/stretchy_net_layout.py uses for the rigid
         # pipeline. _draw_target_faces just reuses this on every redraw
-        # rather than recomputing the BFS every time.
-        self.target_layout = build_stretchy_net_layout(self.coarse_faces
-                                                         if self.coarse_faces is not None
-                                                         else self.faces)
+        # rather than recomputing the BFS every time. Always over the
+        # BASE faces -- the left panel's flat net layout doesn't change
+        # with subdivision level, only its overlay does.
+        self.target_layout = build_stretchy_net_layout(self.base_faces)
 
         self.current_path = path
+        self.subdivision_level = 0
+        self.faces = self.base_faces
+        self.face_of_fine = list(range(len(self.base_faces)))
+        self.edge_length = EDGE_LENGTH
         self.iteration_count = 0
         self.last_stats = {}
         self.positions = None
         self.reference_volume = None
         self.stop_event = None
-        # load_with_cache is the precomputed "step 1 + step 2" starting
-        # point (see module docstring): the coarse net solved with
-        # solve_wireframe's reliable random-restart search, then (for a
-        # fabric net) draped into the fine mesh -- instant on a cache hit,
-        # solved fresh and cached if not (utils/inflate_polyhedron/stretchy_cache.py).
-        # This app's own "Inflate" loop never does any of that solving
-        # itself; it only continues from here.
+        self._update_subdivide_button_state()
         self._run_background(
-            load_with_cache, (path, cache_path_for(path, CACHE_DIR)),
+            _solve_level0, (path, self.base_faces, legacy_coarse_faces is not None, CACHE_DIR),
             self._on_loaded, "Loading precomputed starting shape...")
 
     def _on_loaded(self, payload):
-        _, positions, stats, name = payload
+        positions, stats, cached_name = payload
         self.positions = positions
-        # Fixed for the rest of this net's session (see relax_once's and
+        # Fixed until the next subdivide or net load (see relax_once's and
         # _relax_residual's docstrings on reference_volume): one entry
         # PER FACE, each face's own starting volume contribution, so
         # _relax_residual's per-face pressure term means roughly the same
-        # thing on every face of every net, whether the loaded net is a
-        # small tetrahedron or a large dodecahedron -- left unnormalized,
-        # the SAME pressure value can be ~780x too weak to move a
+        # thing on every face of the CURRENT mesh, whether it's a small
+        # tetrahedron or a large dodecahedron -- left unnormalized, the
+        # SAME pressure value can be ~780x too weak to move a
         # dodecahedron's faces yet already excessive for a cube's, purely
         # because of their very different enclosed volumes at unit edge
         # length, nothing to do with the pressure dial itself.
@@ -433,11 +461,55 @@ class InflatePolyhedronApp:
                             "optimality": None, "converged": None}
         self._update_inflate_button_state()
         self._set_status(
-            f"Loaded {name}: precomputed starting shape ready (edges stretched up to "
-            f"{stats['max_stretch_pct']:.2f}%, RMS {stats['rms_stretch_pct']:.2f}%). "
-            f"Press Inflate to relax/inflate further.", "info")
+            f"Loaded {cached_name or self.mesh_name}: starting shape ready (edges stretched up "
+            f"to {stats['max_stretch_pct']:.2f}%, RMS {stats['rms_stretch_pct']:.2f}%). "
+            f"Press Inflate to relax/inflate, or Subdivide to refine the mesh.", "info")
         self.refresh_net_list()  # the net just loaded may have just gained a cache entry
         self.draw()
+
+    # ---- subdivide ----
+
+    def _update_subdivide_button_state(self):
+        can_subdivide = self.positions is not None and self.subdivision_level < MAX_LEVEL
+        self.subdivide_button.state(["!disabled"] if can_subdivide else ["disabled"])
+        self.subdivide_level_var.set(f"Level: {self.subdivision_level}")
+
+    def on_subdivide_clicked(self):
+        if self.positions is None or self.subdivision_level >= MAX_LEVEL:
+            return
+        self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
+            self.faces, self.positions, self.edge_length, self.face_of_fine,
+            self.subdivision_level)
+        self.subdivision_level += 1
+        # The face set just changed entirely (more, smaller faces) -- both
+        # of these must be recomputed fresh for the NEW mesh, same as a
+        # brand new net load (see _on_loaded).
+        self.reference_volume = per_face_volumes(self.positions, self.faces)
+        self.last_stats = self._compute_stretch_stats()
+        self._update_subdivide_button_state()
+        self._update_inflate_button_state()  # a fresh subdivision hasn't converged yet
+        self._set_status(
+            f"Subdivided to level {self.subdivision_level} ({len(self.faces)} faces, "
+            f"{len(self.positions)} vertices, edges stretched up to "
+            f"{self.last_stats['max_stretch_pct']:.2f}%). Press Inflate to relax/inflate "
+            f"further.", "info")
+        self.draw()
+
+    def _compute_stretch_stats(self):
+        """max/rms edge stretch of the CURRENT self.faces/self.positions
+        against self.edge_length -- the same two stats relax_once/
+        solve_wireframe report, computed directly rather than via a solve,
+        for the freshly-interpolated (not yet relaxed) mesh right after a
+        Subdivide click."""
+        edges = mesh_edges(self.faces)
+        rest = (np.array([self.edge_length[e] for e in edges])
+                if isinstance(self.edge_length, dict) else self.edge_length)
+        lengths = np.array([np.linalg.norm(self.positions[a] - self.positions[b])
+                             for a, b in edges])
+        stretch_pct = 100 * (lengths - rest) / rest
+        return {"max_stretch_pct": float(np.max(np.abs(stretch_pct))),
+                "rms_stretch_pct": float(np.sqrt(np.mean(stretch_pct ** 2))),
+                "optimality": None, "converged": None}
 
     # ---- inflate ----
 
@@ -635,10 +707,12 @@ class InflatePolyhedronApp:
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
             self._update_inflate_button_state()  # respect the converged-at-this-pressure gate
+            self._update_subdivide_button_state()  # respect the at-MAX_LEVEL gate
             self.stop_button.state(["disabled"])
         else:
             self.steps_spin.state(["disabled"])
             self.inflate_button.state(["disabled"])
+            self.subdivide_button.state(["disabled"])
             # stop_button is armed separately by on_inflate_clicked (right
             # after this runs) -- other background jobs, like the initial
             # cache load, leave it disabled since there's nothing to
@@ -703,9 +777,9 @@ class InflatePolyhedronApp:
             "faces": [list(f) for f in self.faces],
             "positions": {str(v): [float(c) for c in p] for v, p in self.positions.items()},
         }
-        if self.coarse_faces is not None:
-            data["coarse_faces"] = [list(f) for f in self.coarse_faces]
-            data["resolution"] = self.fabric_resolution
+        if self.subdivision_level > 0:
+            data["coarse_faces"] = [list(f) for f in self.base_faces]
+            data["resolution"] = self.subdivision_level
             data["face_of_fine"] = list(self.face_of_fine)
         with open(json_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -734,15 +808,17 @@ class InflatePolyhedronApp:
         out of paper and unfolded flat, before any stretching/bending
         closes it up into the solved 3D shape on the right.
 
-        For a fabric-subdivided net (self.coarse_faces set, see
-        load_fabric_spec), shows the COARSE polygons here -- not the
-        hundreds of individual fine triangles -- with a faint subdivision
-        overlay at the resolution the net was actually generated at, as a
-        2D preview of the mesh being solved."""
+        Always shows the BASE (level 0) polygons here -- not the current
+        level's individual fine triangles -- with a faint subdivision
+        overlay at the CURRENT subdivision level (see mesh_levels'
+        docstring: level L's overlay is subdivide_polygon's own
+        resolution 2**(L-1), the absolute-resolution equivalent of this
+        app's own incremental fan-then-quarter scheme), as a 2D preview of
+        the mesh actually being solved."""
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
-        fabric = self.coarse_faces is not None
-        faces = self.coarse_faces if fabric else self.faces
+        overlay_level = self.subdivision_level
+        faces = self.base_faces
         all_pts = []
         for face_idx in sorted(self.target_layout):
             face = faces[face_idx]
@@ -750,9 +826,9 @@ class InflatePolyhedronApp:
             placed = self.target_layout[face_idx]
             self.ax2d.add_patch(Polygon(placed, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
-            if fabric:
+            if overlay_level > 0:
                 sub_points, sub_triangles = subdivide_polygon(
-                    len(face), placed, self.fabric_resolution)
+                    len(face), placed, 2 ** (overlay_level - 1))
                 segments = []
                 for i, j, k in sub_triangles:
                     segments += [(sub_points[i], sub_points[j]),
@@ -778,13 +854,13 @@ class InflatePolyhedronApp:
         convenience -- the thing actually being relaxed is the vertex
         positions and edge lengths.
 
-        For a fabric-subdivided net, colors every fine triangle by its
-        ORIGINAL coarse face (self.face_of_fine, indexing the same
-        per-coarse-face self.colors the left panel uses) so the coarse
-        faces stay visually distinct as color blocks, with the fine mesh
-        edges thin and faint (see SUBDIVISION_EDGE_ALPHA/WIDTH) so the
-        subdivision reads as texture rather than a bold wireframe, and no
-        per-vertex scatter dots (there can be hundreds of fine
+        Once subdivided (self.subdivision_level > 0), colors every fine
+        triangle by its ORIGINAL base face (self.face_of_fine, indexing
+        the same per-base-face self.colors the left panel uses) so the
+        base faces stay visually distinct as color blocks, with the fine
+        mesh edges thin and faint (see SUBDIVISION_EDGE_ALPHA/WIDTH) so
+        the subdivision reads as texture rather than a bold wireframe, and
+        no per-vertex scatter dots (there can be hundreds of fine
         vertices).
 
         Wraps the current (positions, faces) into a Polyhedron -- its
@@ -796,7 +872,7 @@ class InflatePolyhedronApp:
         self.ax3d.cla()
         self._style_3d_axis(self.ax3d, theme)
 
-        fabric = self.coarse_faces is not None
+        fabric = self.subdivision_level > 0
         face_colors = ([self.colors[c % len(self.colors)] for c in self.face_of_fine]
                         if fabric else self.colors)
 

@@ -12,6 +12,8 @@ Modules:
   hull_to_spec        -- derive a Polyhedron (utils.geometry.Polyhedron)
                           from a convex solid's raw 3D vertices
   stretchy_net_layout -- flat 2D layout for a stretchy (vertex-loop) mesh
+  mesh_levels         -- interactive, incremental nested-level subdivision
+                          for inflate_polyhedron_app's "Subdivide" button
   checksums           -- source_checksum(path), used by stretchy_cache
   stretchy_cache      -- checksummed JSON cache for stretchy nets
 

@@ -584,10 +584,15 @@ def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
     return positions, float(np.max(np.abs(stretch_pct))), float(np.sqrt(np.mean(stretch_pct ** 2)))
 
 
-# scipy.optimize.least_squares' own default gtol -- passed explicitly so
-# relax_once's caller can always know and display the exact tolerance an
-# `optimality` value is being compared against.
-CONVERGENCE_GTOL = 1e-8
+# Passed explicitly (rather than relying on scipy's own default of 1e-8)
+# so relax_once's caller can always know and display the exact tolerance
+# an `optimality` value is being compared against. Lowered from the
+# original 1e-8: the app's level-by-level workflow (subdivide, relax,
+# repeat -- see inflate_polyhedron_app/app.py) always starts each level's
+# relax from an already-good interpolated shape rather than a cold start,
+# so a stricter tolerance is reachable quickly instead of being
+# prohibitively slow.
+CONVERGENCE_GTOL = 1e-10
 
 # Status codes least_squares returns when it stopped because ITS OWN
 # tolerance (gtol/ftol/xtol) was satisfied, as opposed to exhausting

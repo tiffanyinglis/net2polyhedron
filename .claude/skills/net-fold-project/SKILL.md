@@ -600,38 +600,66 @@ not wired into `generate_subdivided_stretchy_nets.py` right now, which
 takes the simpler (if slower and less faithful) route of the ordinary
 cache/solve pipeline instead.
 
-### The app (`inflate_polyhedron_app`) — precomputed starting shape, interactive from there
+### The app (`inflate_polyhedron_app`) — coarse starting shape, subdivide and inflate interactively from there
 
 Rewritten (through a couple of iterations -- see git history if the
-reasoning below seems oddly specific) from the original "pick a net, see
-the one automatically-solved answer" design into a **three-stage
-pipeline**, split between an offline precompute and an interactive app:
+reasoning below seems oddly specific) from an original "pick a net, see
+the one automatically-solved answer" design, then again from a
+"precomputed fixed-resolution fabric mesh, interactive from there" design
+(the fabric-subdivided `.json` files below, `generate_subdivided_stretchy_nets.py`,
+and `mesh_subdivide.solve_fabric_mesh`'s drape were built for THAT
+design) into the CURRENT one: every net is always loaded at its own
+BASE (level 0) resolution, and the app's own "Subdivide" button
+(`utils.inflate_polyhedron.mesh_levels.subdivide_once`) refines it
+interactively, one nested level at a time, so any inflation already done
+at one level carries forward as the next level's starting point instead
+of being discarded for a fresh precomputed drape. A legacy
+fabric-subdivided file (one with baked-in `"coarse_faces"`, e.g.
+`cube_res3.json`) still loads fine -- `on_select_net` just uses ITS OWN
+`coarse_faces` as level 0, ignoring its pre-baked fine mesh/cache
+entirely, since a coarse solve is already cheap. Two steps, split between
+the net picker and the "Subdivide" button:
 
-1. **Coarse solve** -- `stretchy_mesh.solve_wireframe` on the
-   UN-subdivided coarse net. Its random-restart-plus-inflation-ramp
-   search is exactly what makes this reliable: a coarse net has few
-   enough faces that retrying a different random start when one doesn't
-   inflate cleanly is cheap.
-2. **Drape** -- for a fabric-subdivided net (see "Fabric subdivision"
-   above), `mesh_subdivide.solve_fabric_mesh` drapes the fine mesh over
-   that already-solved coarse shape, then does one light edge-length
-   relaxation pass. (Applying pressure directly to a raw random start,
-   skipping 1 and 2 entirely, was tried first and doesn't work: see
-   "known, accepted risk" below for what that looked like empirically.)
-3. **Interactive**: THIS app loads the result of 1+2 as iteration 0, then
-   lets the user push further.
+1. **Coarse solve** -- `stretchy_mesh.solve_wireframe` on the net's own
+   base (level 0) faces, on selecting it in the net picker. Its
+   random-restart-plus-inflation-ramp search is exactly what makes this
+   reliable: a coarse net has few enough faces that retrying a different
+   random start when one doesn't inflate cleanly is cheap. Cached via
+   `stretchy_cache` for an ORDINARY net (not a legacy fabric one, whose
+   coarse solve is cheap enough not to need caching at all).
+2. **Subdivide** (`mesh_levels.subdivide_once`, see its own module
+   docstring) -- one press refines the CURRENT mesh by one level: a
+   centroid fan at level 0 -> 1 (unchanged for an already-triangular
+   face), then a "triforce" quarter of every triangle for each level
+   after that, up to `MAX_LEVEL` (3), where the button greys out. New
+   POSITIONS are linearly interpolated from the current mesh's own nearby
+   points (so already-inflated detail survives); new REST LENGTHS are
+   derived analytically from the flat, unit-edge reference geometry
+   (exact circumradius for a spoke, exact halving/midsegment-theorem
+   lengths for a quarter), independent of the current (possibly already
+   stretched) 3D positions -- so the "ideal" target shape a relax stays
+   pointed at doesn't drift as resolution increases, letting "inflate,
+   then increase resolution, then inflate again" converge toward one
+   consistent answer.
 
-Steps 1-2 are precomputed/cached by `src/utils/inflate_polyhedron/stretchy_cache.py`
-(same cache `inflate_polyhedron_app/build_cache.py` warms -- see "Caching" above) --
-`on_select_net` calls `load_with_cache`, so opening the app on an
-already-cached net (e.g. `cube_res3.json`, already warm) lands on a fully
-rounded starting shape in about a second, not from a blank/random state.
-`refresh_net_list` shows the old "(not computed)" suffix again for any
-net that isn't cached yet (selecting it still works, it's just a fresh
-solve instead of an instant read).
+The "Pressure"/"Inflate" controls below work at ANY level, not just the
+final one -- `CONVERGENCE_GTOL` (see `stretchy_mesh.py`) was tightened
+from an earlier `1e-8` specifically because starting each level's relax
+from an already-good interpolated shape (rather than a cold start) makes
+a stricter tolerance reachable quickly instead of prohibitively slow.
 
-- **Net picker**: defaults to `data/input/stretchy_nets/cube_res3.json` if present
+- **Net picker**: defaults to `data/input/stretchy_nets/cube.json` if present
   (`DEFAULT_NET_BASENAME`), else the first net alphabetically.
+- **The "Subdivide" `LabelFrame`**: the Subdivide button plus a "Level: N"
+  label (`self.subdivision_level`, 0..`MAX_LEVEL`) -- sits between "Net"
+  and "Inflate" since subdividing conceptually happens before/alongside
+  inflating. Greyed out once `self.positions is None` (nothing loaded
+  yet) or already at `MAX_LEVEL`. `self.base_faces` (the level-0 mesh,
+  fixed for the whole net session) backs the LEFT "Target faces" panel
+  and its subdivision overlay at all times, regardless of the current
+  level; `self.face_of_fine` is a parallel list, one entry per CURRENT
+  fine face, naming which base face it came from (used for per-base-face
+  coloring on both panels, rebuilt fresh by every `subdivide_once` call).
 - **The "Inflate" `LabelFrame`** groups everything about running
   `relax_once`, top to bottom in the order it's used: Pressure spinner,
   then the iterate-mode radio buttons, then the Inflate/Stop buttons.
