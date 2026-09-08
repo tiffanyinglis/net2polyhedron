@@ -8,10 +8,14 @@ Modules:
                             stretchy net at once, merging shared coarse
                             edges into one connected fine mesh
 """
-from .polygon_subdivisions import SUBDIVISIONS, DEFAULT_RESOLUTION, subdivide, resolution_for
+from .polygon_subdivisions import (
+    SUBDIVISIONS, DEFAULT_RESOLUTION, MAX_LEVEL, subdivide, resolution_for,
+    subdivide_at_level,
+)
 from .mesh_subdivide import subdivide_mesh, solve_fabric_mesh, load_fabric_spec
 
 __all__ = [
-    "SUBDIVISIONS", "DEFAULT_RESOLUTION", "subdivide", "resolution_for",
+    "SUBDIVISIONS", "DEFAULT_RESOLUTION", "MAX_LEVEL", "subdivide", "resolution_for",
+    "subdivide_at_level",
     "subdivide_mesh", "solve_fabric_mesh", "load_fabric_spec",
 ]

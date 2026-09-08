@@ -139,6 +139,51 @@ def _subdivide_triangle(a, b, c, resolution):
     return triangles
 
 
+MAX_LEVEL = 3
+
+_level_cache = {}
+
+
+def subdivide_at_level(n, vertices, level):
+    """Nested-mesh subdivision, level 0..MAX_LEVEL: each level's points and
+    edges are an exact subset of the next level's, so a solver can carry a
+    solved level-k shape forward as the starting guess for level k+1 rather
+    than resolving from scratch (see this module's docstring for why that
+    matters for a later iterative relax/inflate step).
+
+    - level 0: the polygon itself, undivided (no interior points or edges).
+    - level 1: SUBDIVISIONS[n] -- the triangle unchanged at n=3, else the
+      centroid fan.
+    - level k>1: level 1's coarse triangles refined via `_subdivide_triangle`
+      at resolution 2**(k-1) -- i.e. level k+1 is level k's mesh with every
+      triangle quartered (the "triforce" split: connect each edge's
+      midpoint). This is exactly a uniform barycentric grid at DOUBLE the
+      previous level's resolution, and doubling a barycentric grid's
+      resolution never moves an existing grid point, only adds new ones in
+      between -- which is what makes level k's points a genuine subset of
+      level k+1's, not just a visually similar coarser mesh.
+
+    Results are cached by (n, level, vertices) since the same (regular)
+    n-gon's levels get recomputed on every redraw/toggle in the demo app,
+    and will get reused repeatedly once a solver iterates level by level."""
+    if not (0 <= level <= MAX_LEVEL):
+        raise ValueError(f"level must be between 0 and {MAX_LEVEL}, got {level}")
+
+    key = (n, level, tuple((round(x, 9), round(y, 9)) for x, y in vertices))
+    cached = _level_cache.get(key)
+    if cached is not None:
+        points, triangles = cached
+        return list(points), list(triangles)
+
+    if level == 0:
+        points, triangles = list(vertices), []
+    else:
+        points, triangles = subdivide(n, vertices, resolution=2 ** (level - 1))
+
+    _level_cache[key] = (list(points), list(triangles))
+    return points, triangles
+
+
 def subdivide(n, vertices, resolution=DEFAULT_RESOLUTION):
     """Build a fine triangular mesh for a regular n-gon (given its CCW
     vertex list, e.g. from polygon_geom.regular_polygon_vertices).

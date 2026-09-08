@@ -1,7 +1,8 @@
 import numpy as np
+import pytest
 
 from utils.geometry2d.polygon_geom import regular_polygon_vertices
-from utils.subdivisions import SUBDIVISIONS, subdivide, resolution_for
+from utils.subdivisions import SUBDIVISIONS, MAX_LEVEL, subdivide, resolution_for, subdivide_at_level
 
 
 def polygon_area(verts):
@@ -103,6 +104,62 @@ def test_resolution_for_keeps_triangle_sizes_within_a_few_percent_across_ngons()
 def test_resolution_for_is_identity_at_base_n():
     for base_resolution in (1, 3, 4, 10):
         assert resolution_for(4, base_resolution, base_n=4) == base_resolution
+
+
+def test_subdivide_at_level_0_is_the_undivided_polygon():
+    for n in SUBDIVISIONS:
+        verts = regular_polygon_vertices(n)
+        points, triangles = subdivide_at_level(n, verts, 0)
+        assert triangles == []
+        assert [tuple(p) for p in points] == [tuple(v) for v in verts]
+
+
+def test_subdivide_at_level_1_matches_the_coarse_subdivision():
+    for n in SUBDIVISIONS:
+        verts = regular_polygon_vertices(n)
+        _, triangles = subdivide_at_level(n, verts, 1)
+        assert len(triangles) == len(SUBDIVISIONS[n])
+
+
+def test_subdivide_at_level_quadruples_triangle_count_each_level():
+    for n in SUBDIVISIONS:
+        verts = regular_polygon_vertices(n)
+        counts = [len(subdivide_at_level(n, verts, level)[1])
+                  for level in range(1, MAX_LEVEL + 1)]
+        for coarser, finer in zip(counts, counts[1:]):
+            assert finer == 4 * coarser
+
+
+def test_subdivide_at_level_points_are_nested_subsets():
+    # Each level's points must be an exact subset of the next level's --
+    # this is the property a later iterative relax/inflate step depends
+    # on, so a solved shape at one level can seed the next rather than
+    # resolving from scratch.
+    for n in SUBDIVISIONS:
+        verts = regular_polygon_vertices(n)
+        for level in range(0, MAX_LEVEL):
+            coarse_points, _ = subdivide_at_level(n, verts, level)
+            fine_points, _ = subdivide_at_level(n, verts, level + 1)
+            coarse_set = {(round(p[0], 9), round(p[1], 9)) for p in coarse_points}
+            fine_set = {(round(p[0], 9), round(p[1], 9)) for p in fine_points}
+            assert coarse_set <= fine_set
+
+
+def test_subdivide_at_level_covers_the_polygon_at_every_level():
+    for n in SUBDIVISIONS:
+        verts = regular_polygon_vertices(n)
+        area = polygon_area(verts)
+        for level in range(1, MAX_LEVEL + 1):
+            points, triangles = subdivide_at_level(n, verts, level)
+            assert np.isclose(sum(mesh_triangle_areas(points, triangles)), area)
+
+
+def test_subdivide_at_level_rejects_out_of_range_levels():
+    verts = regular_polygon_vertices(4)
+    with pytest.raises(ValueError):
+        subdivide_at_level(4, verts, -1)
+    with pytest.raises(ValueError):
+        subdivide_at_level(4, verts, MAX_LEVEL + 1)
 
 
 def test_resolution_for_fixes_the_cube_corner_valence_asymmetry():

@@ -1,24 +1,13 @@
 """
 Grid demo of regular-polygon-to-fine-triangle-mesh subdivision: shows a
 triangle, square, pentagon, hexagon, 7-gon and 8-gon, each split into a
-fine triangular mesh via utils.subdivisions (see that package's
-docstring for how the mesh is built and merged with no duplicate points
-across all six shapes). Each n-gon is subdivided at
-`resolution_for(n, FABRIC_APP_RESOLUTION)`, not the same literal
-resolution for every n -- a bigger-sided polygon has more area per fixed
-edge length, so using the same resolution across all six would give it
-visibly larger (lower-density) fine triangles than a triangle's or
-square's; `resolution_for` scales resolution per n-gon so every subplot's
-triangles come out roughly the same size. `FABRIC_APP_RESOLUTION` is the
-SAME base resolution (3) utils/subdivisions/mesh_subdivide.py's
-DEFAULT_RESOLUTION uses for the real stretchy fabric nets
-(generate_subdivided_stretchy_nets.py, e.g.
-data/input/stretchy_nets/cube_res3.json) -- this demo is meant as a
-preview of exactly that mesh, so it shows exactly that subdivision rather
-than some other, denser one (utils.subdivisions.DEFAULT_RESOLUTION=10 is
-a much finer default meant for a purely visual preview, not this one). A
-"Show subdivision" checkbox (on by default) toggles the internal mesh
-edges on/off.
+mesh at a chosen nested "level" via
+`utils.subdivisions.subdivide_at_level` (see that function's docstring
+for the exact level 0..MAX_LEVEL scheme -- level 0 is the bare polygon,
+level 1 is the coarse per-n-gon centroid fan, and each level after that
+quarters every triangle from the previous level, so a lower level's
+points/edges are always an exact subset of a higher level's). A "Level"
+selector (0 by default) picks which one all six subplots show at once.
 
 Laid out as small-paired-with-big columns (3-gon over 8-gon, 4-gon over
 7-gon, 5-gon over 6-gon) rather than in n order, so a big and a small
@@ -50,8 +39,7 @@ import sv_ttk
 from common.paths import REPO_ROOT  # noqa: F401 -- import side effect puts src/ on sys.path
 from common.ui_theme import PLOT_THEME
 from utils.geometry2d.polygon_geom import regular_polygon_vertices
-from utils.subdivisions.mesh_subdivide import DEFAULT_RESOLUTION as FABRIC_APP_RESOLUTION
-from utils.subdivisions import subdivide, resolution_for
+from utils.subdivisions import MAX_LEVEL, subdivide_at_level
 
 # Columns pair a small n-gon with a big one (top row / bottom row) so
 # their triangle sizes sit side by side for comparison, rather than a
@@ -91,11 +79,13 @@ class PolygonSubdivisionApp:
         control_frame = ttk.LabelFrame(root, text="Options", padding=12)
         control_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
 
-        self.show_subdivision_var = tk.BooleanVar(value=True)
-        self.subdivision_check = ttk.Checkbutton(
-            control_frame, text="Show subdivision",
-            variable=self.show_subdivision_var, command=self.draw)
-        self.subdivision_check.pack(side=tk.LEFT)
+        ttk.Label(control_frame, text="Level:").pack(side=tk.LEFT)
+        self.level_var = tk.IntVar(value=0)
+        self.level_spinbox = ttk.Spinbox(
+            control_frame, from_=0, to=MAX_LEVEL, width=3,
+            textvariable=self.level_var, state="readonly")
+        self.level_spinbox.pack(side=tk.LEFT, padx=(6, 0))
+        self.level_var.trace_add("write", lambda *_: self.draw())
 
         view_frame = ttk.Frame(root)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
@@ -109,7 +99,7 @@ class PolygonSubdivisionApp:
     def draw(self):
         theme = PLOT_THEME
         self.fig.patch.set_facecolor(theme["bg"])
-        show_subdivision = self.show_subdivision_var.get()
+        level = self.level_var.get()
 
         for ax_row, n_row in zip(self.axes, POLYGON_GRID):
             for ax, n in zip(ax_row, n_row):
@@ -121,8 +111,8 @@ class PolygonSubdivisionApp:
                 ax.fill(xs, ys, facecolor=FACE_COLOR, edgecolor=theme["fg"],
                          linewidth=1.5, zorder=1)
 
-                if show_subdivision:
-                    points, triangles = subdivide(n, verts, resolution_for(n, FABRIC_APP_RESOLUTION))
+                if level > 0:
+                    points, triangles = subdivide_at_level(n, verts, level)
                     # One LineCollection for all mesh edges rather than an
                     # ax.plot() per triangle -- at this resolution each
                     # subplot has several hundred triangles, and matplotlib
@@ -147,8 +137,8 @@ class PolygonSubdivisionApp:
 
         # tight_layout() is not idempotent -- each call re-solves subplot
         # spacing from the current renderer's text bounding boxes, and
-        # calling it again on every redraw (e.g. each "Show subdivision"
-        # toggle) creeps the subplots progressively closer together
+        # calling it again on every redraw (e.g. each level change)
+        # creeps the subplots progressively closer together
         # instead of settling. Nothing that affects layout (titles,
         # axis-off, fixed limits) changes between redraws, so solve it
         # only once.
