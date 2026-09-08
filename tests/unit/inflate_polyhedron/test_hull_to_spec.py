@@ -1,5 +1,5 @@
-from utils.geometry3d.hull_to_spec import polyhedron_from_vertices
-from utils.geometry3d.polyhedron import Polyhedron
+from utils.inflate_polyhedron.hull_to_spec import polyhedron_from_vertices
+from utils.geometry.polyhedron import Polyhedron
 
 TETRAHEDRON_VERTICES = [
     [1.0, 1.0, 1.0],

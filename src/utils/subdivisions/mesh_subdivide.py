@@ -58,8 +58,8 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from .polygon_subdivisions import SUBDIVISIONS, _resolve, _subdivide_triangle, resolution_for
-from ..geometry2d.polygon_geom import regular_polygon_vertices
-from ..geometry3d.stretchy_mesh import (
+from ..geometry.polygon_geom import regular_polygon_vertices
+from ..inflate_polyhedron.stretchy_mesh import (
     EDGE_LENGTH, mesh_edges, _pair_index_arrays, _residual, solve_wireframe,
 )
 
@@ -68,19 +68,11 @@ _POINT_TOL = 1e-7
 
 
 def _subdivide_dual(n, verts2d, verts3d, resolution):
-    """Like polygon_subdivisions.subdivide(), but (when verts3d is given)
-    simultaneously builds a matching list of 3D points -- one per unique
-    2D point -- by running the identical barycentric grid construction
-    over verts3d/its own centroid instead. _subdivide_triangle is purely
-    vector arithmetic (no assumption about dimensionality), and iterates
-    in an order that depends only on `resolution`, not the corner values,
-    so zipping the 2D and 3D calls pairs up matching points automatically
-    without needing to duplicate any of the deduplication logic. Points
-    are deduplicated by their 2D key only (verts3d may come from a
-    genuinely bent/stretched coarse face, where two combinatorially
-    distinct points could otherwise coincide numerically in 3D by
-    accident). Returns (points2d, points3d, triangles); points3d is None
-    if verts3d is None."""
+    """Like polygon_subdivisions.subdivide(), but when verts3d is given,
+    simultaneously builds a matching 3D point per unique 2D point (same
+    barycentric grid run over verts3d instead). Points are deduplicated by
+    their 2D key only. Returns (points2d, points3d, triangles); points3d
+    is None if verts3d is None."""
     centroid2d = sum(verts2d) / len(verts2d)
     centroid3d = sum(verts3d) / len(verts3d) if verts3d is not None else None
 
@@ -113,12 +105,10 @@ def _subdivide_dual(n, verts2d, verts3d, resolution):
 
 
 def _classify_point(p, verts2d, resolution):
-    """Where a subdivided 2D point sits relative to the n-gon's own
-    corners: ("corner", i) for polygon corner i, ("edge", i, k) for the
-    k-th of resolution-1 interior points along boundary edge (i, i+1),
-    counted from corner i (k = 1..resolution-1), or ("interior",) for
-    anything else (the centroid, an internal fan/diagonal seam, or a
-    point strictly inside a coarse triangle)."""
+    """p: one subdivided 2D point; verts2d: the n-gon's own corners.
+    Returns ("corner", i), ("edge", i, k) (the k-th interior point along
+    boundary edge i->i+1), or ("interior",) for anything else (centroid,
+    internal seam, or inside a coarse triangle)."""
     n = len(verts2d)
     for i, v in enumerate(verts2d):
         if np.allclose(p, v, atol=_POINT_TOL):
@@ -135,20 +125,12 @@ def _classify_point(p, verts2d, resolution):
 
 
 def _check_shared_edges_agree_on_resolution(coarse_faces, face_resolutions):
-    """resolution_for gives a DIFFERENT resolution to faces of different
-    side counts (that's the whole point -- see its docstring), but two
-    faces sharing an edge must agree on how many points that edge is
-    split into: there's no support here for a mesh where one side of a
-    shared edge is finer than the other (a proper fix would need
-    T-junction handling, which is out of scope). Raises a clear error
-    naming the offending faces/edge rather than silently building a
-    mismatched mesh.
-
-    This only bites nets with faces of DIFFERENT side counts sharing an
-    edge -- e.g. stretchy_nets/two_pentagons_and_a_square.json (pentagons
-    glued to a square). Any net where every face has the same side count
-    (any Platonic solid) is unaffected, since resolution_for then gives
-    every face the identical resolution regardless."""
+    """coarse_faces: vertex-loop faces; face_resolutions: resolution_for's
+    result per face. Raises ValueError naming the offending faces/edge if
+    two faces sharing an edge got different resolutions (resolution_for
+    can give different n-gons different resolutions -- see its docstring
+    -- but a shared edge needs both sides split the same way; there's no
+    T-junction support here)."""
     edge_owner = {}
     for face_idx, face in enumerate(coarse_faces):
         n = len(face)
@@ -168,39 +150,15 @@ def _check_shared_edges_agree_on_resolution(coarse_faces, face_resolutions):
 
 
 def subdivide_mesh(coarse_faces, resolution=DEFAULT_RESOLUTION, coarse_positions=None):
-    """Subdivide every face of a coarse vertex-loop mesh into a fine
-    triangular mesh, merging points shared across coarse edges into
-    single global vertices.
-
-    `resolution` is interpreted as a SQUARE's resolution (polygon_subdivisions.
-    resolution_for's `base_n=4` default) -- every face is actually
-    subdivided at `resolution_for(len(face), resolution)`, its own
-    side-count-adjusted resolution, so a face with more sides doesn't end
-    up with visibly coarser fine triangles than a face with fewer (see
-    resolution_for's docstring for why the same literal resolution
-    wouldn't do that on its own). All faces sharing an edge must resolve
-    to the SAME resolution -- see _check_shared_edges_agree_on_resolution
-    for when that can fail and what to do about it.
-
-    If `coarse_positions` (a {vertex_id: 3D point} dict, e.g. from
-    stretchy_mesh.solve_wireframe on the SAME coarse_faces) is given, also
-    computes a 3D seed position for every fine vertex by draping the
-    subdivision over those real 3D positions (see module docstring) --
-    otherwise seed_positions is None.
-
-    Returns (fine_faces, face_of_fine, edge_lengths, seed_positions):
-      fine_faces     -- list of (a, b, c) global-vertex-id triangles, CCW
-                        (same winding as the coarse face they came from).
-      face_of_fine   -- fine_faces[i] belongs to coarse face
-                        face_of_fine[i] (e.g. for coloring every fine
-                        triangle by the original face it subdivides).
-      edge_lengths   -- {(a, b): length} for a < b, for every undirected
-                        edge in fine_faces -- the rest length that edge
-                        should hold in a physically-accurate fabric of
-                        unit-edge coarse faces (NOT uniform across the
-                        mesh, see module docstring).
-      seed_positions -- {vertex_id: np.array([x, y, z])} or None.
-    """
+    """coarse_faces: vertex-loop faces; resolution: square-equivalent
+    resolution (each face actually uses resolution_for(len(face),
+    resolution), and all faces sharing an edge must agree, see
+    _check_shared_edges_agree_on_resolution); coarse_positions: optional
+    {vertex_id: 3D point} to also drape a 3D seed guess (else
+    seed_positions is None). Returns (fine_faces, face_of_fine,
+    edge_lengths, seed_positions): fine_faces is CCW (a,b,c) global-id
+    triangles, face_of_fine maps each back to its source coarse face
+    index, edge_lengths is {(a,b): rest length} for a<b (not uniform)."""
     face_resolutions = [resolution_for(len(face), resolution) for face in coarse_faces]
     _check_shared_edges_agree_on_resolution(coarse_faces, face_resolutions)
 
@@ -258,12 +216,10 @@ def subdivide_mesh(coarse_faces, resolution=DEFAULT_RESOLUTION, coarse_positions
 
 def _relax_seed(fine_faces, edge_lengths, seed_positions):
     """A single light edge-length least_squares fit starting from
-    seed_positions -- NOT the full solve_wireframe search (no random
-    restarts, no inflation ramp, no orientation-consistency retries):
-    the seed is already properly oriented and already close to every
-    fine edge's rest length (see module docstring), so this only needs
-    to iron out the small discrepancies left by draping possibly-bent
-    coarse faces, not find an embedding from scratch."""
+    seed_positions -- no random restarts, no inflation ramp, no
+    orientation-consistency retries (the seed is already properly
+    oriented and close to rest length, see module docstring). Returns
+    (positions, stats), same shape as solve_wireframe's."""
     vertex_ids = sorted({v for face in fine_faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(fine_faces)
@@ -286,28 +242,12 @@ def _relax_seed(fine_faces, edge_lengths, seed_positions):
 
 
 def load_fabric_spec(path):
-    """If `path` is a fabric-subdivided stretchy net -- one written by
-    generate_subdivided_stretchy_nets.py, carrying the extra
-    "coarse_faces"/"resolution"/"face_of_fine" fields alongside the
-    ordinary "faces" -- returns (coarse_faces, resolution, face_of_fine).
-    Otherwise (an ordinary stretchy net with no "coarse_faces") returns
-    (None, None, None).
-
-    utils.persistence.stretchy_cache uses this to solve a fabric net via
-    solve_fabric_mesh (which reproduces the coarse net's own correct,
-    rounded shape, colorable by original face) instead of plain
-    solve_wireframe(faces) at a uniform edge length -- tried directly on
-    a fine mesh, that either takes a very long time (the random-restart
-    search struggles badly with hundreds of small triangles) or, worse,
-    settles into a generically-inflated rounded blob that doesn't
-    resemble the source polyhedron at all, since forcing every edge
-    (rim, diagonal, spoke -- see this module's docstring) to the same
-    length erases the shape information those different lengths encode.
-    inflate_polyhedron_app uses `coarse_faces`/`face_of_fine` again
-    at render time: the left panel shows the COARSE polygons (with a
-    faint subdivision overlay) instead of hundreds of individual fine
-    triangles, and every fine triangle in the right panel is colored by
-    its ORIGINAL coarse face via `face_of_fine`."""
+    """path: a stretchy net .json. If it's fabric-subdivided (written by
+    generate_subdivided_stretchy_nets.py, carrying "coarse_faces"/
+    "resolution"/"face_of_fine" alongside "faces"), returns (coarse_faces,
+    resolution, face_of_fine); otherwise returns (None, None, None). Used
+    by stretchy_cache to route fabric nets through solve_fabric_mesh
+    instead of plain solve_wireframe (see module docstring)."""
     with open(path) as f:
         spec = json.load(f)
     coarse_faces = spec.get("coarse_faces")
@@ -317,16 +257,12 @@ def load_fabric_spec(path):
 
 
 def solve_fabric_mesh(coarse_faces, resolution=DEFAULT_RESOLUTION, seed=0):
-    """Solve the coarse net (stretchy_mesh.solve_wireframe, unmodified),
-    then drape a fine fabric mesh over that solved shape and lightly
-    relax it (see module docstring for why this drape-then-relax approach
-    is used instead of solve_wireframe(fine_faces) directly).
-
-    Returns (fine_faces, face_of_fine, positions, stats) -- the first two
-    as from subdivide_mesh, the last two describing the RELAXED fine mesh
-    (positions is {vertex_id: np.array([x, y, z])}, stats has
-    "max_stretch_pct"/"rms_stretch_pct"/"residual", same shape as
-    solve_wireframe's)."""
+    """coarse_faces/resolution/seed: as subdivide_mesh/solve_wireframe.
+    Solves the coarse net, drapes a fine fabric mesh over it, then
+    lightly relaxes that (see module docstring for why, vs.
+    solve_wireframe(fine_faces) directly). Returns (fine_faces,
+    face_of_fine, positions, stats) -- positions/stats describe the
+    relaxed fine mesh, same shape as solve_wireframe's."""
     coarse_positions, _ = solve_wireframe(coarse_faces, edge_length=EDGE_LENGTH, seed=seed)
     fine_faces, face_of_fine, edge_lengths, seed_positions = subdivide_mesh(
         coarse_faces, resolution, coarse_positions=coarse_positions)

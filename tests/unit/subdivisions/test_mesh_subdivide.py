@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from utils.geometry3d.stretchy_mesh import load_stretchy_mesh, mesh_edges
+from utils.inflate_polyhedron.stretchy_mesh import load_stretchy_mesh, mesh_edges
 from utils.subdivisions.mesh_subdivide import subdivide_mesh, solve_fabric_mesh
 
 TETRAHEDRON_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]

@@ -3,11 +3,11 @@ Inflate Polyhedron -- interactive fabric relaxation for stretchy meshes.
 
     python src/apps/inflate_polyhedron_app/app.py
 
-Nets here (data/input/stretchy_nets/*.json, see utils/geometry3d/stretchy_mesh.py
+Nets here (data/input/stretchy_nets/*.json, see utils/inflate_polyhedron/stretchy_mesh.py
 for the vertex-loop format) are specified directly as vertex loops --
 shared vertex ids ARE the adjacency, so a face pair sharing several edges
 (which would force two RIGID flat faces into the same plane -- see
-utils/geometry3d/stretchy_mesh.py's module docstring) needs no special
+utils/inflate_polyhedron/stretchy_mesh.py's module docstring) needs no special
 casing. A fabric-subdivided net (see utils/subdivisions/mesh_subdivide.py
 and generate_subdivided_stretchy_nets.py, e.g.
 data/input/stretchy_nets/cube_res3.json) additionally carries its
@@ -19,7 +19,7 @@ panel.
 This app's job is ONLY step 3 below -- interactive, user-driven
 inflation/relaxation -- because step 1 (coarse solve) and step 2
 (subdivide) are already reliable and fast on their own, and are
-precomputed/cached ahead of time via utils/persistence/stretchy_cache.py
+precomputed/cached ahead of time via utils/inflate_polyhedron/stretchy_cache.py
 (same cache this app's own build_cache.py warms -- see cache/, next to
 this file, not shared with any other app):
 
@@ -40,7 +40,7 @@ this file, not shared with any other app):
    the same failure _inflate's docstring documents for a "cold" random
    point cloud. Draping over an already-solved coarse shape sidesteps
    that entirely.)
-3. THIS app loads that precomputed result (utils/persistence/stretchy_cache.py's
+3. THIS app loads that precomputed result (utils/inflate_polyhedron/stretchy_cache.py's
    load_with_cache -- instant on a cache hit, solved fresh and cached if
    not) as iteration 0, then lets the user push further from there:
    - The "Pressure" spinner + "Inflate" button apply ONE relaxation pass
@@ -92,13 +92,13 @@ import sv_ttk
 
 from common.paths import STRETCHY_NETS_DIR, SAVE_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
-from utils.geometry3d.stretchy_mesh import (
+from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, relax_once, per_face_volumes, is_orientation_consistent,
     mesh_to_polyhedron, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
-from utils.persistence.stretchy_cache import load_with_cache, is_cached, cache_path_for
+from utils.inflate_polyhedron.stretchy_cache import load_with_cache, is_cached, cache_path_for
 from utils.subdivisions.mesh_subdivide import load_fabric_spec, subdivide_mesh
-from utils.geometry2d.stretchy_net_layout import build_stretchy_net_layout
+from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
 from utils.subdivisions import subdivide as subdivide_polygon
 
 # This app's OWN cache -- not shared with polyhedron_unfolder (a different
@@ -390,7 +390,7 @@ class InflatePolyhedronApp:
         # Precomputed once per net selection (see build_stretchy_net_layout's
         # docstring): a breadth-first spanning tree over shared edges,
         # attaching each face to whichever neighbor discovers it first --
-        # the same idea utils/geometry2d/net_layout.py uses for the rigid
+        # the same idea utils/inflate_polyhedron/stretchy_net_layout.py uses for the rigid
         # pipeline. _draw_target_faces just reuses this on every redraw
         # rather than recomputing the BFS every time.
         self.target_layout = build_stretchy_net_layout(self.coarse_faces
@@ -407,7 +407,7 @@ class InflatePolyhedronApp:
         # point (see module docstring): the coarse net solved with
         # solve_wireframe's reliable random-restart search, then (for a
         # fabric net) draped into the fine mesh -- instant on a cache hit,
-        # solved fresh and cached if not (utils/persistence/stretchy_cache.py).
+        # solved fresh and cached if not (utils/inflate_polyhedron/stretchy_cache.py).
         # This app's own "Inflate" loop never does any of that solving
         # itself; it only continues from here.
         self._run_background(

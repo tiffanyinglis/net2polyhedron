@@ -11,8 +11,8 @@ These files are considered DONE -- the user has finished them and
 deliberately doesn't want them touched, since editing them (even
 additively) risks messing up code structure they've already settled on:
 
-- `src/utils/geometry2d/polygon_geom.py`
-- `src/utils/geometry3d/polyhedron.py` (`Polyhedron`: pure 3D solid geometry
+- `src/utils/geometry/polygon_geom.py`
+- `src/utils/geometry/polyhedron.py` (`Polyhedron`: pure 3D solid geometry
   -- shared, indexed vertices; CCW faces; derived `.edges`; `.face_vertices()`,
   `.face_normal()`, `.is_closed()`, `.compute_face_adjacency()`. Ported over
   from the sibling `polyhedron-unfolder` project's own `Polyhedron`, with
@@ -28,7 +28,7 @@ additively) risks messing up code structure they've already settled on:
 - `pytest.ini`
 - `.claude/settings.local.json`
 - `tests/unit/apps_common/test_bounding_box.py`
-- `tests/unit/geometry2d/test_polygon_geom.py`
+- `tests/unit/geometry/test_polygon_geom.py`
 
 (This batch is synced from the sibling `polyhedron-unfolder` project --
 each is either byte-identical there or differs only in import paths for
@@ -42,8 +42,8 @@ net2polyhedron depends on.
 their tests, and `data/input/nets/*.json`) has been DELETED from this
 project** -- that functionality now lives solely in the sibling
 `polyhedron-unfolder` project, so it no longer needs to be duplicated or
-synced here. `tests/unit/geometry3d/test_hull_to_spec.py` and
-`tests/unit/geometry3d/test_stretchy_mesh.py` had their own borrowed copies
+synced here. `tests/unit/inflate_polyhedron/test_hull_to_spec.py` and
+`tests/unit/inflate_polyhedron/test_stretchy_mesh.py` had their own borrowed copies
 of rigid-net vertex coordinates (used only as fixture data, not a real
 functional dependency) inlined directly so they didn't need to change
 behavior. `src/apps/common/paths.py` still defines `NETS_DIR` even though
@@ -164,9 +164,18 @@ shared across more than one of them:
 
 `src/utils/` — the reusable library, split by concern (see each
 sub-package's own `__init__.py` docstring for its module list):
-- `geometry2d/` — flat 2D polygon geometry: `polygon_geom.py`, `stretchy_net_layout.py`
-- `geometry3d/` — stretchy-mesh solving and coordinate derivation:
-  `stretchy_mesh.py`, `hull_to_spec.py`, `polyhedron.py`.
+- `geometry/` — general-purpose 2D/3D geometry with no domain-specific
+  algorithm content: `polygon_geom.py` (regular polygon vertices + rigid
+  2D edge attachment, shared by both `subdivisions` and
+  `inflate_polyhedron`) and `polyhedron.py` (below) -- `polyhedron.py`
+  is currently only used by `inflate_polyhedron`, not `subdivisions`, but
+  it lives here anyway since it's general-purpose solid geometry, not
+  specific to the stretchy-mesh algorithm itself; `geometry/__init__.py`
+  re-exports `EDGE_LENGTH, regular_polygon_vertices, attach_polygon,
+  Polyhedron, face_normal`. `stretchy_net_layout.py` looked like it
+  belonged here too (it's 2D layout code) but only `inflate_polyhedron`
+  ever uses it AND it's specific to the stretchy algorithm, so it lives
+  in `inflate_polyhedron/` instead.
   - `polyhedron.py` — class `Polyhedron`: pure 3D solid geometry — shared,
     indexed vertices; CCW vertex-index faces; derived `.edges`; `.face_vertices()`,
     `.face_normal()`, `.is_closed()`, `.compute_face_adjacency()`. No
@@ -175,7 +184,22 @@ sub-package's own `__init__.py` docstring for its module list):
     this project, under a now-deleted `polyhedron_unfolder/` package) was
     removed entirely — this copy is self-contained (`face_normal` is
     inlined rather than shared with a fold engine, since this project no
-    longer has one).
+    longer has one). **On the untouchable-files list** (see top of this
+    doc) — don't edit it without asking first.
+- `inflate_polyhedron/` — everything specific to the stretchy (non-rigid)
+  mesh pipeline: solving, flat net layout, and disk caching (this used to
+  be split across `geometry2d/` [the stretchy half], `geometry3d/`, and
+  `persistence/` — merged into one package since none of it is shared
+  with `subdivisions`, only with itself). Modules: `stretchy_mesh.py`,
+  `hull_to_spec.py`, `stretchy_net_layout.py`, `checksums.py`,
+  `stretchy_cache.py`. `stretchy_cache.py` is deliberately NOT re-exported
+  from this package's own `__init__.py` (import it directly, e.g.
+  `from utils.inflate_polyhedron.stretchy_cache import load_with_cache`):
+  it imports `..subdivisions.mesh_subdivide`, which imports back into this
+  package's own `stretchy_mesh` module, so re-exporting it eagerly at
+  package-init time would make that a genuine circular import whenever
+  `utils.subdivisions` happens to be the first of the two packages loaded
+  in a given process.
   - `hull_to_spec.py` — `polyhedron_from_vertices(vertices, name=None)`
     builds and returns a `Polyhedron` straight from a convex solid's raw 3D
     coordinates (via `scipy.spatial.ConvexHull`, merging back the
@@ -195,14 +219,17 @@ sub-package's own `__init__.py` docstring for its module list):
     is for callers that want a *finished* mesh's `.edges`/`.is_closed()`/
     `.face_normal()` rather than reimplementing them, e.g.
     `inflate_polyhedron_app`'s `_draw_wireframe_result` (see "The app" below).
-  - `geometry3d/__init__.py` re-exports `load_stretchy_mesh, solve_wireframe,
-    relax_once, mesh_to_polyhedron, polyhedron_from_vertices, Polyhedron`.
+  - `inflate_polyhedron/__init__.py` re-exports `load_stretchy_mesh,
+    solve_wireframe, relax_once, mesh_to_polyhedron, polyhedron_from_vertices,
+    build_stretchy_net_layout` (not `Polyhedron` itself, which lives in
+    `utils.geometry` now -- see its own bullet above -- nor `stretchy_cache`,
+    see above).
   Sample solids (Platonic, etc.) have no on-disk source in this project
   anymore (the old `data/input/nets/*.json` + `sample_polyhedra.py`
   approach was removed along with the rigid pipeline) — anything that needs
   one now either has its own inline vertex coordinates (see
-  `tests/unit/geometry3d/test_hull_to_spec.py`,
-  `tests/unit/geometry3d/test_stretchy_mesh.py`) or loads a stretchy net
+  `tests/unit/inflate_polyhedron/test_hull_to_spec.py`,
+  `tests/unit/inflate_polyhedron/test_stretchy_mesh.py`) or loads a stretchy net
   from `data/input/stretchy_nets/*.json` instead.
 - `subdivisions/` — fine-triangle-mesh subdivision: `polygon_subdivisions.py` (renamed from the old top-level `subdivision_utils/subdivisions.py` — a package can't contain a module with its own name) and `mesh_subdivide.py`, which builds a fine "fabric" triangulation of a whole stretchy net (see "Fabric subdivision" below)
 - `polyhedron_unfolder/` — the rigid pipeline's whole object model, split
@@ -252,8 +279,6 @@ sub-package's own `__init__.py` docstring for its module list):
     modules is an implementation detail.
   No cache module anywhere in this package — nothing here is cached, see
   "No caching" below.
-- `persistence/` — `polyhedron_spec.py` (`load_polyhedron_spec`/`write_polyhedron_spec`) parses/writes the on-disk rigid `.json` format; `checksums.py` (`source_checksum`) and `stretchy_cache.py` are used only by the stretchy pipeline's cache (`inflate_polyhedron_app`) — the rigid pipeline has nothing to checksum against since it never caches. Note: this module's own name is a deliberate exception to `polyhedron_unfolder/`'s naming — it's shared with `inflate_polyhedron_app`'s tests too, so it kept its net2polyhedron-original name rather than being renamed; `UnfoldablePolyhedron.load()` just calls into it.
-
 `data/` — everything on-disk that isn't code (input specs and app output
 ONLY — no caches; those are per-app, under `src/apps/<app>/cache/`, see
 above):
@@ -621,7 +646,7 @@ generic standalone preview) — this demo's whole purpose is to preview
 what the real stretchy fabric nets (e.g. `cube_res3.json`) actually solve,
 so it shows exactly that subdivision, not an unrelated denser one.
 
-## Stretchy meshes (`src/utils/geometry3d/stretchy_mesh.py`, `inflate_polyhedron_app`)
+## Stretchy meshes (`src/utils/inflate_polyhedron/stretchy_mesh.py`, `inflate_polyhedron_app`)
 
 For nets that **cannot** be realized with perfectly rigid, flat faces —
 most sharply, two faces glued along more than one shared edge. If two flat
@@ -772,7 +797,7 @@ have collapsed onto each other — face-normal signs don't notice that on
 their own, since `_mesh_volume`'s pressure term has no particular reason
 to keep distinct vertices apart.
 
-### Caching (`src/utils/persistence/stretchy_cache.py`)
+### Caching (`src/utils/inflate_polyhedron/stretchy_cache.py`)
 
 The rigid pipeline no longer has an equivalent (see "No caching" above) --
 this one still earns its keep because `solve_wireframe` is a genuine
@@ -886,7 +911,7 @@ pipeline**, split between an offline precompute and an interactive app:
 3. **Interactive**: THIS app loads the result of 1+2 as iteration 0, then
    lets the user push further.
 
-Steps 1-2 are precomputed/cached by `src/utils/persistence/stretchy_cache.py`
+Steps 1-2 are precomputed/cached by `src/utils/inflate_polyhedron/stretchy_cache.py`
 (same cache `inflate_polyhedron_app/build_cache.py` warms -- see "Caching" above) --
 `on_select_net` calls `load_with_cache`, so opening the app on an
 already-cached net (e.g. `cube_res3.json`, already warm) lands on a fully
@@ -1122,7 +1147,7 @@ solve instead of an instant read).
   widgets.
 - **Left panel is a real connected net, not disconnected islands**:
   `on_select_net` precomputes `self.target_layout` once via
-  `src/utils/geometry2d/stretchy_net_layout.py`'s `build_stretchy_net_layout` --
+  `src/utils/inflate_polyhedron/stretchy_net_layout.py`'s `build_stretchy_net_layout` --
   a breadth-first search over faces sharing an edge (derived directly
   from each face's own vertex-loop order, no separate combinatorics step
   needed -- unlike the rigid pipeline's old `EdgeMap`-based planar
@@ -1145,7 +1170,7 @@ solve instead of an instant read).
   (e.g. "[4, 0, 2, 6]") that stood in for a real layout before is gone.
 - `_draw_wireframe_result` (the right-hand 3D panel showing the CURRENT
   state) wraps `self.positions`/`self.faces` into a `Polyhedron` via
-  `geometry3d.stretchy_mesh.mesh_to_polyhedron` on every redraw: `.edges`
+  `inflate_polyhedron.stretchy_mesh.mesh_to_polyhedron` on every redraw: `.edges`
   gives the wireframe line segments (`polyhedron.vertices[i]` is the
   position for edge endpoint `i` directly, since `mesh_to_polyhedron`
   already remapped vertex ids to `Polyhedron`'s dense index space --
@@ -1178,8 +1203,8 @@ nets directly (tetrahedron, cube, a synthetic square-face net, a tiny
 open net); there's no test that builds the icosahedron/truncated-icosahedron
 by hand, though `UnfoldablePolyhedron` is exercised against every real
 net in `data/input/nets/` via the app itself. Files map roughly 1:1 to
-`src/utils/` modules (`unit/geometry2d/test_polygon_geom.py`,
-`unit/persistence/test_polyhedron_spec.py`, `unit/geometry3d/test_hull_to_spec.py`,
+`src/utils/` modules (`unit/geometry/test_polygon_geom.py`,
+`unit/persistence/test_polyhedron_spec.py`, `unit/inflate_polyhedron/test_hull_to_spec.py`,
 `integration/test_open_nets.py`, `unit/subdivisions/test_polygon_subdivisions.py`),
 plus `unit/polyhedron_unfolder/` (one file per module in that package):
 `test_polyhedron.py` (the pure-geometry class -- `face_vertices`,
@@ -1200,7 +1225,7 @@ kind of test only exists for the stretchy pipeline's
 `unit/persistence/test_stretchy_cache.py`, since the rigid pipeline
 caches nothing (see "No caching" above).
 
-The **stretchy**-pipeline suite (`unit/geometry3d/test_stretchy_mesh.py`) is slower
+The **stretchy**-pipeline suite (`unit/inflate_polyhedron/test_stretchy_mesh.py`) is slower
 (~30-60s) since even the small Platonic solids run the real
 `solve_wireframe` — the dodecahedron and icosahedron are deliberately kept
 OUT of it (same rationale as the rigid suite) and verified manually
@@ -1231,7 +1256,7 @@ already-rigid coarse net (tetrahedron) and a genuinely bendy one
 (`two_pentagons_and_a_square.json`) — fast (~5s total) since the
 drape-then-relax approach never needs the slow random-restart search.
 
-`unit/geometry2d/test_stretchy_net_layout.py` covers `build_stretchy_net_layout` (see
+`unit/inflate_polyhedron/test_stretchy_net_layout.py` covers `build_stretchy_net_layout` (see
 "The app" above) across every net in `data/input/stretchy_nets/`: every face gets
 placed, every placed face keeps its exact unit-edge regular-polygon shape
 (rotation/translation only, no distortion), and -- reproducing the same
@@ -1243,6 +1268,11 @@ why that's expected, not a bug).
 
 ## Conventions worth knowing before editing
 
+- **Docstring style** (`src/utils/`, and going forward `src/apps/`): see
+  `skills.md` at the repo root -- every function docstring should be
+  about 4-5 lines, succinct, focused on input/output, with design
+  rationale/history moved to the module-level docstring instead (module
+  docstrings are NOT held to the 4-5 line limit).
 - The STRETCHY pipeline's polygon edges all have length 1
   (`stretchy_mesh.EDGE_LENGTH`, capped stretch via `STRETCH_CAP`) since
   its nets are hand-authored combinatorics with no coordinates of their

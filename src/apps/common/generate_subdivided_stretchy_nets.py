@@ -14,7 +14,7 @@ original, un-subdivided polygon loops), "resolution", and "face_of_fine"
 stretchy-net reader that only looks at "faces" still works unmodified
 (extra keys are just ignored) -- but
 utils.subdivisions.mesh_subdivide.load_fabric_spec picks up the extra
-fields so utils.persistence.stretchy_cache can solve this via
+fields so utils.inflate_polyhedron.stretchy_cache can solve this via
 solve_fabric_mesh (draping the fine mesh over the COARSE net's own
 correctly-shaped, correctly-rounded solve) instead of plain
 solve_wireframe(faces) at a uniform edge_length=1.0. That distinction
@@ -35,7 +35,7 @@ import json
 import os
 
 from paths import STRETCHY_NETS_DIR
-from utils.geometry3d.stretchy_mesh import load_stretchy_mesh
+from utils.inflate_polyhedron.stretchy_mesh import load_stretchy_mesh
 from utils.subdivisions.mesh_subdivide import subdivide_mesh
 
 # (source net basename, resolution) pairs to generate -- add more here to

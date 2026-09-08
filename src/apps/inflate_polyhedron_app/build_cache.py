@@ -8,8 +8,8 @@ file) if the source .json is unchanged.
     python src/apps/inflate_polyhedron_app/build_cache.py --force     # recompute every net
 
 The same logic backs the "Compute All Wireframes" button in app.py (see
-utils.persistence.stretchy_cache.build_all). This cache is this app's
-own -- not shared with any other app.
+utils.inflate_polyhedron.stretchy_cache.build_all). This cache is this
+app's own -- not shared with any other app.
 """
 import sys
 from pathlib import Path
@@ -22,7 +22,7 @@ import argparse
 import os
 
 from common.paths import STRETCHY_NETS_DIR
-from utils.persistence.stretchy_cache import build_all
+from utils.inflate_polyhedron.stretchy_cache import build_all
 
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
 

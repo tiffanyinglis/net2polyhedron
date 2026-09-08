@@ -1,6 +1,6 @@
 import numpy as np
 
-from utils.geometry2d.polygon_geom import (
+from utils.geometry.polygon_geom import (
     EDGE_LENGTH, regular_polygon_vertices, rigid_transform_2d, attach_polygon,
 )
 

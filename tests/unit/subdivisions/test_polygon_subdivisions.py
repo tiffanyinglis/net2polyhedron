@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from utils.geometry2d.polygon_geom import regular_polygon_vertices
+from utils.geometry.polygon_geom import regular_polygon_vertices
 from utils.subdivisions import SUBDIVISIONS, MAX_LEVEL, subdivide, resolution_for, subdivide_at_level
 
 

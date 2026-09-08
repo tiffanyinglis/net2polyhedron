@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from utils.geometry3d.stretchy_mesh import load_stretchy_mesh, mesh_edges
-from utils.geometry2d.stretchy_net_layout import build_stretchy_net_layout
+from utils.inflate_polyhedron.stretchy_mesh import load_stretchy_mesh, mesh_edges
+from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
 
 NETS = ["tetrahedron", "cube", "octahedron", "icosahedron", "dodecahedron",
         "two_pentagons_and_a_square"]
@@ -40,7 +40,7 @@ def test_a_tree_edge_lands_shared_faces_on_the_same_two_points():
     # flat net). Reproduce the tree here the same way build_stretchy_net_layout
     # does, and check every edge IT used.
     from collections import deque
-    from utils.geometry2d.stretchy_net_layout import _shared_edge_faces
+    from utils.inflate_polyhedron.stretchy_net_layout import _shared_edge_faces
 
     faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
     placed = build_stretchy_net_layout(faces)
@@ -71,7 +71,7 @@ def test_a_tree_edge_lands_shared_faces_on_the_same_two_points():
 def test_root_face_is_the_canonical_regular_polygon():
     faces, _ = load_stretchy_mesh("data/input/stretchy_nets/dodecahedron.json")
     placed = build_stretchy_net_layout(faces, root=0)
-    from utils.geometry2d.polygon_geom import regular_polygon_vertices
+    from utils.geometry.polygon_geom import regular_polygon_vertices
     expected = regular_polygon_vertices(len(faces[0]))
     for p, e in zip(placed[0], expected):
         assert np.allclose(p, e)

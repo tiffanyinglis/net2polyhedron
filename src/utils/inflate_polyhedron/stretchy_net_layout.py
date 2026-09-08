@@ -1,5 +1,5 @@
 """Lay out a stretchy vertex-loop mesh's faces as a flat, connected 2D net
--- the same idea net_layout.py (in ..geometry2d) uses for the rigid
+-- the same idea net_layout.py (in ..geometry) used for the rigid
 pipeline (attach each child face to its parent along their shared edge,
 reversed so it unfolds outward, like a real paper net), but derived
 directly from the vertex loops' own edge order instead of a separately
@@ -20,14 +20,13 @@ layout purposes.
 """
 from collections import defaultdict, deque
 
-from .polygon_geom import regular_polygon_vertices, attach_polygon
+from ..geometry.polygon_geom import regular_polygon_vertices, attach_polygon
 
 
 def _shared_edge_faces(faces):
-    """{(a, b) sorted: [(face_idx, local_edge_idx), ...]} for every
-    undirected edge, one entry per face that has it as one of its own
-    directed edges (exactly 2 entries for an internal edge of a closed,
-    consistently-wound mesh -- see load_stretchy_mesh's validation)."""
+    """faces: vertex-id loops. Returns {(a, b) sorted: [(face_idx,
+    local_edge_idx), ...]} for every undirected edge -- exactly 2 entries
+    per edge for a closed, consistently-wound mesh."""
     shared = defaultdict(list)
     for fi, face in enumerate(faces):
         n = len(face)
@@ -38,13 +37,11 @@ def _shared_edge_faces(faces):
 
 
 def build_stretchy_net_layout(faces, root=0):
-    """Place every face reachable from `root` by breadth-first search over
-    shared edges, as one connected flat net -- root is placed as a plain
-    regular polygon, then each face BFS reaches next is attached to
-    whichever already-placed neighbor discovered it, along their shared
-    edge (reversed, so it unfolds outward). Returns {face_idx: [2D point,
-    ...]}. Every face is reachable for a closed, connected mesh (which
-    load_stretchy_mesh already guarantees)."""
+    """faces: vertex-id loops; root: index of the face to place first.
+    Lays out every face reachable from root as one connected flat 2D net,
+    via BFS over shared edges (each new face attached to whichever
+    already-placed neighbor discovered it, reversed so it unfolds
+    outward). Returns {face_idx: [2D point, ...]}."""
     shared = _shared_edge_faces(faces)
     placed = {root: regular_polygon_vertices(len(faces[root]))}
     visited = {root}

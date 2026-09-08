@@ -12,15 +12,16 @@ from collections import defaultdict
 import numpy as np
 from scipy.spatial import ConvexHull
 
-from .polyhedron import Polyhedron
+from ..geometry.polyhedron import Polyhedron
 
 PLANE_TOL = 1e-6
 _PLANE_DECIMALS = round(-np.log10(PLANE_TOL))
 
 
 def _merge_coplanar_facets(hull):
-    """Group hull.simplices by facet plane, return list of vertex-index
-    sets, one per true polygon face."""
+    """hull: a scipy.spatial.ConvexHull (always triangulated). Groups its
+    simplices by facet plane. Returns a list of vertex-index sets, one per
+    true (possibly non-triangular) polygon face."""
     groups = defaultdict(list)
     for simplex, eq in zip(hull.simplices, hull.equations):
         key = tuple(np.round(eq / np.linalg.norm(eq[:3]), _PLANE_DECIMALS))
@@ -29,7 +30,9 @@ def _merge_coplanar_facets(hull):
 
 
 def _order_face_loop(points, vertex_ids):
-    """Order a planar, convex set of vertex ids into a CCW polygon loop."""
+    """points: (N,3) all vertex positions; vertex_ids: the ids of one
+    planar, convex face. Returns those ids reordered into a CCW
+    (outward-facing) polygon loop, by angle around the face's own centroid."""
     pts = points[list(vertex_ids)]
     centroid = pts.mean(axis=0)
     normal = np.cross(pts[1] - pts[0], pts[2] - pts[0])
@@ -49,9 +52,7 @@ def _order_face_loop(points, vertex_ids):
 def polyhedron_from_vertices(vertices, name=None):
     """vertices: (N, 3) array-like of a convex polyhedron's corner points.
     Returns a Polyhedron built from those vertices and the CCW face loops
-    recovered from their convex hull -- `.faces` gives face degrees,
-    `.compute_face_adjacency()` gives which faces are adjacent, and
-    `.is_closed()`/`.face_normal()` come for free."""
+    recovered from their convex hull."""
     points = np.asarray(vertices, dtype=float)
     hull = ConvexHull(points)
     vertex_groups = _merge_coplanar_facets(hull)

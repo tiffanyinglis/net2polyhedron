@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pytest
 
-from utils.persistence import stretchy_cache
+from utils.inflate_polyhedron import stretchy_cache
 
 TETRA_JSON = """{
   "name": "Tetra",

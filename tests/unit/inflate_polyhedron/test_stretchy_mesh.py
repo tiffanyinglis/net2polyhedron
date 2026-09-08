@@ -4,16 +4,16 @@ import threading
 import numpy as np
 import pytest
 
-from utils.geometry3d import stretchy_mesh
+from utils.inflate_polyhedron import stretchy_mesh
 from utils.subdivisions.mesh_subdivide import solve_fabric_mesh
-from utils.geometry3d.stretchy_mesh import (
+from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, mesh_to_polyhedron, solve_wireframe, STRETCH_CAP,
     _overall_3d_extent, _min_pairwise_separation, _mesh_volume, _sphere_bound_volume,
     _volume_indices, _planarity_groups, _face_planarity_residual,
     _orientation_signs, _is_orientation_consistent,
     relax_once, EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
 )
-from utils.geometry3d.polyhedron import Polyhedron
+from utils.geometry.polyhedron import Polyhedron
 
 PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json"
 

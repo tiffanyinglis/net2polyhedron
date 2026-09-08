@@ -1,8 +1,7 @@
 """Cache the (expensive) result of solve_wireframe()-ing a stretchy .json
 mesh, so re-loading an unchanged net is just a fast JSON parse instead of
-a full least-squares relaxation -- the same idea as polyhedron_unfolder/cache.py
-for the rigid pipeline, just recording per-vertex 3D positions and the
-summary stats solve_wireframe returns instead of a flat layout/hinge tree.
+a full least-squares relaxation -- recording per-vertex 3D positions and
+the summary stats solve_wireframe returns.
 
 A cache file records the settled `positions`, the `stats` dict
 (max/rms stretch, residual), and a CHECKSUM of the source .json it was
@@ -12,10 +11,8 @@ the source .json changing OR solve_wireframe's algorithm itself changing
 and the cache is treated as stale and rebuilt.
 
 Cache files live in inflate_polyhedron_app's own cache/ folder (next to
-its app.py) -- never data/, and never shared with any other app's cache
-(e.g. polyhedron_unfolder's rigid fold cache is a completely separate
-pipeline and directory). Callers pass that cache directory explicitly via
-cache_path_for's `cache_dir` param, since it's not simply a sibling of
+its app.py) -- never data/. Callers pass that cache directory explicitly
+via cache_path_for's `cache_dir` param, since it's not simply a sibling of
 net_path's own parent directory (see cache_path_for's docstring for the
 default derivation still used when cache_dir is omitted, e.g. in tests).
 
@@ -44,21 +41,15 @@ import time
 import numpy as np
 
 from .checksums import source_checksum as _file_checksum
-from ..geometry3d.stretchy_mesh import load_stretchy_mesh, solve_wireframe, ALGORITHM_VERSION
+from .stretchy_mesh import load_stretchy_mesh, solve_wireframe, ALGORITHM_VERSION
 from ..subdivisions.mesh_subdivide import load_fabric_spec, solve_fabric_mesh
 
 
 def _solve(net_path, faces, seed):
-    """Solve a stretchy net for caching -- solve_fabric_mesh (drape the
-    fine mesh over the coarse net's own correctly-shaped, correctly-
-    rounded solve) for a fabric-subdivided net (one with "coarse_faces",
-    see mesh_subdivide.load_fabric_spec and
-    tools/generate_subdivided_stretchy_nets.py), else plain
-    solve_wireframe at the usual uniform edge_length=1.0. Both return
-    (positions, stats); solve_fabric_mesh's extra (fine_faces,
-    face_of_fine) are discarded here since they're already stored
-    verbatim in the net's own JSON (deterministically reproducible from
-    the same coarse_faces/resolution, so there's no risk of drift)."""
+    """Solve a stretchy net for caching: solve_fabric_mesh (drape+relax)
+    for a fabric-subdivided net (one with "coarse_faces", see
+    mesh_subdivide.load_fabric_spec), else plain solve_wireframe at
+    edge_length=1.0. Returns (positions, stats) either way."""
     coarse_faces, resolution, _ = load_fabric_spec(net_path)
     if coarse_faces is not None:
         _, _, positions, stats = solve_fabric_mesh(coarse_faces, resolution, seed=seed)
@@ -67,18 +58,16 @@ def _solve(net_path, faces, seed):
 
 
 def source_checksum(net_path):
-    """The source .json's own content hash, combined with the current
-    solve_wireframe ALGORITHM_VERSION -- see this module's docstring for
-    why the version needs to be part of the cache key too, not just the
-    file's bytes."""
+    """The source .json's content hash, combined with the current
+    solve_wireframe ALGORITHM_VERSION so an algorithm change also
+    invalidates the cache, not just an edit to the .json itself."""
     return f"{_file_checksum(net_path)}+algo{ALGORITHM_VERSION}"
 
 
 def cache_path_for(net_path, cache_dir=None):
     """Where the cache for a given stretchy .json source lives. Defaults
     to <project root>/stretchy_cache/<basename>.json, where <project
-    root> is the parent of the .json file's own directory (i.e. the
-    parent of stretchy_nets/)."""
+    root> is the parent of net_path's own parent directory."""
     net_path = os.path.abspath(net_path)
     if cache_dir is None:
         project_root = os.path.dirname(os.path.dirname(net_path))
@@ -121,21 +110,19 @@ def write_stretchy_cache(cache_path, checksum, positions, stats, name):
 
 
 def is_cached(net_path, cache_path=None):
-    """True if a valid, up-to-date cache already exists for net_path --
-    i.e. loading it would be a fast parse, not a solve. A read-only
-    check: never deletes anything, so it's safe to call just to decide
-    how to render a net (e.g. in the app's net list)."""
+    """True if a valid, up-to-date cache already exists for net_path,
+    i.e. loading it would be a fast parse, not a solve. Read-only --
+    never deletes anything."""
     cache_path = cache_path or cache_path_for(net_path)
     cached = read_stretchy_cache(cache_path)
     return cached is not None and cached[0] == source_checksum(net_path)
 
 
 def _valid_cache_or_clear_stale(cache_path, checksum):
-    """Read the cache; if present but its checksum no longer matches (the
-    source .json was edited since), it no longer applies to anything, so
-    delete it -- otherwise a failed re-solve would leave a stale cache
-    file behind that looks like a real, current one. Returns the parsed
-    cache tuple if it's still valid, else None."""
+    """Reads the cache at cache_path; if its checksum doesn't match
+    `checksum`, deletes the stale file so a failed re-solve can't leave
+    it looking current. Returns the parsed cache tuple if still valid,
+    else None."""
     cached = read_stretchy_cache(cache_path)
     if cached is None:
         return None
@@ -165,21 +152,12 @@ def load_with_cache(net_path, cache_path=None):
 
 
 def build_all(nets_dir, cache_dir=None, force=False, on_progress=None):
-    """Compute/refresh the cache for every stretchy .json net in
-    nets_dir.
-
-    Shared by inflate_polyhedron_app's build_cache.py CLI and its
-    "Compute All Wireframes" button, so both report progress the same
-    way and stay in sync with how caching actually works.
-
-    cache_dir, if given, overrides where each net's cache is looked up/
-    written (see cache_path_for) -- needed whenever the cache directory
-    isn't simply a sibling of nets_dir's own parent directory.
-
-    on_progress(i, n, label, status, elapsed=None), if given, is called
-    once per net with status one of "skip", "start", "done", "failed".
-    Returns a list of (path, ok, message) tuples.
-    """
+    """Compute/refresh the cache for every stretchy .json net in nets_dir
+    (shared by build_cache.py's CLI and the app's "Compute All
+    Wireframes" button). cache_dir overrides cache_path_for's default
+    location; force re-solves even up-to-date caches. on_progress(i, n,
+    label, status, elapsed=None), if given, is called per net with status
+    one of "skip"/"start"/"done"/"failed". Returns [(path, ok, message)]."""
     paths = sorted(glob.glob(os.path.join(nets_dir, "*.json")))
     n = len(paths)
     results = []

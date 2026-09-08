@@ -1,6 +1,6 @@
 import numpy as np
 
-from utils.geometry3d.polyhedron import Polyhedron
+from utils.geometry.polyhedron import Polyhedron
 
 # A regular tetrahedron: 4 shared vertices, 4 triangular faces as
 # vertex-index tuples (CCW from outside) -- every edge appears in exactly

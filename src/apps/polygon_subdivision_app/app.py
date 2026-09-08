@@ -38,7 +38,7 @@ import sv_ttk
 
 from common.paths import REPO_ROOT  # noqa: F401 -- import side effect puts src/ on sys.path
 from common.ui_theme import PLOT_THEME
-from utils.geometry2d.polygon_geom import regular_polygon_vertices
+from utils.geometry.polygon_geom import regular_polygon_vertices
 from utils.subdivisions import MAX_LEVEL, subdivide_at_level
 
 # Columns pair a small n-gon with a big one (top row / bottom row) so

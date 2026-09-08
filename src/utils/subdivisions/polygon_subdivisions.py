@@ -56,6 +56,14 @@ earlier version of this module did) makes bigger-sided polygons' fine
 triangles coarser than a square's at that same resolution, since
 `len(SUBDIVISIONS[n])` (the coarse triangle count) doesn't scale exactly
 with a regular n-gon's own area. See its docstring for the formula.
+
+`subdivide_at_level` is a separate, NESTED subdivision scheme (level
+0..MAX_LEVEL): unlike `resolution_for`'s per-n-gon-sized scaling, each
+level's points/edges are an exact subset of the next level's, since
+doubling a barycentric grid's resolution only adds new points, never
+moves existing ones. That nesting is what lets a later solver carry a
+solved level-k shape forward as level k+1's starting guess instead of
+resolving from scratch.
 """
 import math
 
@@ -85,34 +93,13 @@ def _regular_polygon_area(n, edge_length=1.0):
 
 
 def resolution_for(n, base_resolution, base_n=4):
-    """The resolution to use for an n-sided polygon so its fine triangles
-    end up roughly the same SIZE as a `base_n`-gon's at `base_resolution`
-    -- i.e. so `subdivide(n, ..., resolution_for(n, base_resolution))`'s
-    fine triangles have about the same area as
-    `subdivide(base_n, ..., base_resolution)`'s, regardless of n.
-
-    Each coarse triangle in SUBDIVISIONS[n] has area
-    `_regular_polygon_area(n) / len(SUBDIVISIONS[n])` (they're always
-    congruent within one n-gon, by construction -- a fan's slices are
-    congruent for a regular polygon, and n=3 is just the one triangle).
-    Refining a coarse triangle at some resolution r divides its area by
-    r**2, so matching `base_n`'s fine-triangle area means solving
-    `coarse_area(n) / r**2 == coarse_area(base_n) / base_resolution**2`
-    for r. Rounded to the nearest positive integer, since resolution is
-    a literal grid subdivision count, not a continuous quantity.
-
-    `base_n` defaults to 4 (the square) since that's the shape this
-    project's own worked examples (data/input/stretchy_nets/cube_res3.json,
-    DEFAULT_RESOLUTION in utils/subdivisions/mesh_subdivide.py) are built
-    around -- `base_resolution` is the resolution that shape actually
-    uses, and every other n-gon is scaled relative to it.
-
-    Not safe to use independently for adjacent faces of DIFFERENT n that
-    share an edge (e.g. a pentagon glued to a square): the two faces
-    would want different resolutions, but a shared edge needs both sides
-    to agree on how many points it's split into. See
-    utils.subdivisions.mesh_subdivide.subdivide_mesh's docstring for how
-    (and when) that's actually enforced."""
+    """n: polygon side count to solve for; base_resolution/base_n: the
+    reference polygon and resolution to match fine-triangle AREA against
+    (base_n defaults to the square). Returns the (rounded, >=1) resolution
+    for n so subdivide(n, ..., that resolution) gives roughly the same
+    triangle size as subdivide(base_n, ..., base_resolution). Not safe to
+    use independently for two different-n faces sharing an edge -- see
+    mesh_subdivide.subdivide_mesh for how that's enforced."""
     base_triangle_area = _regular_polygon_area(base_n) / len(SUBDIVISIONS[base_n])
     target_fine_area = base_triangle_area / base_resolution ** 2
     triangle_area = _regular_polygon_area(n) / len(SUBDIVISIONS[n])
@@ -120,13 +107,10 @@ def resolution_for(n, base_resolution, base_n=4):
 
 
 def _subdivide_triangle(a, b, c, resolution):
-    """Split triangle (a, b, c) into resolution**2 small triangles via a
-    regular barycentric grid: grid[(i, j)] = (i*a + j*b + k*c) / r for
-    every i, j, k >= 0 with i + j + k == r, i.e. (r+1)(r+2)/2 points.
-    Each unit cell of the grid is either one "upward" triangle (always
-    present) or an upward/downward pair (where a neighboring cell still
-    fits within the i+j<=r boundary), which is what tiles the grid into
-    exactly r**2 same-orientation-as-the-original small triangles."""
+    """a, b, c: triangle corners (any dimension -- pure vector arithmetic).
+    Splits it into resolution**2 small triangles via a regular barycentric
+    grid (grid[(i,j)] = (i*a + j*b + k*c)/r for i+j+k==r). Returns a list
+    of (corner, corner, corner) small triangles, same winding as input."""
     r = resolution
     grid = {(i, j): (i * a + j * b + (r - i - j) * c) / r
             for i in range(r + 1) for j in range(r + 1 - i)}
@@ -145,27 +129,13 @@ _level_cache = {}
 
 
 def subdivide_at_level(n, vertices, level):
-    """Nested-mesh subdivision, level 0..MAX_LEVEL: each level's points and
-    edges are an exact subset of the next level's, so a solver can carry a
-    solved level-k shape forward as the starting guess for level k+1 rather
-    than resolving from scratch (see this module's docstring for why that
-    matters for a later iterative relax/inflate step).
-
-    - level 0: the polygon itself, undivided (no interior points or edges).
-    - level 1: SUBDIVISIONS[n] -- the triangle unchanged at n=3, else the
-      centroid fan.
-    - level k>1: level 1's coarse triangles refined via `_subdivide_triangle`
-      at resolution 2**(k-1) -- i.e. level k+1 is level k's mesh with every
-      triangle quartered (the "triforce" split: connect each edge's
-      midpoint). This is exactly a uniform barycentric grid at DOUBLE the
-      previous level's resolution, and doubling a barycentric grid's
-      resolution never moves an existing grid point, only adds new ones in
-      between -- which is what makes level k's points a genuine subset of
-      level k+1's, not just a visually similar coarser mesh.
-
-    Results are cached by (n, level, vertices) since the same (regular)
-    n-gon's levels get recomputed on every redraw/toggle in the demo app,
-    and will get reused repeatedly once a solver iterates level by level."""
+    """n: polygon side count; vertices: its CCW corners; level: 0..MAX_LEVEL.
+    Level 0 is the bare polygon (no triangles); level 1 is SUBDIVISIONS[n];
+    each level after that quarters every triangle from the level before
+    (resolution 2**(level-1) applied to level 1). Returns (points,
+    triangles), same shape as subdivide(). Each level's points/edges are
+    an exact subset of the next level's (see module docstring), and
+    results are cached by (n, level, vertices)."""
     if not (0 <= level <= MAX_LEVEL):
         raise ValueError(f"level must be between 0 and {MAX_LEVEL}, got {level}")
 
