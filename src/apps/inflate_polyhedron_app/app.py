@@ -10,11 +10,14 @@ shared vertex ids ARE the adjacency, so a face pair sharing several edges
 utils/inflate_polyhedron/stretchy_mesh.py's module docstring) needs no special
 casing.
 
-Every net is always LOADED at its own base (level 0) resolution -- even a
-legacy fabric-subdivided file (one carrying baked-in "coarse_faces", see
-utils/subdivisions/mesh_subdivide.load_fabric_spec and
-generate_subdivided_stretchy_nets.py) starts from ITS OWN coarse_faces
-rather than its pre-baked fine mesh. The "Subdivide" button (see
+Every net is always SOLVED at its own base (level 0) resolution first --
+even a legacy fabric-subdivided file (one carrying baked-in
+"coarse_faces", see utils/subdivisions/mesh_subdivide.load_fabric_spec
+and generate_subdivided_stretchy_nets.py) starts from ITS OWN
+coarse_faces rather than its pre-baked fine mesh -- but is only ever
+SHOWN already subdivided to STARTING_LEVEL (1): level 0 exists purely as
+what STARTING_LEVEL's fan subdivision interpolates from, never as
+something the user interacts with directly. The "Subdivide" button (see
 utils.inflate_polyhedron.mesh_levels) then refines the CURRENT mesh
 interactively, one nested level at a time (0..MAX_LEVEL), interpolating
 every new point from wherever the mesh's own nearby points currently sit
@@ -67,6 +70,15 @@ itself still work for anyone who wants one.
      pressure, and stretch stats) and a PNG of the current view to
      data/output/Save/, both named from the source net's filename plus a
      timestamp.
+4. The "Convergence History" table records one row per subdivision level
+   visited this net session: how many Inflate steps that level has taken
+   so far (self.iteration_count -- reset to 0 by every Subdivide click,
+   so it always counts from when that level's mesh was first created, not
+   carried over from a coarser level), the stretch stats at whatever point
+   it's currently at, and the actual stopping-condition numbers --
+   relax_once's own `optimality` against the fixed CONVERGENCE_GTOL
+   threshold it's compared to -- updated live while Inflate runs and
+   finalized (Converged/Stopped/Step cap reached) once it stops.
 """
 import sys
 from pathlib import Path
@@ -79,7 +91,6 @@ import glob
 import json
 import os
 import queue
-import itertools
 import threading
 import time
 import tkinter as tk
@@ -113,6 +124,12 @@ from utils.subdivisions import subdivide as subdivide_polygon
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
 DEFAULT_NET_BASENAME = "cube"
+
+# Every net now starts already subdivided to this level rather than at the
+# raw level-0 base faces -- level 0 is still solved first internally (it's
+# what the fan subdivision to level 1 interpolates from), just never shown
+# on its own.
+STARTING_LEVEL = 1
 
 # A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
 # subdivision reads as texture rather than a bold wireframe competing
@@ -188,9 +205,13 @@ class InflatePolyhedronApp:
 
         sv_ttk.set_theme("dark")
 
-        # ---- Net selection ----
-        net_frame = ttk.LabelFrame(root, text="Net", padding=12)
-        net_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
+        # ---- Net selection + Subdivision, side by side to save vertical
+        # space -- unrelated topics, but both are small/short controls. ----
+        top_row = ttk.Frame(root)
+        top_row.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
+
+        net_frame = ttk.LabelFrame(top_row, text="Net", padding=12)
+        net_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         picker_row = ttk.Frame(net_frame)
         picker_row.pack(fill=tk.X)
@@ -202,12 +223,6 @@ class InflatePolyhedronApp:
         self.save_button = ttk.Button(picker_row, text="Save", command=self.on_save_clicked)
         self.save_button.pack(side=tk.LEFT, padx=(12, 0))
 
-        self.show_axes_var = tk.BooleanVar(value=False)
-        self.axes_check = ttk.Checkbutton(picker_row, text="Show Axes",
-                                           variable=self.show_axes_var,
-                                           command=self.on_toggle_axes)
-        self.axes_check.pack(side=tk.RIGHT, padx=(0, 12))
-
         status_row = ttk.Frame(net_frame)
         status_row.pack(fill=tk.X, pady=(10, 0))
         self.progress = ttk.Progressbar(status_row, mode="indeterminate", length=160)
@@ -218,8 +233,8 @@ class InflatePolyhedronApp:
         # ---- Subdivision: nested-level mesh refinement (level 0 is the
         # net's own base faces; each press adds one level, up to
         # MAX_LEVEL -- see mesh_levels' docstring). ----
-        subdivide_frame = ttk.LabelFrame(root, text="Subdivide", padding=12)
-        subdivide_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+        subdivide_frame = ttk.LabelFrame(top_row, text="Subdivide", padding=12)
+        subdivide_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
         self.subdivide_button = ttk.Button(subdivide_frame, text="Subdivide",
                                             command=self.on_subdivide_clicked)
         self.subdivide_button.pack(side=tk.LEFT)
@@ -274,6 +289,33 @@ class InflatePolyhedronApp:
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
         self.stop_button.state(["disabled"])
 
+        # ---- Convergence history: one row per subdivision level visited
+        # this net session, showing how many Inflate steps that level took
+        # (self.iteration_count, reset to 0 on every Subdivide -- see
+        # _subdivide_step), the stretch stats at whatever point it's
+        # currently at (updated live while Inflate runs, finalized once it
+        # stops -- see _record_level_history's callers), and the actual
+        # stopping-condition numbers: relax_once's own `optimality` (scipy's
+        # first-order optimality measure -- what "Iterate until convergence"
+        # mode is actually driving toward zero) against CONVERGENCE_GTOL,
+        # the fixed threshold it's compared to (same for every row/level,
+        # shown per-row anyway so it's never ambiguous what "converged"
+        # meant without cross-referencing stretchy_mesh.py). ----
+        history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
+        history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+        history_columns = ("level", "steps", "max_stretch", "rms_stretch",
+                            "optimality", "threshold", "status")
+        self.history_tree = ttk.Treeview(history_frame, columns=history_columns,
+                                          show="headings", height=4)
+        for col, heading, width in (
+                ("level", "Level", 50), ("steps", "Steps", 70),
+                ("max_stretch", "Max Stretch %", 110), ("rms_stretch", "RMS Stretch %", 110),
+                ("optimality", "Optimality", 100), ("threshold", "Threshold", 90),
+                ("status", "Status", 140)):
+            self.history_tree.heading(col, text=heading)
+            self.history_tree.column(col, width=width, anchor=tk.CENTER)
+        self.history_tree.pack(fill=tk.X)
+
         # ---- Target faces (left) + wireframe result (right) ----
         view_frame = ttk.Frame(root)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(6, 14))
@@ -303,7 +345,17 @@ class InflatePolyhedronApp:
         self.positions = None
         self.iteration_count = 0
         self.last_stats = {}
+        self.level_history = {}
         self.stop_event = None
+        # Bumped on every on_select_net call and captured by that call's
+        # own _on_loaded closure -- if a second net selection starts
+        # before the first one's background solve finishes, the first's
+        # eventually-arriving result is now for a STALE generation (this
+        # matters more now than it used to: _on_loaded auto-subdivides to
+        # STARTING_LEVEL, mutating self.faces, so a late, stale result's
+        # positions could otherwise be paired with a self.faces that has
+        # already moved on to a newer selection's subdivided mesh).
+        self._load_generation = 0
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
@@ -316,39 +368,21 @@ class InflatePolyhedronApp:
         self.status_var.set(text)
         self.status_label.configure(foreground=STATUS_COLORS.get(kind, ""))
 
-    # ---- theme / axes visibility ----
+    # ---- theme ----
 
     def _style_3d_axis(self, ax, theme):
         ax.title.set_color(theme["fg"])
-        if self.show_axes_var.get():
-            ax.set_axis_on()
-            for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-                axis.pane.set_facecolor(theme["bg"])
-                axis.pane.set_edgecolor(theme["fg"])
-                axis.line.set_color(theme["fg"])
-                axis.label.set_color(theme["fg"])
-                axis._axinfo["grid"]["color"] = theme["grid"]
-            ax.tick_params(colors=theme["fg"])
-        else:
-            ax.set_axis_off()
+        ax.set_axis_off()
 
     def _style_2d_axis(self, ax, theme):
         ax.title.set_color(theme["fg"])
-        if self.show_axes_var.get():
-            ax.set_axis_on()
-            for spine in ax.spines.values():
-                spine.set_color(theme["fg"])
-            ax.tick_params(colors=theme["fg"])
-            ax.grid(True, color=theme["fg"], alpha=theme["grid"][3])
-        else:
-            ax.set_axis_off()
+        ax.set_axis_off()
 
     def _apply_plot_theme(self):
         """Recolor the figure/axes chrome to match the (fixed, dark-only)
-        plot theme and the "Show Axes" toggle -- ax.cla() (called every
-        draw()) resets all of this to matplotlib's defaults, so it has to
-        be re-applied on every redraw, not just on toggle. Returns the
-        theme dict so draw() can reuse its colors."""
+        plot theme -- ax.cla() (called every draw()) resets all of this to
+        matplotlib's defaults, so it has to be re-applied on every redraw.
+        Returns the theme dict so draw() can reuse its colors."""
         theme = PLOT_THEME
         self.fig.patch.set_facecolor(theme["bg"])
         self.ax2d.set_facecolor(theme["bg"])
@@ -363,9 +397,6 @@ class InflatePolyhedronApp:
         else:
             self._apply_plot_theme()
             self.canvas.draw_idle()
-
-    def on_toggle_axes(self):
-        self._refresh_plot()
 
     def _on_3d_drag_start(self, event):
         """mplot3d's own left-click-drag rotation starts here -- hide the
@@ -460,15 +491,22 @@ class InflatePolyhedronApp:
         self.edge_length = EDGE_LENGTH
         self.iteration_count = 0
         self.last_stats = {}
+        self.level_history = {}
+        self.history_tree.delete(*self.history_tree.get_children())
         self.positions = None
         self.reference_volume = None
         self.stop_event = None
         self._update_subdivide_button_state()
+        self._load_generation += 1
+        generation = self._load_generation
         self._run_background(
             _solve_level0, (path, self.base_faces, legacy_coarse_faces is not None, CACHE_DIR),
-            self._on_loaded, "Loading precomputed starting shape...")
+            lambda payload: self._on_loaded(payload, generation),
+            "Loading precomputed starting shape...")
 
-    def _on_loaded(self, payload):
+    def _on_loaded(self, payload, generation):
+        if generation != self._load_generation:
+            return  # a newer net selection has since started; this result is stale
         positions, stats, cached_name = payload
         self.positions = positions
         # Fixed until the next subdivide or net load (see relax_once's and
@@ -485,11 +523,20 @@ class InflatePolyhedronApp:
         self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
                             "rms_stretch_pct": stats["rms_stretch_pct"],
                             "optimality": None, "converged": None}
+        # Every net starts already advanced to STARTING_LEVEL rather than
+        # shown at the raw level-0 base faces (see its own comment) --
+        # level 0 itself never gets a history row, since the user never
+        # interacts with it directly.
+        while self.subdivision_level < STARTING_LEVEL:
+            self._subdivide_step()
         self._update_inflate_button_state()
+        self._update_subdivide_button_state()  # reflect STARTING_LEVEL, not level 0
         self._set_status(
-            f"Loaded {cached_name or self.mesh_name}: starting shape ready (edges stretched up "
-            f"to {stats['max_stretch_pct']:.2f}%, RMS {stats['rms_stretch_pct']:.2f}%). "
-            f"Press Inflate to relax/inflate, or Subdivide to refine the mesh.", "info")
+            f"Loaded {cached_name or self.mesh_name}: starting shape ready at level "
+            f"{self.subdivision_level} (edges stretched up to "
+            f"{self.last_stats['max_stretch_pct']:.2f}%, RMS "
+            f"{self.last_stats['rms_stretch_pct']:.2f}%). Press Inflate to relax/inflate, or "
+            f"Subdivide to refine the mesh further.", "info")
         self.refresh_net_list()  # the net just loaded may have just gained a cache entry
         self.draw()
 
@@ -500,9 +547,12 @@ class InflatePolyhedronApp:
         self.subdivide_button.state(["!disabled"] if can_subdivide else ["disabled"])
         self.subdivide_level_var.set(f"Level: {self.subdivision_level}")
 
-    def on_subdivide_clicked(self):
-        if self.positions is None or self.subdivision_level >= MAX_LEVEL:
-            return
+    def _subdivide_step(self):
+        """The actual level-advancing work, shared by on_subdivide_clicked
+        and _on_loaded's auto-advance to STARTING_LEVEL -- no status
+        message or redraw of its own, so the caller can run this several
+        times in a row (e.g. level 0 -> STARTING_LEVEL) and only report/
+        draw once at the end."""
         self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
             self.faces, self.positions, self.edge_length, self.face_of_fine,
             self.subdivision_level)
@@ -512,6 +562,17 @@ class InflatePolyhedronApp:
         # brand new net load (see _on_loaded).
         self.reference_volume = per_face_volumes(self.positions, self.faces)
         self.last_stats = self._compute_stretch_stats()
+        # Each level's own step count starts over at 0 -- a level's
+        # "how many steps to converge" is only meaningful counted from
+        # when that level's mesh was first created, not carried over from
+        # however many steps a coarser level happened to need.
+        self.iteration_count = 0
+        self._record_level_history(status="not yet inflated")
+
+    def on_subdivide_clicked(self):
+        if self.positions is None or self.subdivision_level >= MAX_LEVEL:
+            return
+        self._subdivide_step()
         self._update_subdivide_button_state()
         self._update_inflate_button_state()  # a fresh subdivision hasn't converged yet
         self._set_status(
@@ -520,6 +581,41 @@ class InflatePolyhedronApp:
             f"{self.last_stats['max_stretch_pct']:.2f}%). Press Inflate to relax/inflate "
             f"further.", "info")
         self.draw()
+
+    # ---- convergence history table ----
+
+    def _record_level_history(self, status):
+        """Records/updates the CURRENT level's row: steps so far this
+        level (self.iteration_count, see _subdivide_step), the stretch
+        stats at this point, and the actual stopping-condition value --
+        relax_once's own `optimality` (None before any Inflate at this
+        level, or if a Stop request aborted before scipy returned a
+        result -- see relax_once's docstring) -- all from self.last_stats.
+        Called on every subdivide, every live Inflate progress update, and
+        when an Inflate run finishes, so the row always reflects the
+        level's latest state rather than only its final converged one."""
+        self.level_history[self.subdivision_level] = {
+            "steps": self.iteration_count,
+            "max_stretch_pct": self.last_stats.get("max_stretch_pct", 0.0),
+            "rms_stretch_pct": self.last_stats.get("rms_stretch_pct", 0.0),
+            "optimality": self.last_stats.get("optimality"),
+            "status": status,
+        }
+        self._refresh_history_table()
+
+    def _refresh_history_table(self):
+        for level in sorted(self.level_history):
+            rec = self.level_history[level]
+            optimality = rec["optimality"]
+            values = (level, rec["steps"], f"{rec['max_stretch_pct']:.2f}",
+                      f"{rec['rms_stretch_pct']:.2f}",
+                      f"{optimality:.2e}" if optimality is not None else "n/a",
+                      f"{CONVERGENCE_GTOL:.0e}", rec["status"])
+            iid = str(level)
+            if self.history_tree.exists(iid):
+                self.history_tree.item(iid, values=values)
+            else:
+                self.history_tree.insert("", "end", iid=iid, values=values)
 
     def _compute_stretch_stats(self):
         """max/rms edge stretch of the CURRENT self.faces/self.positions
@@ -697,7 +793,9 @@ class InflatePolyhedronApp:
         self.iteration_count += nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged}
-        self._set_status(f"Inflating... {self.iteration_count} steps so far "
+        self._record_level_history(status="inflating...")
+        self._set_status(f"Inflating at level {self.subdivision_level}... "
+                          f"{self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
         self.draw()
 
@@ -709,18 +807,23 @@ class InflatePolyhedronApp:
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
+        status = "Stopped" if was_stopped else "Converged" if converged else "Step cap reached"
+        self._record_level_history(status=status)
         if was_stopped:
             self._set_status(
-                f"Stopped ({self.iteration_count} total steps): edges stretched up to "
-                f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "warn")
+                f"Stopped ({self.iteration_count} steps at level {self.subdivision_level}): "
+                f"edges stretched up to {max_stretch:.2f}% from rest length "
+                f"(RMS {rms_stretch:.2f}%).", "warn")
         elif converged:
             self._set_status(
-                f"Converged after {self.iteration_count} total steps: edges stretched up to "
-                f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "success")
+                f"Converged after {self.iteration_count} steps at level "
+                f"{self.subdivision_level}: edges stretched up to {max_stretch:.2f}% from rest "
+                f"length (RMS {rms_stretch:.2f}%).", "success")
         else:
             self._set_status(
-                f"Inflated ({self.iteration_count} total steps, step cap reached): edges "
-                f"stretched up to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).",
+                f"Inflated ({self.iteration_count} steps at level {self.subdivision_level}, "
+                f"step cap reached): edges stretched up to {max_stretch:.2f}% from rest length "
+                f"(RMS {rms_stretch:.2f}%).",
                 "info")
 
     # ---- background worker (used by the initial cache load) ----
@@ -816,15 +919,6 @@ class InflatePolyhedronApp:
                           f"{os.path.basename(png_path)} to Save/.", "success")
 
     # ---- drawing ----
-
-    def _draw_box_wireframe(self, xlim, ylim, zlim, color):
-        """See polyhedron_unfolder's identical helper for why this is
-        needed instead of relying on mplot3d's default pane borders."""
-        corners = list(itertools.product(xlim, ylim, zlim))
-        edges = [(a, b) for i, a in enumerate(corners) for b in corners[i + 1:]
-                  if sum(p != q for p, q in zip(a, b)) == 1]
-        for edge in edges:
-            self.ax3d.add_collection3d(Line3DCollection([edge], colors=color, linewidths=0.8))
 
     def _draw_target_faces(self, theme):
         """The UNDEFORMED net: every face laid out flat and CONNECTED to
@@ -982,8 +1076,6 @@ class InflatePolyhedronApp:
         self.ax3d.set_ylim(*ylim)
         self.ax3d.set_zlim(*zlim)
         self.ax3d.set_box_aspect([1, 1, 1])
-        if self.show_axes_var.get():
-            self._draw_box_wireframe(xlim, ylim, zlim, theme["fg"])
         closed_note = "closed" if closed else "open"
         self.ax3d.set_title(f"Wireframe result (fabric, subdivided, {closed_note})" if fabric else
                              f"Wireframe result ({closed_note})")
@@ -1009,7 +1101,8 @@ class InflatePolyhedronApp:
                 opt_note = "optimality n/a"
             note = (f"   |   max stretch {self.last_stats['max_stretch_pct']:.2f}%, "
                     f"RMS {self.last_stats['rms_stretch_pct']:.2f}%   |   {opt_note}")
-        self.fig.text(0.5, 0.01, f"Iteration: {self.iteration_count}{note}",
+        self.fig.text(0.5, 0.01, f"Level {self.subdivision_level} | Iteration: "
+                                  f"{self.iteration_count}{note}",
                        ha="center", va="bottom", color=theme["fg"], fontsize=10)
         self.canvas.draw_idle()
 
