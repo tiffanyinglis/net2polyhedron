@@ -586,13 +586,25 @@ def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
 
 # Passed explicitly (rather than relying on scipy's own default of 1e-8)
 # so relax_once's caller can always know and display the exact tolerance
-# an `optimality` value is being compared against. Lowered from the
-# original 1e-8: the app's level-by-level workflow (subdivide, relax,
-# repeat -- see inflate_polyhedron_app/app.py) always starts each level's
-# relax from an already-good interpolated shape rather than a cold start,
-# so a stricter tolerance is reachable quickly instead of being
-# prohibitively slow.
-CONVERGENCE_GTOL = 1e-10
+# an `optimality` value is being compared against.
+#
+# Loosened to 1e-6 after a specific counter-example (data/input/stretchy_nets/
+# three_squares.json, subdivided to level 1) showed a stricter tolerance
+# backfiring: the shape visibly settles (max_stretch_pct essentially 0,
+# positions stop moving at all) within ~20-30 steps, but scipy's own
+# `optimality` measure has a long, slowly-shrinking tail after that --
+# tightening this from an earlier 1e-8 to 1e-10 (on the theory that the
+# app's level-by-level workflow starts each relax from an already-good
+# shape, so a stricter tolerance should be cheap to reach) made that one
+# mesh take ~3650 steps to formally "converge" instead of ~115, for a
+# shape that looked identical the whole time -- a regression, not an
+# improvement, for exactly the "converges faster" goal the change was
+# meant to serve. Verified this loosening doesn't cost anything on meshes
+# where it isn't needed (cube, dodecahedron, icosahedron,
+# two_pentagons_and_a_square all converge at the SAME step count and
+# stretch under 1e-6 as under 1e-8) -- it's specifically the slow-tail
+# cases where 1e-6 helps.
+CONVERGENCE_GTOL = 1e-6
 
 # Status codes least_squares returns when it stopped because ITS OWN
 # tolerance (gtol/ftol/xtol) was satisfied, as opposed to exhausting

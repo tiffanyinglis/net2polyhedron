@@ -643,10 +643,18 @@ the net picker and the "Subdivide" button:
    consistent answer.
 
 The "Pressure"/"Inflate" controls below work at ANY level, not just the
-final one -- `CONVERGENCE_GTOL` (see `stretchy_mesh.py`) was tightened
-from an earlier `1e-8` specifically because starting each level's relax
-from an already-good interpolated shape (rather than a cold start) makes
-a stricter tolerance reachable quickly instead of prohibitively slow.
+final one -- `CONVERGENCE_GTOL` (see `stretchy_mesh.py`) is `1e-6`, looser
+than scipy's own `1e-8` default: on `data/input/stretchy_nets/three_squares.json`
+subdivided to level 1, the shape visibly settles (near-zero stretch,
+positions stop moving) within ~20-30 steps, but scipy's own `optimality`
+measure has a long, slowly-shrinking tail after that -- a stricter
+tolerance was tried first (on the theory that starting each level's relax
+from an already-good interpolated shape should make it cheap) and made
+that one mesh take ~3650 steps to formally "converge" for a shape that
+looked identical the whole time. `1e-6` costs nothing on meshes that
+don't have this slow tail (cube, dodecahedron, icosahedron,
+`two_pentagons_and_a_square` all converge at the same step count either
+way).
 
 - **Net picker**: defaults to `data/input/stretchy_nets/cube.json` if present
   (`DEFAULT_NET_BASENAME`), else the first net alphabetically.
@@ -766,7 +774,7 @@ a stricter tolerance reachable quickly instead of prohibitively slow.
     closest thing scipy's trust-region solver exposes to "N steps" --
     there's no clean "run exactly N iterations" knob); "Iterate until
     convergence" (the default) passes `max_nfev=None`, running to the
-    solver's own tolerance (`stretchy_mesh.CONVERGENCE_GTOL = 1e-8`,
+    solver's own tolerance (`stretchy_mesh.CONVERGENCE_GTOL = 1e-6`,
     passed explicitly to `least_squares` so it's a known, displayable
     value rather than relying on scipy's own default staying put across
     versions) -- picked as the default over "steps" since a large fine

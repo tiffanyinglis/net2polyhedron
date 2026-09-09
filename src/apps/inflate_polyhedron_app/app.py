@@ -60,10 +60,9 @@ itself still work for anyone who wants one.
      closest thing scipy's trust-region solver exposes to "N steps" --
      there's no cleaner "run exactly N iterations" knob), or an uncapped
      run to the solver's own convergence tolerance (CONVERGENCE_GTOL --
-     tightened from the earlier 1e-8, since starting each level's relax
-     from an already-good interpolated shape, rather than a cold start,
-     makes a stricter tolerance reachable quickly instead of prohibitively
-     slow).
+     see stretchy_mesh.py's own comment: some meshes visibly settle long
+     before scipy's own optimality measure satisfies a strict tolerance,
+     so this is deliberately looser than it might seem it needs to be).
    - "Save" writes the current vertex positions (plus iteration count,
      pressure, and stretch stats) and a PNG of the current view to
      data/output/Save/, both named from the source net's filename plus a
