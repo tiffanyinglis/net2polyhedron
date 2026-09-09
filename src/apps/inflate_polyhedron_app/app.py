@@ -13,18 +13,19 @@ casing.
 Every net is always LOADED at its own base (level 0) resolution -- even a
 legacy fabric-subdivided file (one carrying baked-in "coarse_faces", see
 utils/subdivisions/mesh_subdivide.load_fabric_spec and
-generate_subdivided_stretchy_nets.py, e.g. data/input/stretchy_nets/cube_res3.json)
-starts from ITS OWN coarse_faces rather than its pre-baked fine mesh. The
-"Subdivide" button (see utils.inflate_polyhedron.mesh_levels) then refines
-the CURRENT mesh interactively, one nested level at a time (0..MAX_LEVEL),
-interpolating every new point from wherever the mesh's own nearby points
-currently sit -- so any inflation already done at one level carries
-forward as the next level's starting point, rather than being discarded
-and re-solved from scratch the way loading a fixed precomputed fine mesh
-used to. This supersedes the old fixed-resolution fabric-net files/
-build_cache precompute pipeline for this app's own workflow (they're
-unused by it now, though still valid stretchy-net .json files on their
-own terms).
+generate_subdivided_stretchy_nets.py) starts from ITS OWN coarse_faces
+rather than its pre-baked fine mesh. The "Subdivide" button (see
+utils.inflate_polyhedron.mesh_levels) then refines the CURRENT mesh
+interactively, one nested level at a time (0..MAX_LEVEL), interpolating
+every new point from wherever the mesh's own nearby points currently sit
+-- so any inflation already done at one level carries forward as the
+next level's starting point, rather than being discarded and re-solved
+from scratch the way loading a fixed precomputed fine mesh used to. This
+supersedes the old fixed-resolution fabric-net files/build_cache
+precompute pipeline for this app's own workflow -- the fixed-resolution
+example nets it used to ship with (cube_res3.json and friends) have been
+removed accordingly, though the format and generate_subdivided_stretchy_nets.py
+itself still work for anyone who wants one.
 
 1. On selecting a net, its BASE (level 0) faces are solved with
    stretchy_mesh.solve_wireframe -- its random-restart-plus-inflation-ramp
@@ -123,18 +124,14 @@ SUBDIVISION_EDGE_WIDTH = 0.5
 # converge to (see stretchy_mesh._relax_residual's docstring -- it uses a
 # PER-FACE `pressure * exp(-v_f / reference_volume)`, not _inflate's
 # target-based term), so unlike an automatic ramp's weights, there's no
-# natural "final" value to anchor the default to. 30 reaches roughly 73%
-# max stretch on data/input/stretchy_nets/cube_res3.json (measured with the correct
-# per-edge rest lengths a fabric net actually needs -- see
-# mesh_subdivide.py's docstring -- and reference_volume set from
-# per_face_volumes on that net's own starting shape, per net/pressure
-# session, as _on_loaded does). That's a lot of give -- deliberately, per
-# explicit request, rather than the earlier ~5.5%-at-default calibration
-# -- so MAX_PRESSURE=60 (2x the default) is meant purely as slider
-# headroom, not a "sane" ceiling. (These numbers are specific to
-# cube_res3.json's particular mesh -- re-measure if the default net or
-# its resolution ever changes.)
-DEFAULT_PRESSURE = 30.0
+# natural "final" value to anchor the default to -- and the "right" amount
+# of pressure now also depends on the current subdivision level (see
+# mesh_levels.py), not just which net is loaded, since a finer mesh's
+# reference_volume is recomputed fresh on every Subdivide click. Kept
+# deliberately gentle (per explicit request) so a first Inflate click
+# doesn't overshoot before the user has a chance to watch it settle
+# incrementally; MAX_PRESSURE=60 is slider headroom, not a "sane" ceiling.
+DEFAULT_PRESSURE = 3.0
 MAX_PRESSURE = 60.0
 PRESSURE_INCREMENT = 0.5
 
@@ -151,9 +148,9 @@ DEFAULT_STEPS = 10
 # forever without ever reaching real convergence, even after hundreds of
 # total steps. Starting small keeps early feedback frequent while step
 # counts are cheap, then growing the chunk lets later chunks actually be
-# large enough to finish the job -- measured on cube_res3.json: chunks of
-# 5/10/20 (31 total steps) converged in ~2.3s, while giving 3 live
-# updates instead of 1.
+# large enough to finish the job -- measured on a 330-variable subdivided
+# cube mesh: chunks of 5/10/20 (31 total steps) converged in ~2.3s, while
+# giving 3 live updates instead of 1.
 INFLATE_CHUNK_START = 5
 INFLATE_CHUNK_MAX = 200
 # Hard stop for "iterate until convergence" mode in case a mesh/pressure
@@ -385,7 +382,7 @@ class InflatePolyhedronApp:
                     self.current_label = label
                     break
         else:
-            # Default to DEFAULT_NET_BASENAME (cube_res3.json) if present,
+            # Default to DEFAULT_NET_BASENAME (cube.json) if present,
             # else just the first net alphabetically.
             default_path = os.path.join(STRETCHY_NETS_DIR, DEFAULT_NET_BASENAME + ".json")
             default_label = next((l for l, p in self.label_to_path.items() if p == default_path), None)
@@ -407,8 +404,7 @@ class InflatePolyhedronApp:
 
         # A LEGACY fabric-subdivided net (one carrying baked-in
         # "coarse_faces", see utils/subdivisions/mesh_subdivide.load_fabric_spec
-        # and generate_subdivided_stretchy_nets.py, e.g.
-        # data/input/stretchy_nets/cube_res3.json) is loaded at ITS OWN
+        # and generate_subdivided_stretchy_nets.py) is loaded at ITS OWN
         # coarse_faces -- i.e. always level 0 -- rather than its pre-baked
         # fine mesh; the new "Subdivide" button refines it interactively
         # from there instead (see module docstring). An ordinary net has

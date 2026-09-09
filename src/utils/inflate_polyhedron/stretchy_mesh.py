@@ -70,8 +70,8 @@ touches them, per this project's docstring convention in skills.md):
   global term for the mesh: a single global term gives a many-faced mesh
   a cheap way to "satisfy" it by folding one small patch through itself
   (spiking the naive signed-volume sum) while leaving everything else
-  untouched -- verified to happen immediately on cube_res3.json (110
-  vertices) even under a gradual ramp. Splitting it per face closes that
+  untouched -- verified to happen immediately on a 110-vertex subdivided
+  cube mesh even under a gradual ramp. Splitting it per face closes that
   loophole (folding one face's patch only hurts that face's own
   residual) and happens to match real pressure's physics better too
   (dV/d(extrusion) = area, so this term's gradient is naturally a

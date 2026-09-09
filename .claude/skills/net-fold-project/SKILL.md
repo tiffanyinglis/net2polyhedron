@@ -669,11 +669,14 @@ a stricter tolerance reachable quickly instead of prohibitively slow.
     `relax_once`, continuing from wherever `self.positions` currently is
     (not from scratch) -- so repeated clicks let the user watch/steer the
     shape incrementally, rather than the app silently retrying different
-    random starts under the hood. Default/max: 30.0 / 60.0 -- 30 reaches
-    roughly 73% max stretch on `cube_res3.json` (see
-    `stretchy_mesh._relax_residual` below for why these numbers, and why
-    that's a much bigger number than an earlier ~5.5%-at-default
-    calibration).
+    random starts under the hood. Default/max: `DEFAULT_PRESSURE`/
+    `MAX_PRESSURE` (3.0/60.0) -- deliberately gentle so a first Inflate
+    click doesn't overshoot before the user gets to watch it settle
+    incrementally (see `stretchy_mesh._relax_residual` below for why
+    "the right amount of pressure" has no single natural value to anchor
+    a default to at all -- it also depends on the CURRENT subdivision
+    level now, not just which net is loaded, since `reference_volume` is
+    recomputed fresh on every Subdivide click).
   - **`stretchy_mesh._relax_residual`: pressure has NO target volume,
     unlike `_inflate`/`solve_wireframe`'s `_residual`, AND is PER FACE,
     not one global term for the whole mesh.** These are two separate
