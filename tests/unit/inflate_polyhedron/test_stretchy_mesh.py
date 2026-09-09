@@ -17,6 +17,18 @@ from utils.geometry.polyhedron import Polyhedron
 
 PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json"
 
+# Three squares, each pair sharing exactly 2 sides with one "partner" square
+# (cyclically: A-B, B-C, C-A), forcing genuine non-planar bend the same way
+# PENTAGONS_AND_SQUARE does. Combinatorially: 3 quad faces, 5 vertices
+# (2 "pole" vertices each touching all 3 faces, 3 "equatorial" vertices
+# each touching only 2), 6 edges -- like a triangular bipyramid's 6
+# triangular faces merged pairwise into 3 quads. Inflated, it rounds out
+# into a compact, roughly 4-cornered blob (the 2 poles pull apart from the
+# 3 equatorial points) -- a deliberately awkward, no-slack-for-planarity
+# case for exercising the inflation algorithm, same role PENTAGONS_AND_SQUARE
+# plays for pentagons.
+THREE_SQUARES = "data/input/stretchy_nets/three_squares.json"
+
 TETRAHEDRON_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
 
 # A real, unit-edge-length regular tetrahedron (CCW-from-outside faces) --
@@ -46,6 +58,18 @@ def test_load_pentagons_and_square_example():
     assert len(faces) == 3
     assert [len(f) for f in faces] == [5, 5, 4]
     assert name == "Two Pentagons and a Square"
+
+
+def test_load_three_squares_example():
+    faces, name = load_stretchy_mesh(THREE_SQUARES)
+    assert len(faces) == 3
+    assert all(len(f) == 4 for f in faces)
+    assert name == "Three Squares"
+    n_verts = len({v for face in faces for v in face})
+    edges = mesh_edges(faces)
+    assert n_verts == 5
+    assert len(edges) == 6
+    assert n_verts - len(edges) + len(faces) == 2  # Euler's formula: closed, genus-0
 
 
 def test_load_stretchy_mesh_rejects_unmatched_directed_edge(tmp_path):
@@ -187,6 +211,47 @@ def test_solve_wireframe_covers_every_vertex_used_by_the_faces():
     faces, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
     positions, _ = solve_wireframe(faces, seed=4)
     assert set(positions) == {v for face in faces for v in face}
+
+
+# ---- solve_wireframe on THREE_SQUARES: same battery of checks as
+# PENTAGONS_AND_SQUARE above, since this net exists for the same reason
+# (a face pair sharing multiple edges, forcing genuine non-planar bend) ----
+
+def test_solve_wireframe_on_three_squares_keeps_edge_stretch_within_the_cap():
+    faces, _ = load_stretchy_mesh(THREE_SQUARES)
+    _, stats = solve_wireframe(faces, seed=1)
+    assert stats["max_stretch_pct"] < 100 * STRETCH_CAP + 1.0  # +1 margin for the polish pass
+
+
+def test_solve_wireframe_on_three_squares_result_is_genuinely_three_dimensional():
+    faces, _ = load_stretchy_mesh(THREE_SQUARES)
+    positions, _ = solve_wireframe(faces, seed=2)
+    pts = np.array(list(positions.values()))
+    assert _overall_3d_extent(pts) > 0.1
+
+
+def test_solve_wireframe_on_three_squares_vertices_are_not_collapsed_together():
+    faces, _ = load_stretchy_mesh(THREE_SQUARES)
+    positions, _ = solve_wireframe(faces, seed=3)
+    pts = np.array(list(positions.values()))
+    assert _min_pairwise_separation(pts) > 0.3
+
+
+def test_solve_wireframe_on_three_squares_covers_every_vertex_used_by_the_faces():
+    faces, _ = load_stretchy_mesh(THREE_SQUARES)
+    positions, _ = solve_wireframe(faces, seed=4)
+    assert set(positions) == {v for face in faces for v in face}
+
+
+def test_solve_wireframe_on_three_squares_is_closed_and_orientation_consistent():
+    # The whole point of this net: it should resemble a (rounded)
+    # tetrahedron once inflated -- a closed, non-self-intersecting solid,
+    # not a tangled mess.
+    faces, _ = load_stretchy_mesh(THREE_SQUARES)
+    positions, _ = solve_wireframe(faces, seed=0)
+    polyhedron = mesh_to_polyhedron(positions, faces)
+    assert polyhedron.is_closed()
+    assert is_orientation_consistent(positions, faces)
 
 
 # ---- solve_wireframe: inflates a real closed solid into a rounded, ----

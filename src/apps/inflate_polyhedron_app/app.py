@@ -98,6 +98,7 @@ import sv_ttk
 
 from common.paths import STRETCHY_NETS_DIR, SAVE_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
+from ui.cullable_face import _CullableFace
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, solve_wireframe, relax_once, per_face_volumes, is_orientation_consistent,
     mesh_to_polyhedron, mesh_edges, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
@@ -282,6 +283,17 @@ class InflatePolyhedronApp:
         self.ax3d = self.fig.add_subplot(1, 2, 2, projection="3d")
         self.canvas = FigureCanvasTkAgg(self.fig, master=view_frame)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # Vertex markers are only culled/positioned correctly for whatever
+        # orientation was current the last time draw() ran (see
+        # _draw_wireframe_result's docstring) -- mplot3d's own interactive
+        # rotation changes elev/azim continuously without ever calling our
+        # draw() again, so hide them for the DURATION of a drag rather than
+        # show stale, wrongly-culled markers mid-rotation; they reappear,
+        # freshly culled for the new angle, on mouse release.
+        self._dragging_3d = False
+        self.vertex_scatter = None
+        self.canvas.mpl_connect("button_press_event", self._on_3d_drag_start)
+        self.canvas.mpl_connect("button_release_event", self._on_3d_drag_end)
 
         self.faces = None
         self.base_faces = None
@@ -354,6 +366,25 @@ class InflatePolyhedronApp:
             self.canvas.draw_idle()
 
     def on_toggle_axes(self):
+        self._refresh_plot()
+
+    def _on_3d_drag_start(self, event):
+        """mplot3d's own left-click-drag rotation starts here -- hide the
+        vertex-marker scatter for the duration (see its own comment in
+        __init__ for why), leaving the (live-culled) faces/edges alone."""
+        if event.inaxes is not self.ax3d or event.button != 1:
+            return
+        self._dragging_3d = True
+        if self.vertex_scatter is not None:
+            self.vertex_scatter.set_visible(False)
+            self.canvas.draw_idle()
+
+    def _on_3d_drag_end(self, event):
+        if not self._dragging_3d:
+            return
+        self._dragging_3d = False
+        # A full redraw (not just set_visible(True)) so the vertex culling
+        # itself is recomputed for wherever the drag left the view angle.
         self._refresh_plot()
 
     # ---- net picker ----
@@ -845,10 +876,9 @@ class InflatePolyhedronApp:
 
     def _draw_wireframe_result(self, theme):
         """The actual current state: possibly non-planar faces (drawn
-        translucent so the bend is visible) plus the raw vertex/edge
-        wireframe on top, since a "face" here is just a rendering
-        convenience -- the thing actually being relaxed is the vertex
-        positions and edge lengths.
+        opaque) plus the raw vertex/edge wireframe on top, since a "face"
+        here is just a rendering convenience -- the thing actually being
+        relaxed is the vertex positions and edge lengths.
 
         Once subdivided (self.subdivision_level > 0), colors every fine
         triangle by its ORIGINAL base face (self.face_of_fine, indexing
@@ -860,11 +890,22 @@ class InflatePolyhedronApp:
         vertices).
 
         Wraps the current (positions, faces) into a Polyhedron -- its
-        .edges gives the wireframe segments below (positions re-indexed to
-        Polyhedron's own dense 0..N-1 space, so `polyhedron.vertices[i]`
-        is the position for edge endpoint `i` directly, no dict lookup
-        needed), and .is_closed() reports in the title whether the current
-        shape is a genuinely closed solid or still an open mesh."""
+        .edges gives the wireframe segments for the (rarer) open-mesh
+        fallback below (positions re-indexed to Polyhedron's own dense
+        0..N-1 space, so `polyhedron.vertices[i]` is the position for
+        edge endpoint `i` directly, no dict lookup needed), and
+        .is_closed() reports in the title whether the current shape is a
+        genuinely closed solid or still an open mesh -- and, more
+        importantly here, gates whether _CullableFace's exact backface
+        culling applies (see its own docstring: only valid for a closed
+        CONVEX solid). When closed, each face is drawn as a _CullableFace
+        carrying its OWN boundary edges, so a face's wireframe lines
+        disappear together with the face itself once it's facing away
+        from the camera -- drawing every edge as one separate, undivided
+        Line3DCollection (the open-mesh fallback below) has no per-face
+        depth information at all, so back-face lines would otherwise
+        render right through the opaque near faces regardless of view
+        angle."""
         self.ax3d.cla()
         self._style_3d_axis(self.ax3d, theme)
 
@@ -873,22 +914,64 @@ class InflatePolyhedronApp:
                         if fabric else self.colors)
 
         polyhedron = mesh_to_polyhedron(self.positions, self.faces)
+        closed = polyhedron.is_closed()
+        edge_width = SUBDIVISION_EDGE_WIDTH if fabric else 1.6
 
         all_pts = np.array(list(self.positions.values()))
-        for face, color in zip(self.faces, face_colors):
+        # Which vertices belong to at least one face CURRENTLY facing the
+        # camera -- a vertex with every adjacent face facing away is
+        # purely on the far side and should be hidden from the scatter
+        # markers below, the same way _CullableFace already hides a
+        # fully-backfacing face's own fill and edges. A silhouette vertex
+        # (some faces front, some back) stays visible, correctly, since
+        # it's genuinely on the boundary of what's visible. Unlike
+        # _CullableFace's own do_3d_projection (called by mplot3d on
+        # every frame, including mid-drag), this is computed once here at
+        # redraw time -- ax3d.scatter's marker collection has no
+        # per-point 3D visibility hook to recompute it live during an
+        # interactive rotation, only when this app's own draw() next runs.
+        front_facing_vertices = set() if closed else None
+        if closed:
+            # Same view-direction math as _CullableFace.do_3d_projection
+            # (see its docstring) -- duplicated rather than imported since
+            # that's a private detail of an untouchable file, not
+            # something it exposes for reuse.
+            elev, azim = np.radians(self.ax3d.elev), np.radians(self.ax3d.azim)
+            view_dir = np.array([np.cos(elev) * np.cos(azim),
+                                  np.cos(elev) * np.sin(azim),
+                                  np.sin(elev)])
+        for face_index, (face, color) in enumerate(zip(self.faces, face_colors)):
             pts = np.array([self.positions[v] for v in face])
-            self.ax3d.add_collection3d(
-                Poly3DCollection([pts], facecolor=color, edgecolor="none", alpha=0.55))
+            if closed:
+                normal = polyhedron.face_normal(face_index)
+                self.ax3d.add_collection3d(_CullableFace(
+                    [pts], normal, base_alpha=1.0,
+                    facecolor=color, edgecolor=theme["fg"], linewidths=edge_width))
+                if np.dot(normal, view_dir) > 0:
+                    front_facing_vertices.update(face)
+            else:
+                self.ax3d.add_collection3d(
+                    Poly3DCollection([pts], facecolor=color, edgecolor="none", alpha=1.0))
 
-        edge_segments = [(polyhedron.vertices[a], polyhedron.vertices[b])
-                          for a, b in polyhedron.edges]
-        self.ax3d.add_collection3d(Line3DCollection(
-            edge_segments, colors=theme["fg"],
-            linewidths=SUBDIVISION_EDGE_WIDTH if fabric else 1.6,
-            alpha=SUBDIVISION_EDGE_ALPHA if fabric else 1.0))
+        if not closed:
+            # No exact culling is possible without closed convexity (see
+            # _CullableFace's docstring) -- fall back to one plain,
+            # undivided wireframe overlay, same as before this fix.
+            edge_segments = [(polyhedron.vertices[a], polyhedron.vertices[b])
+                              for a, b in polyhedron.edges]
+            self.ax3d.add_collection3d(Line3DCollection(
+                edge_segments, colors=theme["fg"], linewidths=edge_width,
+                alpha=SUBDIVISION_EDGE_ALPHA if fabric else 1.0))
         if not fabric:
-            self.ax3d.scatter(all_pts[:, 0], all_pts[:, 1], all_pts[:, 2],
-                               color=theme["fg"], s=18, depthshade=False)
+            vertex_ids = (list(self.positions) if front_facing_vertices is None
+                          else [v for v in self.positions if v in front_facing_vertices])
+            vis_pts = np.array([self.positions[v] for v in vertex_ids])
+            self.vertex_scatter = self.ax3d.scatter(
+                vis_pts[:, 0], vis_pts[:, 1], vis_pts[:, 2],
+                color=theme["fg"], s=18, depthshade=False)
+            self.vertex_scatter.set_visible(not self._dragging_3d)
+        else:
+            self.vertex_scatter = None
 
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
         center = (lo + hi) / 2
@@ -902,7 +985,7 @@ class InflatePolyhedronApp:
         self.ax3d.set_box_aspect([1, 1, 1])
         if self.show_axes_var.get():
             self._draw_box_wireframe(xlim, ylim, zlim, theme["fg"])
-        closed_note = "closed" if polyhedron.is_closed() else "open"
+        closed_note = "closed" if closed else "open"
         self.ax3d.set_title(f"Wireframe result (fabric, subdivided, {closed_note})" if fabric else
                              f"Wireframe result ({closed_note})")
 
