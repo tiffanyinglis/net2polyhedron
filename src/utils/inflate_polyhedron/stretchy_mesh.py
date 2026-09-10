@@ -384,7 +384,9 @@ SOFT_LIMIT_LO = 0.5
 # edge, which is fast enough to guarantee some finite equilibrium exists
 # no matter how high pressure is set, rather than just delaying the same
 # runaway to a higher pressure.
-SOFT_LIMIT_STIFFNESS = 50.0
+# TEMPORARILY set to 0 (disabled) at the user's request, to test behavior
+# without it -- restore to 50.0 afterward unless told otherwise.
+SOFT_LIMIT_STIFFNESS = 0.0
 
 
 def _soft_limit_stretch(dist, edge_length):
@@ -875,3 +877,69 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
 
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
     return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
+
+
+# Empirical starting point for estimate_pressure_for_target_stretch: bisected
+# the pressure giving ~10% max stretch on each of the 5 Platonic solids and
+# found `pressure * total_rest_area` lands in a much tighter band (1.9-3.2)
+# than raw pressure does (0.11-1.44) -- i.e. required pressure scales with
+# how much total AREA it's pushing against, not vertex/face count. This is
+# the average of pressure*area/target_fraction across those 5 solids (range
+# was 19-32) -- a decent first guess, not exact, which is why the function
+# refines it against an actual relax_once result rather than trusting it
+# alone.
+_PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0
+
+# How far a single calibration step is allowed to rescale pressure --
+# guards against a wild jump if one trial's stretch reading is degenerate
+# (e.g. near zero), while still letting normal cases converge in a couple
+# of iterations (stretch responds roughly linearly to pressure in the low-
+# stretch regime this targets, verified against the bisection trace above).
+_PRESSURE_RATIO_CLAMP = (0.2, 5.0)
+
+DEFAULT_TARGET_STRETCH_PCT = 10.0
+
+
+def estimate_pressure_for_target_stretch(positions, faces, edge_length,
+                                          target_stretch_pct=DEFAULT_TARGET_STRETCH_PCT,
+                                          planarity_weight=PLANARITY_WEIGHT, max_iterations=4,
+                                          tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None):
+    """positions/faces/edge_length: as relax_once. Finds a pressure whose
+    relax_once result lands within `tol_pct` of `target_stretch_pct` max
+    stretch, starting from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric
+    guess and refining it by relaxing at that pressure, then rescaling
+    pressure by (target / achieved) -- clamped by _PRESSURE_RATIO_CLAMP --
+    and trying again, up to `max_iterations` times. Every trial starts
+    fresh from the given `positions` (not chained from the previous
+    trial's result), since different pressures can have very different
+    equilibria and this is searching for the pressure, not steering a
+    shape.
+
+    Keeps whichever trial got CLOSEST to the target rather than just the
+    last one: the rescale step assumes more pressure means more stretch,
+    which fails on at least one known net (data/input/stretchy_nets/
+    three_squares.json actually stretches LESS as pressure rises -- a
+    genuine property of that topology, not a bug here) -- without this,
+    a net where that assumption is wrong would escalate pressure every
+    iteration chasing a target it's moving away from. Returns (pressure,
+    new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
+    max_force, converged) -- the last five exactly as relax_once's own
+    return, from whichever trial this settled on."""
+    total_area = _total_rest_area(faces, edge_length)
+    pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_stretch_pct / 100.0) / total_area
+    best_error, best_pressure, best_result = None, None, None
+    for _ in range(max_iterations):
+        result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
+                             max_nfev=max_nfev_per_trial, stop_event=stop_event)
+        _, _, max_stretch, _, _, _ = result
+        error = abs(max_stretch - target_stretch_pct)
+        if best_error is None or error < best_error:
+            best_error, best_pressure, best_result = error, pressure, result
+        stopped = stop_event is not None and stop_event.is_set()
+        if stopped or error < tol_pct or max_stretch <= 0:
+            break
+        ratio = target_stretch_pct / max_stretch
+        ratio = min(max(ratio, _PRESSURE_RATIO_CLAMP[0]), _PRESSURE_RATIO_CLAMP[1])
+        pressure *= ratio
+    new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged = best_result
+    return best_pressure, new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged

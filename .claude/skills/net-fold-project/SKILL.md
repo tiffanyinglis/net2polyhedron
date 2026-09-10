@@ -674,6 +674,25 @@ be rather than making those meshes take far more steps to formally
     shape incrementally. Default/max: `DEFAULT_PRESSURE`/`MAX_PRESSURE`
     (3.0/60.0) -- gentle by default; 60 is generous headroom above what a
     plain cube needs to stay well-behaved (see below).
+  - **"Auto" button** (`on_auto_pressure_clicked` /
+    `stretchy_mesh.estimate_pressure_for_target_stretch`): picks a
+    pressure landing near `DEFAULT_TARGET_STRETCH_PCT` (10%) max stretch
+    and applies it immediately (sets the spinner AND updates the mesh to
+    that pressure's own converged shape -- not just a suggested number).
+    Exists because ONE fixed default pressure is meaningless across
+    different nets -- bisecting for the pressure giving ~10% stretch on
+    each of the 5 Platonic solids found `pressure * total_rest_area`
+    (see `_total_rest_area`) lands in a tight band (1.9-3.2) while raw
+    pressure varies 12.6x (0.11-1.44) and doesn't correlate with
+    vertex/face count at all. The function starts from that area-based
+    geometric estimate, then refines by relaxing at that pressure and
+    rescaling by (target/achieved) -- clamped to avoid a wild jump --
+    up to a few times, keeping whichever trial landed closest rather
+    than just the last one: the rescale assumes more pressure means more
+    stretch, which is false on `three_squares.json` (a real property of
+    that topology -- it stretches LESS as pressure rises), and without
+    tracking the best result that case would escalate pressure forever
+    chasing a target moving away from it.
   - **`stretchy_mesh._relax_force`**: a genuine mechanical force balance,
     no volume or target anywhere in it -- each edge is a Hooke's-law
     spring, each face applies a real `pressure * area * outward_normal`

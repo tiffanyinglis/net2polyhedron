@@ -64,6 +64,13 @@ itself still work for anyone who wants one.
      tolerance (CONVERGENCE_GTOL -- some meshes have a long, slow-shrinking
      tail after the shape has visibly settled, so this is deliberately
      looser than it might seem it needs to be).
+   - The "Auto" button next to the spinner picks a pressure itself (see
+     stretchy_mesh.estimate_pressure_for_target_stretch) landing near
+     DEFAULT_TARGET_STRETCH_PCT max stretch, then applies it directly --
+     required pressure varies a lot between nets (it scales with total
+     surface area, not vertex/face count -- verified empirically), so a
+     single fixed default pressure is either too gentle or wildly
+     excessive depending which net is loaded.
 4. The "Convergence History" table records one row per subdivision level
    visited this net session: how many Inflate steps that level has taken
    so far (self.iteration_count -- reset to 0 by every Subdivide click,
@@ -103,8 +110,9 @@ from common.paths import STRETCHY_NETS_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 from ui.cullable_face import _CullableFace
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, solve_wireframe, relax_once,
+    load_stretchy_mesh, solve_wireframe, relax_once, estimate_pressure_for_target_stretch,
     mesh_to_polyhedron, mesh_edges, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
+    DEFAULT_TARGET_STRETCH_PCT,
 )
 from utils.inflate_polyhedron.stretchy_cache import load_with_cache, is_cached, cache_path_for
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
@@ -238,6 +246,9 @@ class InflatePolyhedronApp:
                                           increment=PRESSURE_INCREMENT, width=6,
                                           textvariable=self.pressure_var, format="%.1f")
         self.pressure_spin.pack(side=tk.LEFT)
+        self.auto_pressure_button = ttk.Button(pressure_row, text="Auto",
+                                                command=self.on_auto_pressure_clicked)
+        self.auto_pressure_button.pack(side=tk.LEFT, padx=(6, 0))
 
         mode_row = ttk.Frame(inflate_frame)
         mode_row.pack(fill=tk.X, pady=(8, 0))
@@ -640,6 +651,36 @@ class InflatePolyhedronApp:
             self.stop_button.state(["disabled"])  # one request is enough; avoid repeat clicks
             self._set_status("Stopping...", "warn")
 
+    def on_auto_pressure_clicked(self):
+        """Finds a pressure landing near DEFAULT_TARGET_STRETCH_PCT max
+        stretch (see estimate_pressure_for_target_stretch's docstring for
+        how) and applies it -- sets the Pressure spinner to the result AND
+        updates the mesh to that trial's own converged shape, the same way
+        a normal Inflate click would, rather than just suggesting a number
+        the user still has to click Inflate to try."""
+        if self.positions is None:
+            return
+        faces, edge_length, positions = self.faces, self.edge_length, self.positions
+        self._set_status("Finding a pressure that settles around "
+                          f"{DEFAULT_TARGET_STRETCH_PCT:.0f}% stretch...", "info")
+        self._run_background(
+            lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length),
+            (), self._on_auto_pressure_done)
+
+    def _on_auto_pressure_done(self, result):
+        pressure, positions, steps, max_stretch, rms_stretch, max_force, converged = result
+        self.pressure_var.set(round(pressure, 4))
+        self.positions = positions
+        self.iteration_count += steps
+        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
+                            "optimality": max_force, "converged": converged}
+        self._record_level_history(status="Converged" if converged else "Auto-calibrated")
+        self._update_inflate_button_state()
+        self._set_status(
+            f"Auto pressure {pressure:.3f}: edges stretched up to {max_stretch:.2f}% from rest "
+            f"length (RMS {rms_stretch:.2f}%).", "success")
+        self.draw()
+
     def _run_inflate_stream(self, pressure, target_steps, stop_event):
         """Runs relax_once in a growing sequence of chunks (5, 10, 20, ...,
         capped at INFLATE_CHUNK_MAX) in a background thread, pushing a
@@ -744,7 +785,7 @@ class InflatePolyhedronApp:
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.pressure_spin,
+        for widget in (self.combo, self.pressure_spin, self.auto_pressure_button,
                        self.steps_radio, self.convergence_radio):
             widget.state(state)
         if enabled:
