@@ -60,7 +60,8 @@ stops it).
 
 Design notes (the "why" behind choices that would otherwise look
 arbitrary -- kept here rather than repeated across every function that
-touches them, per this project's docstring convention in skills.md):
+touches them, per this project's docstring convention in
+.claude/skills/net-fold-project/SKILL.md):
 
 - **relax_once is a genuine force balance, walked step by step -- no
   volume anywhere** (_relax_force): each edge is a Hooke's-law spring;

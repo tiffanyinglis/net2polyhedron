@@ -265,7 +265,8 @@ caches; those are per-app, under `src/apps/<app>/cache/`, see above):
 Top level:
 - `pytest.ini` — sets `pythonpath = . src src/apps` so tests can `import utils` regardless of cwd, and (via the `src/apps` entry) `from common.<module> import ...` the same way the apps themselves resolve it
 - `requirements.txt` — numpy, scipy, networkx, matplotlib, sv-ttk, (dev) pytest
-- `README.md` — user-facing usage doc (install, run the app, write a `.json` net, the cache, tests)
+- `docs/README.md` — user-facing usage doc (install, run the app, write a `.json` net, tests)
+- `docs/algorithm.md` — the inflation algorithm itself, written up scientific-paper style
 
 ## Removed: the rigid-unfolding pipeline (historical)
 
@@ -1003,15 +1004,62 @@ why that's expected, not a bug).
 
 ## Conventions worth knowing before editing
 
-- **Docstring style** (`src/utils/`, and going forward `src/apps/`): see
-  `skills.md` at the repo root -- every function docstring should be
-  about 4-5 lines, succinct, focused on input/output, with design
-  rationale/history moved to the module-level docstring instead (module
-  docstrings are NOT held to the 4-5 line limit).
+- **Docstring style** (`src/utils/`, and going forward `src/apps/`):
+  every function/method docstring should be about 4-5 lines, succinct,
+  and focused on input/output -- not the full history of why the
+  function looks the way it does. Include: one line on what it
+  does/returns; what each non-obvious parameter means (skip ones whose
+  name already says it all); what's returned (shape/type), if not
+  obvious from the name; at most one line for a genuinely load-bearing
+  gotcha. Leave out: multi-paragraph "why we designed it this way"
+  narratives, empirical findings, benchmark numbers, historical
+  iteration ("tried X first, it broke on Y") -- that belongs in the
+  MODULE-level docstring (a "Design notes" section) or git history, not
+  repeated on every function that touches the decision; references to
+  other functions' own internals unless the caller truly needs them;
+  restating what the code obviously does. Module-level docstrings are
+  NOT held to the 4-5 line limit -- keep them as long as they need to be
+  to cover the bigger picture, front-loading the essential "what this
+  module is" in the first paragraph. Example:
+
+  ```python
+  # Before (too long, mixes rationale into a function comment):
+  def _sphere_bound_volume(faces, edge_length):
+      """An optimistic (normally unreachable) target volume for
+      _inflate's pressure term: the volume of the SPHERE with the same
+      total surface area as the mesh's own faces (each assumed a
+      regular polygon of `edge_length` sides, even though the actual
+      solved faces may bend a little) -- the isoperimetric-maximal
+      shape for that much surface, so no achievable inflation ever
+      fully reaches it. Scaled to the mesh's own size (not some
+      arbitrary huge constant) so the pressure it creates stays
+      reasonable regardless of how big the mesh is: e.g. for the
+      regular icosahedron this comes out to ~2.40, within 10% of its
+      true volume (~2.18) ..."""
+
+  # After (4-5 lines, input/output focused; the "why" moves to the
+  # module docstring's Design notes):
+  def _sphere_bound_volume(faces, edge_length):
+      """Volume of the sphere with the same total surface area as
+      `faces` (each assumed a regular polygon of `edge_length` sides)
+      -- an optimistic, normally-unreachable inflation target, scaled
+      to the mesh's own size. See module docstring's Design notes for
+      why this (rather than a fixed constant) is used as _inflate's
+      pressure target."""
+  ```
+
+  When editing a function in `src/utils/`, check its docstring still
+  fits this convention; when adding a new function, write its docstring
+  to this convention from the start rather than adding a full-length one
+  and trimming later. (There used to be a separate `skills.md` at the
+  repo root holding just this section -- merged in here so there's one
+  skill doc, in the one place Claude actually looks for it.)
 - The STRETCHY pipeline's polygon edges all have length 1
-  (`stretchy_mesh.EDGE_LENGTH`, capped stretch via `STRETCH_CAP`) since
-  its nets are hand-authored combinatorics with no coordinates of their
-  own. `polygon_geom.EDGE_LENGTH` (still 1.0) is a default used by
+  (`stretchy_mesh.EDGE_LENGTH`) since its nets are hand-authored
+  combinatorics with no coordinates of their own -- there's no runaway
+  stretch cap on this any more (see "No hacky terms in the physics
+  without explicit permission" above for why a stretch limit was tried
+  and removed). `polygon_geom.EDGE_LENGTH` (still 1.0) is a default used by
   `regular_polygon_vertices`/`attach_polygon`, which the stretchy
   pipeline's `stretchy_net_layout.py` calls. (The now-deleted rigid
   pipeline had no such requirement, since it read real, already-given
