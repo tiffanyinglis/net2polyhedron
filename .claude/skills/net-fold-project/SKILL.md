@@ -419,12 +419,14 @@ equilibrium.
   say, `1/distance`), which is what makes it usable as a least-squares term
   even from a poorly-conditioned starting point.
 - `_sphere_bound_volume(faces, edge_length)` computes an optimistic,
-  normally-unreachable target: the volume of the sphere with the same
-  total surface area as the mesh's own faces (each assumed a regular
-  polygon of `edge_length` sides). Scaled to the mesh's own size rather
-  than an arbitrary huge constant — e.g. ~2.40 for the icosahedron (true
-  volume ~2.18) — so it gives real, well-scaled "pressure" without wildly
-  overshooting what the mesh could ever hold.
+  normally-unreachable target: the volume of the sphere with the mesh's
+  own total rest surface area (`_total_rest_area` -- exact per-face
+  regular-polygon area for a uniform `edge_length`, Heron's formula per
+  triangle for a per-edge dict, e.g. a subdivided mesh's mixed rest
+  lengths). Scaled to the mesh's own size rather than an arbitrary huge
+  constant — e.g. ~2.40 for the icosahedron (true volume ~2.18) — so it
+  gives real, well-scaled "pressure" without wildly overshooting what the
+  mesh could ever hold.
 - The residual term is `weight * (target - actual_volume)`: since target
   is never reached, minimizing this always has a gradient pushing volume
   up, for as long as the edge-length term lets it.
@@ -445,14 +447,12 @@ equilibrium.
   wherever its edges allow), so this only has a little polishing left to
   do.
 
-This target-based pressure term (`_residual`) is specific to this
-AUTOMATIC ramp, where a bounded target is exactly what lets it know when
-to stop without a human watching. `inflate_polyhedron_app`'s
-interactive "Inflate" button uses a DIFFERENT, target-free residual
-(`_relax_residual`, see "The app" below) for the opposite reason: once
-volume nears a fixed target, more pressure stops changing anything,
-which is backwards for a human turning a pressure dial and expecting
-"more pressure → more inflated".
+This pressure term (`_residual`) is a single GLOBAL target for the whole
+mesh, specific to this automatic ramp. `inflate_polyhedron_app`'s
+interactive "Inflate" button uses a DIFFERENT force entirely
+(`_relax_force`, see "The app" below): a real per-face pressure force
+with no target/volume at all, plus a soft per-edge stretch limit instead
+of a global ceiling.
 
 ### Orientation consistency (why this needed real iteration to get right)
 
@@ -464,9 +464,10 @@ the now-deleted rigid pipeline's own fold solver used to reject via
 rather than read directly off given geometry — see "Removed: the
 rigid-unfolding pipeline (historical)" above). `_orientation_signs`
 detects this cheaply: for each face, the sign of `dot(face_normal,
-face_centroid - mesh_centroid)`; a consistent embedding has every face
-agree (all +1 or all -1 — an arbitrary global mirror choice that doesn't
-matter either way), and `_is_orientation_consistent` just checks that.
+face_centroid - mesh_centroid)`; a properly embedded mesh has every face
+agree AND come out +1 (outward from the centroid) — `_is_orientation_consistent`
+checks both, not just mutual agreement, since an all-faces-agree-but-all-
+point-inward mesh (gone fully inside-out) would otherwise pass too.
 
 Getting this to actually help took three iterations, each falsified by a
 real counter-example before landing on the current design — worth knowing
@@ -643,18 +644,12 @@ the net picker and the "Subdivide" button:
    consistent answer.
 
 The "Pressure"/"Inflate" controls below work at ANY level, not just the
-final one -- `CONVERGENCE_GTOL` (see `stretchy_mesh.py`) is `1e-6`, looser
-than scipy's own `1e-8` default: on `data/input/stretchy_nets/three_squares.json`
-subdivided to level 1, the shape visibly settles (near-zero stretch,
-positions stop moving) within ~20-30 steps, but scipy's own `optimality`
-measure has a long, slowly-shrinking tail after that -- a stricter
-tolerance was tried first (on the theory that starting each level's relax
-from an already-good interpolated shape should make it cheap) and made
-that one mesh take ~3650 steps to formally "converge" for a shape that
-looked identical the whole time. `1e-6` costs nothing on meshes that
-don't have this slow tail (cube, dodecahedron, icosahedron,
-`two_pentagons_and_a_square` all converge at the same step count either
-way).
+final one -- `CONVERGENCE_GTOL` (see `stretchy_mesh.py`) is `1e-4`: some
+meshes visibly settle (near-zero stretch, positions stop moving) well
+before their worst vertex's net force actually crosses a strict
+tolerance, so this is deliberately looser than it might seem it needs to
+be rather than making those meshes take far more steps to formally
+"converge" for a shape that looked identical the whole time.
 
 - **Net picker**: defaults to `data/input/stretchy_nets/cube.json` if present
   (`DEFAULT_NET_BASENAME`), else the first net alphabetically.
@@ -676,175 +671,87 @@ way).
   - **"Pressure" spinner**: a user-chosen, CONSTANT pressure passed to
     `relax_once`, continuing from wherever `self.positions` currently is
     (not from scratch) -- so repeated clicks let the user watch/steer the
-    shape incrementally, rather than the app silently retrying different
-    random starts under the hood. Default/max: `DEFAULT_PRESSURE`/
-    `MAX_PRESSURE` (3.0/60.0) -- deliberately gentle so a first Inflate
-    click doesn't overshoot before the user gets to watch it settle
-    incrementally (see `stretchy_mesh._relax_residual` below for why
-    "the right amount of pressure" has no single natural value to anchor
-    a default to at all -- it also depends on the CURRENT subdivision
-    level now, not just which net is loaded, since `reference_volume` is
-    recomputed fresh on every Subdivide click).
-  - **`stretchy_mesh._relax_residual`: pressure has NO target volume,
-    unlike `_inflate`/`solve_wireframe`'s `_residual`, AND is PER FACE,
-    not one global term for the whole mesh.** These are two separate
-    design points, addressing two separate problems:
-    1. *No target*: `_residual`'s pressure term is `inflation_weight *
-       (inflation_target - volume)` -- a TWO-SIDED penalty, zero exactly
-       at a fixed, precomputed `_sphere_bound_volume` target, growing
-       whether volume over- or undershoots it. That's exactly right for
-       the automatic coarse-solve ramp (`INFLATION_WEIGHTS`), which needs
-       a bounded target to know when to stop on its own -- but it means
-       more pressure eventually does NOTHING: once volume is close to
-       that fixed ceiling, no amount of extra weight can ask for more
-       (verified on an earlier version of the default cube net: max
-       stretch plateaus at ~5.5% from pressure ~100 all the way past 300).
-       For a human dialing pressure by hand and expecting "more pressure
-       = more inflated", that's backwards. `relax_once` uses
-       `_relax_residual` instead: `pressure * exp(-v_f / reference_volume)`
-       per face `f` -- no target, shrinks toward (but never reaches) zero
-       as that face's own volume contribution grows, so there's always a
-       gradient rewarding more volume, with no ceiling.
-    2. *Per face, not one global term*: a single global
-       `pressure * exp(-total_volume)` residual (an earlier version of
-       this function) gives the optimizer a CHEAP way to satisfy it on a
-       mesh with many vertices/faces that doesn't involve genuinely
-       inflating at all -- fold one small local patch of the mesh through
-       itself. That fold spikes `_mesh_volume`'s naive divergence-theorem
-       sum (a self-intersecting surface can integrate to an arbitrarily
-       large SIGNED volume) while leaving nearly every edge, and every
-       OTHER face's own local geometry, completely untouched -- cheaper,
-       in a sum-of-squares sense, than genuinely stretching the whole
-       mesh a little. A coarse mesh (few faces, e.g. `cube.json`) has no
-       room for this: every vertex has too much leverage over too large a
-       fraction of the mesh's edges. A subdivided FINE mesh (hundreds of
-       small faces, e.g. `cube_res3.json`) is exactly where the cheat has
-       room to hide. Splitting the SAME formula into one residual PER
-       FACE closes the loophole: folding one face's own patch now only
-       reduces THAT face's own residual, while every other face's
-       residual still wants ITS OWN volume to increase -- so a local fold
-       is no longer numerically cheaper than genuine, mesh-wide expansion.
-       This also happens to match real pressure's physics more directly
-       than a global term ever did: the gradient of one face's own volume
-       contribution with respect to moving that face outward is
-       proportional to that face's own AREA (`dV/d(extrusion distance) =
-       surface area`), so this residual's local gradient is naturally a
-       force-per-area quantity -- much closer to what "pressure" means
-       physically than a single mesh-wide scalar ever was.
-    `exp`, not `1/v_f`, specifically to stay smooth and finite even for a
-    negative/near-zero volume (a tangled starting configuration) --
-    `_mesh_volume`'s docstring already flags a `1/distance`-style
-    singularity as exactly what this residual family needs to avoid.
-    `reference_volume` normalizes each face's `v_f` against that mesh's
-    OWN characteristic scale (a dodecahedron's faces individually enclose
-    much more volume at edge_length=1 than a cube's, so the SAME raw
-    pressure means very different things unnormalized) -- computed once
-    per net via `stretchy_mesh.per_face_volumes` on that net's own
-    starting shape (`_on_loaded`, stored as `self.reference_volume`, an
-    array with one entry per face) and reused for every subsequent
-    Inflate click on that net, so a given pressure value keeps meaning a
-    consistent thing across repeated clicks. **Getting an accurate read
-    on any of this requires the mesh's CORRECT, non-uniform per-edge rest
-    lengths** (`self.edge_length`, from `subdivide_mesh` -- see "Fabric
-    subdivision" above): testing this residual with a uniform
-    `edge_length=1.0` on a fine mesh (whose real rest lengths are much
-    shorter, e.g. ~0.24-0.33 on `cube_res3.json`) manufactures a huge,
-    unrelated built-in stretch demand that has nothing to do with the
-    pressure term at all, and is easy to mistake for a solver bug.
-    At sufficiently high pressure, the old diagonal-split n=4 subdivision
-    (see "Polygon subdivision demo" above) also showed a visible lopsided
-    bulge, traced to an asymmetric mesh valence at some of a cube's
-    corners -- fixed by switching SUBDIVISIONS[4] to a centroid fan (see
-    "Fabric subdivision" above), not by anything in this residual.
+    shape incrementally. Default/max: `DEFAULT_PRESSURE`/`MAX_PRESSURE`
+    (3.0/60.0) -- gentle by default; 60 is generous headroom above what a
+    plain cube needs to stay well-behaved (see below).
+  - **`stretchy_mesh._relax_force`**: a genuine mechanical force balance,
+    no volume or target anywhere in it -- each edge is a Hooke's-law
+    spring, each face applies a real `pressure * area * outward_normal`
+    force split across its own vertices, and each edge ALSO gets a soft
+    limit (`_soft_limit_stretch`) that sharply (quadratically) stiffens
+    it once stretched past 2x or compressed past 0.5x its own rest
+    length. The soft limit exists because plain Hooke's law alone can't
+    hold pressure past a critical value: pressure's push grows with
+    `area` (~length^2) while a plain spring's pull only grows linearly,
+    so without it there's a real pressure above which no equilibrium
+    exists at all and the mesh inflates without bound (verified directly:
+    a plain cube run to convergence diverges past a few million percent
+    stretch at pressure 3+ with no soft limit). `relax_once` walks small
+    EXPLICIT steps along this force (see below) rather than handing it to
+    a Newton-style solver, which matters for the same reason: a solver
+    that re-linearizes and jumps can land on a spurious equilibrium (a
+    doubled-size "solution", or a uniform implosion to near-zero volume
+    that never disagrees with itself) that a genuine small-step physical
+    walk starting from the same point would never reach.
   - **`stretchy_mesh.is_orientation_consistent`** (public wrapper around
-    `_is_orientation_consistent`) is used by `_run_inflate_stream` as a
-    cheap, general-purpose safety net on top of the per-face fix above:
-    after every chunk, if the result is no longer orientation-consistent,
+    `_is_orientation_consistent`) requires every face's normal to agree
+    AND point outward from the mesh's centroid -- not just agree with
+    each other, since a mesh gone fully inside-out is still internally
+    "consistent" by that weaker check alone. Used by `_run_inflate_stream`
+    as a safety net: after every chunk, if the result fails this check,
     it's REJECTED (positions not updated) and retried at half the chunk
     size; once a size is found to cause this, a `ceiling` permanently
     caps how far that Inflate click's chunk is ever allowed to grow back
     to again, so the loop can't oscillate forever between "too small to
     move anything" and "big enough to fold" -- it settles on some safe
-    operating size instead. If even a single-evaluation chunk fails this
-    check, inflation stops there and is reported to the user as unsafe at
-    this pressure, rather than looping forever or silently accepting a
+    operating size instead. If even a single-step chunk fails this check,
+    inflation stops there and is reported to the user as unsafe at this
+    pressure, rather than looping forever or silently accepting a
     corrupted result.
   - **Radio buttons** control how much work one "Inflate" click does:
-    "Iterate for N steps" passes `max_nfev=N` to `relax_once` (the
-    closest thing scipy's trust-region solver exposes to "N steps" --
-    there's no clean "run exactly N iterations" knob); "Iterate until
-    convergence" (the default) passes `max_nfev=None`, running to the
-    solver's own tolerance (`stretchy_mesh.CONVERGENCE_GTOL = 1e-6`,
-    passed explicitly to `least_squares` so it's a known, displayable
-    value rather than relying on scipy's own default staying put across
-    versions) -- picked as the default over "steps" since a large fine
-    mesh (e.g. `dodecahedron_res3.json`, 1446 variables) can need many
-    iterations before the shape looks settled, and there's no obvious
-    step COUNT a user would otherwise know to ask for up front.
+    "Iterate for N steps" passes `max_nfev=N` to `relax_once` (now
+    literally N explicit relaxation steps); "Iterate until convergence"
+    (the default) passes `max_nfev=None`, running until every vertex's
+    own net force drops below `stretchy_mesh.CONVERGENCE_GTOL = 1e-4` --
+    picked as the default over "steps" since a large fine mesh (e.g.
+    `dodecahedron_res3.json`, 1446 variables) can need many iterations
+    before the shape looks settled, and there's no obvious step COUNT a
+    user would otherwise know to ask for up front.
   - **Live progress, not one big jump**: `on_inflate_clicked` doesn't
     make ONE `relax_once` call for the whole request -- `_run_inflate_stream`
     calls it repeatedly in a GROWING sequence of chunks (`INFLATE_CHUNK_START
-    = 5`, doubling up to `INFLATE_CHUNK_MAX = 200`), pushing a "progress"
-    message (redraws + bumps the iteration counter) after every chunk.
-    Growing matters: each chunk is a fresh `least_squares` call with no
-    memory of the previous one's shrunk trust-region radius, so a FIXED
-    small chunk size can get stuck re-exploring the same neighborhood
-    forever without ever reaching real convergence, even after hundreds
-    of total steps. Starting small keeps early feedback frequent while
-    steps are cheap, then growing lets later chunks actually be large
-    enough to finish. How long a full "until convergence" run actually
-    takes varies enormously by mesh size and pressure -- a few seconds
-    for `cube_res3.json` (330 variables) at modest pressure, but each
-    individual chunk on `dodecahedron_res3.json` (1446 variables) at
-    pressure=30 was measured taking 30-90+ seconds on its own, since a
-    numerical-Jacobian evaluation's cost scales with variable count; the
-    live progress updates (and the Stop button) exist specifically so a
-    slow run like that stays visibly alive and interruptible rather than
-    looking hung.
+    = 5`, doubling up to `INFLATE_CHUNK_MAX = 200`), each continuing from
+    the previous chunk's own final positions, pushing a "progress" message
+    (redraws + bumps the iteration counter) after every chunk so the UI
+    updates incrementally instead of jumping straight to the end.
     `INFLATE_SAFETY_STEP_CAP = 5000` hard-stops "until convergence" mode
     if a mesh/pressure combination genuinely never reaches
     `CONVERGENCE_GTOL`, instead of looping forever.
   - **Won't re-run once converged**: `_update_inflate_button_state`
     greys out the Inflate button whenever `self.last_stats["converged"]`
     is true, and `on_inflate_clicked` refuses to run even if clicked
-    anyway. This isn't just cosmetic -- verified empirically that
-    re-running `relax_once` from an already-converged point can burn
-    real steps without moving anything (a fresh `least_squares` call has
-    no memory of how far the previous one's trust region had already
-    shrunk, so it doesn't just no-op, it can wander a while
-    re-discovering the same spot). Re-armed by `_on_pressure_changed` (a
-    `trace_add("write", ...)` on `pressure_var` -- a "converged" verdict
-    only applies to the pressure it was reached at) and by loading a new
-    net; a Stop leaves `converged=False` since it didn't run to
-    completion, so the button stays enabled after one.
+    anyway, since relax_once from an already-converged point starts with
+    near-zero force and has nothing left to do. Re-armed by
+    `_on_pressure_changed` (a `trace_add("write", ...)` on `pressure_var`
+    -- a "converged" verdict only applies to the pressure it was reached
+    at) and by loading a new net; a Stop leaves `converged=False` since it
+    didn't run to completion, so the button stays enabled after one.
   - **"Stop" button** sets a `threading.Event` (`self.stop_event`,
-    created fresh per Inflate click) that `relax_once`'s residual wrapper
-    checks on every evaluation, raising `stretchy_mesh.RelaxStopped`
-    internally to abort at the next evaluation rather than waiting for
-    scipy's own stopping criteria or the step cap -- returns whatever
-    position was last evaluated. Disabled except while an Inflate is
-    actually running (armed by `on_inflate_clicked`, disabled again by
+    created fresh per Inflate click) that `relax_once` checks before each
+    step, aborting before starting another one rather than waiting for
+    its own tolerance or the step cap -- returns whatever position was
+    last reached. Disabled except while an Inflate is actually running
+    (armed by `on_inflate_clicked`, disabled again by
     `_set_controls_enabled(True)` once any background job finishes --
     only `on_inflate_clicked` arms it, so it stays disabled during the
     initial cache load, which isn't usefully interruptible).
-  - `relax_once`'s reported step count is scipy's own `sol.nfev`, NOT the
-    residual wrapper's raw call count -- the wrapper counts every actual
-    invocation (including numerical-Jacobian perturbations), which can
-    run to hundreds or thousands past `max_nfev`'s nominal value before
-    scipy checks the cap again; `sol.nfev` is what keeps a "10 steps"
-    request corresponding to a reported step count near 10, not some much
-    larger multiple. The raw count is used as a fallback ONLY when a Stop
-    request aborts before scipy ever returns a result (no `sol` to read
-    `nfev` from in that case) -- and even then it's capped at that call's
-    own `max_nfev`, so a Stop can never look like it consumed more steps
-    than the chunk it interrupted actually asked for.
   - The bottom-of-figure annotation (`draw()`, via `fig.text` -- see
-    below) shows `optimality` (scipy's first-order optimality measure,
-    should approach 0) against `CONVERGENCE_GTOL`, plus whether THIS
-    press actually converged by scipy's own tolerance vs. hit the step
-    cap (or a Stop request) first -- `optimality` is `None`/shown as
-    "n/a" right after loading (before any Inflate press) or after a
-    Stop, since neither path has a real scipy result to read it from.
+    below) shows `optimality` (the worst vertex's net force, should
+    approach 0) against `CONVERGENCE_GTOL`, plus whether THIS press
+    actually converged by that tolerance vs. hit the step cap (or a Stop
+    request) first -- `optimality` is `None`/shown as "n/a" right after
+    loading (before any Inflate press) or after a Stop, since neither
+    path ran a real step to read it from.
 - **Performance**: after vectorizing `_mesh_volume`/`_per_face_volumes`/
   `_face_planarity_residual` (precomputed flat index arrays -- plus, for
   the per-face case, a `np.bincount` grouping -- instead of a per-face
@@ -975,11 +882,10 @@ rather than a raw random start -- on the small tetrahedron and cube
 (post-vectorization these are fast even at nonzero pressure; see "The
 app"'s measured ~0.04-0.05s/step on a 98-vertex mesh, so cost isn't the
 reason to keep tests small here anymore, just habit/consistency with the
-rest of the suite). Includes a check that pressure genuinely has no
-plateau (`test_relax_once_pressure_has_no_plateau_unlike_a_fixed_target`
--- strictly increasing stretch at pressure 1/5/20 on `cube.json`), the
-property `_relax_residual` exists specifically to have, unlike
-`_residual`'s target-based term.
+rest of the suite). Includes a check that pressure increases stretch over
+a normal working range
+(`test_relax_once_pressure_increases_stretch_over_a_normal_working_range`
+-- strictly increasing stretch at pressure 1/5/20 on `cube.json`).
 
 `unit/subdivisions/test_mesh_subdivide.py` covers the fabric-subdivision pipeline (see
 above): combinatorial closure of the fine mesh at several resolutions,

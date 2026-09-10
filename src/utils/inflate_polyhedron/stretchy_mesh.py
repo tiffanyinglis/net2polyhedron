@@ -60,25 +60,29 @@ Design notes (the "why" behind choices that would otherwise look
 arbitrary -- kept here rather than repeated across every function that
 touches them, per this project's docstring convention in skills.md):
 
-- **Per-face, target-free pressure in relax_once** (_relax_residual):
-  _residual's pressure term (`inflation_weight * (target - volume)`) is a
-  two-sided penalty that plateaus once volume nears its fixed target --
-  right for the automatic solve_wireframe ramp (which needs to know when
-  to stop), backwards for a human turning a pressure dial who expects
-  "more pressure = more inflated". relax_once instead uses ONE
-  `pressure * exp(-v_f / reference_volume)` term PER FACE, not a single
-  global term for the mesh: a single global term gives a many-faced mesh
-  a cheap way to "satisfy" it by folding one small patch through itself
-  (spiking the naive signed-volume sum) while leaving everything else
-  untouched -- verified to happen immediately on a 110-vertex subdivided
-  cube mesh even under a gradual ramp. Splitting it per face closes that
-  loophole (folding one face's patch only hurts that face's own
-  residual) and happens to match real pressure's physics better too
-  (dV/d(extrusion) = area, so this term's gradient is naturally a
-  force-per-area quantity). `reference_volume` (per_face_volumes on the
-  mesh's OWN starting shape) normalizes each face's volume against the
-  mesh's own scale, since raw volume differs by orders of magnitude
-  between e.g. a cube and a dodecahedron at the same edge length.
+- **relax_once is a genuine force balance, walked step by step -- no
+  volume anywhere** (_relax_force): each edge is a Hooke's-law spring;
+  each face applies a real outward force, `pressure * area * normal`,
+  split across its own vertices. Each call moves every vertex a small
+  step along its OWN net force (explicit relaxation), not a
+  least_squares solve: a Newton-style solver re-linearizes the whole
+  mesh and can jump straight past the physically-reachable equilibrium
+  to a distant, spurious one (verified directly -- a plain cube at
+  pressure=1 landed on a doubled-size, 99%-stretched "solution" in 5
+  solver evaluations; at pressure=3 on a subdivided cube it likewise
+  imploded to near-zero volume without any face ever flipping, since a
+  uniform implosion never disagrees with itself -- both are real zeros
+  of the same equations, just not the one a physical process starting
+  nearby would ever walk to). Explicit small steps can't teleport past
+  the reachable equilibrium the way a linearized jump can. Step size is
+  self-normalizing (STEP_MAX_FRACTION of the mesh's own rest edge
+  length, divided by the largest current force) so it adapts to
+  whatever pressure/mesh scale is in play without a fixed constant.
+  Direction vectors use _safe_unit_vectors (a fixed fallback at an exact
+  zero vector) instead of a naive division: without it, "every vertex
+  exactly coincident" is a real zero of the force (every edge and face
+  vanishes together) the relaxation could still land exactly on instead
+  of the intended shape.
 
 - **Ramping + accept-or-reject in _inflate**: applying full pressure
   cold, or from a random start, makes least_squares fail to converge at
@@ -115,7 +119,7 @@ EDGE_LENGTH = 1.0
 # inflation stage) -- stretchy_cache folds this into its cache key, so a
 # solver change invalidates every existing cache entry even though the
 # source .json files themselves haven't changed at all.
-ALGORITHM_VERSION = 5
+ALGORITHM_VERSION = 6
 
 
 def _face_edges(face):
@@ -235,6 +239,18 @@ def _per_face_volumes(pts, face_volume_group):
     return np.bincount(face_ids, weights=tetra_volumes, minlength=n_faces)
 
 
+def _face_index_groups(faces, idx):
+    """faces/idx: as elsewhere. Groups EVERY face's vertex indices by
+    side count (3..8) -- {n: array of shape (num_faces_with_n_sides, n)}
+    -- for vectorized per-face area/outward-normal computation (see
+    _relax_force). Includes triangles, unlike _planarity_groups."""
+    groups = {}
+    for face in faces:
+        n = len(face)
+        groups.setdefault(n, []).append([idx[v] for v in face])
+    return {n: np.array(rows, dtype=int) for n, rows in groups.items()}
+
+
 def _planarity_groups(faces, idx):
     """faces/idx: as above. Precomputed per-face-size index arrays for
     _face_planarity_residual: {n: array of shape (num_n_vertex_faces, n)}
@@ -280,20 +296,35 @@ def _mesh_volume(pts, volume_indices):
     return float(np.einsum('ij,ij->i', v0, np.cross(v1, v2)).sum() / 6.0)
 
 
+def _total_rest_area(faces, edge_length):
+    """Exact total REST surface area from the mesh's own rest edge
+    lengths: closed-form regular-polygon area for a uniform scalar
+    `edge_length`, else Heron's formula per triangle (every dict-keyed
+    mesh here is all-triangle) -- correct even with mixed rest lengths,
+    unlike assuming one (e.g. the smallest) edge length for every face."""
+    if not isinstance(edge_length, dict):
+        n_sum = sum((k / 4.0) / np.tan(np.pi / k) for k in (len(f) for f in faces))
+        return n_sum * edge_length ** 2
+    total = 0.0
+    for a, b, c in faces:
+        la, lb, lc = (edge_length[tuple(sorted(e))] for e in ((b, c), (a, c), (a, b)))
+        s = (la + lb + lc) / 2
+        total += max(0.0, s * (s - la) * (s - lb) * (s - lc)) ** 0.5
+    return total
+
+
 def _sphere_bound_volume(faces, edge_length):
-    """Volume of the sphere with the same total surface area as `faces`
-    (each assumed a regular polygon of `edge_length` sides) -- an
-    optimistic, normally-unreachable inflation target, scaled to the
-    mesh's own size. See module docstring's Design notes for how
-    _inflate uses this as its pressure target."""
-    total_area = sum((k / 4.0) / np.tan(np.pi / k) for k in (len(f) for f in faces))
-    total_area *= edge_length ** 2
+    """Volume of the sphere with the mesh's own total rest surface area
+    (see _total_rest_area) -- an optimistic, normally-unreachable
+    inflation target, scaled to the mesh's own size. See module
+    docstring's Design notes for how this is used as a pressure target."""
+    total_area = _total_rest_area(faces, edge_length)
     r = np.sqrt(total_area / (4 * np.pi))
     return (4 / 3) * np.pi * r ** 3
 
 
 def _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups):
-    """Shared residual pieces for _residual/_relax_residual: RELATIVE
+    """Shared residual pieces for _residual (relax_once uses _relax_force instead, see its docstring): RELATIVE
     edge-length error `(actual - rest) / rest` for every edge (always
     first, so callers can slice it out), plus an optional planarity term.
     `edge_length` may be a scalar or a per-edge array (see
@@ -309,7 +340,7 @@ def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_len
     """The automatic-ramp objective (_inflate/solve_wireframe): edge-length
     + planarity + a TARGET-based inflation pressure term (`inflation_weight
     * (inflation_target - volume)`, see module docstring). relax_once uses
-    _relax_residual instead, which has no target -- see its docstring."""
+    _relax_force instead, which has no target -- see its docstring."""
     pts = flat.reshape(-1, 3)
     parts = _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups)
     if inflation_weight:
@@ -318,19 +349,110 @@ def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_len
     return np.concatenate(parts)
 
 
-def _relax_residual(flat, edge_ai, edge_bi, face_volume_group, planarity_groups, edge_length,
-                     pressure=0.0, planarity_weight=0.0, reference_volume=1.0):
-    """relax_once's objective: edge-length + planarity plus a TARGET-FREE,
-    PER-FACE pressure term `pressure * exp(-v_f / reference_volume)` --
-    see module docstring's Design notes for why per-face and why no
-    target. `reference_volume` (scalar or per-face array) normalizes each
-    face's own volume against the mesh's characteristic scale."""
-    pts = flat.reshape(-1, 3)
-    parts = _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups)
+def _safe_unit_vectors(vecs):
+    """vecs: (M,3), possibly containing exact zero vectors. Returns unit
+    vectors: the true direction where resolvable, or a fixed (1,0,0)
+    fallback at an exact zero vector -- picking one fixed convention
+    there, rather than letting a naive `v/norm(v)` division silently
+    shrink toward the zero vector as `norm(v)` shrinks toward it, is what
+    keeps a genuinely-zero *force* from a magnitude that was never
+    actually zero (see module docstring's Design notes)."""
+    norms = np.linalg.norm(vecs, axis=1)
+    ok = norms > 1e-9
+    unit = np.zeros_like(vecs)
+    unit[ok] = vecs[ok] / norms[ok, None]
+    unit[~ok] = (1.0, 0.0, 0.0)
+    return unit
+
+
+# Ratio (current length / rest length) beyond which an edge starts
+# fighting back much harder than plain Hooke's law -- generous enough to
+# never engage during ordinary inflation, only once something is already
+# badly over- or under-stretched.
+SOFT_LIMIT_HI = 2.0
+SOFT_LIMIT_LO = 0.5
+
+# How hard the soft limit pushes back per unit of excess-past-the-bound,
+# SQUARED (see _soft_limit_stretch) -- squared specifically because plain
+# Hooke's law force only grows linearly with edge length, while outward
+# pressure grows QUADRATICALLY with it (pressure * area, and area grows
+# with length^2): past some pressure, no amount of ordinary spring
+# stiffness can ever catch up, and the mesh inflates without bound (see
+# module docstring's Design notes). A force growing quadratically in the
+# excess grows CUBICALLY in overall edge length for a badly-stretched
+# edge, which is fast enough to guarantee some finite equilibrium exists
+# no matter how high pressure is set, rather than just delaying the same
+# runaway to a higher pressure.
+SOFT_LIMIT_STIFFNESS = 50.0
+
+
+def _soft_limit_stretch(dist, edge_length):
+    """dist/edge_length: as in _relax_force. Returns (extra_stretch,
+    max_excess): extra_stretch is added on top of plain Hooke's-law
+    stretch -- zero inside [SOFT_LIMIT_LO, SOFT_LIMIT_HI] x rest length,
+    growing with the SQUARE of how far outside it the edge is (see
+    SOFT_LIMIT_STIFFNESS for why squared), signed the same way plain
+    stretch already is (positive = pull together, negative = push
+    apart). max_excess (0 if none engaged) lets relax_once pick a safe
+    step size only once this term actually matters (see
+    STEP_MAX_MULTIPLIER_STIFF)."""
+    ratio = dist / edge_length
+    excess_hi = np.maximum(0.0, ratio - SOFT_LIMIT_HI)
+    excess_lo = np.maximum(0.0, SOFT_LIMIT_LO - ratio)
+    max_excess = float(np.max(excess_hi + excess_lo)) if len(ratio) else 0.0
+    return SOFT_LIMIT_STIFFNESS * (excess_hi ** 2 - excess_lo ** 2), max_excess
+
+
+def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_length,
+                  pressure=0.0, planarity_weight=0.0):
+    """relax_once's per-step force: a genuine mechanical force balance.
+    Each edge is a Hooke's-law spring (relative stretch (dist-rest)/rest
+    along the edge direction) PLUS a soft limit (see _soft_limit_stretch)
+    that sharply stiffens an edge stretched past SOFT_LIMIT_HI or
+    compressed past SOFT_LIMIT_LO of its own rest length; each face
+    applies a real outward pressure force, `pressure * area *
+    outward_normal` -- area and normal computed together straight from
+    its own vertex loop via `0.5 * sum_i cross(p_i, p_{i+1})` (Newell's
+    method) -- split evenly across its own vertices; each 4+-gon face
+    also pulls its own vertices a little towards its best-fit plane (see
+    _face_planarity_residual -- same SVD normal, used here as a
+    restoring direction instead of a scalar residual). Returns
+    ((N,3) net force on every vertex, max_excess) -- relax_once walks a
+    small step along the force (see module docstring's Design notes for
+    why edge directions need _safe_unit_vectors rather than a naive
+    division) and uses max_excess to pick how small a step is safe (see
+    STEP_MAX_MULTIPLIER_STIFF)."""
+    n = pts.shape[0]
+    force = np.zeros((n, 3))
+
+    diff = pts[edge_bi] - pts[edge_ai]
+    dist = np.linalg.norm(diff, axis=1)
+    direction = _safe_unit_vectors(diff)
+    soft_limit_stretch, max_excess = _soft_limit_stretch(dist, edge_length)
+    stretch = (dist - edge_length) / edge_length + soft_limit_stretch
+    spring_on_a = stretch[:, None] * direction
+    np.add.at(force, edge_ai, spring_on_a)
+    np.add.at(force, edge_bi, -spring_on_a)
+
     if pressure:
-        face_volumes = _per_face_volumes(pts, face_volume_group)
-        parts.insert(1, pressure * np.exp(-face_volumes / reference_volume))
-    return np.concatenate(parts)
+        for n_sides, group_idx in all_face_groups.items():
+            face_pts = pts[group_idx]                                   # (F, n_sides, 3)
+            next_pts = np.roll(face_pts, -1, axis=1)
+            area_vector = 0.5 * np.cross(face_pts, next_pts).sum(axis=1)  # (F, 3): area * outward normal
+            per_vertex_force = pressure * area_vector / n_sides
+            np.add.at(force, group_idx.ravel(),
+                      np.repeat(per_vertex_force, n_sides, axis=0))
+
+    if planarity_weight and planarity_groups:
+        for group_idx in planarity_groups.values():
+            face_pts = pts[group_idx]  # (F, n, 3)
+            centered = face_pts - face_pts.mean(axis=1, keepdims=True)
+            normals = np.linalg.svd(centered, full_matrices=False)[2][:, -1, :]  # (F, 3)
+            signed_dist = np.einsum('fij,fj->fi', centered, normals)  # (F, n)
+            pull = -planarity_weight * signed_dist[..., None] * normals[:, None, :]  # (F, n, 3)
+            np.add.at(force, group_idx.ravel(), pull.reshape(-1, 3))
+
+    return force, max_excess
 
 
 def _orientation_signs(pts, faces, idx):
@@ -356,9 +478,11 @@ def _orientation_signs(pts, faces, idx):
 
 def _is_orientation_consistent(pts, faces, idx):
     """True iff every face's normal sign (see _orientation_signs) agrees
-    (ignoring degenerate 0s) -- i.e. the mesh hasn't folded through
-    itself anywhere."""
-    return len({s for s in _orientation_signs(pts, faces, idx) if s != 0}) <= 1
+    AND points outward (+1) -- i.e. the mesh hasn't folded through
+    itself, and hasn't turned inside-out either (all faces agreeing on
+    -1 is still a single self-consistent sign, but the wrong one)."""
+    signs = {s for s in _orientation_signs(pts, faces, idx) if s != 0}
+    return signs <= {1.0}
 
 
 def _min_pairwise_separation(pts):
@@ -398,7 +522,7 @@ PLANARITY_WEIGHT = 0.1
 
 def _edge_stretch(residual, n_edges):
     """The max |edge-length error| among the first n_edges entries of a
-    _residual/_relax_residual result."""
+    _residual result."""
     return np.max(np.abs(residual[:n_edges])) if n_edges else 0.0
 
 
@@ -555,14 +679,14 @@ def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATE
 def _edge_setup(faces, edge_length):
     """faces/edge_length: as solve_wireframe. Shared setup for relax_once:
     vertex/edge index arrays plus the precomputed structures
-    _relax_residual needs (built once here, not per call). Returns
-    (vertex_ids, idx, edges, edge_ai, edge_bi, face_volume_group,
+    _relax_force needs (built once here, not per call). Returns
+    (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups,
     planarity_groups, length_arr, scale)."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(faces)
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
-    face_volume_group = _face_volume_group(faces, idx)
+    all_face_groups = _face_index_groups(faces, idx)
     planarity_groups = _planarity_groups(faces, idx)
     if isinstance(edge_length, dict):
         length_arr = np.array([edge_length[e] for e in edges])
@@ -570,7 +694,7 @@ def _edge_setup(faces, edge_length):
     else:
         length_arr = edge_length
         scale = float(edge_length)
-    return (vertex_ids, idx, edges, edge_ai, edge_bi, face_volume_group, planarity_groups,
+    return (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups,
             length_arr, scale)
 
 
@@ -584,45 +708,59 @@ def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
     return positions, float(np.max(np.abs(stretch_pct))), float(np.sqrt(np.mean(stretch_pct ** 2)))
 
 
-# Passed explicitly (rather than relying on scipy's own default of 1e-8)
-# so relax_once's caller can always know and display the exact tolerance
-# an `optimality` value is being compared against.
+# relax_once's convergence check: a step counts as "at rest" once every
+# vertex's own net force drops below this. Compared directly against the
+# force computed by _relax_force -- unlike the old scipy `optimality`
+# measure, this is just "how far from equilibrium is the worst vertex",
+# so it's meaningful on its own rather than needing scipy's internals to
+# interpret.
+CONVERGENCE_GTOL = 1e-4
+
+# Explicit relaxation step size: the vertex with the largest net force
+# moves this fraction of the mesh's own rest edge length in one
+# iteration; every other vertex moves proportionally less (force is
+# normalized by its own max each step). Keeps steps small and stable
+# (a real physical walk, not a linearized jump that can overshoot the
+# reachable equilibrium -- see module docstring's Design notes) while
+# adapting automatically to whatever pressure or mesh scale is in play.
+STEP_MAX_FRACTION = 0.2
+
+# The `.../max_force` half of STEP_MAX_FRACTION's step is only meant to
+# shrink the step when force is LARGE (about to overshoot); left alone it
+# also GROWS the step without bound as force shrinks near equilibrium,
+# which stalls convergence (verified: pressure=1 on a plain cube ran the
+# full MAX_UNBOUNDED_STEPS without ever settling below gtol, oscillating
+# rather than damping down). Capping the per-step multiplier keeps this
+# from an undamped-oscillator's back-and-forth.
 #
-# Loosened to 1e-6 after a specific counter-example (data/input/stretchy_nets/
-# three_squares.json, subdivided to level 1) showed a stricter tolerance
-# backfiring: the shape visibly settles (max_stretch_pct essentially 0,
-# positions stop moving at all) within ~20-30 steps, but scipy's own
-# `optimality` measure has a long, slowly-shrinking tail after that --
-# tightening this from an earlier 1e-8 to 1e-10 (on the theory that the
-# app's level-by-level workflow starts each relax from an already-good
-# shape, so a stricter tolerance should be cheap to reach) made that one
-# mesh take ~3650 steps to formally "converge" instead of ~115, for a
-# shape that looked identical the whole time -- a regression, not an
-# improvement, for exactly the "converges faster" goal the change was
-# meant to serve. Verified this loosening doesn't cost anything on meshes
-# where it isn't needed (cube, dodecahedron, icosahedron,
-# two_pentagons_and_a_square all converge at the SAME step count and
-# stretch under 1e-6 as under 1e-8) -- it's specifically the slow-tail
-# cases where 1e-6 helps.
-CONVERGENCE_GTOL = 1e-6
+# Two tiers, not one: a large force doesn't mean a large SAFE step once
+# SOFT_LIMIT_STIFFNESS's much steeper near-the-limit force is involved
+# (force changes fast with position right there), so that regime needs a
+# much smaller cap (_STIFF) -- verified 0.1/0.02/0.005 each oscillate
+# forever at high pressure (60) on a plain cube, while 0.001 converges
+# there (88 steps), agreeing with 0.0005 on the same final shape (a real
+# fixed point, not step noise). But applying _STIFF everywhere makes
+# ordinary low-pressure inflation (which never nears the soft limit)
+# take ~100x more steps than it needs -- verified pressure=1 on a plain
+# cube didn't even finish 100,000 steps under a flat 0.001, having
+# converged in ~1,300 under 0.1 when nothing was clamped. relax_once
+# switches to _STIFF only on a step where _relax_force reports the soft
+# limit actually engaged (max_excess > 0), so ordinary inflation keeps
+# the fast, generous step size.
+STEP_MAX_MULTIPLIER_BASE = 0.1
+STEP_MAX_MULTIPLIER_STIFF = 0.001
 
-# Status codes least_squares returns when it stopped because ITS OWN
-# tolerance (gtol/ftol/xtol) was satisfied, as opposed to exhausting
-# max_nfev (0) or a Stop request cutting it off early.
-_CONVERGED_STATUSES = (1, 2, 3, 4)
-
-
-class RelaxStopped(Exception):
-    """Raised internally by relax_once's residual wrapper when the given
-    stop_event is set -- never escapes relax_once itself."""
+# Hard cap on iterations when max_nfev=None (run-to-convergence): explicit
+# steps have no scipy-style internal budget of their own, so this stands
+# in for one.
+MAX_UNBOUNDED_STEPS = 200_000
 
 
 def mesh_volume(positions, faces):
     """positions: {vertex_id: [x,y,z]}; faces: vertex-id loops. Returns
     the mesh's current total enclosed volume (see _mesh_volume), for
     callers that don't want to build the private index-array structures
-    themselves. Use per_face_volumes instead for relax_once's
-    `reference_volume` (its pressure term is per-face, not a single total)."""
+    themselves."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     pts = np.array([positions[v] for v in vertex_ids])
@@ -631,9 +769,8 @@ def mesh_volume(positions, faces):
 
 def per_face_volumes(positions, faces):
     """positions: {vertex_id: [x,y,z]}; faces: vertex-id loops. Returns
-    each face's own volume contribution (see _per_face_volumes) -- pass
-    this on the mesh's own STARTING shape (once per net) to get the
-    `reference_volume` array relax_once's pressure term needs."""
+    each face's own volume contribution (see _per_face_volumes) -- a
+    general per-face-geometry utility."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     pts = np.array([positions[v] for v in vertex_ids])
@@ -655,69 +792,49 @@ def is_orientation_consistent(positions, faces):
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL, reference_volume=1.0):
+                gtol=CONVERGENCE_GTOL):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
     as solve_wireframe. Runs ONE relaxation pass at a fixed `pressure` --
-    no automatic ramp, no random restarts (that's _inflate/solve_wireframe's
-    job); the caller picks the pressure and how much work to do, and can
-    call this again with the result to keep steering it. Uses
-    _relax_residual (target-free, per-face pressure -- see module
-    docstring's Design notes), NOT _residual.
+    no automatic ramp, no random restarts (that's solve_wireframe's job);
+    call again with the result to keep steering it. Each iteration moves
+    every vertex a small step along its own net force from _relax_force
+    (see module docstring's Design notes for why this walks explicitly
+    rather than handing the force balance to a Newton-style solver) --
+    `pressure` is a real per-face outward force, with no volume or
+    remembered state anywhere in it.
 
-    `reference_volume` should be computed ONCE per net (via
-    per_face_volumes on its starting shape) and reused across calls, so a
-    given pressure keeps meaning the same thing across repeated clicks --
-    recomputing it from the evolving mesh would drag the target along
-    with the user's own pressure dial.
+    `max_nfev` caps the number of steps; None runs until every vertex's
+    force drops below `gtol` (capped at MAX_UNBOUNDED_STEPS as a runaway
+    guard). `stop_event` (a threading.Event), if given, is checked before
+    each step and aborts at the next one, returning whatever position was
+    last reached.
 
-    `max_nfev` caps solver evaluations, used as a practical stand-in for
-    "how many steps" (scipy's trust-region solvers expose no cleaner
-    "N iterations" knob); None runs to `gtol` instead. `stop_event`
-    (a threading.Event), if given, is checked every evaluation and aborts
-    at the next one, returning whatever position was last evaluated.
-
-    Returns (new_positions, nfev, max_stretch_pct, rms_stretch_pct,
-    optimality, converged). `optimality` is scipy's first-order optimality
-    measure (compare against `gtol`), None if stopped before scipy
-    returned a result. `converged` is True only if scipy's own tolerance
-    (not the step cap or a stop request) is what stopped it."""
-    vertex_ids, idx, edges, edge_ai, edge_bi, face_volume_group, planarity_groups, length_arr, _ = \
+    Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
+    max_force, converged). `max_force` is the worst vertex's net force at
+    the returned position (compare against `gtol`), None if stopped
+    before a single step ran. `converged` is True only if `gtol` (not the
+    step cap or a stop request) is what stopped it."""
+    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
-    x0 = np.array([positions[v] for v in vertex_ids]).flatten()
+    pts = np.array([positions[v] for v in vertex_ids], dtype=float)
+    step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
 
-    last_x = [x0]
-    raw_calls = [0]
-
-    def wrapped_residual(x, *args):
-        raw_calls[0] += 1
-        last_x[0] = x
+    steps_taken = 0
+    converged = False
+    max_force = None
+    for steps_taken in range(1, step_cap + 1):
         if stop_event is not None and stop_event.is_set():
-            raise RelaxStopped()
-        return _relax_residual(x, *args)
-
-    try:
-        sol = least_squares(wrapped_residual, x0,
-                             args=(edge_ai, edge_bi, face_volume_group, planarity_groups, length_arr,
-                                   pressure, planarity_weight, reference_volume),
-                             max_nfev=max_nfev, gtol=gtol)
-        pts = sol.x.reshape(-1, 3)
-        # scipy's own nfev -- NOT wrapped_residual's raw call count, which
-        # can run well past max_nfev's nominal value before scipy checks
-        # the cap again (e.g. mid Jacobian estimate): using sol.nfev here
-        # keeps a "N steps" request corresponding to roughly N reported
-        # steps.
-        reported_nfev = sol.nfev
-        optimality = float(sol.optimality)
-        converged = sol.status in _CONVERGED_STATUSES
-    except RelaxStopped:
-        # scipy never returned, so there's no sol.nfev -- fall back to the
-        # wrapper's own raw call count, capped at max_nfev (the caller's
-        # declared step budget) so a Stop doesn't look like it consumed
-        # far more "steps" than the caller actually asked for.
-        pts = last_x[0].reshape(-1, 3)
-        reported_nfev = min(raw_calls[0], max_nfev) if max_nfev is not None else raw_calls[0]
-        optimality = None
-        converged = False
+            steps_taken -= 1
+            break
+        force, max_excess = _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
+                                          length_arr, pressure, planarity_weight)
+        max_force = float(np.linalg.norm(force, axis=1).max())
+        if max_force < gtol:
+            converged = True
+            break
+        step_mult = STEP_MAX_MULTIPLIER_STIFF if max_excess > 0 else STEP_MAX_MULTIPLIER_BASE
+        dt = min(step_mult, STEP_MAX_FRACTION * scale / max_force)
+        pts = pts + dt * force
 
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
-    return new_positions, reported_nfev, max_stretch, rms_stretch, optimality, converged
+    return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged

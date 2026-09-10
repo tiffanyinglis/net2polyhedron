@@ -14,6 +14,7 @@ from utils.inflate_polyhedron.stretchy_mesh import (
     relax_once, EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
 )
 from utils.geometry.polyhedron import Polyhedron
+from utils.inflate_polyhedron.mesh_levels import subdivide_once
 
 PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json"
 
@@ -183,6 +184,32 @@ def test_sphere_bound_volume_is_an_optimistic_but_well_scaled_target(name, sides
     true_volume = TRUE_VOLUME[name]
     assert bound > true_volume  # optimistic: never actually reachable
     assert bound < 3 * true_volume  # but well-scaled, not some huge arbitrary constant
+
+
+def test_sphere_bound_volume_unchanged_by_subdividing():
+    # Subdividing splits flat faces into smaller flat pieces -- same total
+    # area, so the isoperimetric target must match too. A regression test
+    # for a real bug: using a per-edge dict's SMALLEST rest length as a
+    # stand-in scalar underestimated total area, giving relax_once's
+    # pressure term almost nothing left to push toward on an
+    # already-inflated, freshly-subdivided mesh.
+    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
+    positions, _ = solve_wireframe(faces, seed=0)
+    target0 = _sphere_bound_volume(faces, EDGE_LENGTH)
+    faces1, _, edge_length1, _ = subdivide_once(
+        faces, positions, EDGE_LENGTH, list(range(len(faces))), level=0)
+    target1 = _sphere_bound_volume(faces1, edge_length1)
+    assert target1 == pytest.approx(target0)
+
+
+def test_relax_once_pressure_still_inflates_a_subdivided_mesh():
+    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
+    positions, _ = solve_wireframe(faces, seed=0)
+    faces1, positions1, edge_length1, _ = subdivide_once(
+        faces, positions, EDGE_LENGTH, list(range(len(faces))), level=0)
+    _, _, low_stretch, _, _, _ = relax_once(positions1, faces1, edge_length1, pressure=1.0)
+    _, _, high_stretch, _, _, _ = relax_once(positions1, faces1, edge_length1, pressure=100.0)
+    assert high_stretch > low_stretch + 1.0  # meaningfully more, not stuck near zero
 
 
 # ---- solve_wireframe: edges stretch a bounded amount, never collapse/flatten ----
@@ -408,55 +435,45 @@ def test_relax_once_max_nfev_caps_reported_steps():
 def test_relax_once_stop_event_aborts_and_reports_not_converged():
     positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     stop_event = threading.Event()
-    stop_event.set()  # already set: should abort at the very first evaluation
-    new_positions, nfev, _, _, optimality, converged = relax_once(
+    stop_event.set()  # already set: should abort before even the first step
+    new_positions, nfev, _, _, max_force, converged = relax_once(
         positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=3.0, stop_event=stop_event)
     assert set(new_positions) == set(positions)
-    assert nfev >= 1
-    assert optimality is None
+    assert nfev == 0  # no step actually ran
+    assert max_force is None
     assert not converged
 
 
 def test_relax_once_stop_event_reported_nfev_is_capped_by_max_nfev():
-    # A Stop mid-call has no scipy sol.nfev to report, so it falls back to
-    # the residual wrapper's raw call count -- which counts every
-    # numerical-Jacobian perturbation, not just "steps", and can run well
-    # past whatever max_nfev the caller declared (see _relax_residual's
-    # docstring). Reported nfev must never exceed that declared budget,
-    # so a caller tracking cumulative "steps" (e.g.
-    # inflate_polyhedron_app's iteration counter) doesn't see a
-    # stopped call's cost look bigger than the caller's own request.
+    # Each relax_once iteration checks stop_event BEFORE computing that
+    # step's force, so a Stop raised from inside one step's own force
+    # calculation still lets that step complete, but the NEXT iteration's
+    # check aborts before another one starts -- reported steps should be
+    # exactly the number that actually completed, never more than max_nfev.
     positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
     stop_event = threading.Event()
 
     calls = [0]
-    real_wrapped = stretchy_mesh._relax_residual
+    real_force = stretchy_mesh._relax_force
 
-    def counting_residual(*args, **kwargs):
+    def counting_force(*args, **kwargs):
         calls[0] += 1
-        if calls[0] == 2:  # let the raw call count exceed max_nfev before stopping
-            stop_event.set()
-        return real_wrapped(*args, **kwargs)
+        stop_event.set()  # stop after this step's force is computed
+        return real_force(*args, **kwargs)
 
     import unittest.mock
-    with unittest.mock.patch.object(stretchy_mesh, "_relax_residual", counting_residual):
-        _, nfev, _, _, optimality, converged = relax_once(
+    with unittest.mock.patch.object(stretchy_mesh, "_relax_force", counting_force):
+        _, nfev, _, _, max_force, converged = relax_once(
             positions, TETRAHEDRON_FACES, EDGE_LENGTH,
             pressure=3.0, max_nfev=1, stop_event=stop_event)
-    assert nfev <= 1
+    assert nfev == 1
     assert not converged
 
 
-def test_relax_once_pressure_has_no_plateau_unlike_a_fixed_target():
-    # relax_once uses _relax_residual (pressure * exp(-volume)), not
-    # _residual's target-based `pressure * (target - volume)` -- the
-    # whole point being that genuinely higher pressure keeps demanding
-    # genuinely more stretch, rather than converging toward the same
-    # fixed ceiling harder once volume gets close to a precomputed
-    # target (verified manually on a subdivided cube: max stretch
-    # plateaus around 5.5% from pressure ~100 all the way past 300 with
-    # the target-based formula). Confirm that monotonic relationship
-    # holds here too, on a small/fast net.
+def test_relax_once_pressure_increases_stretch_over_a_normal_working_range():
+    # relax_once's spring+pressure force balance (see module docstring's
+    # Design notes) genuinely stretches more as pressure grows, over the
+    # range the app's pressure spinner actually offers.
     faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
     positions, _ = solve_wireframe(faces, seed=0)
     stretches = []
@@ -495,55 +512,32 @@ def test_is_orientation_consistent_public_wrapper_matches_private_helper():
 # ---- per-face pressure (the fix for a fine mesh's "cheap local fold" exploit) ----
 
 def test_relax_once_per_face_pressure_stays_orientation_consistent_on_a_fine_mesh():
-    # Before _relax_residual switched to a PER-FACE pressure term, a
-    # single GLOBAL `pressure * exp(-total_volume)` residual gave the
-    # optimizer a cheap way to satisfy it on a mesh with many
-    # vertices/faces without genuinely inflating at all: fold one small
-    # local patch through itself, which spikes the naive divergence-
-    # theorem volume sum while leaving nearly every edge (and every OTHER
-    # face) untouched. A coarse mesh (few faces, tested above on
-    # data/input/stretchy_nets/cube.json) has no room for that cheat -- every vertex
-    # has too much leverage over too large a fraction of the mesh's
-    # edges. A subdivided FINE mesh (many small faces) is exactly where
-    # the cheat has room to hide, so that's what this test exercises:
-    # a resolution-2 tetrahedron subdivision (16 small triangles),
-    # solved and draped via solve_fabric_mesh (giving it the CORRECT,
-    # non-uniform per-edge rest lengths a fine mesh actually needs --
-    # see mesh_subdivide.py's docstring), then relaxed under real
-    # pressure. If the per-face fix works, every face keeps agreeing on
-    # which way is outward at every step, even as the mesh visibly
-    # inflates (positive, growing stretch) -- no self-intersecting fold.
+    # A single GLOBAL pressure term gives the optimizer a cheap way to
+    # satisfy it on a mesh with many vertices/faces without genuinely
+    # inflating at all: fold one small local patch through itself, which
+    # spikes the naive divergence-theorem volume sum while leaving nearly
+    # every edge (and every OTHER face) untouched. A coarse mesh (few
+    # faces, tested above on data/input/stretchy_nets/cube.json) has no
+    # room for that cheat -- every vertex has too much leverage over too
+    # large a fraction of the mesh's edges. A subdivided FINE mesh (many
+    # small faces) is exactly where the cheat has room to hide, so that's
+    # what this test exercises: a resolution-2 tetrahedron subdivision
+    # (16 small triangles), solved and draped via solve_fabric_mesh
+    # (giving it the CORRECT, non-uniform per-edge rest lengths a fine
+    # mesh actually needs -- see mesh_subdivide.py's docstring), then
+    # relaxed under real pressure. If the per-face fix works, every face
+    # keeps agreeing on which way is outward at every step, even as the
+    # mesh visibly inflates (positive, growing stretch) -- no
+    # self-intersecting fold.
     fine_faces, _, positions, _ = solve_fabric_mesh(TETRAHEDRON_FACES, resolution=2, seed=0)
     from utils.subdivisions.mesh_subdivide import subdivide_mesh
     _, _, edge_length, _ = subdivide_mesh(TETRAHEDRON_FACES, resolution=2)
-    reference_volume = per_face_volumes(positions, fine_faces)
 
     pos = positions
     prev_stretch = -1.0
     for pressure in (1.0, 5.0, 15.0):
         pos, _, max_stretch, _, _, converged = relax_once(
-            pos, fine_faces, edge_length, pressure=pressure, reference_volume=reference_volume)
+            pos, fine_faces, edge_length, pressure=pressure)
         assert is_orientation_consistent(pos, fine_faces)
         assert max_stretch > prev_stretch  # genuinely more pressure keeps demanding more stretch
         prev_stretch = max_stretch
-
-
-def test_relax_once_reference_volume_accepts_a_scalar_or_a_per_face_array():
-    # A scalar broadcasts against every face (the original, still-default
-    # behavior several other tests rely on); an array with one entry per
-    # face (the new, mesh-size-aware normalization -- see
-    # _relax_residual's docstring) must work identically well. Same
-    # small/fast coarse net as the plateau test above, just checking the
-    # two call styles don't raise and both produce a sane, positive
-    # stretch increase.
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
-    positions, _ = solve_wireframe(faces, seed=0)
-
-    _, _, scalar_stretch, _, _, _ = relax_once(
-        positions, faces, EDGE_LENGTH, pressure=5.0, reference_volume=1.0)
-    per_face_ref = mesh_volume(positions, faces) / len(faces)
-    _, _, array_stretch, _, _, _ = relax_once(
-        positions, faces, EDGE_LENGTH, pressure=5.0,
-        reference_volume=np.full(len(faces), per_face_ref))
-    assert scalar_stretch > 0
-    assert array_stretch > 0

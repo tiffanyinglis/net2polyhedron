@@ -55,17 +55,15 @@ itself still work for anyone who wants one.
    relaxation pass (stretchy_mesh.relax_once) at a user-chosen, constant
    inflation pressure, continuing from wherever the mesh currently is --
    so repeated clicks let you watch/steer the shape settle incrementally.
-   This pressure has NO target to converge to -- genuinely more pressure
-   asks for genuinely more stretch, with no built-in ceiling (see
-   stretchy_mesh._relax_residual's docstring).
+   relax_once walks small explicit steps along a genuine spring-vs-pressure
+   force (see stretchy_mesh's Design notes) -- no volume or remembered
+   state anywhere in it, so it can't compound across a Subdivide.
    - The radio buttons control how much work each "Inflate" click does:
-     either a capped number of solver steps (relax_once's `max_nfev`, the
-     closest thing scipy's trust-region solver exposes to "N steps" --
-     there's no cleaner "run exactly N iterations" knob), or an uncapped
-     run to the solver's own convergence tolerance (CONVERGENCE_GTOL --
-     see stretchy_mesh.py's own comment: some meshes visibly settle long
-     before scipy's own optimality measure satisfies a strict tolerance,
-     so this is deliberately looser than it might seem it needs to be).
+     either a capped number of relax_once steps (`max_nfev`, literally N
+     iterations now), or an uncapped run to relax_once's own convergence
+     tolerance (CONVERGENCE_GTOL -- some meshes have a long, slow-shrinking
+     tail after the shape has visibly settled, so this is deliberately
+     looser than it might seem it needs to be).
    - "Save" writes the current vertex positions (plus iteration count,
      pressure, and stretch stats) and a PNG of the current view to
      data/output/Save/, both named from the source net's filename plus a
@@ -76,9 +74,10 @@ itself still work for anyone who wants one.
    so it always counts from when that level's mesh was first created, not
    carried over from a coarser level), the stretch stats at whatever point
    it's currently at, and the actual stopping-condition numbers --
-   relax_once's own `optimality` against the fixed CONVERGENCE_GTOL
-   threshold it's compared to -- updated live while Inflate runs and
-   finalized (Converged/Stopped/Step cap reached) once it stops.
+   relax_once's own `max_force` (the worst vertex's net force) against the
+   fixed CONVERGENCE_GTOL threshold it's compared to -- updated live while
+   Inflate runs and finalized (Converged/Stopped/Step cap reached) once it
+   stops.
 """
 import sys
 from pathlib import Path
@@ -110,7 +109,7 @@ from common.paths import STRETCHY_NETS_DIR, SAVE_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 from ui.cullable_face import _CullableFace
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, solve_wireframe, relax_once, per_face_volumes, is_orientation_consistent,
+    load_stretchy_mesh, solve_wireframe, relax_once, is_orientation_consistent,
     mesh_to_polyhedron, mesh_edges, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from utils.inflate_polyhedron.stretchy_cache import load_with_cache, is_cached, cache_path_for
@@ -137,17 +136,13 @@ STARTING_LEVEL = 1
 SUBDIVISION_EDGE_ALPHA = 0.35
 SUBDIVISION_EDGE_WIDTH = 0.5
 
-# Pressure spinner bounds: relax_once's pressure has no fixed target to
-# converge to (see stretchy_mesh._relax_residual's docstring -- it uses a
-# PER-FACE `pressure * exp(-v_f / reference_volume)`, not _inflate's
-# target-based term), so unlike an automatic ramp's weights, there's no
-# natural "final" value to anchor the default to -- and the "right" amount
-# of pressure now also depends on the current subdivision level (see
-# mesh_levels.py), not just which net is loaded, since a finer mesh's
-# reference_volume is recomputed fresh on every Subdivide click. Kept
-# deliberately gentle (per explicit request) so a first Inflate click
-# doesn't overshoot before the user has a chance to watch it settle
-# incrementally; MAX_PRESSURE=60 is slider headroom, not a "sane" ceiling.
+# Pressure spinner bounds: relax_once's spring-vs-pressure force keeps a
+# real (if increasingly stretched) equilibrium up through at least 60 on
+# every net tried, thanks to stretchy_mesh's soft edge-length limit (see
+# its Design notes) -- past that, ordinary Hooke's-law inflation alone
+# stops being a meaningful "gentle" pressure. DEFAULT_PRESSURE stays
+# gentle so a first click doesn't overshoot; MAX_PRESSURE=60 is generous
+# headroom above that.
 DEFAULT_PRESSURE = 3.0
 MAX_PRESSURE = 60.0
 PRESSURE_INCREMENT = 0.5
@@ -157,17 +152,8 @@ DEFAULT_STEPS = 10
 # on_inflate_clicked runs relax_once in a growing sequence of chunks
 # (5, 10, 20, ...) instead of one big max_nfev call, so the iteration
 # counter/plot update incrementally instead of jumping straight from the
-# start count to the end one. Doubling (rather than a small fixed chunk)
-# matters: relax_once's residual wrapper checked, EACH chunk is a fresh
-# least_squares call with no memory of the previous one's shrunk
-# trust-region radius, so a chunk size that's too small (measured: 1-5 on
-# a 330-variable mesh) can get stuck re-exploring the same neighborhood
-# forever without ever reaching real convergence, even after hundreds of
-# total steps. Starting small keeps early feedback frequent while step
-# counts are cheap, then growing the chunk lets later chunks actually be
-# large enough to finish the job -- measured on a 330-variable subdivided
-# cube mesh: chunks of 5/10/20 (31 total steps) converged in ~2.3s, while
-# giving 3 live updates instead of 1.
+# start count to the end one -- each chunk continues from the previous
+# one's own final positions, so nothing is lost by splitting the run up.
 INFLATE_CHUNK_START = 5
 INFLATE_CHUNK_MAX = 200
 # Hard stop for "iterate until convergence" mode in case a mesh/pressure
@@ -295,8 +281,8 @@ class InflatePolyhedronApp:
         # _subdivide_step), the stretch stats at whatever point it's
         # currently at (updated live while Inflate runs, finalized once it
         # stops -- see _record_level_history's callers), and the actual
-        # stopping-condition numbers: relax_once's own `optimality` (scipy's
-        # first-order optimality measure -- what "Iterate until convergence"
+        # stopping-condition numbers: relax_once's own `optimality` (the
+        # worst vertex's net force -- what "Iterate until convergence"
         # mode is actually driving toward zero) against CONVERGENCE_GTOL,
         # the fixed threshold it's compared to (same for every row/level,
         # shown per-row anyway so it's never ambiguous what "converged"
@@ -494,7 +480,6 @@ class InflatePolyhedronApp:
         self.level_history = {}
         self.history_tree.delete(*self.history_tree.get_children())
         self.positions = None
-        self.reference_volume = None
         self.stop_event = None
         self._update_subdivide_button_state()
         self._load_generation += 1
@@ -509,17 +494,6 @@ class InflatePolyhedronApp:
             return  # a newer net selection has since started; this result is stale
         positions, stats, cached_name = payload
         self.positions = positions
-        # Fixed until the next subdivide or net load (see relax_once's and
-        # _relax_residual's docstrings on reference_volume): one entry
-        # PER FACE, each face's own starting volume contribution, so
-        # _relax_residual's per-face pressure term means roughly the same
-        # thing on every face of the CURRENT mesh, whether it's a small
-        # tetrahedron or a large dodecahedron -- left unnormalized, the
-        # SAME pressure value can be ~780x too weak to move a
-        # dodecahedron's faces yet already excessive for a cube's, purely
-        # because of their very different enclosed volumes at unit edge
-        # length, nothing to do with the pressure dial itself.
-        self.reference_volume = per_face_volumes(positions, self.faces)
         self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
                             "rms_stretch_pct": stats["rms_stretch_pct"],
                             "optimality": None, "converged": None}
@@ -557,10 +531,9 @@ class InflatePolyhedronApp:
             self.faces, self.positions, self.edge_length, self.face_of_fine,
             self.subdivision_level)
         self.subdivision_level += 1
-        # The face set just changed entirely (more, smaller faces) -- both
-        # of these must be recomputed fresh for the NEW mesh, same as a
-        # brand new net load (see _on_loaded).
-        self.reference_volume = per_face_volumes(self.positions, self.faces)
+        # The face set just changed entirely (more, smaller faces) --
+        # recomputed fresh for the NEW mesh, same as a brand new net load
+        # (see _on_loaded).
         self.last_stats = self._compute_stretch_stats()
         # Each level's own step count starts over at 0 -- a level's
         # "how many steps to converge" is only meaningful counted from
@@ -589,8 +562,8 @@ class InflatePolyhedronApp:
         level (self.iteration_count, see _subdivide_step), the stretch
         stats at this point, and the actual stopping-condition value --
         relax_once's own `optimality` (None before any Inflate at this
-        level, or if a Stop request aborted before scipy returned a
-        result -- see relax_once's docstring) -- all from self.last_stats.
+        level, or if a Stop request aborted before any step ran -- see
+        relax_once's docstring) -- all from self.last_stats.
         Called on every subdivide, every live Inflate progress update, and
         when an Inflate run finishes, so the row always reflects the
         level's latest state rather than only its final converged one."""
@@ -642,13 +615,11 @@ class InflatePolyhedronApp:
     def _update_inflate_button_state(self):
         """Greys out Inflate once self.last_stats reports the mesh already
         converged at the current pressure -- clicking again would just
-        burn time without moving anything: a fresh least_squares call
-        from an already-converged point has no memory of how far its
-        trust region had already shrunk, so it doesn't just no-op, it
-        can genuinely wander for a while re-discovering the same spot
-        (measured: 10 wasted steps that moved nothing). Re-armed by
-        _on_pressure_changed, a new net load, or a Stop (which leaves
-        converged=False since it didn't run to completion)."""
+        burn steps without moving anything, since relax_once from an
+        already-converged point starts with near-zero force already.
+        Re-armed by _on_pressure_changed, a new net load, or a Stop
+        (which leaves converged=False since it didn't run to
+        completion)."""
         if self.last_stats.get("converged"):
             self.inflate_button.state(["disabled"])
         else:
@@ -697,15 +668,12 @@ class InflatePolyhedronApp:
         only one that touches Tk widgets.
 
         Each chunk is checked for orientation consistency (see
-        is_orientation_consistent's docstring) before being accepted: a
-        big enough single relax_once call CAN fold the mesh through
-        itself -- verified empirically even on a plain cube at
-        pressure=30 with a single 5-evaluation chunk, which "converges"
-        to a deceptively tiny reported edge stretch while actually
-        self-intersecting, not genuinely inflated -- and relax_once has
-        no restart/retry logic of its own to catch that (by design, see
-        its docstring: it's meant for small incremental nudges from an
-        already-good point). A chunk that tangles the mesh is REJECTED
+        is_orientation_consistent's docstring) before being accepted:
+        relax_once's own small steps make this unlikely, but it has no
+        restart/retry logic of its own if one still folds the mesh
+        through itself (by design, see its docstring: it's meant for
+        small incremental nudges from an already-good point). A chunk
+        that tangles the mesh is REJECTED
         (positions not updated) and retried at half the size instead;
         once a size is found to tangle, `ceiling` permanently caps how
         far this click's chunk is ever allowed to grow back to again, so
@@ -719,7 +687,6 @@ class InflatePolyhedronApp:
         q = queue.Queue()
         faces, edge_length = self.faces, self.edge_length
         start_positions = self.positions
-        reference_volume = self.reference_volume
 
         def worker():
             positions = start_positions
@@ -731,8 +698,7 @@ class InflatePolyhedronApp:
                     this_chunk = max(1, chunk if target_steps is None
                                       else min(chunk, target_steps - completed))
                     result = relax_once(positions, faces, edge_length, pressure,
-                                         PLANARITY_WEIGHT, max_nfev=this_chunk, stop_event=stop_event,
-                                         reference_volume=reference_volume)
+                                         PLANARITY_WEIGHT, max_nfev=this_chunk, stop_event=stop_event)
                     trial_positions, nfev, max_stretch, rms_stretch, optimality, converged = result
                     stopped = stop_event is not None and stop_event.is_set()
 
