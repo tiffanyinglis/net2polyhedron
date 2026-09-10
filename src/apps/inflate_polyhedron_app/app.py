@@ -136,6 +136,7 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import ttk
+import tkinter.font as tkfont
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -219,12 +220,20 @@ LEVEL_ZOOM_STEP = 1.1
 LEVEL_ZOOM_MIN = 0.1
 LEVEL_ZOOM_MAX = 10.0
 
+# Overall UI text size multiplier -- applied once, at startup, to every
+# named Tk/ttk font (see _scale_ui_fonts) so the whole app's text (not
+# just this one label) grows together rather than each widget needing
+# its own hardcoded size.
+UI_FONT_SCALE = 1.3
+
 # Every panel's title ("Net", "Level N") is a plain Tkinter Label above
 # its image/canvas, not text drawn inside the image itself -- a title
 # drawn INSIDE a PyVista panel's own rendered scene clipped against the
 # panel's own edge (see _render_level_pv's Design notes), which a real
-# widget placed above the image can't do.
-LEVEL_TITLE_FONT = ("TkDefaultFont", 11)
+# widget placed above the image can't do. Scaled by UI_FONT_SCALE like
+# every other font (see _scale_ui_fonts) since it's a plain (family,
+# size) tuple, not a named Tk font _scale_ui_fonts can reach on its own.
+LEVEL_TITLE_FONT = ("TkDefaultFont", round(11 * UI_FONT_SCALE))
 
 # Shown on the Pressure readout before the user has ever clicked "Auto"
 # -- pressure isn't user-editable (see the "Auto" button), so this only
@@ -284,6 +293,7 @@ class InflatePolyhedronApp:
         root.minsize(820, 600)
 
         sv_ttk.set_theme("dark")
+        self._scale_ui_fonts()
 
         # ---- Debug mode vs. release mode: the ONLY difference between
         # them is whether "Iterate for N steps" is offered at all (see
@@ -538,6 +548,37 @@ class InflatePolyhedronApp:
         self._apply_mode_visibility()
         if self.current_label:
             self.on_select_net()
+
+    def _scale_ui_fonts(self):
+        """Scales every named Tk/ttk font by UI_FONT_SCALE, once at
+        startup, right after sv_ttk.set_theme -- covers the whole UI's
+        text size in one place rather than a per-widget font= override
+        everywhere. sv_ttk's dark/light themes route almost every ttk
+        style (TButton, TLabel, TLabelframe.Label, Treeview, its Heading,
+        ...) through a handful of its OWN named Tcl fonts
+        (SunValleyBodyFont, SunValleyCaptionFont, ...) rather than the
+        standard TkDefaultFont/TkTextFont/etc, so scaling only the
+        standard names would miss most of the UI -- tkfont.names()
+        returns every named font known to the interpreter, Sun Valley's
+        included, so this reaches both in one pass. A size of 0 (some
+        internal fonts use this) means "use the platform default" and
+        stays that way rather than becoming 0 * scale = 0."""
+        for name in tkfont.names(self.root):
+            font = tkfont.nametofont(name, root=self.root)
+            size = font.cget("size")
+            if size == 0:
+                continue
+            sign = -1 if size < 0 else 1
+            font.configure(size=sign * round(abs(size) * UI_FONT_SCALE))
+        # Treeview's rowheight is set by sv_ttk's theme file to
+        # SunValleyBodyFont's line spacing PLUS A FIXED PADDING, computed
+        # once when the theme loads -- it doesn't auto-track a font
+        # resize done afterward, so rows would stay sized for the OLD
+        # (smaller) font, clipping the new, taller text. Recomputed here
+        # the same way (see sv_ttk's dark.tcl "Treeview" style) now that
+        # SunValleyBodyFont has its final scaled size.
+        body_font = tkfont.nametofont("SunValleyBodyFont", root=self.root)
+        ttk.Style(self.root).configure("Treeview", rowheight=body_font.metrics("linespace") + 3)
 
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
