@@ -51,36 +51,47 @@ itself still work for anyone who wants one.
    -- letting "inflate, then increase resolution, then inflate again"
    converge toward one consistent answer instead of each level chasing a
    different target. Greyed out once MAX_LEVEL is reached.
-3. At ANY level, the "Pressure" spinner + "Inflate" button apply ONE
-   relaxation pass (stretchy_mesh.relax_once) at a user-chosen, constant
-   inflation pressure, continuing from wherever the mesh currently is --
-   so repeated clicks let you watch/steer the shape settle incrementally.
-   relax_once walks small explicit steps along a genuine spring-vs-pressure
-   force (see stretchy_mesh's Design notes) -- no volume or remembered
-   state anywhere in it, so it can't compound across a Subdivide.
-   - The radio buttons control how much work each "Inflate" click does:
-     either a capped number of relax_once steps (`max_nfev`, literally N
-     iterations now), or an uncapped run to relax_once's own convergence
-     tolerance (CONVERGENCE_GTOL -- some meshes have a long, slow-shrinking
-     tail after the shape has visibly settled, so this is deliberately
-     looser than it might seem it needs to be).
-   - The "Auto" button next to the spinner picks a pressure itself (see
-     stretchy_mesh.estimate_pressure_for_target_stretch) landing near
-     DEFAULT_TARGET_STRETCH_PCT max stretch, then applies it directly --
-     required pressure varies a lot between nets (it scales with total
-     surface area, not vertex/face count -- verified empirically), so a
-     single fixed default pressure is either too gentle or wildly
-     excessive depending which net is loaded.
+3. At ANY level, the "Inflate" button first CALIBRATES a pressure (see
+   stretchy_mesh.estimate_pressure_for_target_stretch) landing near the
+   "Target RMS stretch" spinner's value (% of rest edge length, default
+   DEFAULT_TARGET_RMS_STRETCH_PCT), then applies ONE relaxation pass
+   (stretchy_mesh.relax_once) at that pressure, continuing from wherever
+   the mesh currently is -- so repeated clicks let you watch/steer the
+   shape settle incrementally, and re-calibrate each time since pressure
+   is no longer something the user sets directly (required pressure
+   varies a lot between nets -- it scales with total surface area, not
+   vertex/face count -- so a single fixed number would be either too
+   gentle or wildly excessive depending which net is loaded). relax_once
+   walks small explicit steps along a genuine spring-vs-pressure force
+   (see stretchy_mesh's Design notes) -- no volume or remembered state
+   anywhere in it, so it can't compound across a Subdivide.
+   - The radio buttons control how much work the actual inflation part of
+     each "Inflate" click does (after calibration): either a capped
+     number of relax_once steps (`max_nfev`, literally N iterations now),
+     or an uncapped run to relax_once's own convergence tolerance
+     (CONVERGENCE_GTOL -- some meshes have a long, slow-shrinking tail
+     after the shape has visibly settled, so this is deliberately looser
+     than it might seem it needs to be).
 4. The "Convergence History" table records one row per subdivision level
-   visited this net session: how many Inflate steps that level has taken
-   so far (self.iteration_count -- reset to 0 by every Subdivide click,
-   so it always counts from when that level's mesh was first created, not
-   carried over from a coarser level), the stretch stats at whatever point
-   it's currently at, and the actual stopping-condition numbers --
-   relax_once's own `max_force` (the worst vertex's net force) against the
-   fixed CONVERGENCE_GTOL threshold it's compared to -- updated live while
-   Inflate runs and finalized (Converged/Stopped/Step cap reached) once it
-   stops.
+   visited this net session: the pressure last calibrated for it, how
+   many Inflate steps that level has taken so far (self.iteration_count
+   -- reset to 0 by every Subdivide click, so it always counts from when
+   that level's mesh was first created, not carried over from a coarser
+   level), the stretch stats at whatever point it's currently at (RMS
+   shown against the CURRENT "Target RMS stretch" spinner value), and a
+   single combined "Convergence" cell -- relax_once's own `max_force`
+   (the worst vertex's net force) against the fixed CONVERGENCE_GTOL
+   threshold, with a check or cross mark for whether it's below it --
+   updated live while Inflate runs.
+5. The view below is "Net" (the flat, undeformed layout) plus one 3D
+   panel per level, "Level 1".."Level N" (MAX_LEVEL total). Only the
+   panel for self.subdivision_level is LIVE -- it redraws every Inflate
+   progress update; every level already subdivided past is frozen at
+   whatever state it was left in (self.level_snapshots, captured by
+   _subdivide_step the moment the user moves on from it) and never
+   updates again; a level not reached yet is drawn empty. Level 0 never
+   gets its own panel -- this app always auto-advances past it, see
+   STARTING_LEVEL above.
 """
 import sys
 from pathlib import Path
@@ -112,7 +123,7 @@ from ui.cullable_face import _CullableFace
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, solve_wireframe, relax_once, estimate_pressure_for_target_stretch,
     mesh_to_polyhedron, mesh_edges, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
-    DEFAULT_TARGET_STRETCH_PCT,
+    DEFAULT_TARGET_RMS_STRETCH_PCT,
 )
 from utils.inflate_polyhedron.stretchy_cache import load_with_cache, is_cached, cache_path_for
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
@@ -138,16 +149,10 @@ STARTING_LEVEL = 1
 SUBDIVISION_EDGE_ALPHA = 0.35
 SUBDIVISION_EDGE_WIDTH = 0.5
 
-# Pressure spinner bounds: relax_once's spring-vs-pressure force keeps a
-# real (if increasingly stretched) equilibrium up through at least 60 on
-# every net tried, thanks to stretchy_mesh's soft edge-length limit (see
-# its Design notes) -- past that, ordinary Hooke's-law inflation alone
-# stops being a meaningful "gentle" pressure. DEFAULT_PRESSURE stays
-# gentle so a first click doesn't overshoot; MAX_PRESSURE=60 is generous
-# headroom above that.
+# Shown on the Pressure readout before the user has ever clicked "Auto"
+# -- pressure isn't user-editable (see the "Auto" button), so this only
+# matters if "Inflate" is clicked with no calibration done yet.
 DEFAULT_PRESSURE = 3.0
-MAX_PRESSURE = 60.0
-PRESSURE_INCREMENT = 0.5
 
 DEFAULT_STEPS = 10
 
@@ -235,20 +240,25 @@ class InflatePolyhedronApp:
 
         pressure_row = ttk.Frame(inflate_frame)
         pressure_row.pack(fill=tk.X)
-        ttk.Label(pressure_row, text="Pressure:").pack(side=tk.LEFT, padx=(0, 4))
-        self.pressure_var = tk.DoubleVar(value=DEFAULT_PRESSURE)
-        # A "converged" result is only converged AT this pressure -- if the
-        # user changes it, the gate on re-clicking Inflate (see
-        # _update_inflate_button_state) needs to lift, since the new
-        # pressure hasn't actually been tried yet.
-        self.pressure_var.trace_add("write", self._on_pressure_changed)
-        self.pressure_spin = ttk.Spinbox(pressure_row, from_=0.0, to=MAX_PRESSURE,
-                                          increment=PRESSURE_INCREMENT, width=6,
-                                          textvariable=self.pressure_var, format="%.1f")
-        self.pressure_spin.pack(side=tk.LEFT)
-        self.auto_pressure_button = ttk.Button(pressure_row, text="Auto",
-                                                command=self.on_auto_pressure_clicked)
-        self.auto_pressure_button.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(pressure_row, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
+        self.target_rms_var = tk.DoubleVar(value=DEFAULT_TARGET_RMS_STRETCH_PCT)
+        # A "converged" verdict only applies to the target it was reached
+        # at -- changing this means the current pressure hasn't actually
+        # been (re)calibrated for the new target yet, so the gate on
+        # re-clicking Inflate (see _update_inflate_button_state) needs to
+        # lift, since otherwise a converged mesh would stay stuck
+        # refusing to recalibrate even after the user asks for a
+        # different target.
+        self.target_rms_var.trace_add("write", self._on_target_rms_changed)
+        self.target_rms_spin = ttk.Spinbox(pressure_row, from_=0.1, to=200.0,
+                                            increment=1.0, width=6,
+                                            textvariable=self.target_rms_var, format="%.1f")
+        self.target_rms_spin.pack(side=tk.LEFT)
+        ttk.Label(pressure_row, text="%").pack(side=tk.LEFT, padx=(2, 8))
+        # Pressure is no longer user-editable or separately displayed --
+        # "Inflate" calibrates it itself (see on_inflate_clicked) and it's
+        # already logged per level in the Convergence History table.
+        self.pressure_value = DEFAULT_PRESSURE
 
         mode_row = ttk.Frame(inflate_frame)
         mode_row.pack(fill=tk.X, pady=(8, 0))
@@ -278,43 +288,55 @@ class InflatePolyhedronApp:
         self.stop_button.state(["disabled"])
 
         # ---- Convergence history: one row per subdivision level visited
-        # this net session, showing how many Inflate steps that level took
+        # this net session, showing the pressure last calibrated for it
+        # (self.pressure_value -- only ever set by on_inflate_clicked's
+        # calibration phase), how many Inflate steps that level took
         # (self.iteration_count, reset to 0 on every Subdivide -- see
         # _subdivide_step), the stretch stats at whatever point it's
         # currently at (updated live while Inflate runs, finalized once it
-        # stops -- see _record_level_history's callers), and the actual
-        # stopping-condition numbers: relax_once's own `optimality` (the
-        # worst vertex's net force -- what "Iterate until convergence"
-        # mode is actually driving toward zero) against CONVERGENCE_GTOL,
-        # the fixed threshold it's compared to (same for every row/level,
-        # shown per-row anyway so it's never ambiguous what "converged"
-        # meant without cross-referencing stretchy_mesh.py). ----
+        # stops -- see _record_level_history's callers, RMS shown against
+        # the CURRENT "Target RMS stretch" spinner value -- see
+        # _refresh_history_table), and a single combined "Convergence"
+        # cell -- relax_once's own `optimality` (the worst vertex's net
+        # force) against the fixed CONVERGENCE_GTOL threshold, with a
+        # check/cross mark for whether it's below it (see
+        # _refresh_history_table). height=MAX_LEVEL since that's the most
+        # rows this table will ever hold -- a taller fixed height would
+        # just reserve blank space below whatever's actually populated. ----
         history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
         history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
-        history_columns = ("level", "steps", "max_stretch", "rms_stretch",
-                            "optimality", "threshold", "status")
+        history_columns = ("level", "pressure", "steps", "max_stretch", "rms_stretch",
+                            "convergence")
         self.history_tree = ttk.Treeview(history_frame, columns=history_columns,
-                                          show="headings", height=4)
+                                          show="headings", height=MAX_LEVEL)
         for col, heading, width in (
-                ("level", "Level", 50), ("steps", "Steps", 70),
-                ("max_stretch", "Max Stretch %", 110), ("rms_stretch", "RMS Stretch %", 110),
-                ("optimality", "Optimality", 100), ("threshold", "Threshold", 90),
-                ("status", "Status", 140)):
+                ("level", "Level", 50), ("pressure", "Pressure", 80), ("steps", "Steps", 70),
+                ("max_stretch", "Max Stretch %", 110), ("rms_stretch", "RMS Stretch %", 150),
+                ("convergence", "Convergence", 170)):
             self.history_tree.heading(col, text=heading)
             self.history_tree.column(col, width=width, anchor=tk.CENTER)
         self.history_tree.pack(fill=tk.X)
 
-        # ---- Target faces (left) + wireframe result (right) ----
+        # ---- Net (flat layout) + one 3D panel per level (1..MAX_LEVEL),
+        # side by side. Level N's panel is LIVE (redrawn every Inflate
+        # progress update) only while self.subdivision_level == N; once
+        # the user subdivides past it, that level's last state is frozen
+        # into self.level_snapshots and its panel stops updating -- see
+        # draw()/_subdivide_step. ----
         view_frame = ttk.Frame(root)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(6, 14))
-        self.fig = plt.figure(figsize=(11, 5.5))
-        self.ax2d = self.fig.add_subplot(1, 2, 1)
-        self.ax3d = self.fig.add_subplot(1, 2, 2, projection="3d")
+        self.fig = plt.figure(figsize=(18, 5))
+        n_panels = 1 + MAX_LEVEL
+        self.ax2d = self.fig.add_subplot(1, n_panels, 1)
+        self.ax3d_by_level = {
+            level: self.fig.add_subplot(1, n_panels, 1 + level, projection="3d")
+            for level in range(1, MAX_LEVEL + 1)
+        }
         self.canvas = FigureCanvasTkAgg(self.fig, master=view_frame)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         # Vertex markers are only culled/positioned correctly for whatever
         # orientation was current the last time draw() ran (see
-        # _draw_wireframe_result's docstring) -- mplot3d's own interactive
+        # _draw_wireframe_panel's docstring) -- mplot3d's own interactive
         # rotation changes elev/azim continuously without ever calling our
         # draw() again, so hide them for the DURATION of a drag rather than
         # show stale, wrongly-culled markers mid-rotation; they reappear,
@@ -323,6 +345,12 @@ class InflatePolyhedronApp:
         self.vertex_scatter = None
         self.canvas.mpl_connect("button_press_event", self._on_3d_drag_start)
         self.canvas.mpl_connect("button_release_event", self._on_3d_drag_end)
+
+        # Per-level frozen snapshots of {faces, positions, face_of_fine,
+        # edge_length} taken the moment the user subdivides PAST that
+        # level (see _subdivide_step) -- level 0 is never snapshotted or
+        # shown (this app always auto-advances past it, see STARTING_LEVEL).
+        self.level_snapshots = {}
 
         self.faces = None
         self.base_faces = None
@@ -374,9 +402,10 @@ class InflatePolyhedronApp:
         theme = PLOT_THEME
         self.fig.patch.set_facecolor(theme["bg"])
         self.ax2d.set_facecolor(theme["bg"])
-        self.ax3d.set_facecolor(theme["bg"])
         self._style_2d_axis(self.ax2d, theme)
-        self._style_3d_axis(self.ax3d, theme)
+        for ax in self.ax3d_by_level.values():
+            ax.set_facecolor(theme["bg"])
+            self._style_3d_axis(ax, theme)
         return theme
 
     def _refresh_plot(self):
@@ -390,7 +419,7 @@ class InflatePolyhedronApp:
         """mplot3d's own left-click-drag rotation starts here -- hide the
         vertex-marker scatter for the duration (see its own comment in
         __init__ for why), leaving the (live-culled) faces/edges alone."""
-        if event.inaxes is not self.ax3d or event.button != 1:
+        if event.inaxes not in self.ax3d_by_level.values() or event.button != 1:
             return
         self._dragging_3d = True
         if self.vertex_scatter is not None:
@@ -480,6 +509,7 @@ class InflatePolyhedronApp:
         self.iteration_count = 0
         self.last_stats = {}
         self.level_history = {}
+        self.level_snapshots = {}
         self.history_tree.delete(*self.history_tree.get_children())
         self.positions = None
         self.stop_event = None
@@ -521,7 +551,18 @@ class InflatePolyhedronApp:
         and _on_loaded's auto-advance to STARTING_LEVEL -- no status
         message or redraw of its own, so the caller can run this several
         times in a row (e.g. level 0 -> STARTING_LEVEL) and only report/
-        draw once at the end."""
+        draw once at the end.
+
+        Freezes the level being LEFT into self.level_snapshots (its own
+        "Level N" panel stops updating from here on -- see draw()) using
+        whatever state that level had reached, before overwriting
+        self.faces/positions/etc. with the new level's. Level 0 is never
+        snapshotted (or shown at all -- see STARTING_LEVEL)."""
+        if self.subdivision_level >= 1:
+            self.level_snapshots[self.subdivision_level] = {
+                "faces": self.faces, "positions": self.positions,
+                "face_of_fine": self.face_of_fine,
+            }
         self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
             self.faces, self.positions, self.edge_length, self.face_of_fine,
             self.subdivision_level)
@@ -535,7 +576,7 @@ class InflatePolyhedronApp:
         # when that level's mesh was first created, not carried over from
         # however many steps a coarser level happened to need.
         self.iteration_count = 0
-        self._record_level_history(status="not yet inflated")
+        self._record_level_history()
 
     def on_subdivide_clicked(self):
         if self.positions is None or self.subdivision_level >= MAX_LEVEL:
@@ -552,33 +593,50 @@ class InflatePolyhedronApp:
 
     # ---- convergence history table ----
 
-    def _record_level_history(self, status):
-        """Records/updates the CURRENT level's row: steps so far this
-        level (self.iteration_count, see _subdivide_step), the stretch
-        stats at this point, and the actual stopping-condition value --
-        relax_once's own `optimality` (None before any Inflate at this
-        level, or if a Stop request aborted before any step ran -- see
-        relax_once's docstring) -- all from self.last_stats.
-        Called on every subdivide, every live Inflate progress update, and
-        when an Inflate run finishes, so the row always reflects the
-        level's latest state rather than only its final converged one."""
+    def _record_level_history(self):
+        """Records/updates the CURRENT level's row: the pressure last
+        calibrated for it, steps so far this level (self.iteration_count,
+        see _subdivide_step), the stretch stats at this point, and the
+        actual stopping-condition value -- relax_once's own `optimality`
+        (None before any Inflate at this level, or if a Stop request
+        aborted before any step ran -- see relax_once's docstring) -- all
+        from self.last_stats. Called on every subdivide, every live
+        Inflate progress update, and when an Inflate run finishes, so the
+        row always reflects the level's latest state rather than only its
+        final converged one."""
         self.level_history[self.subdivision_level] = {
+            "pressure": self.pressure_value,
             "steps": self.iteration_count,
             "max_stretch_pct": self.last_stats.get("max_stretch_pct", 0.0),
             "rms_stretch_pct": self.last_stats.get("rms_stretch_pct", 0.0),
             "optimality": self.last_stats.get("optimality"),
-            "status": status,
         }
         self._refresh_history_table()
 
+    @staticmethod
+    def _format_sci(value, precision=2):
+        """1.23e-05 -> "1.23e-5" (no leading zero on the exponent) --
+        matches the compact form used in the Convergence column.
+        `precision=0` gives "1e-4" style (used for the fixed threshold,
+        which doesn't need decimal places since it never varies)."""
+        mantissa, exponent = f"{value:.{precision}e}".split("e")
+        return f"{mantissa}e{int(exponent)}"
+
     def _refresh_history_table(self):
+        target_rms_pct = self.target_rms_var.get()
         for level in sorted(self.level_history):
             rec = self.level_history[level]
             optimality = rec["optimality"]
-            values = (level, rec["steps"], f"{rec['max_stretch_pct']:.2f}",
-                      f"{rec['rms_stretch_pct']:.2f}",
-                      f"{optimality:.2e}" if optimality is not None else "n/a",
-                      f"{CONVERGENCE_GTOL:.0e}", rec["status"])
+            if optimality is None:
+                convergence = "n/a"
+            else:
+                op = "<" if optimality < CONVERGENCE_GTOL else ">"
+                mark = "✅" if optimality < CONVERGENCE_GTOL else "❌"
+                convergence = (f"{self._format_sci(optimality)} {op} "
+                                f"{self._format_sci(CONVERGENCE_GTOL, precision=0)} {mark}")
+            values = (level, f"{rec['pressure']:.4g}", rec["steps"], f"{rec['max_stretch_pct']:.2f}",
+                      f"{rec['rms_stretch_pct']:.2f} (target: {target_rms_pct:g})",
+                      convergence)
             iid = str(level)
             if self.history_tree.exists(iid):
                 self.history_tree.item(iid, values=values)
@@ -612,7 +670,7 @@ class InflatePolyhedronApp:
         converged at the current pressure -- clicking again would just
         burn steps without moving anything, since relax_once from an
         already-converged point starts with near-zero force already.
-        Re-armed by _on_pressure_changed, a new net load, or a Stop
+        Re-armed by _on_target_rms_changed, a new net load, or a Stop
         (which leaves converged=False since it didn't run to
         completion)."""
         if self.last_stats.get("converged"):
@@ -620,28 +678,43 @@ class InflatePolyhedronApp:
         else:
             self.inflate_button.state(["!disabled"])
 
-    def _on_pressure_changed(self, *_args):
-        # A "converged" verdict only applies to the pressure it was
-        # reached at -- changing it means the new pressure hasn't
-        # actually been tried, so the gate must lift (back to "unknown",
-        # not "converged").
+    def _on_target_rms_changed(self, *_args):
         if self.last_stats.get("converged"):
             self.last_stats["converged"] = None
             self._update_inflate_button_state()
 
     def on_inflate_clicked(self):
+        """Two phases: first calibrate a pressure for the current "Target
+        RMS stretch" (stretchy_mesh.estimate_pressure_for_target_stretch,
+        via _run_background -- see _on_pressure_calibrated), THEN actually
+        inflate at that pressure via the normal streamed _run_inflate_stream
+        (respecting the steps-vs-convergence mode and the Stop button, same
+        as always). Recalibrates fresh from wherever self.positions
+        currently is on every click, since the user can no longer set
+        pressure directly."""
         if self.positions is None or self.last_stats.get("converged"):
             return
-        pressure = self.pressure_var.get()
+        faces, edge_length, positions = self.faces, self.edge_length, self.positions
+        target_rms_pct = self.target_rms_var.get()
         target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
-        status = (f"Inflating at pressure {pressure:.1f} for {target_steps} steps..."
-                   if target_steps is not None else
-                   f"Inflating at pressure {pressure:.1f} until convergence...")
+        self._set_status(f"Finding a pressure that settles around {target_rms_pct:.1f}% "
+                          "RMS stretch...", "info")
+        self._run_background(
+            lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length,
+                                                           target_rms_pct=target_rms_pct),
+            (), lambda result: self._on_pressure_calibrated(result, target_steps))
+
+    def _on_pressure_calibrated(self, result, target_steps):
+        pressure = result[0]
+        self.pressure_value = pressure
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
         self.stop_button.state(["!disabled"])
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
+        status = (f"Inflating at pressure {pressure:.4g} for {target_steps} steps..."
+                   if target_steps is not None else
+                   f"Inflating at pressure {pressure:.4g} until convergence...")
         self._set_status(status, "info")
         self._run_inflate_stream(pressure, target_steps, self.stop_event)
 
@@ -650,32 +723,6 @@ class InflatePolyhedronApp:
             self.stop_event.set()
             self.stop_button.state(["disabled"])  # one request is enough; avoid repeat clicks
             self._set_status("Stopping...", "warn")
-
-    def on_auto_pressure_clicked(self):
-        """Finds a pressure landing near DEFAULT_TARGET_STRETCH_PCT max
-        stretch (see estimate_pressure_for_target_stretch's docstring for
-        how) and applies it -- sets the Pressure spinner to the result AND
-        updates the mesh to that trial's own converged shape, the same way
-        a normal Inflate click would, rather than just suggesting a number
-        the user still has to click Inflate to try."""
-        if self.positions is None:
-            return
-        faces, edge_length, positions = self.faces, self.edge_length, self.positions
-        self._set_status("Finding a pressure that settles around "
-                          f"{DEFAULT_TARGET_STRETCH_PCT:.0f}% stretch...", "info")
-        self._run_background(
-            lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length),
-            (), self._on_auto_pressure_done)
-
-    def _on_auto_pressure_done(self, result):
-        pressure, positions, steps, max_stretch, rms_stretch, max_force, converged = result
-        self.pressure_var.set(round(pressure, 4))
-        self.positions = positions
-        self.iteration_count += steps
-        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
-                            "optimality": max_force, "converged": converged}
-        self._record_level_history(status="Converged" if converged else "Auto-calibrated")
-        self._update_inflate_button_state()
         self._set_status(
             f"Auto pressure {pressure:.3f}: edges stretched up to {max_stretch:.2f}% from rest "
             f"length (RMS {rms_stretch:.2f}%).", "success")
@@ -748,7 +795,7 @@ class InflatePolyhedronApp:
         self.iteration_count += nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged}
-        self._record_level_history(status="inflating...")
+        self._record_level_history()
         self._set_status(f"Inflating at level {self.subdivision_level}... "
                           f"{self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
@@ -762,8 +809,7 @@ class InflatePolyhedronApp:
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
-        status = "Stopped" if was_stopped else "Converged" if converged else "Step cap reached"
-        self._record_level_history(status=status)
+        self._record_level_history()
         if was_stopped:
             self._set_status(
                 f"Stopped ({self.iteration_count} steps at level {self.subdivision_level}): "
@@ -785,7 +831,7 @@ class InflatePolyhedronApp:
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.pressure_spin, self.auto_pressure_button,
+        for widget in (self.combo, self.target_rms_spin,
                        self.steps_radio, self.convergence_radio):
             widget.state(state)
         if enabled:
@@ -887,144 +933,96 @@ class InflatePolyhedronApp:
         self.ax2d.set_xlim(lo[0] - pad, hi[0] + pad)
         self.ax2d.set_ylim(lo[1] - pad, hi[1] + pad)
         self.ax2d.set_aspect("equal")
-        self.ax2d.set_title("Target faces (net)")
+        self.ax2d.set_title("Net")
 
-    def _draw_wireframe_result(self, theme):
-        """The actual current state: possibly non-planar faces (drawn
-        opaque) plus the raw vertex/edge wireframe on top, since a "face"
-        here is just a rendering convenience -- the thing actually being
-        relaxed is the vertex positions and edge lengths.
+    def _draw_wireframe_panel(self, ax, theme, level, faces, positions, face_of_fine):
+        """One "Level N" panel: possibly non-planar faces (drawn opaque)
+        plus the raw vertex/edge wireframe on top, since a "face" here is
+        just a rendering convenience -- the thing actually being relaxed
+        is the vertex positions and edge lengths. `faces` is None for a
+        level not yet reached this net session (see draw()) -- drawn as
+        an empty panel with just its title.
 
-        Once subdivided (self.subdivision_level > 0), colors every fine
-        triangle by its ORIGINAL base face (self.face_of_fine, indexing
-        the same per-base-face self.colors the left panel uses) so the
-        base faces stay visually distinct as color blocks, with the fine
-        mesh edges thin and faint (see SUBDIVISION_EDGE_ALPHA/WIDTH) so
-        the subdivision reads as texture rather than a bold wireframe, and
-        no per-vertex scatter dots (there can be hundreds of fine
-        vertices).
+        Colors every fine triangle by its ORIGINAL base face
+        (`face_of_fine`, indexing the same per-base-face self.colors the
+        Net panel uses) so the base faces stay visually distinct as color
+        blocks, with the fine mesh edges thin and faint (see
+        SUBDIVISION_EDGE_ALPHA/WIDTH) so the subdivision reads as texture
+        rather than a bold wireframe.
 
-        Wraps the current (positions, faces) into a Polyhedron -- its
-        .edges gives the wireframe segments for the (rarer) open-mesh
-        fallback below (positions re-indexed to Polyhedron's own dense
-        0..N-1 space, so `polyhedron.vertices[i]` is the position for
-        edge endpoint `i` directly, no dict lookup needed), and
-        .is_closed() reports in the title whether the current shape is a
-        genuinely closed solid or still an open mesh -- and, more
-        importantly here, gates whether _CullableFace's exact backface
-        culling applies (see its own docstring: only valid for a closed
-        CONVEX solid). When closed, each face is drawn as a _CullableFace
-        carrying its OWN boundary edges, so a face's wireframe lines
-        disappear together with the face itself once it's facing away
-        from the camera -- drawing every edge as one separate, undivided
-        Line3DCollection (the open-mesh fallback below) has no per-face
-        depth information at all, so back-face lines would otherwise
-        render right through the opaque near faces regardless of view
-        angle."""
-        self.ax3d.cla()
-        self._style_3d_axis(self.ax3d, theme)
+        Wraps (positions, faces) into a Polyhedron -- its .edges gives the
+        wireframe segments for the (rarer) open-mesh fallback below
+        (positions re-indexed to Polyhedron's own dense 0..N-1 space, so
+        `polyhedron.vertices[i]` is the position for edge endpoint `i`
+        directly, no dict lookup needed), and .is_closed() gates whether
+        _CullableFace's exact backface culling applies (see its own
+        docstring: only valid for a closed CONVEX solid). When closed,
+        each face is drawn as a _CullableFace carrying its OWN boundary
+        edges, so a face's wireframe lines disappear together with the
+        face itself once it's facing away from the camera -- drawing
+        every edge as one separate, undivided Line3DCollection (the
+        open-mesh fallback below) has no per-face depth information at
+        all, so back-face lines would otherwise render right through the
+        opaque near faces regardless of view angle."""
+        ax.cla()
+        self._style_3d_axis(ax, theme)
+        if faces is None:
+            ax.set_title(f"Level {level}")
+            return
 
-        fabric = self.subdivision_level > 0
-        face_colors = ([self.colors[c % len(self.colors)] for c in self.face_of_fine]
-                        if fabric else self.colors)
-
-        polyhedron = mesh_to_polyhedron(self.positions, self.faces)
+        face_colors = [self.colors[c % len(self.colors)] for c in face_of_fine]
+        polyhedron = mesh_to_polyhedron(positions, faces)
         closed = polyhedron.is_closed()
-        edge_width = SUBDIVISION_EDGE_WIDTH if fabric else 1.6
 
-        all_pts = np.array(list(self.positions.values()))
-        # Which vertices belong to at least one face CURRENTLY facing the
-        # camera -- a vertex with every adjacent face facing away is
-        # purely on the far side and should be hidden from the scatter
-        # markers below, the same way _CullableFace already hides a
-        # fully-backfacing face's own fill and edges. A silhouette vertex
-        # (some faces front, some back) stays visible, correctly, since
-        # it's genuinely on the boundary of what's visible. Unlike
-        # _CullableFace's own do_3d_projection (called by mplot3d on
-        # every frame, including mid-drag), this is computed once here at
-        # redraw time -- ax3d.scatter's marker collection has no
-        # per-point 3D visibility hook to recompute it live during an
-        # interactive rotation, only when this app's own draw() next runs.
-        front_facing_vertices = set() if closed else None
-        if closed:
-            # Same view-direction math as _CullableFace.do_3d_projection
-            # (see its docstring) -- duplicated rather than imported since
-            # that's a private detail of an untouchable file, not
-            # something it exposes for reuse.
-            elev, azim = np.radians(self.ax3d.elev), np.radians(self.ax3d.azim)
-            view_dir = np.array([np.cos(elev) * np.cos(azim),
-                                  np.cos(elev) * np.sin(azim),
-                                  np.sin(elev)])
-        for face_index, (face, color) in enumerate(zip(self.faces, face_colors)):
-            pts = np.array([self.positions[v] for v in face])
+        all_pts = np.array(list(positions.values()))
+        for face_index, (face, color) in enumerate(zip(faces, face_colors)):
+            pts = np.array([positions[v] for v in face])
             if closed:
                 normal = polyhedron.face_normal(face_index)
-                self.ax3d.add_collection3d(_CullableFace(
+                ax.add_collection3d(_CullableFace(
                     [pts], normal, base_alpha=1.0,
-                    facecolor=color, edgecolor=theme["fg"], linewidths=edge_width))
-                if np.dot(normal, view_dir) > 0:
-                    front_facing_vertices.update(face)
+                    facecolor=color, edgecolor=theme["fg"], linewidths=SUBDIVISION_EDGE_WIDTH))
             else:
-                self.ax3d.add_collection3d(
+                ax.add_collection3d(
                     Poly3DCollection([pts], facecolor=color, edgecolor="none", alpha=1.0))
 
         if not closed:
             # No exact culling is possible without closed convexity (see
             # _CullableFace's docstring) -- fall back to one plain,
-            # undivided wireframe overlay, same as before this fix.
+            # undivided wireframe overlay.
             edge_segments = [(polyhedron.vertices[a], polyhedron.vertices[b])
                               for a, b in polyhedron.edges]
-            self.ax3d.add_collection3d(Line3DCollection(
-                edge_segments, colors=theme["fg"], linewidths=edge_width,
-                alpha=SUBDIVISION_EDGE_ALPHA if fabric else 1.0))
-        if not fabric:
-            vertex_ids = (list(self.positions) if front_facing_vertices is None
-                          else [v for v in self.positions if v in front_facing_vertices])
-            vis_pts = np.array([self.positions[v] for v in vertex_ids])
-            self.vertex_scatter = self.ax3d.scatter(
-                vis_pts[:, 0], vis_pts[:, 1], vis_pts[:, 2],
-                color=theme["fg"], s=18, depthshade=False)
-            self.vertex_scatter.set_visible(not self._dragging_3d)
-        else:
-            self.vertex_scatter = None
+            ax.add_collection3d(Line3DCollection(
+                edge_segments, colors=theme["fg"], linewidths=SUBDIVISION_EDGE_WIDTH,
+                alpha=SUBDIVISION_EDGE_ALPHA))
 
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
         center = (lo + hi) / 2
         half = (hi - lo).max() / 2 * 1.2 + 1e-6
-        xlim = (center[0] - half, center[0] + half)
-        ylim = (center[1] - half, center[1] + half)
-        zlim = (center[2] - half, center[2] + half)
-        self.ax3d.set_xlim(*xlim)
-        self.ax3d.set_ylim(*ylim)
-        self.ax3d.set_zlim(*zlim)
-        self.ax3d.set_box_aspect([1, 1, 1])
-        closed_note = "closed" if closed else "open"
-        self.ax3d.set_title(f"Wireframe result (fabric, subdivided, {closed_note})" if fabric else
-                             f"Wireframe result ({closed_note})")
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[1] - half, center[1] + half)
+        ax.set_zlim(center[2] - half, center[2] + half)
+        ax.set_box_aspect([1, 1, 1])
+        ax.set_title(f"Level {level}")
 
     def draw(self):
+        """Redraws the Net panel plus every "Level N" panel: level ==
+        self.subdivision_level draws LIVE from current state; a level in
+        self.level_snapshots (already subdivided past) draws its frozen
+        state; any other level hasn't been reached yet and draws empty
+        (see _draw_wireframe_panel)."""
         theme = self._apply_plot_theme()
         self._draw_target_faces(theme)
-        self._draw_wireframe_result(theme)
-        # fig.text accumulates across redraws unless the previous one is
-        # removed first -- this is the "Iteration: N" line shown under the
-        # image.
-        for txt in list(self.fig.texts):
-            txt.remove()
-        note = ""
-        if self.last_stats:
-            optimality = self.last_stats.get("optimality")
-            converged = self.last_stats.get("converged")
-            if optimality is not None:
-                conv_str = "converged" if converged else "not converged"
-                opt_note = f"optimality {optimality:.2e} vs. tol {CONVERGENCE_GTOL:.0e} ({conv_str})"
+        for level, ax in self.ax3d_by_level.items():
+            if level == self.subdivision_level:
+                self._draw_wireframe_panel(ax, theme, level, self.faces, self.positions,
+                                            self.face_of_fine)
+            elif level in self.level_snapshots:
+                snap = self.level_snapshots[level]
+                self._draw_wireframe_panel(ax, theme, level, snap["faces"], snap["positions"],
+                                            snap["face_of_fine"])
             else:
-                opt_note = "optimality n/a"
-            note = (f"   |   max stretch {self.last_stats['max_stretch_pct']:.2f}%, "
-                    f"RMS {self.last_stats['rms_stretch_pct']:.2f}%   |   {opt_note}")
-        self.fig.text(0.5, 0.01, f"Level {self.subdivision_level} | Iteration: "
-                                  f"{self.iteration_count}{note}",
-                       ha="center", va="bottom", color=theme["fg"], fontsize=10)
+                self._draw_wireframe_panel(ax, theme, level, None, None, None)
         self.canvas.draw_idle()
 
 

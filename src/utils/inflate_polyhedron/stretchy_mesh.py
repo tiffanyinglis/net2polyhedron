@@ -84,6 +84,19 @@ touches them, per this project's docstring convention in skills.md):
   vanishes together) the relaxation could still land exactly on instead
   of the intended shape.
 
+- **No runaway guard on pressure, deliberately.** Plain Hooke's-law
+  springs can't hold arbitrarily high pressure -- past some critical
+  value there's no equilibrium at all, since pressure's push grows with
+  `area` (~edge_length^2) while a spring's pull only grows linearly. A
+  per-edge stretch limit was tried here to force an equilibrium to exist
+  at any pressure, and removed again: the actual fix for "what pressure
+  should I use" is estimate_pressure_for_target_stretch calibrating a
+  modest, appropriate pressure per net in the first place (see its own
+  docstring), not clamping a badly-chosen one after the fact -- a
+  correctly-calibrated pressure never gets near the critical value this
+  would have guarded against. See .claude/skills/net-fold-project/SKILL.md
+  for this project's general stance on adding a term like that.
+
 - **Ramping + accept-or-reject in _inflate**: applying full pressure
   cold, or from a random start, makes least_squares fail to converge at
   all rather than inflate cleanly. INFLATION_WEIGHTS ramps up gradually,
@@ -366,73 +379,28 @@ def _safe_unit_vectors(vecs):
     return unit
 
 
-# Ratio (current length / rest length) beyond which an edge starts
-# fighting back much harder than plain Hooke's law -- generous enough to
-# never engage during ordinary inflation, only once something is already
-# badly over- or under-stretched.
-SOFT_LIMIT_HI = 2.0
-SOFT_LIMIT_LO = 0.5
-
-# How hard the soft limit pushes back per unit of excess-past-the-bound,
-# SQUARED (see _soft_limit_stretch) -- squared specifically because plain
-# Hooke's law force only grows linearly with edge length, while outward
-# pressure grows QUADRATICALLY with it (pressure * area, and area grows
-# with length^2): past some pressure, no amount of ordinary spring
-# stiffness can ever catch up, and the mesh inflates without bound (see
-# module docstring's Design notes). A force growing quadratically in the
-# excess grows CUBICALLY in overall edge length for a badly-stretched
-# edge, which is fast enough to guarantee some finite equilibrium exists
-# no matter how high pressure is set, rather than just delaying the same
-# runaway to a higher pressure.
-# TEMPORARILY set to 0 (disabled) at the user's request, to test behavior
-# without it -- restore to 50.0 afterward unless told otherwise.
-SOFT_LIMIT_STIFFNESS = 0.0
-
-
-def _soft_limit_stretch(dist, edge_length):
-    """dist/edge_length: as in _relax_force. Returns (extra_stretch,
-    max_excess): extra_stretch is added on top of plain Hooke's-law
-    stretch -- zero inside [SOFT_LIMIT_LO, SOFT_LIMIT_HI] x rest length,
-    growing with the SQUARE of how far outside it the edge is (see
-    SOFT_LIMIT_STIFFNESS for why squared), signed the same way plain
-    stretch already is (positive = pull together, negative = push
-    apart). max_excess (0 if none engaged) lets relax_once pick a safe
-    step size only once this term actually matters (see
-    STEP_MAX_MULTIPLIER_STIFF)."""
-    ratio = dist / edge_length
-    excess_hi = np.maximum(0.0, ratio - SOFT_LIMIT_HI)
-    excess_lo = np.maximum(0.0, SOFT_LIMIT_LO - ratio)
-    max_excess = float(np.max(excess_hi + excess_lo)) if len(ratio) else 0.0
-    return SOFT_LIMIT_STIFFNESS * (excess_hi ** 2 - excess_lo ** 2), max_excess
-
-
 def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_length,
                   pressure=0.0, planarity_weight=0.0):
     """relax_once's per-step force: a genuine mechanical force balance.
     Each edge is a Hooke's-law spring (relative stretch (dist-rest)/rest
-    along the edge direction) PLUS a soft limit (see _soft_limit_stretch)
-    that sharply stiffens an edge stretched past SOFT_LIMIT_HI or
-    compressed past SOFT_LIMIT_LO of its own rest length; each face
-    applies a real outward pressure force, `pressure * area *
-    outward_normal` -- area and normal computed together straight from
-    its own vertex loop via `0.5 * sum_i cross(p_i, p_{i+1})` (Newell's
-    method) -- split evenly across its own vertices; each 4+-gon face
-    also pulls its own vertices a little towards its best-fit plane (see
-    _face_planarity_residual -- same SVD normal, used here as a
-    restoring direction instead of a scalar residual). Returns
-    ((N,3) net force on every vertex, max_excess) -- relax_once walks a
-    small step along the force (see module docstring's Design notes for
+    along the edge direction); each face applies a real outward pressure
+    force, `pressure * area * outward_normal` -- area and normal computed
+    together straight from its own vertex loop via `0.5 * sum_i
+    cross(p_i, p_{i+1})` (Newell's method) -- split evenly across its own
+    vertices; each 4+-gon face also pulls its own vertices a little
+    towards its best-fit plane (see _face_planarity_residual -- same SVD
+    normal, used here as a restoring direction instead of a scalar
+    residual). Returns the (N,3) net force on every vertex -- relax_once
+    walks a small step along it (see module docstring's Design notes for
     why edge directions need _safe_unit_vectors rather than a naive
-    division) and uses max_excess to pick how small a step is safe (see
-    STEP_MAX_MULTIPLIER_STIFF)."""
+    division)."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
 
     diff = pts[edge_bi] - pts[edge_ai]
     dist = np.linalg.norm(diff, axis=1)
     direction = _safe_unit_vectors(diff)
-    soft_limit_stretch, max_excess = _soft_limit_stretch(dist, edge_length)
-    stretch = (dist - edge_length) / edge_length + soft_limit_stretch
+    stretch = (dist - edge_length) / edge_length
     spring_on_a = stretch[:, None] * direction
     np.add.at(force, edge_ai, spring_on_a)
     np.add.at(force, edge_bi, -spring_on_a)
@@ -455,7 +423,7 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_
             pull = -planarity_weight * signed_dist[..., None] * normals[:, None, :]  # (F, n, 3)
             np.add.at(force, group_idx.ravel(), pull.reshape(-1, 3))
 
-    return force, max_excess
+    return force
 
 
 def _orientation_signs(pts, faces, idx):
@@ -738,30 +706,14 @@ STEP_MAX_FRACTION = 0.2
 # rather than damping down). Capping the per-step multiplier keeps this
 # from an undamped-oscillator's back-and-forth.
 #
-# Two tiers, not one: a large force doesn't mean a large SAFE step once
-# SOFT_LIMIT_STIFFNESS's much steeper near-the-limit force is involved
-# (force changes fast with position right there), so that regime needs a
-# much smaller cap (_STIFF) -- verified 0.1/0.02/0.005 each oscillate
-# forever at high pressure (60) on a plain cube, while 0.001 converges
-# there (88 steps), agreeing with 0.0005 on the same final shape (a real
-# fixed point, not step noise). But applying _STIFF everywhere makes
-# ordinary low-pressure inflation (which never nears the soft limit)
-# take ~100x more steps than it needs -- verified pressure=1 on a plain
-# cube didn't even finish 100,000 steps under a flat 0.001, having
-# converged in ~1,300 under 0.1 when nothing was clamped. relax_once
-# switches to _STIFF only on a step where _relax_force reports the soft
-# limit actually engaged (max_excess > 0), so ordinary inflation keeps
-# the fast, generous step size.
-#
-# _BASE itself needed lowering from 0.1 to 0.05: a denser mesh has more
-# springs meeting at each vertex, which raises that vertex's EFFECTIVE
-# combined stiffness even with no soft limit involved at all -- verified
-# a level-3-subdivided cube at pressure=1 (194 vertices) settles into an
-# exact, undamped 2-cycle under 0.1 (max_stretch_pct alternates between
-# ~18.9% and ~24.4% forever, never converging), while 0.05/0.02/0.01 all
-# converge cleanly to the SAME ~8.5% fixed point.
-STEP_MAX_MULTIPLIER_BASE = 0.05
-STEP_MAX_MULTIPLIER_STIFF = 0.001
+# Needed lowering from 0.1 to 0.05: a denser mesh has more springs
+# meeting at each vertex, which raises that vertex's EFFECTIVE combined
+# stiffness -- verified a level-3-subdivided cube at pressure=1 (194
+# vertices) settles into an exact, undamped 2-cycle under 0.1
+# (max_stretch_pct alternates between ~18.9% and ~24.4% forever, never
+# converging), while 0.05/0.02/0.01 all converge cleanly to the SAME
+# ~8.5% fixed point.
+STEP_MAX_MULTIPLIER = 0.05
 
 # Hard cap on iterations when max_nfev=None (run-to-convergence): explicit
 # steps have no scipy-style internal budget of their own, so this stands
@@ -859,8 +811,8 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
         if stop_event is not None and stop_event.is_set():
             steps_taken -= 1
             break
-        force, max_excess = _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
-                                          length_arr, pressure, planarity_weight)
+        force = _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
+                              length_arr, pressure, planarity_weight)
         max_force = float(np.linalg.norm(force, axis=1).max())
         if max_force < gtol:
             converged = True
@@ -871,8 +823,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
                 and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
             converged = True
             break
-        step_mult = STEP_MAX_MULTIPLIER_STIFF if max_excess > 0 else STEP_MAX_MULTIPLIER_BASE
-        dt = min(step_mult, STEP_MAX_FRACTION * scale / max_force)
+        dt = min(STEP_MAX_MULTIPLIER, STEP_MAX_FRACTION * scale / max_force)
         pts = pts + dt * force
 
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
@@ -880,14 +831,15 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
 
 
 # Empirical starting point for estimate_pressure_for_target_stretch: bisected
-# the pressure giving ~10% max stretch on each of the 5 Platonic solids and
-# found `pressure * total_rest_area` lands in a much tighter band (1.9-3.2)
-# than raw pressure does (0.11-1.44) -- i.e. required pressure scales with
-# how much total AREA it's pushing against, not vertex/face count. This is
-# the average of pressure*area/target_fraction across those 5 solids (range
-# was 19-32) -- a decent first guess, not exact, which is why the function
-# refines it against an actual relax_once result rather than trusting it
-# alone.
+# the pressure giving ~10% stretch on each of the 5 Platonic solids (max
+# and RMS stretch coincide there -- a regular solid stretches every edge
+# equally) and found `pressure * total_rest_area` lands in a much tighter
+# band (1.9-3.2) than raw pressure does (0.11-1.44) -- i.e. required
+# pressure scales with how much total AREA it's pushing against, not
+# vertex/face count. This is the average of pressure*area/target_fraction
+# across those 5 solids (range was 19-32) -- a decent first guess, not
+# exact, which is why the function refines it against an actual
+# relax_once result rather than trusting it alone.
 _PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0
 
 # How far a single calibration step is allowed to rescale pressure --
@@ -897,23 +849,24 @@ _PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0
 # stretch regime this targets, verified against the bisection trace above).
 _PRESSURE_RATIO_CLAMP = (0.2, 5.0)
 
-DEFAULT_TARGET_STRETCH_PCT = 10.0
+DEFAULT_TARGET_RMS_STRETCH_PCT = 8.0
 
 
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
-                                          target_stretch_pct=DEFAULT_TARGET_STRETCH_PCT,
+                                          target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
                                           planarity_weight=PLANARITY_WEIGHT, max_iterations=4,
                                           tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None):
     """positions/faces/edge_length: as relax_once. Finds a pressure whose
-    relax_once result lands within `tol_pct` of `target_stretch_pct` max
-    stretch, starting from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric
-    guess and refining it by relaxing at that pressure, then rescaling
-    pressure by (target / achieved) -- clamped by _PRESSURE_RATIO_CLAMP --
-    and trying again, up to `max_iterations` times. Every trial starts
-    fresh from the given `positions` (not chained from the previous
-    trial's result), since different pressures can have very different
-    equilibria and this is searching for the pressure, not steering a
-    shape.
+    relax_once result lands within `tol_pct` of `target_rms_pct` RMS
+    stretch (RMS, not max -- an irregular/subdivided mesh stretches
+    unevenly, and RMS is what the "Target RMS stretch" spinner asks for),
+    starting from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess and
+    refining it by relaxing at that pressure, then rescaling pressure by
+    (target / achieved) -- clamped by _PRESSURE_RATIO_CLAMP -- and trying
+    again, up to `max_iterations` times. Every trial starts fresh from
+    the given `positions` (not chained from the previous trial's
+    result), since different pressures can have very different equilibria
+    and this is searching for the pressure, not steering a shape.
 
     Keeps whichever trial got CLOSEST to the target rather than just the
     last one: the rescale step assumes more pressure means more stretch,
@@ -926,19 +879,19 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     max_force, converged) -- the last five exactly as relax_once's own
     return, from whichever trial this settled on."""
     total_area = _total_rest_area(faces, edge_length)
-    pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_stretch_pct / 100.0) / total_area
+    pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
     best_error, best_pressure, best_result = None, None, None
     for _ in range(max_iterations):
         result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
                              max_nfev=max_nfev_per_trial, stop_event=stop_event)
-        _, _, max_stretch, _, _, _ = result
-        error = abs(max_stretch - target_stretch_pct)
+        _, _, _, rms_stretch, _, _ = result
+        error = abs(rms_stretch - target_rms_pct)
         if best_error is None or error < best_error:
             best_error, best_pressure, best_result = error, pressure, result
         stopped = stop_event is not None and stop_event.is_set()
-        if stopped or error < tol_pct or max_stretch <= 0:
+        if stopped or error < tol_pct or rms_stretch <= 0:
             break
-        ratio = target_stretch_pct / max_stretch
+        ratio = target_rms_pct / rms_stretch
         ratio = min(max(ratio, _PRESSURE_RATIO_CLAMP[0]), _PRESSURE_RATIO_CLAMP[1])
         pressure *= ratio
     new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged = best_result

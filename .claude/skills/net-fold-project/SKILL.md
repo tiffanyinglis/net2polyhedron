@@ -66,6 +66,33 @@ for permission first, naming the file and what change is needed, rather
 than proceeding or silently working around it. This list is expected to
 grow -- check it before editing anything in this project.
 
+## No hacky terms in the physics without explicit permission
+
+`stretchy_mesh.py`'s force model (see "Stretchy meshes" below) has
+repeatedly grown, then had removed, a term that papers over a symptom of
+the CURRENT model instead of fixing its actual cause -- each time
+because it "felt like it would work" in the moment, not because the user
+asked for it:
+
+- A target-volume/reference-volume pressure term, removed because it
+  silently followed wherever the mesh currently was, compounding stretch
+  across repeated Subdivide-then-Inflate cycles even at the same nominal
+  pressure.
+- A per-edge soft stretch limit (quadratic stiffening past 2x/0.5x rest
+  length), added to keep pressure from having no equilibrium at all past
+  a critical value, removed once `estimate_pressure_for_target_stretch`
+  made calibrating an appropriate pressure per net the actual fix,
+  rather than clamping a badly-chosen one after the fact.
+
+Both were reasonable-sounding in isolation and both turned out to be the
+wrong layer to fix the problem at. **Do not add a volume term, a target/
+reference term, a stretch clamp, or any other term to the force model
+that isn't a direct, literal physical quantity (a real spring force, a
+real pressure force) without the user explicitly asking for it first** --
+if a pressure/stretch/convergence problem shows up, explain the actual
+cause and propose the fix (including a new term, if one is genuinely
+warranted) rather than silently adding one to make a symptom go away.
+
 Two Tkinter entry points currently live in this project (a third,
 `polyhedron_unfolder`, existed for the now-DELETED rigid-unfolding
 pipeline described below — see "Untouchable files" above and "Removed:
@@ -661,57 +688,79 @@ be rather than making those meshes take far more steps to formally
   fine face, naming which base face it came from (used for per-base-face
   coloring on both panels, rebuilt fresh by every `subdivide_once` call).
 - **The "Inflate" `LabelFrame`** groups everything about running
-  `relax_once`, top to bottom in the order it's used: Pressure spinner,
-  then the iterate-mode radio buttons, then the Inflate/Stop buttons.
-  (The net picker lives in the "Net" frame above it instead -- not an
-  inflation control. There USED TO also be a "Save" button there,
-  writing vertex positions/stats to a `.json` plus a PNG of the current
-  view under `data/output/Save/` -- removed; see git history for
-  `on_save_clicked` if this needs reviving.)
-  - **"Pressure" spinner**: a user-chosen, CONSTANT pressure passed to
-    `relax_once`, continuing from wherever `self.positions` currently is
-    (not from scratch) -- so repeated clicks let the user watch/steer the
-    shape incrementally. Default/max: `DEFAULT_PRESSURE`/`MAX_PRESSURE`
-    (3.0/60.0) -- gentle by default; 60 is generous headroom above what a
-    plain cube needs to stay well-behaved (see below).
-  - **"Auto" button** (`on_auto_pressure_clicked` /
-    `stretchy_mesh.estimate_pressure_for_target_stretch`): picks a
-    pressure landing near `DEFAULT_TARGET_STRETCH_PCT` (10%) max stretch
-    and applies it immediately (sets the spinner AND updates the mesh to
-    that pressure's own converged shape -- not just a suggested number).
-    Exists because ONE fixed default pressure is meaningless across
-    different nets -- bisecting for the pressure giving ~10% stretch on
-    each of the 5 Platonic solids found `pressure * total_rest_area`
-    (see `_total_rest_area`) lands in a tight band (1.9-3.2) while raw
-    pressure varies 12.6x (0.11-1.44) and doesn't correlate with
-    vertex/face count at all. The function starts from that area-based
-    geometric estimate, then refines by relaxing at that pressure and
-    rescaling by (target/achieved) -- clamped to avoid a wild jump --
-    up to a few times, keeping whichever trial landed closest rather
-    than just the last one: the rescale assumes more pressure means more
-    stretch, which is false on `three_squares.json` (a real property of
-    that topology -- it stretches LESS as pressure rises), and without
-    tracking the best result that case would escalate pressure forever
-    chasing a target moving away from it.
+  `relax_once`, top to bottom in the order it's used: the "Target RMS
+  stretch" spinner, then the iterate-mode radio buttons, then the
+  Inflate/Stop buttons. (The net picker lives in the "Net" frame above it
+  instead -- not an inflation control. There USED TO also be a "Save"
+  button there, writing vertex positions/stats to a `.json` plus a PNG of
+  the current view under `data/output/Save/` -- removed; see git history
+  for `on_save_clicked` if this needs reviving. There USED TO also be a
+  separate "Auto" button and a Pressure readout label -- removed once
+  "Inflate" itself started calibrating pressure, and once the
+  Convergence History table started showing it per level, respectively;
+  see git history for `on_auto_pressure_clicked`/`_on_auto_pressure_done`
+  if a standalone calibrate-without-inflating action is wanted again.)
+  - **Pressure is NOT user-editable** -- `self.pressure_value` (a plain
+    attribute, with no dedicated display of its own; it's logged per
+    level in the Convergence History table instead) is only ever set by
+    `on_inflate_clicked`'s own calibration phase (see below), fresh on
+    EVERY click, since there's no longer a separate action that sets it
+    once for the user to reuse.
+  - **"Target RMS stretch" spinner** (`self.target_rms_var`, % of rest
+    edge length, default `DEFAULT_TARGET_RMS_STRETCH_PCT` = 8.0) --
+    user-editable; feeds `on_inflate_clicked`'s calibration call into
+    `estimate_pressure_for_target_stretch` as `target_rms_pct`.
+  - **`on_inflate_clicked` calibrates pressure before inflating**: phase
+    1 runs `stretchy_mesh.estimate_pressure_for_target_stretch` (in the
+    background, via `_run_background`) to find a pressure landing near
+    the "Target RMS stretch" spinner's value from wherever
+    `self.positions` currently is; phase 2 (`_on_pressure_calibrated`)
+    takes JUST the resulting pressure number (calibration's own trial
+    positions are discarded, not applied to `self.positions`) and feeds
+    it into the normal streamed `_run_inflate_stream`, so the
+    steps-vs-convergence radio mode and the Stop button behave exactly
+    as before -- calibration only decides WHAT pressure to use, it
+    isn't itself the inflation. Targets RMS stretch specifically (not
+    max) -- on a regular Platonic solid the two coincide (every edge
+    stretches equally), but an irregular or subdivided mesh stretches
+    unevenly and RMS is the metric the spinner actually asks for.
+    Calibration exists because ONE fixed default pressure is meaningless
+    across different nets -- bisecting for the pressure giving ~10%
+    stretch on each of the 5 Platonic solids found `pressure *
+    total_rest_area` (see `_total_rest_area`) lands in a tight band
+    (1.9-3.2) while raw pressure varies 12.6x (0.11-1.44) and doesn't
+    correlate with vertex/face count at all. The function starts from
+    that area-based geometric estimate, then refines by relaxing at that
+    pressure and rescaling by (target/achieved) -- clamped to avoid a
+    wild jump -- up to a few times, keeping whichever trial landed
+    closest rather than just the last one: the rescale assumes more
+    pressure means more stretch, which is false on `three_squares.json`
+    (a real property of that topology -- it stretches LESS as pressure
+    rises), and without tracking the best result that case would
+    escalate pressure forever chasing a target moving away from it.
   - **`stretchy_mesh._relax_force`**: a genuine mechanical force balance,
     no volume or target anywhere in it -- each edge is a Hooke's-law
     spring, each face applies a real `pressure * area * outward_normal`
-    force split across its own vertices, and each edge ALSO gets a soft
-    limit (`_soft_limit_stretch`) that sharply (quadratically) stiffens
-    it once stretched past 2x or compressed past 0.5x its own rest
-    length. The soft limit exists because plain Hooke's law alone can't
-    hold pressure past a critical value: pressure's push grows with
-    `area` (~length^2) while a plain spring's pull only grows linearly,
-    so without it there's a real pressure above which no equilibrium
-    exists at all and the mesh inflates without bound (verified directly:
-    a plain cube run to convergence diverges past a few million percent
-    stretch at pressure 3+ with no soft limit). `relax_once` walks small
+    force split across its own vertices. `relax_once` walks small
     EXPLICIT steps along this force (see below) rather than handing it to
-    a Newton-style solver, which matters for the same reason: a solver
-    that re-linearizes and jumps can land on a spurious equilibrium (a
-    doubled-size "solution", or a uniform implosion to near-zero volume
-    that never disagrees with itself) that a genuine small-step physical
-    walk starting from the same point would never reach.
+    a Newton-style solver: a solver that re-linearizes and jumps can land
+    on a spurious equilibrium (a doubled-size "solution", or a uniform
+    implosion to near-zero volume that never disagrees with itself) that
+    a genuine small-step physical walk starting from the same point would
+    never reach. Plain Hooke's-law springs genuinely can't hold pressure
+    past a critical value (pressure's push grows with `area` ~
+    length^2, a spring's pull only grows linearly, so past some pressure
+    there's no equilibrium at all and the mesh inflates without bound) --
+    a per-edge soft stretch limit was tried here to force an equilibrium
+    to exist at any pressure, and removed again once
+    `estimate_pressure_for_target_stretch` (below) made the actual fix
+    available: calibrate an appropriate pressure per net up front, rather
+    than clamp a badly-chosen one after the fact. **Do not re-add a term
+    like this (or a volume/target term, per the compounding-across-
+    Subdivide bug they caused earlier in this project's history) without
+    the user explicitly asking for it** -- both were tried, both work
+    around a symptom instead of the actual cause, and both were removed
+    once a better fix existed.
   - **No orientation/fold check on the interactive Inflate loop.** An
     earlier version of `_run_inflate_stream` rejected a chunk whenever
     `stretchy_mesh.is_orientation_consistent` (the centroid-outward
@@ -768,10 +817,12 @@ be rather than making those meshes take far more steps to formally
     is true, and `on_inflate_clicked` refuses to run even if clicked
     anyway, since relax_once from an already-converged point starts with
     near-zero force and has nothing left to do. Re-armed by
-    `_on_pressure_changed` (a `trace_add("write", ...)` on `pressure_var`
-    -- a "converged" verdict only applies to the pressure it was reached
-    at) and by loading a new net; a Stop leaves `converged=False` since it
-    didn't run to completion, so the button stays enabled after one.
+    `_on_target_rms_changed` (a `trace_add("write", ...)` on
+    `target_rms_var` -- a "converged" verdict only applies to the target
+    it was reached at, and pressure is recalibrated fresh every click
+    anyway) and by loading a new net; a Stop leaves `converged=False`
+    since it didn't run to completion, so the button stays enabled after
+    one.
   - **"Stop" button** sets a `threading.Event` (`self.stop_event`,
     created fresh per Inflate click) that `relax_once` checks before each
     step, aborting before starting another one rather than waiting for
@@ -781,13 +832,10 @@ be rather than making those meshes take far more steps to formally
     `_set_controls_enabled(True)` once any background job finishes --
     only `on_inflate_clicked` arms it, so it stays disabled during the
     initial cache load, which isn't usefully interruptible).
-  - The bottom-of-figure annotation (`draw()`, via `fig.text` -- see
-    below) shows `optimality` (the worst vertex's net force, should
-    approach 0) against `CONVERGENCE_GTOL`, plus whether THIS press
-    actually converged by that tolerance vs. hit the step cap (or a Stop
-    request) first -- `optimality` is `None`/shown as "n/a" right after
-    loading (before any Inflate press) or after a Stop, since neither
-    path ran a real step to read it from.
+  - There USED TO be a bottom-of-figure annotation (`draw()`, via
+    `fig.text`) repeating the current level/iteration/stretch/optimality
+    numbers under the plots -- removed as redundant once the
+    Convergence History table already showed all of it per level.
 - **Performance**: after vectorizing `_mesh_volume`/`_per_face_volumes`/
   `_face_planarity_residual` (precomputed flat index arrays -- plus, for
   the per-face case, a `np.bincount` grouping -- instead of a per-face
@@ -852,20 +900,36 @@ be rather than making those meshes take far more steps to formally
   the precomputed `self.target_layout` on every redraw rather than
   recomputing the BFS each time; the per-face raw-vertex-id text label
   (e.g. "[4, 0, 2, 6]") that stood in for a real layout before is gone.
-- `_draw_wireframe_result` (the right-hand 3D panel showing the CURRENT
-  state) wraps `self.positions`/`self.faces` into a `Polyhedron` via
-  `inflate_polyhedron.stretchy_mesh.mesh_to_polyhedron` on every redraw: `.edges`
-  gives the wireframe line segments (`polyhedron.vertices[i]` is the
-  position for edge endpoint `i` directly, since `mesh_to_polyhedron`
-  already remapped vertex ids to `Polyhedron`'s dense index space --
-  no `self.positions[...]` dict lookup needed), and `.is_closed()`
-  annotates the panel title ("Wireframe result (closed)" vs "(open)") so
-  it's visible at a glance whether the current shape -- coarse OR fine
-  fabric mesh, mid-relax or fully settled -- is a genuinely closed solid
-  yet. This is purely a rendering/reporting convenience: the solve/relax
-  internals (`solve_wireframe`, `relax_once`, etc.) stay on the
-  dict-keyed representation throughout, since vertices are relaxed by id
-  and a mid-solve mesh isn't reliably closed or convex.
+- **View layout: "Net" plus one 3D panel per level.** `self.ax2d` is the
+  flat "Net" layout (unchanged); `self.ax3d_by_level` is a `{level:
+  Axes3D}` dict, one per level 1..`MAX_LEVEL`, built once in `__init__`.
+  `draw()` decides per level, every redraw, which of three states that
+  level's panel is in: `level == self.subdivision_level` draws LIVE from
+  the current `self.faces`/`self.positions`/`self.face_of_fine`; `level
+  in self.level_snapshots` draws that level's FROZEN state (captured by
+  `_subdivide_step` the instant the user subdivides past it -- a plain
+  reference to the about-to-be-replaced `self.faces`/`self.positions`/
+  `self.face_of_fine`, not a deep copy, since `subdivide_once`/
+  `relax_once` always return NEW dict/array objects rather than mutating
+  their input); any other level hasn't been reached yet this net session
+  and draws empty (just its "Level N" title, no data). Level 0 never
+  gets a panel or a snapshot -- this app always auto-advances past it
+  (see `STARTING_LEVEL`).
+- `_draw_wireframe_panel(ax, theme, level, faces, positions,
+  face_of_fine)` (one level's panel, called once per level by `draw()`
+  with either live, frozen, or `None` data) wraps `positions`/`faces`
+  into a `Polyhedron` via `inflate_polyhedron.stretchy_mesh.mesh_to_polyhedron`:
+  `.edges` gives the wireframe line segments (`polyhedron.vertices[i]`
+  is the position for edge endpoint `i` directly, since
+  `mesh_to_polyhedron` already remapped vertex ids to `Polyhedron`'s
+  dense index space -- no `positions[...]` dict lookup needed), and
+  `.is_closed()` gates whether `_CullableFace`'s exact backface culling
+  applies (only valid for a closed convex solid) vs. a plain
+  `Line3DCollection` wireframe overlay for an open mesh. This is purely
+  a rendering/reporting convenience: the solve/relax internals
+  (`solve_wireframe`, `relax_once`, etc.) stay on the dict-keyed
+  representation throughout, since vertices are relaxed by id and a
+  mid-solve mesh isn't reliably closed or convex.
 
 ## Testing
 
