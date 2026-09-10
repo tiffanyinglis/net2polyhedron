@@ -114,7 +114,9 @@ work for anyone who wants one.
    rotation state (self.level_azim/level_elev) -- a drag on any panel
    rotates all of them together, matching what the old matplotlib
    panels' rotation sync used to do. (Tried on Level 0 alone first, to
-   validate the approach before applying it to every level.)
+   validate the approach before applying it to every level.) Every level
+   panel likewise shares ONE mouse-wheel zoom state (self.level_zoom) --
+   scrolling over any panel zooms all of them together, same rationale.
 """
 import sys
 from pathlib import Path
@@ -198,6 +200,15 @@ LEVEL_DEFAULT_AZIM = -60.0
 # Degrees of camera rotation per pixel of click-drag -- tuned by feel
 # against mplot3d's own drag-to-rotate sensitivity this replaced.
 LEVEL_DRAG_SENSITIVITY = 0.5
+# Zoom multiplier applied per mouse-wheel notch (one scroll "click", i.e.
+# one event.delta increment of 120 on Windows) -- >1 zooms in, so the
+# factor camera.parallel_scale is multiplied by is its RECIPROCAL (a
+# smaller parallel_scale means a smaller visible world height, i.e.
+# zoomed in). Clamped by LEVEL_ZOOM_MIN/MAX so scrolling can't shrink the
+# shape to nothing or push it arbitrarily far away.
+LEVEL_ZOOM_STEP = 1.1
+LEVEL_ZOOM_MIN = 0.1
+LEVEL_ZOOM_MAX = 10.0
 
 # Every panel's title ("Net", "Level N") is a plain Tkinter Label above
 # its image/canvas, not text drawn inside the image itself -- a title
@@ -456,6 +467,10 @@ class InflatePolyhedronApp:
         # (_render_all_level_panels).
         self.level_azim = LEVEL_DEFAULT_AZIM
         self.level_elev = LEVEL_DEFAULT_ELEV
+        # ONE shared zoom factor across every level panel, same rationale
+        # as level_azim/level_elev above -- a scroll on any panel updates
+        # it and re-renders all of them (see _on_level_scroll).
+        self.level_zoom = 1.0
         self._level_dragging = False
         self._level_last_xy = None
         # ONE button per level, below its panel -- no separate button
@@ -569,6 +584,13 @@ class InflatePolyhedronApp:
         label.bind("<ButtonPress-1>", self._on_level_drag_start)
         label.bind("<B1-Motion>", self._on_level_motion)
         label.bind("<ButtonRelease-1>", self._on_level_drag_end)
+        # Windows/macOS deliver <MouseWheel> with event.delta; Linux
+        # (X11) delivers wheel motion as Button-4/Button-5 clicks instead
+        # -- binding all three covers every platform this app might run
+        # on.
+        label.bind("<MouseWheel>", self._on_level_scroll)
+        label.bind("<Button-4>", self._on_level_scroll)
+        label.bind("<Button-5>", self._on_level_scroll)
 
     def _on_level_drag_start(self, event):
         self._level_dragging = True
@@ -605,6 +627,21 @@ class InflatePolyhedronApp:
         # already keeps every panel live-updated during the drag itself,
         # so this is just a safety net for that edge case, not the
         # primary sync point.
+        self._render_all_level_panels()
+
+    def _on_level_scroll(self, event):
+        """Mouse-wheel-scroll on ANY level panel zooms the shared camera
+        (self.level_zoom) and re-renders EVERY panel with it -- the same
+        shared-state-across-all-panels approach _on_level_motion uses for
+        rotation (see this class's own Design notes in __init__), just
+        for zoom instead of angle. event.num is Button-4/5 on X11 (no
+        event.delta there); event.delta is Windows/macOS's own signed
+        notch count (positive delta zooms in)."""
+        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
+            factor = 1.0 / LEVEL_ZOOM_STEP
+        else:
+            factor = LEVEL_ZOOM_STEP
+        self.level_zoom = max(LEVEL_ZOOM_MIN, min(LEVEL_ZOOM_MAX, self.level_zoom * factor))
         self._render_all_level_panels()
 
     def _render_all_level_panels(self):
@@ -687,7 +724,11 @@ class InflatePolyhedronApp:
         # LEVEL_ZOOM_FILL then shrinks the shape within that
         # guaranteed-fitting frame.
         panel_width, panel_height = LEVEL_PANEL_SIZE
-        camera.parallel_scale = half * max(1.0, panel_height / panel_width) / LEVEL_ZOOM_FILL
+        # self.level_zoom is a divisor here (like LEVEL_ZOOM_FILL) since
+        # parallel_scale is a visible-world-HEIGHT, not a magnification --
+        # a bigger level_zoom (scrolled in) must shrink parallel_scale.
+        camera.parallel_scale = (half * max(1.0, panel_height / panel_width)
+                                  / LEVEL_ZOOM_FILL / self.level_zoom)
         plotter.reset_camera_clipping_range()
         # plotter.screenshot() does NOT re-render on a camera-only change
         # by itself -- verified directly: two screenshots taken after
@@ -827,6 +868,15 @@ class InflatePolyhedronApp:
         converged = bool(self.last_stats.get("converged"))
         for level, button in self.level_action_buttons.items():
             if level != self.subdivision_level or self.positions is None:
+                # Not the current frontier -- reset its text too, not just
+                # its disabled state: without this, a level that reached
+                # "DONE!" (MAX_LEVEL, converged) on a PREVIOUS net keeps
+                # showing "DONE!", now stuck and disabled, after selecting
+                # a different net resets self.subdivision_level back to 0.
+                # "Subdivide" (rather than leaving MAX_LEVEL's own idle
+                # label, "Inflate") since that's the label this button
+                # will actually show once every level up to it converges.
+                button.config(text="Relax" if level == 0 else "Subdivide")
                 button.state(["disabled"])
             elif not converged:
                 label = "Relax" if level == 0 else "Inflate"
