@@ -5,13 +5,12 @@ import numpy as np
 import pytest
 
 from utils.inflate_polyhedron import stretchy_mesh
-from utils.subdivisions.mesh_subdivide import solve_fabric_mesh
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, mesh_edges, mesh_to_polyhedron, solve_wireframe, STRETCH_CAP,
-    _overall_3d_extent, _min_pairwise_separation, _mesh_volume, _sphere_bound_volume,
-    _volume_indices, _planarity_groups, _face_planarity_residual,
+    load_stretchy_mesh, mesh_edges, mesh_to_polyhedron,
+    _mesh_volume, _volume_indices, _planarity_groups,
     _orientation_signs, _is_orientation_consistent,
-    relax_once, EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
+    relax_once, relax_initial_configuration, random_initial_positions,
+    EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
 )
 from utils.geometry.polyhedron import Polyhedron
 from utils.inflate_polyhedron.mesh_levels import subdivide_once
@@ -52,6 +51,20 @@ TRUE_VOLUME = {
     "icosahedron": (5 / 12) * (3 + np.sqrt(5)),
     "dodecahedron": (15 + 7 * np.sqrt(5)) / 4,
 }
+
+
+def _relaxed_positions(faces, edge_length=EDGE_LENGTH, seed=0, max_nfev=None):
+    """A real, non-degenerate embedding of `faces`, via the same
+    random-start-plus-spring-relax pipeline inflate_polyhedron_app itself
+    now uses for its own starting configuration (see
+    stretchy_mesh.relax_initial_configuration) -- used throughout this
+    file wherever a test just needs SOME concrete positions to work with,
+    in place of the old solve_wireframe fixture data. `max_nfev` caps the
+    relax short of full convergence, for a test that specifically wants a
+    still-somewhat-stretched starting point."""
+    pos0 = random_initial_positions(faces, seed=seed)
+    positions, *_ = relax_initial_configuration(pos0, faces, edge_length, max_nfev=max_nfev)
+    return positions
 
 
 def test_load_pentagons_and_square_example():
@@ -98,7 +111,7 @@ def test_mesh_edges_deduplicates_and_sorts():
 
 
 def test_mesh_to_polyhedron_wraps_a_solved_mesh():
-    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    positions = _relaxed_positions(TETRAHEDRON_FACES)
     solid = mesh_to_polyhedron(positions, TETRAHEDRON_FACES, name="tetra")
     assert isinstance(solid, Polyhedron)
     assert solid.name == "tetra"
@@ -121,7 +134,7 @@ def test_mesh_to_polyhedron_handles_non_contiguous_vertex_ids():
     assert np.array_equal(solid.vertices[2], positions[30])
 
 
-# ---- _mesh_volume / _sphere_bound_volume ----
+# ---- _mesh_volume / planarity groups ----
 
 def _unit_edge_tetrahedron_points():
     verts = np.array(_RIGID_TETRAHEDRON_VERTICES)
@@ -137,30 +150,6 @@ def test_mesh_volume_matches_the_true_regular_tetrahedron_volume():
     assert np.isclose(_mesh_volume(pts, volume_indices), TRUE_VOLUME["tetrahedron"], atol=1e-6)
 
 
-def test_face_planarity_residual_is_zero_for_all_triangle_faces():
-    # every face here has exactly 3 vertices, always exactly planar --
-    # _planarity_groups should exclude them entirely (no size-4+ group).
-    pts, faces = _unit_edge_tetrahedron_points()
-    idx = {i: i for i in range(len(pts))}
-    groups = _planarity_groups(faces, idx)
-    assert groups == {}
-    assert _face_planarity_residual(pts, groups).size == 0
-
-
-def test_face_planarity_residual_flags_a_non_planar_quad():
-    # a square face lifted out of plane at one corner should give a
-    # nonzero residual for that face; a perfectly flat square should not.
-    flat = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
-    bent = flat.copy()
-    bent[0, 2] = 0.5  # lift one corner out of plane
-    idx = {i: i for i in range(4)}
-    face = [0, 1, 2, 3]
-    groups = _planarity_groups([face], idx)
-    assert set(groups) == {4}
-    assert np.allclose(_face_planarity_residual(flat, groups), 0.0, atol=1e-9)
-    assert np.max(np.abs(_face_planarity_residual(bent, groups))) > 0.05
-
-
 def test_planarity_groups_batches_multiple_face_sizes_independently():
     # two squares + one pentagon: two groups (size 4 with 2 faces, size 5
     # with 1), each internally batched, and no cross-contamination.
@@ -174,126 +163,14 @@ def test_planarity_groups_batches_multiple_face_sizes_independently():
     assert groups[5].shape == (1, 5)
 
 
-@pytest.mark.parametrize("name,sides_each,n_faces", [
-    ("tetrahedron", 3, 4), ("cube", 4, 6), ("octahedron", 3, 8),
-    ("icosahedron", 3, 20), ("dodecahedron", 5, 12),
-])
-def test_sphere_bound_volume_is_an_optimistic_but_well_scaled_target(name, sides_each, n_faces):
-    faces = [[0] * sides_each] * n_faces  # only len() per face matters to _sphere_bound_volume
-    bound = _sphere_bound_volume(faces, edge_length=1.0)
-    true_volume = TRUE_VOLUME[name]
-    assert bound > true_volume  # optimistic: never actually reachable
-    assert bound < 3 * true_volume  # but well-scaled, not some huge arbitrary constant
-
-
-def test_sphere_bound_volume_unchanged_by_subdividing():
-    # Subdividing splits flat faces into smaller flat pieces -- same total
-    # area, so the isoperimetric target must match too. A regression test
-    # for a real bug: using a per-edge dict's SMALLEST rest length as a
-    # stand-in scalar underestimated total area, giving relax_once's
-    # pressure term almost nothing left to push toward on an
-    # already-inflated, freshly-subdivided mesh.
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
-    positions, _ = solve_wireframe(faces, seed=0)
-    target0 = _sphere_bound_volume(faces, EDGE_LENGTH)
-    faces1, _, edge_length1, _ = subdivide_once(
-        faces, positions, EDGE_LENGTH, list(range(len(faces))), level=0)
-    target1 = _sphere_bound_volume(faces1, edge_length1)
-    assert target1 == pytest.approx(target0)
-
-
 def test_relax_once_pressure_still_inflates_a_subdivided_mesh():
     faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
-    positions, _ = solve_wireframe(faces, seed=0)
+    positions = _relaxed_positions(faces)
     faces1, positions1, edge_length1, _ = subdivide_once(
         faces, positions, EDGE_LENGTH, list(range(len(faces))), level=0)
     _, _, low_stretch, _, _, _ = relax_once(positions1, faces1, edge_length1, pressure=0.1)
     _, _, high_stretch, _, _, _ = relax_once(positions1, faces1, edge_length1, pressure=1.0)
     assert high_stretch > low_stretch + 1.0  # meaningfully more, not stuck near zero
-
-
-# ---- solve_wireframe: edges stretch a bounded amount, never collapse/flatten ----
-
-def test_solve_wireframe_keeps_edge_stretch_within_the_cap():
-    faces, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
-    _, stats = solve_wireframe(faces, seed=1)
-    assert stats["max_stretch_pct"] < 100 * STRETCH_CAP + 1.0  # +1 margin for the polish pass
-
-
-def test_solve_wireframe_result_is_genuinely_three_dimensional():
-    faces, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
-    positions, _ = solve_wireframe(faces, seed=2)
-    pts = np.array(list(positions.values()))
-    assert _overall_3d_extent(pts) > 0.1
-
-
-def test_solve_wireframe_vertices_are_not_collapsed_together():
-    faces, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
-    positions, _ = solve_wireframe(faces, seed=3)
-    pts = np.array(list(positions.values()))
-    assert _min_pairwise_separation(pts) > 0.3
-
-
-def test_solve_wireframe_covers_every_vertex_used_by_the_faces():
-    faces, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
-    positions, _ = solve_wireframe(faces, seed=4)
-    assert set(positions) == {v for face in faces for v in face}
-
-
-# ---- solve_wireframe on THREE_SQUARES: same battery of checks as
-# PENTAGONS_AND_SQUARE above, since this net exists for the same reason
-# (a face pair sharing multiple edges, forcing genuine non-planar bend) ----
-
-def test_solve_wireframe_on_three_squares_keeps_edge_stretch_within_the_cap():
-    faces, _ = load_stretchy_mesh(THREE_SQUARES)
-    _, stats = solve_wireframe(faces, seed=1)
-    assert stats["max_stretch_pct"] < 100 * STRETCH_CAP + 1.0  # +1 margin for the polish pass
-
-
-def test_solve_wireframe_on_three_squares_result_is_genuinely_three_dimensional():
-    faces, _ = load_stretchy_mesh(THREE_SQUARES)
-    positions, _ = solve_wireframe(faces, seed=2)
-    pts = np.array(list(positions.values()))
-    assert _overall_3d_extent(pts) > 0.1
-
-
-def test_solve_wireframe_on_three_squares_vertices_are_not_collapsed_together():
-    faces, _ = load_stretchy_mesh(THREE_SQUARES)
-    positions, _ = solve_wireframe(faces, seed=3)
-    pts = np.array(list(positions.values()))
-    assert _min_pairwise_separation(pts) > 0.3
-
-
-def test_solve_wireframe_on_three_squares_covers_every_vertex_used_by_the_faces():
-    faces, _ = load_stretchy_mesh(THREE_SQUARES)
-    positions, _ = solve_wireframe(faces, seed=4)
-    assert set(positions) == {v for face in faces for v in face}
-
-
-def test_solve_wireframe_on_three_squares_is_closed_and_orientation_consistent():
-    # The whole point of this net: it should resemble a (rounded)
-    # tetrahedron once inflated -- a closed, non-self-intersecting solid,
-    # not a tangled mess.
-    faces, _ = load_stretchy_mesh(THREE_SQUARES)
-    positions, _ = solve_wireframe(faces, seed=0)
-    polyhedron = mesh_to_polyhedron(positions, faces)
-    assert polyhedron.is_closed()
-    assert is_orientation_consistent(positions, faces)
-
-
-# ---- solve_wireframe: inflates a real closed solid into a rounded, ----
-# ---- (near-)fully-untangled shape, not just A valid one ----
-
-def test_solve_wireframe_on_a_tetrahedron_inflates_within_the_stretch_cap():
-    # a real tetrahedron (all-triangle faces) is ALREADY at its maximum
-    # volume for 4 unit triangles -- there's no slack left to inflate --
-    # so the inflation pressure just stretches it a little instead, the
-    # same as slightly overinflating an already-taut balloon. That's
-    # expected, not a bug: capped at STRETCH_CAP, not unbounded.
-    positions, stats = solve_wireframe(TETRAHEDRON_FACES, seed=0)
-    assert stats["max_stretch_pct"] < 100 * STRETCH_CAP + 1.0
-    pts = np.array(list(positions.values()))
-    assert _overall_3d_extent(pts) > 0.1
 
 
 # name -> (num_faces, num_vertices, num_edges, sides_per_face) -- these
@@ -320,29 +197,6 @@ def test_platonic_solid_stretchy_nets_load_with_correct_combinatorics(name, expe
     assert n_verts - n_edges + n_faces == 2  # Euler's formula: closed, genus-0
 
 
-# Only the small/fast solids run the actual numerical solve here, same
-# rationale as this project's rigid-pipeline tests never running the
-# icosahedron/truncated-icosahedron solve (see tests/test_fold_solver.py
-# and the net-fold-project skill doc). The dodecahedron and icosahedron
-# are much faster than before now that inflation replaced the old
-# many-seeds-and-hope repulsion approach (~10s and ~5s respectively,
-# down from 30+s) but still slow enough to keep out of the routine
-# suite; verified manually instead (see solve_wireframe's docstring) --
-# both now reach essentially their true minimum vertex separation, not
-# just "some valid embedding".
-@pytest.mark.parametrize("name", ["tetrahedron", "cube", "octahedron"])
-def test_solve_wireframe_on_small_platonic_solids_nearly_untangles_fully(name):
-    faces, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
-    positions, stats = solve_wireframe(faces, seed=0)
-    assert stats["max_stretch_pct"] < 100 * STRETCH_CAP + 1.0
-    pts = np.array(list(positions.values()))
-    assert _overall_3d_extent(pts) > 0.1
-    # inflation should land these very close to their true minimum
-    # vertex separation of exactly 1 edge length (a real cube/octahedron
-    # /tetrahedron never has two vertices closer than that)
-    assert _min_pairwise_separation(pts) > 0.9
-
-
 # ---- winding convention (_orientation_signs / _is_orientation_consistent) ----
 
 def test_orientation_signs_agree_for_a_genuinely_convex_solid():
@@ -366,52 +220,22 @@ def test_is_orientation_consistent_false_when_one_face_is_flipped():
     assert not _is_orientation_consistent(pts, flipped_faces, idx)
 
 
-def test_solve_wireframe_raises_a_helpful_error_when_no_embedding_is_found(monkeypatch):
-    # force every candidate to look inconsistent, regardless of the
-    # actual geometry, so solve_wireframe has to exhaust its attempts
-    # and raise -- verifies the failure path itself, not the (already
-    # well-covered) success path.
-    monkeypatch.setattr(stretchy_mesh, "_is_orientation_consistent", lambda *a, **k: False)
-    with pytest.raises(ValueError, match="counterclockwise"):
-        solve_wireframe(TETRAHEDRON_FACES, seed=0)
-
-
-def test_solve_wireframe_on_a_cube_rounds_out_the_skew_not_just_the_edges():
-    # the specific complaint this was built to fix: a plain edge-length
-    # fit can converge to a valid but skewed parallelepiped-looking cube.
-    # Inflation should pull all 8 vertices to a near-uniform distance
-    # from the centroid, i.e. genuinely rounded out, not just
-    # edge-length-correct.
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
-    positions, _ = solve_wireframe(faces, seed=0)
-    pts = np.array(list(positions.values()))
-    centroid = pts.mean(axis=0)
-    radii = np.linalg.norm(pts - centroid, axis=1)
-    assert radii.std() / radii.mean() < 0.05  # tightly clustered around one radius
-
-
 # ---- relax_once: manual, restart-free relaxation for
 # inflate_polyhedron_app's interactive "Inflate" workflow, continuing
-# from an already-solved starting point (that app precomputes/caches the
-# starting point via solve_wireframe + mesh_subdivide.solve_fabric_mesh --
-# see its module docstring for why applying pressure directly to a raw
-# random start doesn't work well: it can hang for a very long time, the
-# same failure _inflate's docstring documents for a "cold" random point
-# cloud). Using solve_wireframe's own result as that starting point here
-# too keeps these tests representative of the real usage.
+# from an already-relaxed starting point (that app now builds its own
+# starting point via relax_initial_configuration -- see that function's
+# and inflate_polyhedron_app's own module docstrings). Using
+# _relaxed_positions here too keeps these tests representative of the
+# real usage.
 
 def test_relax_once_continues_from_the_given_positions_not_from_scratch():
-    # solve_wireframe's tetrahedron result is already inflated a little
-    # past exact unit edge length (see
-    # test_solve_wireframe_on_a_tetrahedron_inflates_within_the_stretch_cap:
-    # a regular tetrahedron is already at max volume for 4 unit
-    # triangles, so inflation just stretches it slightly). A zero-pressure
+    # A partial (not fully converged) relax_initial_configuration run
+    # leaves the tetrahedron meaningfully stretched. A zero-pressure
     # relax_once from THAT shape should pull the stretch back down close
     # to 0% -- proving it genuinely continued refining the given shape
     # rather than landing on some unrelated fresh embedding (which would
     # have no reason to end up this well edge-length-fitted).
-    positions, stats = solve_wireframe(TETRAHEDRON_FACES, seed=0)
-    assert stats["max_stretch_pct"] > 0.5  # confirms it started non-trivially stretched
+    positions = _relaxed_positions(TETRAHEDRON_FACES, max_nfev=5)
     _, nfev, max_stretch, rms_stretch, optimality, converged = relax_once(
         positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=0.0)
     assert max_stretch < 0.1
@@ -425,7 +249,7 @@ def test_relax_once_max_nfev_caps_reported_steps():
     # max_nfev a little -- scipy only checks the cap between its own
     # internal steps, not mid-Jacobian-estimate -- but a small budget
     # should still cut off well short of an unbounded run.
-    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    positions = _relaxed_positions(TETRAHEDRON_FACES)
     _, nfev, _, _, _, converged = relax_once(
         positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=3.0, max_nfev=5)
     assert nfev < 30
@@ -433,7 +257,7 @@ def test_relax_once_max_nfev_caps_reported_steps():
 
 
 def test_relax_once_stop_event_aborts_and_reports_not_converged():
-    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    positions = _relaxed_positions(TETRAHEDRON_FACES)
     stop_event = threading.Event()
     stop_event.set()  # already set: should abort before even the first step
     new_positions, nfev, _, _, max_force, converged = relax_once(
@@ -450,7 +274,7 @@ def test_relax_once_stop_event_reported_nfev_is_capped_by_max_nfev():
     # calculation still lets that step complete, but the NEXT iteration's
     # check aborts before another one starts -- reported steps should be
     # exactly the number that actually completed, never more than max_nfev.
-    positions, _ = solve_wireframe(TETRAHEDRON_FACES, seed=0)
+    positions = _relaxed_positions(TETRAHEDRON_FACES)
     stop_event = threading.Event()
 
     calls = [0]
@@ -477,7 +301,7 @@ def test_relax_once_pressure_increases_stretch_over_a_normal_working_range():
     # having any equilibrium at all (see the Design notes on why there's
     # no runaway guard) -- past that, more pressure isn't meaningful.
     faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
-    positions, _ = solve_wireframe(faces, seed=0)
+    positions = _relaxed_positions(faces)
     stretches = []
     for pressure in (0.1, 0.3, 0.8):
         _, _, max_stretch, _, _, _ = relax_once(positions, faces, EDGE_LENGTH, pressure=pressure)
@@ -523,19 +347,25 @@ def test_relax_once_per_face_pressure_stays_orientation_consistent_on_a_fine_mes
     # room for that cheat -- every vertex has too much leverage over too
     # large a fraction of the mesh's edges. A subdivided FINE mesh (many
     # small faces) is exactly where the cheat has room to hide, so that's
-    # what this test exercises: a resolution-2 tetrahedron subdivision
-    # (16 small triangles), solved and draped via solve_fabric_mesh
-    # (giving it the CORRECT, non-uniform per-edge rest lengths a fine
-    # mesh actually needs -- see mesh_subdivide.py's docstring), then
+    # what this test exercises: the tetrahedron fan-triangulated (level 0,
+    # a no-op on already-triangular faces) then quartered once more
+    # (level 1, mesh_levels.subdivide_once) -- 16 small triangles, given a
+    # real starting embedding via relax_initial_configuration (seed=0
+    # happens to land orientation-consistent; see that function's
+    # docstring for why this isn't guaranteed for every seed) -- then
     # relaxed under real pressure. If the per-face fix works, every face
     # keeps agreeing on which way is outward at every step, even as the
     # mesh visibly inflates (positive, growing stretch) -- no
     # self-intersecting fold.
-    fine_faces, _, positions, _ = solve_fabric_mesh(TETRAHEDRON_FACES, resolution=2, seed=0)
-    from utils.subdivisions.mesh_subdivide import subdivide_mesh
-    _, _, edge_length, _ = subdivide_mesh(TETRAHEDRON_FACES, resolution=2)
+    dummy0 = {v: np.zeros(3) for face in TETRAHEDRON_FACES for v in face}
+    faces1, _, edge_length1, face_of_fine1 = subdivide_once(
+        TETRAHEDRON_FACES, dummy0, EDGE_LENGTH, list(range(len(TETRAHEDRON_FACES))), 0)
+    dummy1 = {v: np.zeros(3) for face in faces1 for v in face}
+    fine_faces, _, edge_length, _ = subdivide_once(faces1, dummy1, edge_length1, face_of_fine1, 1)
 
-    pos = positions
+    pos = _relaxed_positions(fine_faces, edge_length=edge_length, seed=0)
+    assert is_orientation_consistent(pos, fine_faces)
+
     prev_stretch = -1.0
     for pressure in (0.2, 0.5, 0.8):
         pos, _, max_stretch, _, _, converged = relax_once(

@@ -2,6 +2,8 @@ numpy
 scipy
 networkx
 matplotlib
+pillow
+pyvista
 sv-ttk
 
 # dev/test only

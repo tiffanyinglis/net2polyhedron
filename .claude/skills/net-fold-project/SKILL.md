@@ -105,10 +105,10 @@ the rigid-unfolding pipeline (historical)" further down):
   DIFFERENT solver entirely, for nets that can't stay rigid and flat at
   all (e.g. a face sharing more than one edge with a neighbor). See
   "Stretchy meshes" below — this is the most algorithmically involved
-  part of the project, and the only one that still needs a solve cache
-  (`src/apps/inflate_polyhedron_app/cache/`, warmed by its own
-  `build_cache.py`) since its solve is a genuine numerical optimization,
-  unlike the rigid pipeline's.
+  part of the project. No solve cache (removed along with `solve_wireframe`
+  itself, see "Stretchy meshes" below) — every net's starting
+  configuration is now a cheap random start plus a live-in-the-UI spring
+  relax (the "Relax" button, "Level 0"), not a precomputed/cached search.
 
 ## Directory layout
 
@@ -126,10 +126,10 @@ described in "Removed: the rigid-unfolding pipeline (historical)" below
 — it has been deleted along with the rest of that pipeline, so only the
 two folders below exist now.)
 - `inflate_polyhedron_app/` — the stretchy-mesh viewer (see "Stretchy meshes" below)
-  - `app.py` — entry point, class `InflatePolyhedronApp`
-  - `build_cache.py` — precompute/refresh this app's OWN solve cache
-    (was the top-level `build_stretchy_cache.py`)
-  - `cache/*.json` — the actual cache files (was `data/cache/stretchy_cache/`)
+  - `app.py` — entry point, class `InflatePolyhedronApp`. No `cache/`
+    or `build_cache.py` any more (removed along with `solve_wireframe`
+    and `stretchy_cache.py`, see "Stretchy meshes" below) — nothing here
+    is precomputed ahead of time.
 - `polygon_subdivision_app/` — 2D-only fine-triangle-mesh demo (see below), no cache
   - `app.py` — entry point, class `PolygonSubdivisionApp`
 - `common/` — helpers SHARED by more than one app (not net-fold domain
@@ -168,7 +168,13 @@ two folders below exist now.)
   anymore. See git history (`sample_polyhedra`/`generate_platonic_nets`,
   etc.) if a genuinely NEW sample solid with no existing `.json` ever needs
   the old raw-coordinates-via-`hull_to_spec` approach again.
-  - `generate_subdivided_stretchy_nets.py` — writes `data/input/stretchy_nets/<name>_res<resolution>.json` fine-triangulated variants of an existing stretchy net (see "Fabric subdivision" below); reads an existing stretchy net's own faces directly, no dependency on the now-removed `sample_polyhedra.py`. This is the one remaining `generate_*.py` script; it isn't imported by anything (it's its own CLI entry point) and lives in `common/` anyway since it's maintenance tooling shared across whichever apps read the `data/input/` specs it produces, and neither `utils/` (no `__main__` scripts there, see Conventions) nor `ui/` fit
+  There USED TO also be a `generate_subdivided_stretchy_nets.py` here,
+  writing fixed-resolution fabric-mesh `.json` variants via
+  `mesh_subdivide.subdivide_mesh`/`solve_fabric_mesh` — DELETED along with
+  `solve_wireframe` and the rest of that pipeline (see "Stretchy meshes"
+  below): nothing reads a fabric file's baked-in fine mesh any more, only
+  its `coarse_faces` (`mesh_subdivide.load_fabric_spec`, still kept), so
+  there's nothing left worth generating that format for.
 - `ui/` — generic Tkinter/matplotlib widgets, not net-fold domain logic:
   - `tooltip.py` — `Tooltip`, a small generic hover-tooltip helper for Tkinter (not net-fold-specific)
   - `cullable_face.py` — `_CullableFace`, generic matplotlib/3D backface-culling logic, not fold-solving logic. **Currently unused** — written for the now-deleted `polyhedron_unfolder` app (see "Removed: the rigid-unfolding pipeline (historical)" below); on the untouchable-files list (see top of this doc), so it stays even though nothing currently imports it.
@@ -198,19 +204,15 @@ sub-package's own `__init__.py` docstring for its module list):
     longer has one). **On the untouchable-files list** (see top of this
     doc) — don't edit it without asking first.
 - `inflate_polyhedron/` — everything specific to the stretchy (non-rigid)
-  mesh pipeline: solving, flat net layout, and disk caching (this used to
-  be split across `geometry2d/` [the stretchy half], `geometry3d/`, and
-  `persistence/` — merged into one package since none of it is shared
-  with `subdivisions`, only with itself). Modules: `stretchy_mesh.py`,
-  `hull_to_spec.py`, `stretchy_net_layout.py`, `checksums.py`,
-  `stretchy_cache.py`. `stretchy_cache.py` is deliberately NOT re-exported
-  from this package's own `__init__.py` (import it directly, e.g.
-  `from utils.inflate_polyhedron.stretchy_cache import load_with_cache`):
-  it imports `..subdivisions.mesh_subdivide`, which imports back into this
-  package's own `stretchy_mesh` module, so re-exporting it eagerly at
-  package-init time would make that a genuine circular import whenever
-  `utils.subdivisions` happens to be the first of the two packages loaded
-  in a given process.
+  mesh pipeline: solving and flat net layout (this used to be split across
+  `geometry2d/` [the stretchy half], `geometry3d/`, and `persistence/` —
+  merged into one package since none of it is shared with `subdivisions`,
+  only with itself). Modules: `stretchy_mesh.py`, `hull_to_spec.py`,
+  `stretchy_net_layout.py`. No disk caching any more — `checksums.py` and
+  `stretchy_cache.py` were DELETED along with `solve_wireframe` (see
+  "Stretchy meshes" below): a cache existed to avoid re-running
+  `solve_wireframe`'s expensive random-restart search on every net
+  selection, and nothing here does that kind of search any more.
   - `hull_to_spec.py` — `polyhedron_from_vertices(vertices, name=None)`
     builds and returns a `Polyhedron` straight from a convex solid's raw 3D
     coordinates (via `scipy.spatial.ConvexHull`, merging back the
@@ -231,10 +233,10 @@ sub-package's own `__init__.py` docstring for its module list):
     `.face_normal()` rather than reimplementing them, e.g.
     `inflate_polyhedron_app`'s `_draw_wireframe_result` (see "The app" below).
   - `inflate_polyhedron/__init__.py` re-exports `load_stretchy_mesh,
-    solve_wireframe, relax_once, mesh_to_polyhedron, polyhedron_from_vertices,
-    build_stretchy_net_layout` (not `Polyhedron` itself, which lives in
-    `utils.geometry` now -- see its own bullet above -- nor `stretchy_cache`,
-    see above).
+    relax_initial_configuration, random_initial_positions, relax_once,
+    mesh_to_polyhedron, polyhedron_from_vertices, build_stretchy_net_layout`
+    (not `Polyhedron` itself, which lives in `utils.geometry` now -- see
+    its own bullet above).
   Sample solids (Platonic, etc.) have no on-disk source in this project
   anymore (the old `data/input/nets/*.json` + `sample_polyhedra.py`
   approach was removed along with the rigid pipeline) — anything that needs
@@ -304,17 +306,17 @@ least_squares`, a 17-point restart sweep, rejecting "collapsed"
 self-intersecting solutions). Once specs carried real 3D coordinates,
 fold angles became directly measurable instead — this is the historical
 reason a `fold_solver.py`-shaped module doesn't exist anywhere in this
-project anymore, and it's also the direct ancestor of the "collapsed
-branch" embeddability concern that the CURRENT stretchy pipeline's
-orientation-consistency search (see "Orientation consistency" under
-"Stretchy meshes" below) had to solve a different way, since a stretchy
-mesh has no coordinates-first shortcut available to it. Because nothing
-was left to solve for, the rigid pipeline was fast even for its bushiest
-net (~0.07s for a 32-face, 31-hinge truncated icosahedron) and needed no
-on-disk cache at all — unlike the stretchy pipeline's
-`stretchy_cache.py` (see "Caching" under "Stretchy meshes" below), which
-still earns its keep since `solve_wireframe` is a genuine numerical
-optimization.
+project anymore, and it's also the direct ancestor of the orientation
+concern the stretchy pipeline's own `_orientation_signs`/
+`_is_orientation_consistent` check a different way (see "The
+starting-configuration algorithm" under "Stretchy meshes" below), since a
+stretchy mesh has no coordinates-first shortcut available to it. Because
+nothing was left to solve for, the rigid pipeline was fast even for its
+bushiest net (~0.07s for a 32-face, 31-hinge truncated icosahedron) and
+needed no on-disk cache at all. Neither does the stretchy pipeline any
+more, now that `solve_wireframe` (the one genuine numerical optimization
+it used to run) is gone -- see "The starting-configuration algorithm"
+below.
 
 **Leftover, now-unused files** (kept because they're on the
 untouchable-files list, not because anything still calls them): the
@@ -417,251 +419,131 @@ exactly one reverse partner) and raises a clear error naming the offending
 edge(s) otherwise. That check alone can't catch everything, though — see
 "Orientation consistency" below for the subtler, solve-time half of this.
 
-### The algorithm (`solve_wireframe`)
+### The starting-configuration algorithm (`random_initial_positions` + `relax_initial_configuration`)
 
-No hinge-and-rotate step at all: everything is a single unified
-least-squares point-cloud fit (`_residual`), run in two conceptual stages.
+Replaced an earlier `solve_wireframe` (a random-restart-plus-inflation-ramp
+`least_squares` search, with its own on-disk cache to avoid re-running it)
+entirely -- DELETED along with `stretchy_cache.py`/`checksums.py` and
+`inflate_polyhedron_app`'s `build_cache.py`/`cache/` -- see git history
+around this section if any of that machinery's own reasoning is ever
+needed again. The replacement is deliberately simpler and more general,
+inspired by ordinary force-directed graph layout:
 
-**Stage 1 — plain edge-length fit.** From a random 3D starting guess,
-`least_squares` minimizes `|p_a - p_b| - edge_length` over every mesh edge.
-The system is underdetermined (3 coords × N vertices, minus 6 for rigid-
-body motion, usually well over the edge count), so many solutions exist —
-which one you land on is essentially arbitrary and often tangled or
-skewed, since edge-length fitting alone has no opinion about the mesh's
-overall shape.
+1. **`random_initial_positions(faces, spread=INITIAL_RANDOM_SPREAD, seed=0)`**
+   -- an independent uniform-random point in `[-spread/2, spread/2]^3` for
+   every vertex. Deliberately NOT a meaningful embedding (doesn't even
+   look at `edge_length`) -- just noise spread out enough for the next
+   step to pull into a well-separated 3D shape on its own.
+2. **`relax_initial_configuration(positions, faces, edge_length, ...)`**
+   -- pulls that noise into a well-separated shape using PURE spring
+   forces only (`_spring_only_force`: the same per-edge Hooke's-law term
+   `_relax_force` uses, with no pressure and no planarity) -- no volume,
+   no target, no random restarts. Faces are free to cross each other and
+   the result can land anywhere in space at any scale (nothing here
+   constrains overall position or keeps non-adjacent vertices apart) --
+   the only goal is a well-separated, edge-length-plausible starting point
+   to hand off to `relax_once`'s real per-face pressure model afterward.
+   Any view of this result must derive its own camera framing from its
+   actual bounding box (see `_draw_level_panel` in "The app" below)
+   rather than assuming it lands near the origin.
+   - **Why the mesh must already be triangulated first.** A plain
+     polyhedron wireframe (e.g. a cube's own 12 edges, no face diagonals)
+     is a flexible MECHANISM under springs alone, not a rigid structure --
+     exactly like an unbraced rectangular frame. Fan-triangulating first
+     (`mesh_levels.subdivide_once` at level 0 -- see "The app" below for
+     why Level 0 and Level 1 share this exact topology) adds the diagonal
+     bracing a spring relaxation needs to settle into a well-defined 3D
+     shape at all.
+   - **Orientation is NOT guaranteed consistent.** Nothing in a pure
+     spring force cares which way a face's normal points, so the result
+     lands globally inside-out about as often as right-side-out. A
+     UNIFORMLY inverted result is fixed for free: reflecting every vertex
+     through the mesh's own centroid (`pts = 2*centroid - pts`) is an
+     isometry (preserves every edge length/stretch stat) that flips every
+     face's outward-from-centroid sign AT ONCE (see `_orientation_signs`)
+     -- so a consistent wrong answer becomes a consistent right one at no
+     cost. A genuinely MIXED result (some faces each way -- verified this
+     happens too, e.g. roughly half the time for an octahedron across
+     seeds) can't be fixed this cheaply and is returned as-is, by explicit
+     user decision: `relax_once`'s subsequent pressure model is trusted to
+     work it out rather than adding a retry-a-different-seed loop here.
 
-**Stage 2 — inflation** (`_inflate`): the actual fix, and the most
-load-bearing piece of this module. Physically the same idea as stuffing a
-plush toy or blowing up a balloon: a constant outward pressure, resisted
-by the fabric's own tension, settles into a smooth, rounded, convex
-equilibrium.
+`_orientation_signs`/`_is_orientation_consistent` (and their public
+wrappers `is_orientation_consistent` etc.) are still exactly what they
+were before -- general orientation-checking utilities, just no longer
+built around `solve_wireframe`'s own random-restart search.
 
-- `_mesh_volume(pts, faces, idx)` computes the mesh's enclosed volume via
-  the divergence theorem: fan-triangulate every face from its own first
-  vertex and sum each triangle's signed tetrahedron volume with the origin
-  (`v0 . (v1 x v2) / 6`). Smooth and singularity-free everywhere (unlike,
-  say, `1/distance`), which is what makes it usable as a least-squares term
-  even from a poorly-conditioned starting point.
-- `_sphere_bound_volume(faces, edge_length)` computes an optimistic,
-  normally-unreachable target: the volume of the sphere with the mesh's
-  own total rest surface area (`_total_rest_area` -- exact per-face
-  regular-polygon area for a uniform `edge_length`, Heron's formula per
-  triangle for a per-edge dict, e.g. a subdivided mesh's mixed rest
-  lengths). Scaled to the mesh's own size rather than an arbitrary huge
-  constant — e.g. ~2.40 for the icosahedron (true volume ~2.18) — so it
-  gives real, well-scaled "pressure" without wildly overshooting what the
-  mesh could ever hold.
-- The residual term is `weight * (target - actual_volume)`: since target
-  is never reached, minimizing this always has a gradient pushing volume
-  up, for as long as the edge-length term lets it.
-- **Ramping matters.** Applying this at full strength, or from a cold
-  random start, makes `least_squares` fail to converge at all (verified
-  empirically) rather than inflate cleanly — the landscape is too
-  ill-conditioned early on. `_inflate` instead walks `INFLATION_WEIGHTS =
-  (0.1, 0.2, 0.4, 0.8, 1.5, 3.0)` in order, each step reseeded from the
-  **previous accepted** step, and stops (keeping the last good result) the
-  moment a step's edge-length error would exceed `STRETCH_CAP` (8%) —
-  self-limiting for a topology that genuinely can't hold much pressure
-  (`data/input/stretchy_nets/two_pentagons_and_a_square.json`) instead of stretching
-  it into a mess.
-- A final light planarity pass (`PLANARITY_WEIGHT`, via per-face best-fit-
-  plane SVD residuals) tidies up individual faces at the same pressure
-  without relaxing it back down — inflation already tends to leave faces
-  close to flat on its own (a taut membrane wants to be locally flat
-  wherever its edges allow), so this only has a little polishing left to
-  do.
+### Fabric subdivision (REMOVED -- `src/utils/subdivisions/mesh_subdivide.py` now holds only `load_fabric_spec`)
 
-This pressure term (`_residual`) is a single GLOBAL target for the whole
-mesh, specific to this automatic ramp. `inflate_polyhedron_app`'s
-interactive "Inflate" button uses a DIFFERENT force entirely
-(`_relax_force`, see "The app" below): a real per-face pressure force
-with no target/volume at all, plus a soft per-edge stretch limit instead
-of a global ceiling.
+This used to be a whole file-generation feature: `subdivide_mesh` split a
+coarse net's faces into a fine triangular "fabric" mesh, `solve_fabric_mesh`
+draped it over a `solve_wireframe`-solved coarse shape, and
+`src/apps/common/generate_subdivided_stretchy_nets.py` wrote the result out
+as a fixed-resolution `data/input/stretchy_nets/<name>_res<resolution>.json`
+(e.g. the now-deleted `cube_res3.json`) for `inflate_polyhedron_app`'s old
+cache to pick up. **All of that was DELETED** once `solve_wireframe` itself
+was (see "The starting-configuration algorithm" above): the app no longer
+reads a fabric file's baked-in fine mesh at all -- see "The app" below --
+so generating one served no purpose left. See git history around this
+section (and `solve_fabric_mesh`'s own former docstring) if a from-scratch
+fine-fabric-mesh generator is ever wanted again; it would need its own
+starting-configuration strategy now, not a resurrected `solve_wireframe`.
 
-### Orientation consistency (why this needed real iteration to get right)
+**What's left**: `mesh_subdivide.load_fabric_spec(path)` still reads the
+`"coarse_faces"`/`"resolution"`/`"face_of_fine"` fields a legacy
+fabric-subdivided `.json` may carry alongside its ordinary `"faces"` --
+`inflate_polyhedron_app`'s `on_select_net` still calls it to detect such a
+file and use ITS `coarse_faces` as the net's own base faces (ignoring the
+file's pre-baked fine mesh entirely). No shipped net under
+`data/input/stretchy_nets/` currently has this field, so this path is
+currently untested by real data -- kept only because it doesn't depend on
+anything else being removed and a hand-authored file could still use it.
 
-Plain edge-length fitting has no opinion about orientation, so a stage-1
-result is often already self-intersecting — one face folded inside-out
-relative to the rest (a sharper version of the "collapsed branch" problem
-the now-deleted rigid pipeline's own fold solver used to reject via
-`_is_embeddable`, back when rigid fold angles were numerically solved for
-rather than read directly off given geometry — see "Removed: the
-rigid-unfolding pipeline (historical)" above). `_orientation_signs`
-detects this cheaply: for each face, the sign of `dot(face_normal,
-face_centroid - mesh_centroid)`; a properly embedded mesh has every face
-agree AND come out +1 (outward from the centroid) — `_is_orientation_consistent`
-checks both, not just mutual agreement, since an all-faces-agree-but-all-
-point-inward mesh (gone fully inside-out) would otherwise pass too.
+### The app (`inflate_polyhedron_app`) — random start, relax, subdivide and inflate interactively from there
 
-Getting this to actually help took three iterations, each falsified by a
-real counter-example before landing on the current design — worth knowing
-before "improving" this further:
+Rewritten several times -- see git history if the reasoning below seems
+oddly specific -- from an original "pick a net, see the one
+automatically-solved answer" design, through a "precomputed
+fixed-resolution fabric mesh, interactive from there" design (the
+fabric-subdivided `.json` format, `generate_subdivided_stretchy_nets.py`,
+and `mesh_subdivide.solve_fabric_mesh`'s drape were built for THAT design
+-- see "Fabric subdivision" above, now removed), into the CURRENT one:
+every net starts as "Level 0" -- a random start on its own fan-triangulated
+topology (see "The starting-configuration algorithm" above) -- and a
+"Relax" button turns that into Level 1's actual starting shape; from
+there, the "Subdivide" button (`utils.inflate_polyhedron.mesh_levels.subdivide_once`)
+refines it interactively, one nested level at a time, so any inflation
+already done at one level carries forward as the next level's starting
+point. A legacy fabric-subdivided file (one with baked-in
+`"coarse_faces"`) still loads fine -- `on_select_net` just uses ITS OWN
+`coarse_faces` as the base faces for this same random-start-then-relax
+flow, ignoring its pre-baked fine mesh entirely. The steps, in order:
 
-1. *Require stage-1 already consistent, before ever inflating.* Broke the
-   dodecahedron: its stage-1 output is essentially **always** inconsistent
-   (random edge-length fits for 20 vertices / 30 edges are just tangled),
-   but `_inflate`'s very first pressure step reliably fixes it anyway —
-   inflating *is* the untangling mechanism there. Requiring consistency
-   up front threw away every candidate before inflation ever got a chance,
-   and every attempt exhausted the retry budget and raised.
-2. *Gate every ramp step on consistency, breaking at the first
-   inconsistent one.* Broke the icosahedron: its ramp genuinely passes
-   *through* a couple of inconsistent intermediate weights (0.1-0.4) before
-   self-correcting at higher pressure (0.8 onward) — the opposite failure
-   mode from the dodecahedron. Stopping early at step 1 meant it could
-   never reach the weight where it actually recovers.
-3. **Current design**: no per-step orientation gating inside `_inflate` at
-   all (only `STRETCH_CAP` per step); instead `solve_wireframe` tries
-   whole stage-1-through-polish attempts one at a time (`CANDIDATES_PER_ROUND`
-   per round, escalating up to `MAX_ORIENTATION_ATTEMPTS` total) and keeps
-   the **first** one whose *final* result is orientation-consistent. Since
-   repeated successes land on essentially the same result once a mesh
-   inflates at all, there's no benefit to comparing many successes against
-   each other (an earlier version did, and it was pure wasted computation
-   for slower meshes). If every attempt is exhausted with nothing
-   consistent, it raises `ValueError` naming the winding convention and
-   pointing at the worked example, rather than silently returning a
-   self-intersecting mesh — `inflate_polyhedron_app/build_cache.py`'s existing
-   `except ValueError` failure-reporting path surfaces this per-net.
-
-A separate, cheap guard catches what orientation-consistency can't:
-`_min_pairwise_separation(pts) > MIN_SEPARATION_FRACTION * edge_length`
-rejects a result where two *unrelated* (non-adjacent) vertices happen to
-have collapsed onto each other — face-normal signs don't notice that on
-their own, since `_mesh_volume`'s pressure term has no particular reason
-to keep distinct vertices apart.
-
-### Caching (`src/utils/inflate_polyhedron/stretchy_cache.py`)
-
-The now-deleted rigid pipeline had no equivalent (see "Removed: the
-rigid-unfolding pipeline (historical)" above) --
-this one still earns its keep because `solve_wireframe` is a genuine
-numerical optimization, not a direct geometric read. Records just a
-positions + stats dict (no hinge tree/fold angles to write out).
-`ALGORITHM_VERSION` (in `stretchy_mesh.py`) is folded into the cache key
-(`stretchy_cache.source_checksum` = file hash + `"+algo{VERSION}"`) —
-**bump it whenever `solve_wireframe`'s algorithm changes enough to produce
-a different result for the same mesh**, e.g. adding the inflation stage.
-Without this, an on-disk cache from a previous algorithm version would
-keep being served forever, since its checksum only ever tracked the
-*source* `.json`, not how it was solved. The cache always stores seed=0's
-result (the one canonical answer) via `_solve` -- `solve_wireframe` for
-an ordinary net, or `mesh_subdivide.solve_fabric_mesh` for a fabric one
-(see `load_fabric_spec`) -- and is used by `inflate_polyhedron_app`'s
-`build_cache.py` and `build_all`. **The interactive "Inflate" loop itself
-no longer reads or writes this cache at all** (see "The app" below, a
-substantial rewrite from the earlier "pick a net, see the solved answer"
-design) -- the app's `on_select_net` still reads it once, via
-`load_with_cache`, to get the starting shape -- caching still matters for
-warming `inflate_polyhedron_app/cache/` ahead of time via `build_cache.py`,
-just not for the interactive loop itself.
-
-### Fabric subdivision (`src/utils/subdivisions/mesh_subdivide.py`, `src/apps/common/generate_subdivided_stretchy_nets.py`)
-
-Simulates a stretchy net's faces as fabric rather than (at most gently
-bending) rigid-ish panels: every coarse face is split into a fine
-triangular mesh — the same hardcoded per-n-gon coarse split
-(`utils.subdivisions.SUBDIVISIONS`) and barycentric refinement
-(`utils.subdivisions.polygon_subdivisions._subdivide_triangle`) `polygon_subdivision_app` uses to
-preview a single polygon — applied to every face of a whole net at once,
-with points on a shared coarse edge merged into one global vertex so the
-result is a single connected mesh, not N disconnected per-face patches.
-
-**This is a file-generation step, not an app feature.**
-`src/apps/common/generate_subdivided_stretchy_nets.py` reads an existing
-`data/input/stretchy_nets/<name>.json`, calls `subdivide_mesh(coarse_faces,
-resolution)`, and writes the fine triangulation straight out as an
-ordinary `data/input/stretchy_nets/<name>_res<resolution>.json` — a plain
-vertex-loop mesh, no different in format from any other stretchy net.
-(`SUBDIVISIONS_TO_GENERATE` at the top of that script is the editable
-list of `(name, resolution)` pairs to produce; `data/input/stretchy_nets/cube_res3.json`
-is the one generated so far -- resolution 3, not 4, because SUBDIVISIONS[4]
-switching to a 4-triangle centroid fan (see below) doubled the coarse
-triangle count per face, so resolution 3 there lands close to the triangle
-count resolution 4 used to give under the old 2-triangle split.) Once
-written, it goes through `inflate_polyhedron_app`'s `build_cache.py` and
-net picker completely unmodified — there is no separate fabric mode or
-UI control for this, it's just another `.json` in the directory.
-
-**Known simplification: rest lengths are treated as uniform, even though
-they aren't.** SUBDIVISIONS' coarse triangles aren't generally
-equilateral (a centroid fan has unit-length rim edges but shorter spoke
-edges to the centroid, except exactly at n=6) — `subdivide_mesh`'s
-`edge_lengths` return value captures each fine edge's true rest length
-correctly (derived from `subdivide_polygon`'s own exact 2D coordinates for
-a regular n-gon of unit edge length), but `generate_subdivided_stretchy_nets.py`
-currently discards it, since the plain vertex-loop JSON format has no
-field for per-edge lengths and `inflate_polyhedron_app/build_cache.py` always solves
-with `solve_wireframe`'s default UNIFORM `edge_length=1.0`. Confirmed
-empirically on an earlier, diagonal-split version of the subdivided cube
-net (192 faces, 98 vertices): it solves successfully (6.8% max stretch,
-within `STRETCH_CAP`) but settles into a generic rounded/geodesic-ball
-shape, NOT a recognizable puffed-up cube — because forcing the true-length
-rim and diagonal segments to be equal erases the geometric distinction
-between them. The same mismatch exists just as much (rim vs. spoke) under
-the current centroid-fan split, so this remains a deliberate,
-known-and-accepted tradeoff (see git history around this section), not a
-bug to fix reflexively — `solve_wireframe`/`_residual` already support a
-per-edge `{(a, b): length}` dict plus an explicit `volume_target` (see
-their docstrings) if this ever needs to be revisited for geometric
-fidelity.
-
-Also worth knowing before reusing it: `solve_fabric_mesh` in
-`mesh_subdivide.py` is a *different*, more involved path that was tried
-for driving this live from the app (a "Fabric subdivision" checkbox in
-`inflate_polyhedron_app`, since removed at the user's request in
-favor of this file-based workflow) — it drapes the fine mesh over the
-coarse net's own `solve_wireframe` result as a 3D-accurate starting
-guess (`_subdivide_dual` reruns the same barycentric grid construction in
-3D, fed real solved corner/centroid positions) and then does one light
-`_relax_seed` pass, specifically to avoid the same
-orientation-consistency search that made the subdivided cube net above take
-~13 minutes to solve (a resolution-2 tetrahedron subdivision — just 16
-small triangles — never once reached a consistent embedding in 30 random
-attempts when tried via plain `solve_wireframe(fine_faces)`, several
-seconds each). `mesh_subdivide.py` is kept around specifically so
-different resolutions can still be explored this way later; it's just
-not wired into `generate_subdivided_stretchy_nets.py` right now, which
-takes the simpler (if slower and less faithful) route of the ordinary
-cache/solve pipeline instead.
-
-### The app (`inflate_polyhedron_app`) — coarse starting shape, subdivide and inflate interactively from there
-
-Rewritten (through a couple of iterations -- see git history if the
-reasoning below seems oddly specific) from an original "pick a net, see
-the one automatically-solved answer" design, then again from a
-"precomputed fixed-resolution fabric mesh, interactive from there" design
-(the fabric-subdivided `.json` files below, `generate_subdivided_stretchy_nets.py`,
-and `mesh_subdivide.solve_fabric_mesh`'s drape were built for THAT
-design) into the CURRENT one: every net is always loaded at its own
-BASE (level 0) resolution, and the app's own "Subdivide" button
-(`utils.inflate_polyhedron.mesh_levels.subdivide_once`) refines it
-interactively, one nested level at a time, so any inflation already done
-at one level carries forward as the next level's starting point instead
-of being discarded for a fresh precomputed drape. A legacy
-fabric-subdivided file (one with baked-in `"coarse_faces"`, e.g.
-`cube_res3.json`) still loads fine -- `on_select_net` just uses ITS OWN
-`coarse_faces` as level 0, ignoring its pre-baked fine mesh/cache
-entirely, since a coarse solve is already cheap. Two steps, split between
-the net picker and the "Subdivide" button:
-
-1. **Coarse solve** -- `stretchy_mesh.solve_wireframe` on the net's own
-   base (level 0) faces, on selecting it in the net picker. Its
-   random-restart-plus-inflation-ramp search is exactly what makes this
-   reliable: a coarse net has few enough faces that retrying a different
-   random start when one doesn't inflate cleanly is cheap. Cached via
-   `stretchy_cache` for an ORDINARY net (not a legacy fabric one, whose
-   coarse solve is cheap enough not to need caching at all).
-2. **Subdivide** (`mesh_levels.subdivide_once`, see its own module
+1. **Level 0: random start** -- on selecting a net, `on_select_net`
+   fan-triangulates its base faces (`mesh_levels.subdivide_once` at level
+   0 -- this is exactly Level 1's own topology too, see below) and calls
+   `random_initial_positions` for a fresh random start. Cheap enough
+   (no numerical solve at all) to happen synchronously, so there's no
+   background thread or cache for this step any more.
+2. **"Relax" (Level 0 only)** -- runs `relax_initial_configuration` to
+   convergence (see "The starting-configuration algorithm" above),
+   streamed in growing chunks the same way "Inflate" is (see "Live
+   progress" below). Once it converges, the result is PROMOTED straight
+   into Level 1's starting position -- a pure relabeling
+   (`self.subdivision_level = 1`), not a new `subdivide_once` call, since
+   Level 0 and Level 1 already share the exact same fan-triangulated
+   `self.faces`/`self.face_of_fine`/`self.edge_length`. A tangled (mixed
+   face-orientation) result is possible and deliberately NOT retried --
+   the subsequent Inflate/pressure step is expected to work it out (see
+   "The starting-configuration algorithm" above).
+3. **Subdivide** (`mesh_levels.subdivide_once`, see its own module
    docstring) -- one press refines the CURRENT mesh by one level: a
-   centroid fan at level 0 -> 1 (unchanged for an already-triangular
-   face), then a "triforce" quarter of every triangle for each level
-   after that, up to `MAX_LEVEL` (3), where the button greys out. New
-   POSITIONS are linearly interpolated from the current mesh's own nearby
-   points (so already-inflated detail survives); new REST LENGTHS are
-   derived analytically from the flat, unit-edge reference geometry
-   (exact circumradius for a spoke, exact halving/midsegment-theorem
-   lengths for a quarter), independent of the current (possibly already
+   "triforce" quarter of every triangle, up to `MAX_LEVEL` (3), where the
+   button greys out. New POSITIONS are linearly interpolated from the
+   current mesh's own nearby points (so already-inflated detail
+   survives); new REST LENGTHS are derived analytically from the flat,
+   unit-edge reference geometry (exact halving/midsegment-theorem lengths
+   for a quarter), independent of the current (possibly already
    stretched) 3D positions -- so the "ideal" target shape a relax stays
    pointed at doesn't drift as resolution increases, letting "inflate,
    then increase resolution, then inflate again" converge toward one
@@ -764,8 +646,9 @@ be rather than making those meshes take far more steps to formally
   - **No orientation/fold check on the interactive Inflate loop.** An
     earlier version of `_run_inflate_stream` rejected a chunk whenever
     `stretchy_mesh.is_orientation_consistent` (the centroid-outward
-    heuristic -- see its own docstring, still used by `solve_wireframe`)
-    failed, on the theory that a big enough step could fold the mesh
+    heuristic -- see its own docstring, also used by
+    `relax_initial_configuration`'s free flip fix) failed, on the theory
+    that a big enough step could fold the mesh
     through itself. That heuristic false-positives on non-convex/open
     nets -- verified `data/input/stretchy_nets/two_pentagons_and_a_square.json`
     subdivided to level 1 gets flagged as "folded" even completely at
@@ -812,69 +695,68 @@ be rather than making those meshes take far more steps to formally
     `INFLATE_SAFETY_STEP_CAP = 5000` hard-stops "until convergence" mode
     if a mesh/pressure combination genuinely never reaches
     `CONVERGENCE_GTOL`, instead of looping forever.
-  - **Won't re-run once converged**: `_update_inflate_button_state`
-    greys out the Inflate button whenever `self.last_stats["converged"]`
-    is true, and `on_inflate_clicked` refuses to run even if clicked
-    anyway, since relax_once from an already-converged point starts with
-    near-zero force and has nothing left to do. Re-armed by
-    `_on_target_rms_changed` (a `trace_add("write", ...)` on
-    `target_rms_var` -- a "converged" verdict only applies to the target
-    it was reached at, and pressure is recalibrated fresh every click
-    anyway) and by loading a new net; a Stop leaves `converged=False`
-    since it didn't run to completion, so the button stays enabled after
-    one.
+  - **Convergence History's checkmark tracks the algorithm's own
+    `converged` flag, not a fresh `optimality < CONVERGENCE_GTOL`
+    comparison redone in the table.** `_explicit_relax_loop` (shared by
+    `relax_once`/`relax_initial_configuration`) can declare convergence
+    via EITHER of two criteria -- the worst vertex's force below
+    `CONVERGENCE_GTOL`, or `max_stretch_pct` stalled for `STALL_WINDOW`
+    steps (see its own comment) -- so a stall-converged result can still
+    show `optimality` numerically ABOVE `CONVERGENCE_GTOL` even though
+    the algorithm is genuinely done; recomputing the checkmark from that
+    comparison alone would then wrongly show a cross on a run that
+    actually converged and visibly looks fine. `_refresh_history_table`
+    stores/uses the real `converged` boolean instead, with the numeric
+    comparison kept alongside for reference. The mark itself is a plain
+    ✔/✘ (not a colored emoji, which ttk doesn't reliably render in
+    color) whose color comes from a per-ROW Treeview tag
+    (`"converged"`/`"not_converged"`, `foreground=STATUS_COLORS["success"/"error"]`)
+    -- ttk.Treeview can only tint a whole row, not one cell, so the
+    Convergence column's color choice ends up applied to that row's
+    other columns too.
+  - **Level 0's history row has no target/pressure to speak of.**
+    `relax_initial_configuration` is pure springs -- no pressure
+    parameter, no target RMS stretch to calibrate toward -- so its row
+    shows `pressure` as `"n/a"` (`_record_level_history` stores `None`
+    for `subdivision_level == 0`) and its RMS Stretch % cell omits the
+    `"(target: N)"` suffix every other level's row has. The target
+    itself, when shown, uses one decimal place (`{target_rms_pct:.1f}`),
+    matching the "Target RMS stretch" spinner's own `format="%.1f"`.
+  - **Won't re-run once converged**: `_update_level_action_buttons`
+    (see the single-action-button bullet below) turns the button into
+    "Subdivide"/"DONE!" once `self.last_stats["converged"]` is true, and
+    `on_inflate_clicked` refuses to run even if invoked anyway, since
+    relax_once from an already-converged point starts with near-zero
+    force and has nothing left to do. Re-armed by `_on_target_rms_changed`
+    (a `trace_add("write", ...)` on `target_rms_var` -- a "converged"
+    verdict only applies to the target it was reached at, and pressure is
+    recalibrated fresh every click anyway) and by loading a new net; a
+    Stop leaves `converged=False` since it didn't run to completion, so
+    the button goes back to "Inflate"/"Relax" after one.
   - **"Stop" button** sets a `threading.Event` (`self.stop_event`,
-    created fresh per Inflate click) that `relax_once` checks before each
-    step, aborting before starting another one rather than waiting for
-    its own tolerance or the step cap -- returns whatever position was
-    last reached. Disabled except while an Inflate is actually running
-    (armed by `on_inflate_clicked`, disabled again by
-    `_set_controls_enabled(True)` once any background job finishes --
-    only `on_inflate_clicked` arms it, so it stays disabled during the
-    initial cache load, which isn't usefully interruptible).
+    created fresh per Inflate/Relax click) that the relax loop checks
+    before each step, aborting before starting another one rather than
+    waiting for its own tolerance or the step cap -- returns whatever
+    position was last reached. Only active while a run is in progress (see
+    `_set_level_action_button_running` below).
   - There USED TO be a bottom-of-figure annotation (`draw()`, via
     `fig.text`) repeating the current level/iteration/stretch/optimality
     numbers under the plots -- removed as redundant once the
     Convergence History table already showed all of it per level.
-- **Performance**: after vectorizing `_mesh_volume`/`_per_face_volumes`/
-  `_face_planarity_residual` (precomputed flat index arrays -- plus, for
-  the per-face case, a `np.bincount` grouping -- instead of a per-face
-  Python loop with a dict lookup per vertex, built once per solve rather
-  than on every single residual evaluation -- see their docstrings), a
-  single `relax_once` function evaluation on `cube_res3.json` (110
-  vertices, 330 variables) costs a few hundredths of a second, roughly a
-  50x speedup over the original per-face-Python-loop version. Total
-  wall-clock time for a full "until convergence" run still varies a lot
-  by mesh size and pressure, though -- see the "Live progress" bullet
-  above for how large that range gets (`dodecahedron_res3.json`'s 1446
-  variables at pressure=30 is a very different proposition from
-  `cube_res3.json`'s 330). `DEFAULT_STEPS = 10` predates this
-  vectorization fix and is unrelated to the per-face pressure work --
-  left alone since it's still a perfectly reasonable default for "Iterate
-  for N steps" mode, not a stale workaround.
-- **Known, accepted history**: an earlier version of this app used a
-  literal random start (`stretchy_mesh.initial_relaxation`, since
-  removed) with NO coarse-solve-and-drape step at all, to keep the whole
-  pipeline restart-free end to end. That failed empirically: a random
-  stage-1 fit for a subdivided cube net lands orientation-INCONSISTENT
-  (volume ≈ -0.03 against a target of ~1.38), and applying ANY nonzero pressure
-  to it made `least_squares` grind for 60-90+ seconds without returning,
-  for any `max_nfev` cap tried (scipy's cap does not reliably bound
-  wall-clock time on a badly-conditioned problem -- observed one case
-  where `max_nfev=10` was honored in `sol.nfev`'s final reported value,
-  yet the solver internally made 2068 actual calls to reach it). This is
-  exactly the failure mode `_inflate`'s docstring already documents
-  ("tried cold from a random point cloud... makes least_squares fail to
-  converge at all") -- which is why the CURRENT design (this section)
-  reintroduces the coarse solve's restart search as a precomputed,
-  cached, one-time setup step, while keeping the interactive "Inflate"
-  loop itself restart-free either way.
-- The initial cache load runs in a background thread via `_run_background`;
-  each "Inflate" click runs via the streaming variant, `_run_inflate_stream`
-  (see above) -- both because either can take a while and because Tk
-  isn't thread-safe, so the worker only ever pushes to a queue and the
-  main thread (via a scheduled `after` poll) is the only one touching
-  widgets.
+- **Performance**: after vectorizing `_mesh_volume`/`_per_face_volumes`
+  (precomputed flat index arrays -- plus, for the per-face case, a
+  `np.bincount` grouping -- instead of a per-face Python loop with a dict
+  lookup per vertex, built once per call rather than on every single
+  force evaluation -- see their docstrings), a single `relax_once`
+  function evaluation on a level-3-subdivided mesh (hundreds of
+  variables) costs a few hundredths of a second, roughly a 50x speedup
+  over the original per-face-Python-loop version. Total wall-clock time
+  for a full "until convergence" run still varies a lot by mesh size and
+  pressure, though -- see the "Live progress" bullet above for how large
+  that range gets. `DEFAULT_STEPS = 10` predates this vectorization fix
+  and is unrelated to the per-face pressure work -- left alone since it's
+  still a perfectly reasonable default for "Iterate for N steps" mode,
+  not a stale workaround.
 - **Left panel is a real connected net, not disconnected islands**:
   `on_select_net` precomputes `self.target_layout` once via
   `src/utils/inflate_polyhedron/stretchy_net_layout.py`'s `build_stretchy_net_layout` --
@@ -930,48 +812,45 @@ be rather than making those meshes take far more steps to formally
     debug/release duplicates) always visible, with `self.mode_row` (the
     steps-vs-convergence radio choice) as the one part that shows/hides
     per mode.
-  - **One Inflate button above, one Subdivide button below, each
-    "Level N" panel** (`self.level_inflate_buttons`/
-    `self.level_subdivide_buttons`), packed unconditionally in `__init__`
-    (no longer toggled by `_apply_mode_visibility`) -- both packed into
-    their level's frame BEFORE the canvas, the top one with `side=tk.TOP`
-    and the bottom one with `side=tk.BOTTOM`, specifically in that order:
-    packing either AFTER the canvas (which has `expand=True`) starves it
-    of space entirely, since the canvas would already have claimed the
-    whole remaining cavity by the time a later-packed sibling asks for
-    its share (verified: the Subdivide button was invisible, silently
-    squeezed to zero height, until this was fixed).
-  - **MAX_LEVEL has no Subdivide button at all** (nothing further to
-    subdivide TO) -- a green "DONE!" label (`self.level_done_label`/
-    `self.level_done_label_var`, `foreground=STATUS_COLORS["success"]`)
-    takes its exact spot instead, shown once that level converges, so
-    the layout stays visually symmetric with every other level's pair.
-  - **Workflow enforcement: exactly one button active at a time**, in
-    BOTH modes now. `_update_inflate_button_state` disables a level's
-    Inflate button once `self.last_stats["converged"]` is true;
-    `_update_subdivide_button_state` additionally requires that SAME
-    `converged` flag before enabling a level's Subdivide button (on top
-    of "must be the current frontier level" and `can_subdivide`) -- so a
-    freshly-subdivided, not-yet-inflated level has ONLY Inflate enabled,
-    and a freshly-converged level has ONLY Subdivide enabled (or shows
-    "DONE!" at MAX_LEVEL), never both.
+  - **ONE action button per "Level N" panel, below it only -- no button
+    above.** `self.level_action_buttons` is a single `{level: ttk.Button}`
+    dict spanning `range(0, MAX_LEVEL + 1)` (Level 0 included), packed
+    into its level's frame BEFORE the canvas with `side=tk.BOTTOM`
+    (packing it AFTER the canvas, which has `expand=True`, would starve
+    it of space entirely, since the canvas would already have claimed
+    the whole remaining cavity by the time a later-packed sibling asks
+    for its share). `_update_level_action_buttons` is the single source
+    of truth for what it shows: only the current frontier level's button
+    is ever enabled, cycling **"Relax"** (Level 0 only) or **"Inflate"**
+    (Level 1+, idle) -> **"Stop"** (a run in progress, see
+    `_set_level_action_button_running` below) -> **"Subdivide"**
+    (converged, clickable, advances to the next level) or **"DONE!"**
+    (converged at `MAX_LEVEL`, nothing further to subdivide to, so left
+    disabled) -- every other level's button is just disabled, left
+    however it last read when the user moved on from it. This replaced
+    an earlier two-button-per-level design (a top Inflate/Relax button
+    plus a bottom Subdivide button or "DONE!"/blank label) at the user's
+    explicit request to consolidate down to one control, always below.
   - **No separate Stop button, in either mode.** The CURRENT frontier
-    level's own Inflate button turns into the Stop control for the
-    duration of a run (`_set_level_inflate_button_running`, called from
-    `_on_pressure_calibrated`/`_finish_inflate`) -- text and `command`
-    both swap (to `self.on_stop_clicked`) while running, and swap back
-    once it finishes. `_set_controls_enabled`'s disabled branch
-    deliberately leaves the frontier level's Inflate button alone (every
-    other level's stays disabled as normal) so it's still clickable as
-    Stop.
+    level's own action button turns into the Stop control for the
+    duration of a run (`_set_level_action_button_running(True)`, called
+    from `_on_pressure_calibrated`/`on_relax_clicked`) -- text and
+    `command` both swap (to `self.on_stop_clicked`) while running, and
+    `_set_level_action_button_running(False)` (called from
+    `_finish_inflate`/`_finish_relax`) delegates back to
+    `_update_level_action_buttons` to restore its normal state
+    afterward. `_set_controls_enabled`'s disabled branch deliberately
+    leaves the frontier level's button alone (every other level's stays
+    disabled as normal) so it's still clickable as Stop.
   - **No "Sync rotation" choice at all -- rotation is just always
-    synced**, in both modes. There's no checkbox or variable for it
-    anymore: `_on_3d_motion`/`_on_3d_drag_end` sync unconditionally on
-    every drag, and `draw()` ALSO syncs every panel to the current
-    frontier level's view at the end of every redraw (see
-    `_sync_views_to`'s callers) -- specifically so a level just revealed
-    by Subdivide inherits whatever view the others are already at,
-    rather than starting at mplot3d's own default one.
+    synced**, in both modes. There's no checkbox or variable for it:
+    every level panel shares ONE camera angle
+    (`self.level_azim`/`self.level_elev`) -- a drag on any panel updates
+    it and re-renders every panel from it (`_on_level_motion` ->
+    `_render_all_level_panels`), and `draw()` always renders every panel
+    from that same shared state too, so a level just revealed by
+    Subdivide inherits whatever view the others are already at rather
+    than starting at some default one.
   - **The "success" (green) status message is always suppressed**
     (`_set_status`: `if kind == "success": text = ""`) -- e.g. "Converged
     after N steps..." -- since the per-level button states, the green
@@ -987,74 +866,85 @@ be rather than making those meshes take far more steps to formally
   - Status/progress (`self.progress`/`self.status_var`) and the
     Convergence History table were already shared before the
     unification and still are -- placed once, always visible.
-- **Multiple small canvases, not one shared figure.** Each panel (Net
-  and every "Level N") got its OWN `matplotlib.figure.Figure` +
-  `FigureCanvasTkAgg` (`self.fig_net`/`self.canvas_net`, and
-  `self.level_canvases[level]`, each wrapping its own single-axis
-  figure, `figsize=(3.2, 4.5)`) specifically so a native Tkinter button
-  can sit directly above/below each level's own panel in release mode --
-  one shared canvas has no way to embed a real widget over just one of
-  its subplots. All 4 panels' figures at this size (4 x 3.2in x 100dpi ≈
-  1280px) need `root.geometry("1500x820")`'s width to actually fit
-  side by side without the last one running off-screen -- if either
-  changes, check the other still leaves headroom. `_draw_idle_all`/`_canvas_for_axis` are the small helpers
-  this split needs: redraw every canvas after a full `draw()` (previously
-  one `self.canvas.draw_idle()` call), and look up which canvas owns a
-  given `Axes3D` (needed by the drag/rotation handlers, which now
-  connect to EVERY level canvas rather than one shared one -- `event.inaxes`
-  still identifies which `Axes3D` fired regardless of which canvas the
-  event came from, so the handler logic itself didn't need to change).
-- **View layout: "Net" plus one 3D panel per level.** `self.ax2d` is the
-  flat "Net" layout (unchanged); `self.ax3d_by_level` is a `{level:
-  Axes3D}` dict, one per level 1..`MAX_LEVEL`, built once in `__init__`.
-  `draw()` decides per level, every redraw, which of three states that
-  level's panel is in: `level == self.subdivision_level` draws LIVE from
-  the current `self.faces`/`self.positions`/`self.face_of_fine`; `level
-  in self.level_snapshots` draws that level's FROZEN state (captured by
-  `_subdivide_step` the instant the user subdivides past it -- a plain
-  reference to the about-to-be-replaced `self.faces`/`self.positions`/
-  `self.face_of_fine`, not a deep copy, since `subdivide_once`/
-  `relax_once` always return NEW dict/array objects rather than mutating
-  their input); any other level hasn't been reached yet this net session
-  and draws empty (just its "Level N" title, no data). Level 0 never
-  gets a panel or a snapshot -- this app always auto-advances past it
-  (see `STARTING_LEVEL`).
-- `_draw_wireframe_panel(ax, theme, level, faces, positions,
-  face_of_fine)` (one level's panel, called once per level by `draw()`
-  with either live, frozen, or `None` data) wraps `positions`/`faces`
-  into a `Polyhedron` via `inflate_polyhedron.stretchy_mesh.mesh_to_polyhedron`:
-  `.edges` gives the wireframe line segments (`polyhedron.vertices[i]`
-  is the position for edge endpoint `i` directly, since
-  `mesh_to_polyhedron` already remapped vertex ids to `Polyhedron`'s
-  dense index space -- no `positions[...]` dict lookup needed), and
-  `.is_closed()` gates whether `_CullableFace`'s exact backface culling
-  applies (only valid for a closed convex solid) vs. a plain
-  `Line3DCollection` wireframe overlay for an open mesh. This is purely
-  a rendering/reporting convenience: the solve/relax internals
-  (`solve_wireframe`, `relax_once`, etc.) stay on the dict-keyed
-  representation throughout, since vertices are relaxed by id and a
-  mid-solve mesh isn't reliably closed or convex.
-  `WIREFRAME_VIEW_FILL` (0.8) sets how tightly each panel crops to the
-  shape's own bounding box -- below 1.0 crops in past the shape's exact
-  extent, making it look bigger within the same panel without resizing
-  anything; tuned directly against user-requested "N% bigger" asks
-  (1.2/0.8 = 1.5, i.e. 50% bigger than the original 1.2 = 20%-margin
-  baseline), so if asked again, compute the new value the same way
-  rather than guessing.
-- **"Sync rotation" checkbox** (`self.sync_rotation_var`, above the
-  panels): while checked and a mouse-drag rotation is in progress on one
-  "Level N" panel, `_on_3d_motion` (a `motion_notify_event` handler,
-  connected AFTER mplot3d's own internal rotation handler so
-  `self._active_drag_ax`'s `elev`/`azim` already reflect the current
-  move by the time it runs) copies that axis's `elev`/`azim` directly
-  onto every OTHER 3D panel via `ax.view_init(...)` -- a direct copy, not
-  a relative nudge, so all panels end up sharing the exact same view
-  matrix rather than each just spinning independently from wherever it
-  already was. `self._active_drag_ax` (set in `_on_3d_drag_start`,
-  cleared in `_on_3d_drag_end`) tracks which axis the drag STARTED on,
-  since `event.inaxes` during a motion event isn't reliable once the
-  mouse strays outside that axis's bounds mid-drag (mplot3d itself keeps
-  rotating based on drag origin, not current mouse position).
+- **Every "Level N" panel renders via PyVista/VTK, not matplotlib --
+  only "Net" is still matplotlib.** Tried on Level 0 alone first (its
+  mesh is the one guaranteed non-convex/self-intersecting case, a
+  random-start-then-relax result), then applied to every level at the
+  user's request once it looked right. The reason: a mesh here is
+  routinely self-intersecting or non-convex -- not just Level 0's own
+  starting point, but ANY level mid-relax or mid-inflate before pressure
+  has had a chance to round it out -- which neither mplot3d's own
+  painter's-algorithm depth sort nor this app's OLD `_CullableFace`
+  (exact normal-based culling, valid only for a closed CONVEX solid --
+  see its own docstring, still on the untouchable-files list but no
+  longer imported by this app) could draw correctly: occluded faces
+  would wrongly show through. PyVista gives a real GPU depth buffer
+  instead, which handles arbitrary triangle soups correctly regardless
+  of convexity or face count -- no per-face visibility object to build
+  at all, unlike the old one-`_CullableFace`-per-face approach.
+- **Rendered off-screen to a plain image, not a live interactive VTK
+  widget.** Each level panel is a `pv.Plotter(off_screen=True,
+  window_size=LEVEL_PANEL_SIZE)` (`self.level_plotters[level]`) whose
+  `.screenshot(return_img=True)` result gets wrapped in a
+  `PIL.ImageTk.PhotoImage` and set on a plain `tk.Label`
+  (`self.level_labels[level]`) -- keeps this app on ONE interaction
+  toolkit (Tkinter) rather than also embedding VTK's own
+  widget/event-loop integration. `self.level_photos[level]` holds the
+  live `PhotoImage` reference -- required, since Tk drops (blanks) an
+  image whose only reference gets garbage-collected. `LEVEL_PANEL_SIZE =
+  (320, 450)` matches the Net panel's matplotlib `figsize=(3.2, 4.5)` at
+  ~100dpi, so every panel is the same size.
+- **Building the mesh** (`_draw_level_panel`): faces are always
+  triangles from Level 0 on (see "The algorithm" above), so unlike the
+  old `_draw_wireframe_panel` there's no fan/n-gon handling needed.
+  Builds ONE `pv.PolyData` for the whole mesh with per-CELL RGB color
+  scalars (`mesh.cell_data["colors"]`, from `face_of_fine` indexing the
+  same per-base-face `self.colors` the Net panel uses) and ONE
+  `add_mesh(..., scalars="colors", rgb=True, show_edges=True)` call --
+  a single draw call handles occlusion, face coloring, AND edges
+  together, which is what replaces the old per-face `_CullableFace` loop
+  plus a separate `Line3DCollection` wireframe-overlay fallback.
+- **Camera**: parallel (orthographic) projection, not perspective, to
+  match fixed-axis-limit framing with no foreshortening -- the closest
+  equivalent PyVista offers to what `ax.set_xlim/ylim/zlim` gave the old
+  matplotlib panels. `_render_level_pv` derives the camera direction from
+  the SHARED `self.level_azim`/`self.level_elev` (see the rotation
+  bullet below) and the distance/`parallel_scale` from THIS level's own
+  bounding box (`self._level_center[level]`/`self._level_half[level]`,
+  set by `_draw_level_panel` -- necessary since neither a pure-spring
+  relax nor a pressure inflation has any mechanism keeping the result
+  near the origin or at a familiar scale). `parallel_scale` needs an
+  aspect-ratio correction (multiply by `panel_height/panel_width` when
+  portrait, as this panel is) since it only directly controls the
+  vertical half-height -- left uncorrected, the shape's WIDER dimension
+  gets cropped on a portrait-shaped panel; `LEVEL_ZOOM_FILL` (0.6) then
+  shrinks the shape within that guaranteed-fitting frame, per user
+  request (the un-zoomed framing looked too large/cropped).
+  `WIREFRAME_VIEW_FILL` (0.8) is a separate, earlier zoom factor folded
+  into `self._level_half` itself, kept from the original matplotlib
+  version's tuning.
+- **Title text must be added as a plain, explicitly centered text actor,
+  not a named "upper_edge" position.** `add_text(..., position="upper_edge")`
+  returns a `vtkCornerAnnotation`, which despite the name renders
+  LEFT-justified starting AT the horizontal center -- visibly off-center
+  to the right, not centered. The fix: `add_text(f"Level {level}",
+  position=(0.5, 0.92), viewport=True, name="level_title")` followed by
+  `title_actor.GetTextProperty().SetJustification(vtk.VTK_TEXT_CENTERED)`
+  -- a plain text actor at a normalized-viewport position, explicitly
+  told to center itself on that point, which is what a matplotlib
+  `ax.set_title()` gives for free and this had to be reproduced by hand.
+- **Rotation sync, one shared angle across every panel.** No "Sync
+  rotation" checkbox (see its own bullet above) -- `self.level_azim`/
+  `self.level_elev` are single, SHARED floats, not per-level state. A
+  left-click-drag on ANY level panel's Label (`_on_level_drag_start`/
+  `_on_level_motion`/`_on_level_drag_end`, plain Tkinter mouse bindings
+  reimplementing what mplot3d's own drag-to-rotate gave the old panels
+  for free) updates them by the drag delta (`LEVEL_DRAG_SENSITIVITY`
+  degrees per pixel, elevation clamped to ±89° to avoid flipping through
+  the poles) and calls `_render_all_level_panels()`, which re-renders
+  EVERY level's plotter from the same updated angle -- a direct
+  recomputation from shared state each time, not a relative nudge
+  copied panel-to-panel, so every panel always agrees exactly.
 
 ## Testing
 
@@ -1068,9 +958,12 @@ directly even though no current app calls it — see its own bullet under
 `src/utils/`'s own sub-package split exactly, one test file per module:
 `unit/geometry/test_polygon_geom.py`, `unit/geometry/test_polyhedron.py`
 (the `Polyhedron` class in `src/utils/geometry/`), `unit/inflate_polyhedron/`
-(`test_hull_to_spec.py`, `test_stretchy_mesh.py`, `test_stretchy_cache.py`,
+(`test_hull_to_spec.py`, `test_stretchy_mesh.py`, `test_mesh_levels.py`,
 `test_stretchy_net_layout.py`), and `unit/subdivisions/`
-(`test_polygon_subdivisions.py`, `test_mesh_subdivide.py`).
+(`test_polygon_subdivisions.py`). (There USED TO also be `test_stretchy_cache.py`
+and `test_mesh_subdivide.py` -- DELETED along with `stretchy_cache.py`/
+`checksums.py` and `mesh_subdivide.py`'s `subdivide_mesh`/`solve_fabric_mesh`,
+see "Stretchy meshes" below.)
 
 (There USED TO also be a `unit/polyhedron_unfolder/` directory — one file
 per module of the now-deleted rigid-pipeline package, testing
@@ -1081,36 +974,22 @@ and `UnfoldablePolyhedron` respectively — plus `unit/persistence/` and an
 rest of the rigid pipeline; see "Removed: the rigid-unfolding pipeline
 (historical)" above.)
 
-The **stretchy**-pipeline suite (`unit/inflate_polyhedron/test_stretchy_mesh.py`) is slower
-(~30-60s) since even the small Platonic solids run the real
-`solve_wireframe` — the dodecahedron and icosahedron are deliberately kept
-OUT of it (real numerical solving is slow enough on the bushiest solids
-that hand verification is cheaper than paying that cost on every test
-run) and verified manually instead. Includes `monkeypatch`-based tests of the orientation-consistency
-failure path (forcing `_is_orientation_consistent` to always return
-`False` to exercise the `ValueError`) and of the winding convention itself
-(reversing one face's loop and checking `_is_orientation_consistent`
-catches it). Also covers `relax_once` (the restart-free primitive
-`inflate_polyhedron_app`'s interactive "Inflate" workflow is built
-on -- see "The app" above), continuing from a `solve_wireframe` result
-rather than a raw random start -- on the small tetrahedron and cube
-(post-vectorization these are fast even at nonzero pressure; see "The
-app"'s measured ~0.04-0.05s/step on a 98-vertex mesh, so cost isn't the
-reason to keep tests small here anymore, just habit/consistency with the
-rest of the suite). Includes a check that pressure increases stretch over
-a normal working range
-(`test_relax_once_pressure_increases_stretch_over_a_normal_working_range`
--- strictly increasing stretch at pressure 1/5/20 on `cube.json`).
-
-`unit/subdivisions/test_mesh_subdivide.py` covers the fabric-subdivision pipeline (see
-above): combinatorial closure of the fine mesh at several resolutions,
-that shared coarse edges actually merge (not left as disconnected
-per-face patches), that a pentagon face's fine edges have exactly two
-distinct rest lengths (rim vs. spoke, not a uniform one), and that
-`solve_fabric_mesh` produces low-stretch results for both an
-already-rigid coarse net (tetrahedron) and a genuinely bendy one
-(`two_pentagons_and_a_square.json`) — fast (~5s total) since the
-drape-then-relax approach never needs the slow random-restart search.
+The **stretchy**-pipeline suite (`unit/inflate_polyhedron/test_stretchy_mesh.py`)
+is fast now (a couple of seconds total) -- it used to run the real,
+genuinely slow `solve_wireframe` search (deliberately keeping the
+dodecahedron/icosahedron OUT of it and verifying those by hand instead),
+but that function is gone; wherever a test just needs SOME concrete,
+non-degenerate positions to work with, `_relaxed_positions` (a small
+helper in the test file itself) builds them via the same
+`random_initial_positions`-plus-`relax_initial_configuration` pipeline
+the app now uses for its own starting configuration. Includes a test of
+the winding convention itself (reversing one face's loop and checking
+`_is_orientation_consistent` catches it). Also covers `relax_once` (the
+restart-free primitive `inflate_polyhedron_app`'s interactive "Inflate"
+workflow is built on -- see "The app" above) on the small tetrahedron and
+cube, and a check that pressure increases stretch over a normal working
+range (`test_relax_once_pressure_increases_stretch_over_a_normal_working_range`
+-- strictly increasing stretch at pressure 0.1/0.3/0.8 on `cube.json`).
 
 `unit/inflate_polyhedron/test_stretchy_net_layout.py` covers `build_stretchy_net_layout` (see
 "The app" above) across every net in `data/input/stretchy_nets/`: every face gets
@@ -1146,9 +1025,9 @@ why that's expected, not a bug).
   see "Removed: the rigid-unfolding pipeline (historical)" above — and
   `src/utils/geometry/polyhedron.py`'s current `Polyhedron` class keeps
   it too.)
-- `stretchy_mesh.py`/`stretchy_cache.py` have no
-  `if __name__ == "__main__"` demo blocks — that logic lives in `tests/`.
-  Add new ad hoc verification as a real test, not a script block.
+- `stretchy_mesh.py` has no `if __name__ == "__main__"` demo block --
+  that logic lives in `tests/`. Add new ad hoc verification as a real
+  test, not a script block.
 - (Historical: a stored "fold angle" was a rigid-pipeline-only concept —
   the rotation *from flat* rather than the dihedral angle itself, e.g.
   cube hinges rotating 90°, tetrahedron hinges rotating 109.47°. No

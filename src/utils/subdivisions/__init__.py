@@ -1,21 +1,20 @@
-"""subdivisions: split a polygon (or a whole net's faces) into a fine
-triangular mesh.
+"""subdivisions: split a polygon into a fine triangular mesh.
 
 Modules:
   polygon_subdivisions -- hardcoded coarse split of a single n-gon (n=3..8)
                            into triangles, refined to any resolution
-  mesh_subdivide        -- applies polygon_subdivisions to every face of a
-                            stretchy net at once, merging shared coarse
-                            edges into one connected fine mesh
+  mesh_subdivide        -- reads a legacy fabric-subdivided stretchy net's
+                            "coarse_faces" field (load_fabric_spec) -- see
+                            that module's own docstring
 """
 from .polygon_subdivisions import (
     SUBDIVISIONS, DEFAULT_RESOLUTION, MAX_LEVEL, subdivide, resolution_for,
     subdivide_at_level,
 )
-from .mesh_subdivide import subdivide_mesh, solve_fabric_mesh, load_fabric_spec
+from .mesh_subdivide import load_fabric_spec
 
 __all__ = [
     "SUBDIVISIONS", "DEFAULT_RESOLUTION", "MAX_LEVEL", "subdivide", "resolution_for",
     "subdivide_at_level",
-    "subdivide_mesh", "solve_fabric_mesh", "load_fabric_spec",
+    "load_fabric_spec",
 ]

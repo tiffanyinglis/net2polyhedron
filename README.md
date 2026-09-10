@@ -89,16 +89,11 @@ from the raw coordinates via a convex hull — see its docstring.
 
 - **`src/apps/inflate_polyhedron_app/app.py`** — a separate, non-rigid
   pipeline for nets that can't stay flat and rigid (e.g. a face sharing
-  more than one edge with a neighbor): interactively inflate a stretchy
-  mesh from `data/input/stretchy_nets/`. Unlike the rigid pipeline above,
-  this one genuinely solves a numerical optimization, so it keeps its own
-  cache (`src/apps/inflate_polyhedron_app/cache/`) and its own
-  `build_cache.py` to precompute it:
-
-  ```bash
-  python src/apps/inflate_polyhedron_app/build_cache.py            # only nets whose cache is stale
-  python src/apps/inflate_polyhedron_app/build_cache.py --force    # recompute every net regardless
-  ```
+  more than one edge with a neighbor): interactively relax/inflate a
+  stretchy mesh from `data/input/stretchy_nets/`. No cache and no
+  precompute step — every net starts as "Level 0", a random start on its
+  own triangulated topology, and a "Relax" button turns that into the
+  actual starting shape live in the UI.
 
 - **`src/apps/polygon_subdivision_app/app.py`** — an unrelated 2D-only
   demo of splitting a regular polygon into a fine triangular mesh, as a
@@ -110,9 +105,8 @@ from the raw coordinates via a convex hull — see its docstring.
 python tests/run_tests.py
 ```
 
-or just `pytest` from the repo root. The rigid-pipeline suite is fast
-(no numerical solving involved at all); the stretchy-pipeline suite is
-slower (~30-60s) since it runs the real inflation solver. Pass extra
+or just `pytest` from the repo root. The whole suite is fast (no
+numerical solving is exercised as part of any test any more). Pass extra
 arguments straight through to pytest, e.g. `python tests/run_tests.py -k stretchy -v`.
 
 ## Project layout
@@ -138,10 +132,9 @@ src/
     polyhedron_unfolder/            rigid pipeline: pick a net, see it fold
                                     (two tabs -- animated slider, flat-vs-folded)
       app.py                         entry point, class PolyhedronUnfolderApp
-    inflate_polyhedron_app/        stretchy pipeline: interactive fabric inflation
+    inflate_polyhedron_app/        stretchy pipeline: interactive fabric relax/inflation
       app.py                         entry point, class InflatePolyhedronApp
-      build_cache.py                 precompute this app's OWN solve cache
-      cache/*.json                   ...that cache lives here, not in data/
+                                    (no cache, no precompute script)
     polygon_subdivision_app/       unrelated 2D-only subdivision demo, no cache
       app.py                         entry point, class PolygonSubdivisionApp
     common/                        helpers SHARED by more than one app
@@ -149,9 +142,6 @@ src/
                                     (NOT caches -- those are per-app, above)
       ui_theme.py                    shared Tk/matplotlib look-and-feel constants
       bounding_box.py                bounding_box(vertices): a rendering helper
-      generate_subdivided_stretchy_nets.py
-                                    one-off script that writes fine-triangulated
-                                    variants of an existing stretchy net
     ui/                            generic Tk/matplotlib widgets, not domain logic
       tooltip.py                     Tooltip: hover-tooltip for any Tk widget
       cullable_face.py                _CullableFace: backface culling for a

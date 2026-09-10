@@ -35,26 +35,28 @@ it's violated.
 
 That check alone can't catch every possible mistake, though: flipping
 EVERY face at once (a full mirror image) is just as valid a loop
-structure as the original. A subtler problem can still reach the
-solver even so: solve_wireframe's plain edge-length fit has many
-solutions for a well-connected mesh, and some of them fold one face
-inside-out relative to the rest even though the abstract loops are
-perfectly consistent. solve_wireframe checks for this too (see
-_is_orientation_consistent) and specifically searches for a consistent
-embedding; if it truly can't find one after many attempts, it raises
-ValueError with a suggestion to double check face winding.
+structure as the original. A subtler problem can still reach the pipeline
+even so: relax_initial_configuration's random-start-plus-spring relax
+(see its own docstring) has no notion of "outward" at all, so it can just
+as easily land globally inside-out, or (rarer, and not fixed for free)
+genuinely mixed -- some faces each way. See _orientation_signs/
+_is_orientation_consistent for how a caller can check this, and
+relax_initial_configuration's own docstring for what it does about it.
 
-solve_wireframe() then finds SOME 3D position for every vertex that
-keeps every edge close to unit length, without requiring individual
-faces to stay flat -- letting edges stretch a little and faces bend is
-exactly what makes an otherwise-rigid-impossible net (like
+The overall pipeline this module supports (used by inflate_polyhedron_app,
+see its own module docstring): random_initial_positions gives a fresh net
+a starting point that isn't even a meaningful embedding yet;
+relax_initial_configuration pulls that into a well-separated 3D shape
+using pure spring forces (no pressure); relax_once then takes over for
+interactive, pressure-based "inflation" -- letting edges stretch a little
+and faces bend to round the shape out, exactly what makes an
+otherwise-rigid-impossible net (like
 data/input/stretchy_nets/two_pentagons_and_a_square.json) realizable at
-all. It works equally well on an ordinary closed solid (see
+all, and what puffs an ordinary closed solid (see
 data/input/stretchy_nets/{tetrahedron,cube,octahedron,icosahedron,dodecahedron}.json)
--- those settle with only a few percent stretch, puffed out into a
-rounded, convex, plushie-like shape via an outward "inflation" pressure
-(literally the same idea as stuffing/blowing up a plush toy or balloon
-until the fabric's own tension stops it).
+into a rounded, convex, plushie-like shape (literally the same idea as
+stuffing/blowing up a plush toy or balloon until the fabric's own tension
+stops it).
 
 Design notes (the "why" behind choices that would otherwise look
 arbitrary -- kept here rather than repeated across every function that
@@ -96,44 +98,15 @@ touches them, per this project's docstring convention in skills.md):
   correctly-calibrated pressure never gets near the critical value this
   would have guarded against. See .claude/skills/net-fold-project/SKILL.md
   for this project's general stance on adding a term like that.
-
-- **Ramping + accept-or-reject in _inflate**: applying full pressure
-  cold, or from a random start, makes least_squares fail to converge at
-  all rather than inflate cleanly. INFLATION_WEIGHTS ramps up gradually,
-  re-seeding each step from the last ACCEPTED one, and stops (keeping the
-  last good result) the moment a step's edge stretch would exceed
-  STRETCH_CAP -- self-limiting for a topology that genuinely can't hold
-  much pressure instead of stretching it into a mess.
-
-- **Why solve_wireframe retries whole attempts, not per-ramp-step
-  orientation checks**: gating _inflate's ramp on orientation consistency
-  at every step was tried and made things worse -- the icosahedron's ramp
-  reliably passes through a couple of genuinely inconsistent intermediate
-  weights before self-correcting at higher pressure, so stopping early
-  would mean it never reaches the weight where it recovers. Consistency
-  is instead checked only on each WHOLE attempt's final result;
-  solve_wireframe retries a fresh random stage-1 start (up to
-  MAX_ORIENTATION_ATTEMPTS) rather than second-guessing individual ramp
-  steps, and keeps the first attempt that succeeds without comparing
-  further ones (repeated successes land on essentially the same result
-  once a mesh inflates at all).
 """
 import collections
 import json
 
 import numpy as np
-from scipy.optimize import least_squares
 
 from ..geometry.polyhedron import Polyhedron
 
 EDGE_LENGTH = 1.0
-
-# Bump whenever solve_wireframe's algorithm changes enough to produce a
-# meaningfully different result for the same mesh (e.g. adding the
-# inflation stage) -- stretchy_cache folds this into its cache key, so a
-# solver change invalidates every existing cache entry even though the
-# source .json files themselves haven't changed at all.
-ALGORITHM_VERSION = 6
 
 
 def _face_edges(face):
@@ -209,8 +182,7 @@ def _pair_index_arrays(pairs, idx):
 def _volume_indices(faces, idx):
     """faces/idx: as above. Precomputed fan-triangulation index arrays
     for _mesh_volume: each face fan-triangulated from its own first
-    vertex, flattened into three parallel int arrays (v0, v1, v2).
-    Built once per solve rather than re-derived on every _residual call."""
+    vertex, flattened into three parallel int arrays (v0, v1, v2)."""
     v0s, v1s, v2s = [], [], []
     for face in faces:
         face_idx = [idx[v] for v in face]
@@ -267,9 +239,9 @@ def _face_index_groups(faces, idx):
 
 def _planarity_groups(faces, idx):
     """faces/idx: as above. Precomputed per-face-size index arrays for
-    _face_planarity_residual: {n: array of shape (num_n_vertex_faces, n)}
-    for every face with 4+ vertices (triangles are always exactly planar
-    and excluded). Lets same-size faces batch into one SVD call."""
+    _relax_force's planarity pull: {n: array of shape (num_n_vertex_faces,
+    n)} for every face with 4+ vertices (triangles are always exactly
+    planar and excluded). Lets same-size faces batch into one SVD call."""
     groups = {}
     for face in faces:
         n = len(face)
@@ -279,28 +251,11 @@ def _planarity_groups(faces, idx):
     return {n: np.array(rows, dtype=int) for n, rows in groups.items()}
 
 
-def _face_planarity_residual(pts, planarity_groups):
-    """pts: (N,3) vertex positions; planarity_groups: _planarity_groups'
-    result (triangles already excluded). Returns each (4+-vertex) face's
-    points' signed distance from that face's own best-fit plane (via SVD),
-    one batched call per distinct face size."""
-    if not planarity_groups:
-        return np.zeros(0)
-    parts = []
-    for group_idx in planarity_groups.values():
-        face_pts = pts[group_idx]  # (num_faces, n, 3)
-        centered = face_pts - face_pts.mean(axis=1, keepdims=True)
-        normals = np.linalg.svd(centered, full_matrices=False)[2][:, -1, :]  # (num_faces, 3)
-        parts.append(np.einsum('fij,fj->fi', centered, normals).ravel())
-    return np.concatenate(parts)
-
-
 def _mesh_volume(pts, volume_indices):
     """pts: (N,3) vertex positions; volume_indices: _volume_indices'
     precomputed (v0,v1,v2) index arrays. Returns the mesh's signed
-    enclosed volume via the divergence theorem (fan-triangulated,
-    summed against the origin) -- smooth and singularity-free, so usable
-    as a least_squares term even from a poorly-conditioned start."""
+    enclosed volume via the divergence theorem (fan-triangulated, summed
+    against the origin)."""
     v0_idx, v1_idx, v2_idx = volume_indices
     if len(v0_idx) == 0:
         return 0.0
@@ -325,42 +280,6 @@ def _total_rest_area(faces, edge_length):
         s = (la + lb + lc) / 2
         total += max(0.0, s * (s - la) * (s - lb) * (s - lc)) ** 0.5
     return total
-
-
-def _sphere_bound_volume(faces, edge_length):
-    """Volume of the sphere with the mesh's own total rest surface area
-    (see _total_rest_area) -- an optimistic, normally-unreachable
-    inflation target, scaled to the mesh's own size. See module
-    docstring's Design notes for how this is used as a pressure target."""
-    total_area = _total_rest_area(faces, edge_length)
-    r = np.sqrt(total_area / (4 * np.pi))
-    return (4 / 3) * np.pi * r ** 3
-
-
-def _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups):
-    """Shared residual pieces for _residual (relax_once uses _relax_force instead, see its docstring): RELATIVE
-    edge-length error `(actual - rest) / rest` for every edge (always
-    first, so callers can slice it out), plus an optional planarity term.
-    `edge_length` may be a scalar or a per-edge array (see
-    mesh_subdivide.py for why a subdivided mesh needs the latter)."""
-    parts = [(np.linalg.norm(pts[edge_ai] - pts[edge_bi], axis=1) - edge_length) / edge_length]
-    if planarity_weight:
-        parts.append(planarity_weight * _face_planarity_residual(pts, planarity_groups))
-    return parts
-
-
-def _residual(flat, edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
-              inflation_weight=0.0, inflation_target=0.0, planarity_weight=0.0):
-    """The automatic-ramp objective (_inflate/solve_wireframe): edge-length
-    + planarity + a TARGET-based inflation pressure term (`inflation_weight
-    * (inflation_target - volume)`, see module docstring). relax_once uses
-    _relax_force instead, which has no target -- see its docstring."""
-    pts = flat.reshape(-1, 3)
-    parts = _edge_and_planarity_parts(pts, edge_ai, edge_bi, edge_length, planarity_weight, planarity_groups)
-    if inflation_weight:
-        vol = _mesh_volume(pts, volume_indices)
-        parts.insert(1, np.array([inflation_weight * (inflation_target - vol)]))
-    return np.concatenate(parts)
 
 
 def _safe_unit_vectors(vecs):
@@ -388,9 +307,8 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_
     together straight from its own vertex loop via `0.5 * sum_i
     cross(p_i, p_{i+1})` (Newell's method) -- split evenly across its own
     vertices; each 4+-gon face also pulls its own vertices a little
-    towards its best-fit plane (see _face_planarity_residual -- same SVD
-    normal, used here as a restoring direction instead of a scalar
-    residual). Returns the (N,3) net force on every vertex -- relax_once
+    towards its own best-fit plane (SVD normal, used here as a restoring
+    direction). Returns the (N,3) net force on every vertex -- relax_once
     walks a small step along it (see module docstring's Design notes for
     why edge directions need _safe_unit_vectors rather than a naive
     division)."""
@@ -451,41 +369,10 @@ def _is_orientation_consistent(pts, faces, idx):
     """True iff every face's normal sign (see _orientation_signs) agrees
     AND points outward (+1) -- i.e. the mesh hasn't folded through
     itself, and hasn't turned inside-out either (all faces agreeing on
-    -1 is still a single self-consistent sign, but the wrong one). Used
-    by solve_wireframe to judge a fresh, unconstrained candidate embedding
-    (see its own docstring)."""
+    -1 is still a single self-consistent sign, but the wrong one)."""
     signs = {s for s in _orientation_signs(pts, faces, idx) if s != 0}
     return signs <= {1.0}
 
-
-def _min_pairwise_separation(pts):
-    """pts: (N,3) vertex positions. Returns the smallest distance between
-    any two distinct points (inf if fewer than 2)."""
-    d = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
-    np.fill_diagonal(d, np.inf)
-    return d.min() if len(pts) > 1 else np.inf
-
-
-def _overall_3d_extent(pts):
-    """The point cloud's smallest principal-axis extent (via SVD) -- near
-    zero means the whole mesh has landed flat in a single plane."""
-    centered = pts - pts.mean(axis=0)
-    return np.linalg.svd(centered, compute_uv=False)[-1]
-
-
-CONVERGE_TOL = 1e-4  # max |edge length error| to call a plain edge-length solve "converged"
-STRETCH_CAP = 0.08  # max |edge length error| _inflate will tolerate before backing off
-MIN_3D_EXTENT = 0.1  # fraction of edge_length; below this, call the whole result "flat"
-
-# fraction of edge_length; a final result with two DISTINCT (non-shared)
-# vertices closer than this is rejected as degenerate even if
-# _is_orientation_consistent didn't flag it (that check is blind to two
-# unrelated vertices landing on almost the same point).
-MIN_SEPARATION_FRACTION = 0.15
-
-# A gradually increasing "pressure" ramp -- see module docstring's Design
-# notes for why this needs to ramp rather than jump to full strength.
-INFLATION_WEIGHTS = (0.1, 0.2, 0.4, 0.8, 1.5, 3.0)
 
 # How strongly to prefer each face staying close to flat, in the final
 # polish pass -- low, since inflation already tends to leave faces close
@@ -493,168 +380,14 @@ INFLATION_WEIGHTS = (0.1, 0.2, 0.4, 0.8, 1.5, 3.0)
 PLANARITY_WEIGHT = 0.1
 
 
-def _edge_stretch(residual, n_edges):
-    """The max |edge-length error| among the first n_edges entries of a
-    _residual result."""
-    return np.max(np.abs(residual[:n_edges])) if n_edges else 0.0
-
-
-def _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length, volume_indices, volume_target=None):
-    """pts0: an already edge-length-valid point cloud (N,3); faces/edge_ai/
-    edge_bi/idx/edge_length/volume_indices: mesh structure (see
-    solve_wireframe). Gradually ramps inflation pressure (INFLATION_WEIGHTS,
-    see module docstring's Design notes), re-seeding from the last accepted
-    step and stopping at the first step exceeding STRETCH_CAP. Returns
-    (pts, edge_stretch, inflation_weight_reached) -- the last of which the
-    caller can reuse for a final planarity pass at the same pressure.
-    `volume_target` overrides the target derived from faces/edge_length
-    (needed for a subdivided fabric mesh, see mesh_subdivide.py)."""
-    n_edges = len(edge_ai)
-    target = volume_target if volume_target is not None else _sphere_bound_volume(faces, edge_length)
-    cur = pts0
-    cur_err = _edge_stretch(
-        np.linalg.norm(pts0[edge_ai] - pts0[edge_bi], axis=1) - edge_length, n_edges)
-    weight_used = 0.0
-    for w in INFLATION_WEIGHTS:
-        sol = least_squares(_residual, cur.flatten(),
-                             args=(edge_ai, edge_bi, volume_indices, None, edge_length, w, target))
-        pts = sol.x.reshape(-1, 3)
-        err = _edge_stretch(sol.fun, n_edges)
-        if err > STRETCH_CAP:
-            break
-        cur, cur_err, weight_used = pts, err, w
-    return cur, cur_err, weight_used
-
-
-MAX_ORIENTATION_ATTEMPTS = 60  # hard cap on stage-1 restarts spent seeking a usable one
-CANDIDATES_PER_ROUND = 8  # how many stage-1 starts to try inflating before giving up a round
-
-
-def _inflate_from(pts0, faces, edge_ai, edge_bi, idx, edge_length, n_edges,
-                   volume_indices, planarity_groups, volume_target=None, scale=None):
-    """Runs _inflate from one stage-1 starting point, then (if it inflated
-    at all) a light final planarity pass at the same pressure. Returns
-    (pts, edge_stretch, weight_reached) -- weight_reached is 0.0 if the
-    very first pressure step was rejected. `scale`, if given, replaces
-    `edge_length` for the MIN_3D_EXTENT check (needed when edge_length is
-    a per-edge array)."""
-    if scale is None:
-        scale = edge_length
-    pts, residual, weight = _inflate(pts0, faces, edge_ai, edge_bi, idx, edge_length,
-                                      volume_indices, volume_target)
-    if weight:
-        target = volume_target if volume_target is not None else _sphere_bound_volume(faces, edge_length)
-        sol = least_squares(_residual, pts.flatten(),
-                             args=(edge_ai, edge_bi, volume_indices, planarity_groups, edge_length,
-                                   weight, target, PLANARITY_WEIGHT))
-        polished = sol.x.reshape(-1, 3)
-        err = _edge_stretch(sol.fun, n_edges)
-        if (err < STRETCH_CAP and _overall_3d_extent(polished) > MIN_3D_EXTENT * scale
-                and _is_orientation_consistent(polished, faces, idx)):
-            pts, residual = polished, err
-    return pts, residual, weight
-
-
-def solve_wireframe(faces, edge_length=EDGE_LENGTH, seed=0, n_restarts=CANDIDATES_PER_ROUND,
-                     volume_target=None):
-    """faces: vertex-id loops (see module docstring for the winding
-    convention). edge_length: scalar rest length, or a {(a,b): length}
-    dict for a non-uniform (e.g. subdivided fabric) mesh -- in which case
-    `volume_target` must be given explicitly too, since there's no single
-    edge length for _sphere_bound_volume to use.
-
-    Randomly restarts edge-length-fit-then-inflate (see _inflate_from)
-    from stage-1 starting points, up to MAX_ORIENTATION_ATTEMPTS, keeping
-    the FIRST result that's orientation-consistent (see
-    _is_orientation_consistent) and has no two distinct vertices closer
-    than MIN_SEPARATION_FRACTION * edge_length. See module docstring's
-    Design notes for why whole attempts are retried rather than
-    individual ramp steps second-guessed.
-
-    Raises ValueError if MAX_ORIENTATION_ATTEMPTS is exhausted with no
-    consistent, well-separated result -- usually a winding-convention bug
-    (see this module's docstring).
-
-    Returns (positions, stats): positions is {vertex_id: np.array([x, y,
-    z])}, stats has "max_stretch_pct"/"rms_stretch_pct" (how far settled
-    edges ended up from `edge_length`) and "residual" (raw max error)."""
-    vertex_ids = sorted({v for face in faces for v in face})
-    idx = {v: i for i, v in enumerate(vertex_ids)}
-    edges = mesh_edges(faces)
-    if not edges:
-        raise ValueError("mesh has no edges")
-    n = len(vertex_ids)
-    edge_ai, edge_bi = _pair_index_arrays(edges, idx)
-    n_edges = len(edges)
-    # Built once here rather than re-derived on every _residual call --
-    # see _residual's docstring for why that matters.
-    volume_indices = _volume_indices(faces, idx)
-    planarity_groups = _planarity_groups(faces, idx)
-
-    if isinstance(edge_length, dict):
-        if volume_target is None:
-            raise ValueError("volume_target must be given explicitly when edge_length is a dict")
-        length_arr = np.array([edge_length[e] for e in edges])
-        scale = float(np.min(length_arr))
-    else:
-        length_arr = edge_length
-        scale = float(edge_length)
-
-    rng = np.random.default_rng(seed)
-    best = None  # (pts, residual)
-    attempted = 0
-    budget = n_restarts
-    while best is None and attempted < MAX_ORIENTATION_ATTEMPTS:
-        for _ in range(min(budget, MAX_ORIENTATION_ATTEMPTS - attempted)):
-            x0 = rng.normal(scale=scale, size=3 * n)
-            sol = least_squares(_residual, x0,
-                                 args=(edge_ai, edge_bi, volume_indices, planarity_groups, length_arr))
-            pts0 = sol.x.reshape(-1, 3)
-            attempted += 1
-
-            pts, residual, weight = _inflate_from(
-                pts0, faces, edge_ai, edge_bi, idx, length_arr, n_edges,
-                volume_indices, planarity_groups, volume_target=volume_target, scale=scale)
-            if (weight and _is_orientation_consistent(pts, faces, idx)
-                    and _min_pairwise_separation(pts) > MIN_SEPARATION_FRACTION * scale):
-                # the first success is kept as-is, not compared against
-                # further candidates: repeated runs land on essentially
-                # the same result once one succeeds at all (see module
-                # docstring's Design notes), so searching further just
-                # costs time for no real gain -- stop immediately.
-                best = (pts, residual)
-                break
-        budget *= 2
-
-    if best is None:
-        raise ValueError(
-            f"could not find a non-self-intersecting, inflatable embedding in {attempted} "
-            f"attempts: every candidate either folded a face inside-out relative to the "
-            f"others (see _is_orientation_consistent) or couldn't inflate at all before "
-            f"hitting that. This usually means the mesh's faces aren't consistently "
-            f"wound -- every face's vertex list should go counterclockwise as seen from "
-            f"the outside of the solid, matching how its neighbors reference the same "
-            f"shared vertices (see this module's docstring for the convention and "
-            f"stretchy_nets/two_pentagons_and_a_square.json for a worked example); "
-            f"double-check each face's vertex order.")
-    pts, residual = best
-
-    positions = {v: pts[i] for i, v in enumerate(vertex_ids)}
-
-    lengths = np.array([np.linalg.norm(positions[a] - positions[b]) for a, b in edges])
-    stretch_pct = 100 * (lengths - length_arr) / length_arr
-    stats = dict(residual=residual,
-                 max_stretch_pct=float(np.max(np.abs(stretch_pct))),
-                 rms_stretch_pct=float(np.sqrt(np.mean(stretch_pct ** 2))))
-    return positions, stats
-
-
 def _edge_setup(faces, edge_length):
-    """faces/edge_length: as solve_wireframe. Shared setup for relax_once:
-    vertex/edge index arrays plus the precomputed structures
-    _relax_force needs (built once here, not per call). Returns
-    (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups,
-    planarity_groups, length_arr, scale)."""
+    """faces: vertex-id loops (see module docstring for the winding
+    convention); edge_length: scalar rest length, or a {(a,b): length}
+    dict for a non-uniform (e.g. subdivided) mesh. Shared setup for
+    relax_once/relax_initial_configuration: vertex/edge index arrays plus
+    the precomputed structures _relax_force needs (built once here, not
+    per call). Returns (vertex_ids, idx, edges, edge_ai, edge_bi,
+    all_face_groups, planarity_groups, length_arr, scale)."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(faces)
@@ -771,13 +504,53 @@ def is_orientation_consistent(positions, faces):
     return _is_orientation_consistent(pts, faces, idx)
 
 
+def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
+                          max_nfev, stop_event, gtol):
+    """Shared explicit-relaxation driver for relax_once and
+    relax_initial_configuration -- the only thing that varies between
+    them is the force itself (`force_fn(pts) -> (N,3)`); the walking
+    logic (step size, stopping criteria) is identical, so it lives here
+    once rather than being kept in sync by hand in two places.
+
+    Repeatedly nudges `pts` a small step along `force_fn(pts)` (see
+    STEP_MAX_FRACTION/STEP_MAX_MULTIPLIER) until EITHER every vertex's
+    force drops below `gtol`, or max_stretch_pct stops moving for
+    STALL_WINDOW steps (see STALL_WINDOW's own comment for why both
+    exist), or `max_nfev`/`stop_event` cuts it off first. Returns (pts,
+    steps_taken, max_force, converged) -- callers each compute their own
+    final positions/stretch stats from `pts`."""
+    step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
+    steps_taken = 0
+    converged = False
+    max_force = None
+    recent_max_stretch = collections.deque(maxlen=STALL_WINDOW)
+    for steps_taken in range(1, step_cap + 1):
+        if stop_event is not None and stop_event.is_set():
+            steps_taken -= 1
+            break
+        force = force_fn(pts)
+        max_force = float(np.linalg.norm(force, axis=1).max())
+        if max_force < gtol:
+            converged = True
+            break
+        dist = np.linalg.norm(pts[edge_bi] - pts[edge_ai], axis=1)
+        recent_max_stretch.append(float(np.max(np.abs(100 * (dist - length_arr) / length_arr))))
+        if (len(recent_max_stretch) == STALL_WINDOW
+                and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
+            converged = True
+            break
+        dt = min(STEP_MAX_MULTIPLIER, STEP_MAX_FRACTION * scale / max_force)
+        pts = pts + dt * force
+    return pts, steps_taken, max_force, converged
+
+
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
                 gtol=CONVERGENCE_GTOL):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
-    as solve_wireframe. Runs ONE relaxation pass at a fixed `pressure` --
-    no automatic ramp, no random restarts (that's solve_wireframe's job);
-    call again with the result to keep steering it. Each iteration moves
+    as _edge_setup. Runs ONE relaxation pass at a fixed `pressure` -- no
+    automatic ramp; call again with the result to keep steering it. Each
+    iteration moves
     every vertex a small step along its own net force from _relax_force
     (see module docstring's Design notes for why this walks explicitly
     rather than handing the force balance to a Newton-style solver) --
@@ -800,31 +573,110 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     it."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
-    pts = np.array([positions[v] for v in vertex_ids], dtype=float)
-    step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
+    pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
 
-    steps_taken = 0
-    converged = False
-    max_force = None
-    recent_max_stretch = collections.deque(maxlen=STALL_WINDOW)
-    for steps_taken in range(1, step_cap + 1):
-        if stop_event is not None and stop_event.is_set():
-            steps_taken -= 1
-            break
-        force = _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
-                              length_arr, pressure, planarity_weight)
-        max_force = float(np.linalg.norm(force, axis=1).max())
-        if max_force < gtol:
-            converged = True
-            break
-        dist = np.linalg.norm(pts[edge_bi] - pts[edge_ai], axis=1)
-        recent_max_stretch.append(float(np.max(np.abs(100 * (dist - length_arr) / length_arr))))
-        if (len(recent_max_stretch) == STALL_WINDOW
-                and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
-            converged = True
-            break
-        dt = min(STEP_MAX_MULTIPLIER, STEP_MAX_FRACTION * scale / max_force)
-        pts = pts + dt * force
+    def force_fn(pts):
+        return _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
+                             length_arr, pressure, planarity_weight)
+
+    pts, steps_taken, max_force, converged = _explicit_relax_loop(
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol)
+    new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
+    return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
+
+
+# "5x5x5" per the user's own suggestion, in edge_length units -- big
+# enough that a mesh of a few dozen vertices starts well spread out
+# rather than all clumped near the origin.
+INITIAL_RANDOM_SPREAD = 5.0
+
+
+def random_initial_positions(faces, spread=INITIAL_RANDOM_SPREAD, seed=0):
+    """Independent uniform-random position in [-spread/2, spread/2]^3 for
+    every vertex `faces` references. Deliberately NOT a meaningful
+    embedding (this doesn't even look at edge_length) -- just a starting
+    point for relax_initial_configuration's spring force to pull into a
+    well-separated 3D shape on its own, the same way force-directed graph
+    layout starts from noise."""
+    vertex_ids = sorted({v for face in faces for v in face})
+    rng = np.random.default_rng(seed)
+    return {v: rng.uniform(-spread / 2, spread / 2, size=3) for v in vertex_ids}
+
+
+def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
+    """Pure Hooke's-law spring force for relax_initial_configuration --
+    the same per-edge term as _relax_force, with no pressure and no
+    planarity. Faces aren't expected to be flat or even
+    non-self-intersecting at this stage (see relax_initial_configuration's
+    docstring); the only goal is a well-separated, edge-length-plausible
+    starting point to hand off to the real per-face pressure model
+    afterward."""
+    n = pts.shape[0]
+    force = np.zeros((n, 3))
+    diff = pts[edge_bi] - pts[edge_ai]
+    dist = np.linalg.norm(diff, axis=1)
+    direction = _safe_unit_vectors(diff)
+    stretch = (dist - edge_length) / edge_length
+    spring_on_a = stretch[:, None] * direction
+    np.add.at(force, edge_ai, spring_on_a)
+    np.add.at(force, edge_bi, -spring_on_a)
+    return force
+
+
+def relax_initial_configuration(positions, faces, edge_length,
+                                 max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL):
+    """positions/faces/edge_length: as relax_once, but `positions` is
+    typically random_initial_positions' output here, not a meaningful
+    embedding -- this is what turns it into one, WITHOUT ever touching
+    pressure: pure Hooke's-law springs only (_spring_only_force). Nothing
+    here constrains vertices that don't share an edge, or fixes overall
+    position/scale, so the result can end up anywhere in space, at any
+    scale, and self-intersecting -- fine, since the only goal is a
+    well-separated, edge-length-plausible starting point for relax_once's
+    real per-face pressure model afterward. Any view of this result must
+    re-derive its own camera
+    framing from its actual bounding box (see _draw_wireframe_panel)
+    rather than assuming it lands near the origin or at a familiar scale.
+    See this module's docstring for why a plain polyhedron wireframe
+    (e.g. a cube's own 12 edges, no face diagonals) needs to already be
+    subdivided into all-triangle faces (see mesh_levels.subdivide_once)
+    before this can find a well-defined 3D shape at all: an unbraced
+    quad/pentagon face is a genuine mechanism (like an unbraced
+    rectangular frame), not a rigid one, so springs alone can't stop it
+    flexing arbitrarily.
+
+    Same stopping rule as relax_once (see _explicit_relax_loop): `gtol`
+    on the worst vertex's force, OR max_stretch_pct stalling for
+    STALL_WINDOW steps, OR `max_nfev`/`stop_event`. Returns
+    (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
+    max_force, converged) -- exactly relax_once's own return shape."""
+    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
+        _edge_setup(faces, edge_length)
+    pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
+
+    def force_fn(pts):
+        return _spring_only_force(pts, edge_ai, edge_bi, length_arr)
+
+    pts, steps_taken, max_force, converged = _explicit_relax_loop(
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol)
+
+    # A pure-spring relax has no notion of "outward" at all -- nothing in
+    # the force cares which way a face's normal points, so it lands
+    # globally inside-out about as often as right-side-out. If every face
+    # agrees on being inward, reflecting every vertex through the mesh's
+    # own centroid is a free fix: a point reflection is an isometry
+    # (every pairwise distance, so every edge length and stretch stat, is
+    # unchanged), and it flips every face's sign AT ONCE, since a face's
+    # normal itself is unchanged by the reflection (cross(-a,-b) =
+    # cross(a,b)) while its "outward from centroid" reference direction
+    # flips (see _orientation_signs) -- so what was a consistent wrong
+    # answer becomes a consistent right one, for free. A genuinely MIXED
+    # result (some faces each way) can't be fixed this cheaply and is
+    # returned as-is; per instructions, that residual case is left to the
+    # subsequent pressure model rather than retried here.
+    idx = {v: i for i, v in enumerate(vertex_ids)}
+    if {s for s in _orientation_signs(pts, faces, idx) if s != 0} == {-1.0}:
+        pts = 2 * pts.mean(axis=0) - pts
 
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
     return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged

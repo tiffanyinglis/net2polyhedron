@@ -10,48 +10,51 @@ shared vertex ids ARE the adjacency, so a face pair sharing several edges
 utils/inflate_polyhedron/stretchy_mesh.py's module docstring) needs no special
 casing.
 
-Every net is always SOLVED at its own base (level 0) resolution first --
-even a legacy fabric-subdivided file (one carrying baked-in
-"coarse_faces", see utils/subdivisions/mesh_subdivide.load_fabric_spec
-and generate_subdivided_stretchy_nets.py) starts from ITS OWN
-coarse_faces rather than its pre-baked fine mesh -- but is only ever
-SHOWN already subdivided to STARTING_LEVEL (1): level 0 exists purely as
-what STARTING_LEVEL's fan subdivision interpolates from, never as
-something the user interacts with directly. The "Subdivide" button (see
-utils.inflate_polyhedron.mesh_levels) then refines the CURRENT mesh
-interactively, one nested level at a time (0..MAX_LEVEL), interpolating
-every new point from wherever the mesh's own nearby points currently sit
--- so any inflation already done at one level carries forward as the
-next level's starting point, rather than being discarded and re-solved
-from scratch the way loading a fixed precomputed fine mesh used to. This
-supersedes the old fixed-resolution fabric-net files/build_cache
-precompute pipeline for this app's own workflow -- the fixed-resolution
-example nets it used to ship with (cube_res3.json and friends) have been
-removed accordingly, though the format and generate_subdivided_stretchy_nets.py
-itself still work for anyone who wants one.
+A net's starting configuration is no longer solved analytically
+(solve_wireframe, the old random-restart-plus-inflation-ramp search) --
+"Level 0" instead starts from genuine random noise
+(stretchy_mesh.random_initial_positions) and the "Relax" button pulls it
+into a well-separated 3D shape using pure spring forces only
+(stretchy_mesh.relax_initial_configuration -- no pressure, faces may
+cross), the same generic force-directed-layout idea for any net
+regardless of its combinatorics. Level 0 is triangulated first (fan
+subdivision, see mesh_levels.subdivide_once) since an untriangulated
+face (e.g. a plain quad) is a flexible mechanism under springs alone, not
+a rigid structure -- this fan-triangulated topology is *exactly* Level
+1's own topology (see mesh_levels' docstring), so once Relax converges,
+promoting Level 0's result into Level 1's starting position is a pure
+relabeling, not a new subdivide_once call. A legacy fabric-subdivided
+file (one carrying baked-in "coarse_faces", see
+utils/subdivisions/mesh_subdivide.load_fabric_spec and
+generate_subdivided_stretchy_nets.py) starts this same way from ITS OWN
+coarse_faces rather than its pre-baked fine mesh. This supersedes the old
+fixed-resolution fabric-net files/build_cache precompute pipeline for
+this app's own workflow -- the fixed-resolution example nets it used to
+ship with (cube_res3.json and friends) have been removed accordingly,
+though the format and generate_subdivided_stretchy_nets.py itself still
+work for anyone who wants one.
 
-1. On selecting a net, its BASE (level 0) faces are solved with
-   stretchy_mesh.solve_wireframe -- its random-restart-plus-inflation-ramp
-   search is exactly what makes this reliable (it doesn't hang: a coarse
-   net has few enough faces that restarting from a different random start
-   when one doesn't inflate cleanly is cheap and effective -- see
-   solve_wireframe's docstring). An ordinary (non-fabric) net's solve is
-   still cached via utils/inflate_polyhedron/stretchy_cache.py
-   (load_with_cache -- instant on a cache hit); a legacy fabric file's
-   extracted coarse_faces are solved fresh instead, uncached, since a
-   coarse solve is already cheap.
-2. "Subdivide" (mesh_levels.subdivide_once) refines the CURRENT mesh by
-   one level: level 0 -> 1 triangulates every face via a centroid fan
-   (unchanged for an already-triangular face); each level after that
-   quarters every triangle by connecting edge midpoints. New points are
-   linearly interpolated from the current mesh's own nearby points; new
-   REST lengths (as opposed to positions) are derived analytically from
-   the original unit-edge flat reference geometry, so the ideal target
-   shape stays fixed as resolution increases (see mesh_levels' docstring)
-   -- letting "inflate, then increase resolution, then inflate again"
-   converge toward one consistent answer instead of each level chasing a
-   different target. Greyed out once MAX_LEVEL is reached.
-3. At ANY level, the "Inflate" button first CALIBRATES a pressure (see
+1. On selecting a net, its BASE faces are fan-triangulated (Level 0/1's
+   shared topology) and given a fresh random start -- both cheap enough
+   to happen instantly, so there's no background solve or cache for this
+   step anymore (see "Relax" below for what actually shapes it).
+2. "Relax" (Level 0 only, stretchy_mesh.relax_initial_configuration) runs
+   pure-spring relaxation to convergence; once it converges, Level 0's
+   result is promoted straight into Level 1's starting position (see
+   above -- no user action needed for this handoff). A tangled (mixed
+   face-orientation) result is possible and NOT retried automatically --
+   the subsequent Inflate/pressure step is expected to work it out.
+3. "Subdivide" (mesh_levels.subdivide_once) refines the CURRENT mesh by
+   one level (from Level 1 on): each level quarters every triangle by
+   connecting edge midpoints. New points are linearly interpolated from
+   the current mesh's own nearby points; new REST lengths (as opposed to
+   positions) are derived analytically from the original unit-edge flat
+   reference geometry, so the ideal target shape stays fixed as
+   resolution increases (see mesh_levels' docstring) -- letting "inflate,
+   then increase resolution, then inflate again" converge toward one
+   consistent answer instead of each level chasing a different target.
+   Greyed out once MAX_LEVEL is reached.
+4. At Level 1 and up, the "Inflate" button first CALIBRATES a pressure (see
    stretchy_mesh.estimate_pressure_for_target_stretch) landing near the
    "Target RMS stretch" spinner's value (% of rest edge length, default
    DEFAULT_TARGET_RMS_STRETCH_PCT), then applies ONE relaxation pass
@@ -72,26 +75,46 @@ itself still work for anyone who wants one.
      (CONVERGENCE_GTOL -- some meshes have a long, slow-shrinking tail
      after the shape has visibly settled, so this is deliberately looser
      than it might seem it needs to be).
-4. The "Convergence History" table records one row per subdivision level
-   visited this net session: the pressure last calibrated for it, how
-   many Inflate steps that level has taken so far (self.iteration_count
-   -- reset to 0 by every Subdivide click, so it always counts from when
-   that level's mesh was first created, not carried over from a coarser
-   level), the stretch stats at whatever point it's currently at (RMS
-   shown against the CURRENT "Target RMS stretch" spinner value), and a
-   single combined "Convergence" cell -- relax_once's own `max_force`
-   (the worst vertex's net force) against the fixed CONVERGENCE_GTOL
-   threshold, with a check or cross mark for whether it's below it --
-   updated live while Inflate runs.
-5. The view below is "Net" (the flat, undeformed layout) plus one 3D
-   panel per level, "Level 1".."Level N" (MAX_LEVEL total). Only the
-   panel for self.subdivision_level is LIVE -- it redraws every Inflate
-   progress update; every level already subdivided past is frozen at
-   whatever state it was left in (self.level_snapshots, captured by
-   _subdivide_step the moment the user moves on from it) and never
-   updates again; a level not reached yet is drawn empty. Level 0 never
-   gets its own panel -- this app always auto-advances past it, see
-   STARTING_LEVEL above.
+5. The "Convergence History" table records one row per subdivision level
+   visited this net session: the pressure last calibrated for it (n/a for
+   Level 0, which has no pressure at all), how many Inflate/Relax steps
+   that level has taken so far (self.iteration_count -- reset to 0 by
+   every Subdivide/promotion, so it always counts from when that level's
+   mesh was first created, not carried over from a coarser level), the
+   stretch stats at whatever point it's currently at (RMS shown against
+   the CURRENT "Target RMS stretch" spinner value), and a single combined
+   "Convergence" cell -- the relax's own `max_force` (the worst vertex's
+   net force) against the fixed CONVERGENCE_GTOL threshold, with a check
+   or cross mark for whether it's below it -- updated live while
+   Inflate/Relax runs.
+6. The view below is "Net" (the flat, undeformed layout, matplotlib)
+   plus one 3D panel per level, "Level 0".."Level N" (MAX_LEVEL total,
+   plus Level 0). Only the panel for self.subdivision_level is LIVE -- it
+   redraws every Inflate/Relax progress update; every level already left
+   behind (by Subdivide, or by Relax's own promotion) is frozen at
+   whatever state it was left in (self.level_snapshots, captured the
+   moment the user moves on from it) and never updates again; a level
+   not reached yet is drawn empty. Each panel derives its own view
+   bounds from its current points' bounding box every redraw (see
+   _draw_level_panel) -- necessary since neither a pure-spring relax nor
+   a pressure inflation has any mechanism keeping the result near the
+   origin or at a familiar scale.
+
+   Every "Level N" panel renders via PyVista/VTK
+   (`_build_level_pv_panel`/`_draw_level_panel`/`_render_level_pv`), not
+   matplotlib: a mesh here is routinely self-intersecting or non-convex
+   (mid-relax, mid-inflate, or Level 0's own random-start-then-relax
+   result), which neither mplot3d's own painter's-algorithm depth sort
+   nor this app's old `_CullableFace` (exact normal-based culling, valid
+   only for a closed CONVEX solid) could draw correctly -- occluded
+   faces would wrongly show through. PyVista gives a real GPU depth
+   buffer instead, which handles arbitrary triangle soups correctly
+   regardless of convexity, blitted into a plain Tkinter Label as an
+   off-screen-rendered image. Every level panel shares ONE click-drag
+   rotation state (self.level_azim/level_elev) -- a drag on any panel
+   rotates all of them together, matching what the old matplotlib
+   panels' rotation sync used to do. (Tried on Level 0 alone first, to
+   validate the approach before applying it to every level.)
 """
 import sys
 from pathlib import Path
@@ -110,38 +133,28 @@ from tkinter import ttk
 import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from PIL import Image, ImageTk
+import pyvista as pv
 import sv_ttk
 
 from common.paths import STRETCHY_NETS_DIR
-from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
-from ui.cullable_face import _CullableFace
+from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, solve_wireframe, relax_once, estimate_pressure_for_target_stretch,
-    mesh_to_polyhedron, mesh_edges, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
-    DEFAULT_TARGET_RMS_STRETCH_PCT,
+    load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
+    estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
+    PLANARITY_WEIGHT, CONVERGENCE_GTOL, DEFAULT_TARGET_RMS_STRETCH_PCT,
 )
-from utils.inflate_polyhedron.stretchy_cache import load_with_cache, is_cached, cache_path_for
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
 from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
 from utils.subdivisions import subdivide as subdivide_polygon
 
-# This app's OWN cache -- not shared with polyhedron_unfolder (a different
-# pipeline entirely) or with any other app.
-CACHE_DIR = Path(__file__).resolve().parent / "cache"
-
 DEFAULT_NET_BASENAME = "cube"
-
-# Every net now starts already subdivided to this level rather than at the
-# raw level-0 base faces -- level 0 is still solved first internally (it's
-# what the fan subdivision to level 1 interpolates from), just never shown
-# on its own.
-STARTING_LEVEL = 1
 
 # A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
 # subdivision reads as texture rather than a bold wireframe competing
@@ -157,6 +170,41 @@ SUBDIVISION_EDGE_WIDTH = 0.5
 # zooming) makes the shape 1.2/0.8 = 50% larger within the frame than
 # that original size.
 WIREFRAME_VIEW_FILL = 0.8
+
+# Every "Level N" panel renders via PyVista/VTK instead of matplotlib
+# (see _build_level_pv_panel) -- a real GPU depth buffer, needed because
+# a mesh here is routinely self-intersecting/non-convex (mid-relax or
+# mid-inflate, or Level 0's random-start-then-relax result itself),
+# which neither mplot3d's own painter's-algorithm depth sort nor this
+# app's old _CullableFace (exact culling, valid only for a closed CONVEX
+# solid) could draw correctly -- tried on Level 0 alone first to
+# validate the approach before applying it to every level. Pixel size
+# matches figsize=(3.2, 4.5) at the ~100dpi the Net panel's matplotlib
+# figure renders at, so every level panel is the same size as its
+# neighbors.
+LEVEL_PANEL_SIZE = (320, 450)
+# How much of the panel the shape's own bounding box fills, on top of
+# the aspect-ratio correction below -- 1.0 would make the shape's widest
+# dimension exactly touch the panel edge; below 1.0 leaves margin around
+# it (shrinks the apparent shape without resizing the panel). 0.6, then
+# a further "60% of that" per two rounds of user request (the unzoomed
+# 1.0 rendered noticeably too large/cropped against the panel, and 0.6
+# alone still did too) -- 0.6 * 0.6 = 0.36.
+LEVEL_ZOOM_FILL = 0.36
+# Initial camera angle -- arbitrary, just a reasonable non-axis-aligned
+# starting view (close to mplot3d's own default elev=30/azim=-60).
+LEVEL_DEFAULT_ELEV = 30.0
+LEVEL_DEFAULT_AZIM = -60.0
+# Degrees of camera rotation per pixel of click-drag -- tuned by feel
+# against mplot3d's own drag-to-rotate sensitivity this replaced.
+LEVEL_DRAG_SENSITIVITY = 0.5
+
+# Every panel's title ("Net", "Level N") is a plain Tkinter Label above
+# its image/canvas, not text drawn inside the image itself -- a title
+# drawn INSIDE a PyVista panel's own rendered scene clipped against the
+# panel's own edge (see _render_level_pv's Design notes), which a real
+# widget placed above the image can't do.
+LEVEL_TITLE_FONT = ("TkDefaultFont", 11)
 
 # Shown on the Pressure readout before the user has ever clicked "Auto"
 # -- pressure isn't user-editable (see the "Auto" button), so this only
@@ -180,28 +228,39 @@ INFLATE_CHUNK_MAX = 200
 INFLATE_SAFETY_STEP_CAP = 5000
 
 
-def _solve_level0(path, base_faces, is_legacy_fabric, cache_dir):
-    """The level-0 (coarse) starting shape for a just-selected net -- run
-    in a background thread by on_select_net via _run_background.
-    `is_legacy_fabric` (a file with baked-in "coarse_faces", see
-    load_fabric_spec): its own precomputed fine-mesh cache targeted a
-    fixed resolution from the old, now-superseded precompute pipeline, so
-    `base_faces` is solved fresh instead (cheap -- see solve_wireframe's
-    docstring) rather than via that stale cache. An ordinary net still
-    uses stretchy_cache normally. Returns (positions, stats, name) --
-    name is None for the fresh-solve path (the caller already has the
-    net's own name from load_stretchy_mesh)."""
-    if is_legacy_fabric:
-        positions, stats = solve_wireframe(base_faces, edge_length=EDGE_LENGTH, seed=0)
-        return positions, stats, None
-    _, positions, stats, name = load_with_cache(path, cache_path_for(path, cache_dir))
-    return positions, stats, name
+def _build_level1_topology(base_faces):
+    """Level 0 and Level 1 share this exact fan-triangulated topology (see
+    module docstring/mesh_levels' own docstring for why triangulating
+    first matters for a spring-only relax) -- cheap enough (pure index
+    math, no numerical solve) to compute synchronously on every net
+    selection. Calls subdivide_once with placeholder positions purely to
+    get the resulting faces/edge_length/face_of_fine; the interpolated
+    positions it also returns are meaningless (every input point is the
+    same placeholder) and discarded -- random_initial_positions supplies
+    Level 0's real starting positions instead."""
+    dummy_positions = {v: np.zeros(3) for face in base_faces for v in face}
+    faces, _, edge_length, face_of_fine = subdivide_once(
+        base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
+    return faces, edge_length, face_of_fine
 
 
 class InflatePolyhedronApp:
     def __init__(self, root):
         self.root = root
-        root.geometry("1500x820")
+        # Wide enough for Net + Level 0..MAX_LEVEL (5 panels), each a
+        # fixed LEVEL_PANEL_SIZE-wide image -- the panel row no longer
+        # stretches its frames to fill extra window width (see
+        # panels_row's own comment), so this only needs to fit the
+        # panels' own natural width, not leave room to spread them out.
+        # Tall enough for Setup + status + Convergence History + each
+        # panel's own title-Label-plus-image-plus-button stack at their
+        # full natural size (root.winfo_reqheight() once everything is
+        # built) -- too short here silently SQUEEZES every image Label
+        # below LEVEL_PANEL_SIZE's own height (Tk shrinks a packed widget
+        # to whatever's left rather than erroring), which visibly cropped
+        # the bottom of every panel and threw off where mouse drags
+        # actually land on it (see _on_level_drag_start and friends).
+        root.geometry("1700x880")
         root.minsize(820, 600)
 
         sv_ttk.set_theme("dark")
@@ -243,7 +302,7 @@ class InflatePolyhedronApp:
         # A "converged" verdict only applies to the target it was reached
         # at -- changing this means the current pressure hasn't actually
         # been (re)calibrated for the new target yet, so the gate on
-        # re-clicking Inflate (see _update_inflate_button_state) needs to
+        # re-clicking Inflate (see _update_level_action_buttons) needs to
         # lift, since otherwise a converged mesh would stay stuck
         # refusing to recalibrate even after the user asks for a
         # different target.
@@ -290,129 +349,145 @@ class InflatePolyhedronApp:
         self.status_label.pack(side=tk.LEFT)
 
         # ---- Convergence history: one row per subdivision level visited
-        # this net session, showing the pressure last calibrated for it
+        # this net session (including Level 0 now -- see module
+        # docstring), showing the pressure last calibrated for it
         # (self.pressure_value -- only ever set by on_inflate_clicked's
-        # calibration phase), how many Inflate steps that level took
-        # (self.iteration_count, reset to 0 on every Subdivide -- see
-        # _subdivide_step), the stretch stats at whatever point it's
-        # currently at (updated live while Inflate runs, finalized once it
-        # stops -- see _record_level_history's callers, RMS shown against
-        # the CURRENT "Target RMS stretch" spinner value -- see
-        # _refresh_history_table), and a single combined "Convergence"
-        # cell -- relax_once's own `optimality` (the worst vertex's net
-        # force) against the fixed CONVERGENCE_GTOL threshold, with a
-        # check/cross mark for whether it's below it (see
-        # _refresh_history_table). height=MAX_LEVEL since that's the most
-        # rows this table will ever hold -- a taller fixed height would
-        # just reserve blank space below whatever's actually populated. ----
+        # calibration phase; "n/a" for Level 0, which has no pressure at
+        # all, see _record_level_history), how many Inflate/Relax steps
+        # that level took (self.iteration_count, reset to 0 on every
+        # Subdivide/promotion -- see _subdivide_step/_finish_relax), the
+        # stretch stats at whatever point it's currently at (updated live
+        # while Inflate/Relax runs, finalized once it stops -- see
+        # _record_level_history's callers, RMS shown against the CURRENT
+        # "Target RMS stretch" spinner value -- see _refresh_history_table),
+        # and a single combined "Convergence" cell -- the relax's own
+        # `optimality` (the worst vertex's net force) against the fixed
+        # CONVERGENCE_GTOL threshold, with a check/cross mark for whether
+        # it's below it (see _refresh_history_table). height=MAX_LEVEL+1
+        # (0..MAX_LEVEL) since that's the most rows this table will ever
+        # hold -- a taller fixed height would just reserve blank space
+        # below whatever's actually populated. ----
         self.history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
         self.history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
         history_columns = ("level", "pressure", "steps", "max_stretch", "rms_stretch",
                             "convergence")
         self.history_tree = ttk.Treeview(self.history_frame, columns=history_columns,
-                                          show="headings", height=MAX_LEVEL)
+                                          show="headings", height=MAX_LEVEL + 1)
         for col, heading, width in (
                 ("level", "Level", 50), ("pressure", "Pressure", 80), ("steps", "Steps", 70),
                 ("max_stretch", "Max Stretch %", 110), ("rms_stretch", "RMS Stretch %", 150),
                 ("convergence", "Convergence", 170)):
             self.history_tree.heading(col, text=heading)
             self.history_tree.column(col, width=width, anchor=tk.CENTER)
+        # ttk.Treeview can only color a whole ROW, not one cell -- so the
+        # Convergence column's check/cross (see _refresh_history_table)
+        # comes with its whole row tinted to match, rather than leaving
+        # the mark itself in the default text color.
+        self.history_tree.tag_configure("converged", foreground=STATUS_COLORS["success"])
+        self.history_tree.tag_configure("not_converged", foreground=STATUS_COLORS["error"])
         self.history_tree.pack(fill=tk.X)
 
-        # ---- Net (flat layout) + one 3D panel per level (1..MAX_LEVEL),
-        # side by side, each its OWN Figure/Canvas (not one shared
-        # figure) specifically so a native Tkinter Inflate/Subdivide
-        # button pair can sit directly above/below each level's own
-        # panel in release mode (see _apply_mode_visibility) -- a single
-        # shared canvas has no way to embed a real button over just one
-        # of its subplots. Level N's panel is LIVE (redrawn every Inflate
-        # progress update) only while self.subdivision_level == N; once
-        # the user subdivides past it, that level's last state is frozen
-        # into self.level_snapshots and its panel stops updating -- see
-        # draw()/_subdivide_step. ----
-        # No "Sync rotation" choice -- panels are always kept in the same
-        # view (see _sync_views_to's callers: every drag, and once per
-        # draw() so a level revealed by Subdivide inherits the current
-        # shared view instead of starting at mplot3d's default one).
+        # ---- Net (flat layout, matplotlib) + one 3D panel per level
+        # (0..MAX_LEVEL, PyVista -- see LEVEL_PANEL_SIZE's own comment
+        # for why), side by side. Each level panel is its OWN off-screen
+        # Plotter/Label pair specifically so a native Tkinter
+        # Inflate/Subdivide/Relax button can sit directly below it (see
+        # _apply_mode_visibility) -- a single shared render target has no
+        # way to embed a real button over just one panel. Level N's panel
+        # is LIVE (redrawn every Inflate/Relax progress update) only
+        # while self.subdivision_level == N; once the user subdivides
+        # past it (or, for Level 0, once Relax converges and promotes
+        # it), that level's last state is frozen into self.level_snapshots
+        # and its panel stops updating -- see draw()/_subdivide_step/
+        # _finish_relax. ----
+        # No "Sync rotation" choice -- every level panel shares ONE
+        # camera angle (self.level_azim/level_elev), updated by a drag on
+        # ANY panel (see _on_level_motion) and reapplied to a level just
+        # revealed by Subdivide so it inherits the current shared view
+        # rather than starting at some default one.
         view_frame = ttk.Frame(root)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(6, 14))
 
+        # fill/expand=False here (unlike a plain pack default) -- each
+        # panel below is a FIXED-size image (LEVEL_PANEL_SIZE) that never
+        # grows to fill extra space, so letting this row stretch to the
+        # window's full width just spreads the panels apart with dead
+        # space between them instead of shrinking; hugging its own
+        # natural (sum-of-panels) width keeps them packed together, with
+        # any leftover window width left past the last panel instead.
         panels_row = ttk.Frame(view_frame)
-        panels_row.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        panels_row.pack(side=tk.TOP, anchor=tk.W)
 
         net_panel_frame = ttk.Frame(panels_row)
-        net_panel_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        net_panel_frame.pack(side=tk.LEFT)
+        # A plain Label, not ax.set_title() -- drawing a title INSIDE a
+        # PyVista panel's own rendered image clipped its top edge against
+        # the panel boundary (see _render_level_pv's own Design notes);
+        # a real Tkinter widget above the image has no such problem, and
+        # this same approach is used for every "Level N" panel's title
+        # too, so keeping Net's title as a matplotlib ax.set_title()
+        # would leave it inconsistently positioned relative to its
+        # neighbors' labels.
+        ttk.Label(net_panel_frame, text="Net", font=LEVEL_TITLE_FONT,
+                  anchor=tk.CENTER).pack(side=tk.TOP, fill=tk.X)
+        # A disabled, blank button matching every "Level N" panel's own
+        # action button below it -- purely to claim the same vertical
+        # space, so the Net canvas ends up the same height as every level
+        # panel (keeping content aligned in a row rather than Net's
+        # canvas rendering visibly larger for having no button competing
+        # for space underneath it).
+        net_bottom_spacer = ttk.Button(net_panel_frame, text="")
+        net_bottom_spacer.state(["disabled"])
+        net_bottom_spacer.pack(side=tk.BOTTOM, fill=tk.X)
         self.fig_net = plt.figure(figsize=(3.2, 4.5))
         self.ax2d = self.fig_net.add_subplot(1, 1, 1)
         self.canvas_net = FigureCanvasTkAgg(self.fig_net, master=net_panel_frame)
         self.canvas_net.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.level_canvases = {}
         self.level_frames = {}
-        self.level_inflate_buttons = {}
-        self.level_subdivide_buttons = {}
-        self.level_done_label_var = None
-        self.ax3d_by_level = {}
-        for level in range(1, MAX_LEVEL + 1):
+        self.level_plotters = {}
+        self.level_labels = {}
+        self.level_photos = {}
+        self._level_center = {}
+        self._level_half = {}
+        # ONE shared camera angle across every level panel (see this
+        # section's own Design notes above) -- updated by a drag on any
+        # panel (_on_level_motion), applied to all of them
+        # (_render_all_level_panels).
+        self.level_azim = LEVEL_DEFAULT_AZIM
+        self.level_elev = LEVEL_DEFAULT_ELEV
+        self._level_dragging = False
+        self._level_last_xy = None
+        # ONE button per level, below its panel -- no separate button
+        # above (see _update_level_action_buttons for its full state
+        # machine): idle it reads "Relax" (level 0 only) or "Inflate",
+        # a run in progress turns it into "Stop" (see
+        # _set_level_action_button_running), and once that level
+        # converges it becomes "Subdivide" (clickable, advances to the
+        # next level) or "DONE!" (MAX_LEVEL, nothing further to
+        # subdivide to). Only the current frontier level's button is
+        # ever enabled.
+        self.level_action_buttons = {}
+        for level in range(0, MAX_LEVEL + 1):
             level_frame = ttk.Frame(panels_row)
-            level_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            # No fill/expand -- see panels_row's own comment on why
+            # every panel hugs its own fixed image size instead.
+            level_frame.pack(side=tk.LEFT)
             self.level_frames[level] = level_frame
-            self.level_inflate_buttons[level] = ttk.Button(
-                level_frame, text="Inflate", command=self.on_inflate_clicked)
-            # The last level has nowhere further to subdivide TO -- a
-            # green "DONE!" label takes the Subdivide button's usual spot
-            # instead, shown once that level converges (see
-            # _update_subdivide_button_state), so the layout stays
-            # symmetric with every other level's button pair.
-            if level < MAX_LEVEL:
-                self.level_subdivide_buttons[level] = ttk.Button(
-                    level_frame, text="Subdivide", command=self.on_subdivide_clicked)
-            else:
-                self.level_done_label_var = tk.StringVar(value="")
-                self.level_done_label = ttk.Label(
-                    level_frame, textvariable=self.level_done_label_var,
-                    foreground=STATUS_COLORS["success"], anchor=tk.CENTER,
-                    font=("TkDefaultFont", 11, "bold"))
-            fig = plt.figure(figsize=(3.2, 4.5))
-            self.ax3d_by_level[level] = fig.add_subplot(1, 1, 1, projection="3d")
-            self.level_canvases[level] = FigureCanvasTkAgg(fig, master=level_frame)
-            # Inflate/the bottom widget packed BEFORE the canvas, and the
-            # bottom one on side=BOTTOM specifically -- packing either
-            # AFTER an expand=True canvas would starve it of space, since
-            # the canvas (packed first) would already have claimed the
-            # entire remaining cavity by the time it's placed. Same
-            # layout in both modes now, so this is unconditional.
-            self.level_inflate_buttons[level].pack(side=tk.TOP, fill=tk.X, in_=level_frame)
-            bottom_widget = (self.level_subdivide_buttons[level] if level < MAX_LEVEL
-                              else self.level_done_label)
-            bottom_widget.pack(side=tk.BOTTOM, fill=tk.X, in_=level_frame)
-            self.level_canvases[level].get_tk_widget().pack(
-                side=tk.TOP, fill=tk.BOTH, expand=True, in_=level_frame)
-
-        # All the 3D canvases (Net has no rotation-sync/vertex-culling
-        # concerns of its own) share these three handlers -- `event.inaxes`
-        # inside them identifies which Axes3D was involved regardless of
-        # which canvas actually fired the event, so one set of handlers
-        # connected to every 3D canvas works the same as one handler on
-        # one shared canvas used to.
-        self._dragging_3d = False
-        self.vertex_scatter = None
-        # Which 3D axes the current drag started on -- "Sync rotation"
-        # (see _on_3d_motion) copies THIS axis's live elev/azim onto every
-        # other "Level N" panel on every mouse-move, not just when the
-        # drag ends, and not by adding some relative offset -- all
-        # panels end up sharing the exact same view matrix, not just
-        # each spinning from wherever it happened to already be.
-        self._active_drag_ax = None
-        for canvas in self.level_canvases.values():
-            canvas.mpl_connect("button_press_event", self._on_3d_drag_start)
-            canvas.mpl_connect("button_release_event", self._on_3d_drag_end)
-            canvas.mpl_connect("motion_notify_event", self._on_3d_motion)
+            button = ttk.Button(level_frame, text="Relax" if level == 0 else "Inflate")
+            self.level_action_buttons[level] = button
+            # Button packed BEFORE the panel widget, at BOTTOM -- packing
+            # it AFTER an expand=True widget would starve it of space,
+            # since that widget (packed first) would already have
+            # claimed the entire remaining cavity by the time it's
+            # placed.
+            button.pack(side=tk.BOTTOM, fill=tk.X, in_=level_frame)
+            self._build_level_pv_panel(level, level_frame)
 
         # Per-level frozen snapshots of {faces, positions, face_of_fine,
         # edge_length} taken the moment the user subdivides PAST that
-        # level (see _subdivide_step) -- level 0 is never snapshotted or
-        # shown (this app always auto-advances past it, see STARTING_LEVEL).
+        # level (see _subdivide_step), or Level 0's Relax converges and
+        # promotes it into Level 1 (see _finish_relax).
         self.level_snapshots = {}
 
         self.faces = None
@@ -426,15 +501,6 @@ class InflatePolyhedronApp:
         self.last_stats = {}
         self.level_history = {}
         self.stop_event = None
-        # Bumped on every on_select_net call and captured by that call's
-        # own _on_loaded closure -- if a second net selection starts
-        # before the first one's background solve finishes, the first's
-        # eventually-arriving result is now for a STALE generation (this
-        # matters more now than it used to: _on_loaded auto-subdivides to
-        # STARTING_LEVEL, mutating self.faces, so a late, stale result's
-        # positions could otherwise be paired with a self.faces that has
-        # already moved on to a newer selection's subdivided mesh).
-        self._load_generation = 0
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
@@ -461,136 +527,221 @@ class InflatePolyhedronApp:
             self.iterate_mode_var.set("convergence")
 
     def _set_status(self, text, kind="info"):
-        # The "success" (green) message is always dropped -- e.g.
-        # "Converged after N steps..." -- since the per-level button
-        # states, the green "DONE!" label, and the Convergence History
-        # table already show that; other kinds (info/warn/error) still
-        # carry useful feedback while something's running or has gone
-        # wrong, so those stay.
-        if kind == "success":
+        # "success" is always dropped, in both modes -- e.g. "Converged
+        # after N steps..." -- since the per-level button states and the
+        # Convergence History table already show that. Release mode also
+        # drops routine "info" narration (e.g. "Relaxing... N steps so
+        # far...", "Relaxed... Promoted to Level 1...", "Subdivided to
+        # level N...") for the same reason -- the live panel redraw,
+        # button state, and history row already say all of it; debug mode
+        # keeps "info" since it's meant for someone working on this app,
+        # not an end user. "warn"/"error" (Stop requested, a solver
+        # crash) always show in both modes -- those aren't otherwise
+        # visible anywhere else.
+        if kind == "success" or (kind == "info" and not self.debug_mode):
             text = ""
         self.status_var.set(text)
         self.status_label.configure(foreground=STATUS_COLORS.get(kind, ""))
 
-    # ---- theme ----
+    # ---- Level panels (PyVista/VTK -- see LEVEL_PANEL_SIZE's comment) ----
 
-    def _style_3d_axis(self, ax, theme):
-        ax.title.set_color(theme["fg"])
-        ax.set_axis_off()
+    def _build_level_pv_panel(self, level, level_frame):
+        """Builds one "Level N" panel: a plain Tkinter title Label (NOT
+        text drawn inside the rendered image -- see _render_level_pv's
+        own Design notes for why that clipped) above an image Label
+        showing an off-screen-rendered PyVista image, rather than a live
+        interactive VTK widget -- keeps this app on a single interaction
+        toolkit (Tkinter native mouse bindings reimplement just the
+        click-drag-to-rotate behavior mplot3d used to give the old
+        matplotlib panels for free, see _on_level_drag_start/_motion/_end
+        below) instead of also embedding VTK's own widget/event loop."""
+        ttk.Label(level_frame, text=f"Level {level}", font=LEVEL_TITLE_FONT,
+                  anchor=tk.CENTER).pack(side=tk.TOP, fill=tk.X)
+        label = tk.Label(level_frame, bg=PLOT_THEME["bg"], bd=0)
+        label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        plotter = pv.Plotter(off_screen=True, window_size=list(LEVEL_PANEL_SIZE))
+        plotter.set_background(PLOT_THEME["bg"])
+        self.level_labels[level] = label
+        self.level_plotters[level] = plotter
+        self.level_photos[level] = None  # keeps a reference alive -- Tk drops a GC'd PhotoImage
+        self._level_center[level] = np.zeros(3)
+        self._level_half[level] = 1.0
+        label.bind("<ButtonPress-1>", self._on_level_drag_start)
+        label.bind("<B1-Motion>", self._on_level_motion)
+        label.bind("<ButtonRelease-1>", self._on_level_drag_end)
+
+    def _on_level_drag_start(self, event):
+        self._level_dragging = True
+        self._level_last_xy = (event.x, event.y)
+
+    def _on_level_motion(self, event):
+        """Left-click-drag on ANY level panel rotates the shared camera
+        angle (self.level_azim/level_elev) and re-renders EVERY panel
+        with it in real time -- this app's own analogue of mplot3d's
+        built-in drag rotation, reimplemented here since PyVista/VTK
+        panels are plain images, not interactive widgets (see
+        _build_level_pv_panel). Re-rendering all four costs ~30ms
+        (measured), well within real-time feel -- an earlier version of
+        this only re-rendered the dragged panel, misdiagnosing a
+        completely different bug (plotter.screenshot() not actually
+        re-rendering on a camera-only change without an explicit
+        render() first, see _render_level_pv) as a performance problem;
+        now that that's fixed, there's no reason to hold the other three
+        back until the drag ends."""
+        if not self._level_dragging or self._level_last_xy is None:
+            return
+        last_x, last_y = self._level_last_xy
+        dx, dy = event.x - last_x, event.y - last_y
+        self.level_azim -= dx * LEVEL_DRAG_SENSITIVITY
+        self.level_elev = max(-89.0, min(89.0, self.level_elev + dy * LEVEL_DRAG_SENSITIVITY))
+        self._level_last_xy = (event.x, event.y)
+        self._render_all_level_panels()
+
+    def _on_level_drag_end(self, event):
+        self._level_dragging = False
+        self._level_last_xy = None
+        # One last explicit render, in case the button release didn't
+        # come with its own trailing motion event -- _on_level_motion
+        # already keeps every panel live-updated during the drag itself,
+        # so this is just a safety net for that edge case, not the
+        # primary sync point.
+        self._render_all_level_panels()
+
+    def _render_all_level_panels(self):
+        for level in self.level_plotters:
+            self._render_level_pv(level)
+
+    def _draw_level_panel(self, level, faces, positions, face_of_fine):
+        """One "Level N" panel, drawn every call from whatever
+        faces/positions/face_of_fine draw() passes it (live, frozen
+        snapshot, or all-None for "not reached yet this session" -- see
+        draw()'s own docstring). Faces are always triangles from Level 1
+        on (Level 0's own topology, and everything Subdivide derives
+        from it, is all-triangle -- see module docstring), so no
+        fan/n-gon handling is needed. Colors every face by its ORIGINAL
+        base face (`face_of_fine`, the same per-base-face self.colors
+        the Net panel and every level's panel use) as PER-CELL RGB
+        scalars -- one `pv.PolyData`/`add_mesh` call for the whole mesh
+        (PyVista/VTK's own depth buffer handles occlusion correctly
+        regardless of face count or convexity, unlike the old
+        matplotlib/`_CullableFace` rendering this replaced -- see module
+        docstring)."""
+        plotter = self.level_plotters[level]
+        plotter.clear()
+        if faces is not None:
+            vertex_ids = sorted(positions)
+            idx = {v: i for i, v in enumerate(vertex_ids)}
+            points = np.array([positions[v] for v in vertex_ids])
+            face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in faces])
+            mesh = pv.PolyData(points, face_conn)
+            colors = np.array(
+                [np.array(mcolors.to_rgb(self.colors[c % len(self.colors)])) * 255
+                 for c in face_of_fine], dtype=np.uint8)
+            mesh.cell_data["colors"] = colors
+            plotter.add_mesh(mesh, scalars="colors", rgb=True, show_edges=True,
+                              edge_color=PLOT_THEME["fg"], line_width=SUBDIVISION_EDGE_WIDTH)
+
+            lo, hi = points.min(axis=0), points.max(axis=0)
+            self._level_center[level] = (lo + hi) / 2
+            self._level_half[level] = (hi - lo).max() / 2 * WIREFRAME_VIEW_FILL + 1e-6
+        self._render_level_pv(level)
+
+    def _render_level_pv(self, level):
+        """Positions an orthographic (parallel-projection) camera from
+        the SHARED self.level_azim/elev (see the drag handlers) at a
+        distance derived from THIS level's own current bounding box
+        (self._level_center/_level_half, set by _draw_level_panel --
+        necessary since neither a pure-spring relax nor a pressure
+        inflation has any mechanism keeping the result near the origin
+        or at a familiar scale), renders off-screen, and blits the
+        result into self.level_labels[level]. Parallel rather than
+        perspective projection to give every panel fixed, comparable
+        axis-limit-like framing with no foreshortening. The panel's
+        "Level N" title is a separate Tkinter Label (see
+        _build_level_pv_panel), not drawn into this image -- a title
+        drawn INSIDE the rendered scene (tried first, via
+        plotter.add_text) clipped against the panel's own top edge (a
+        "0" losing its top arc, reading as a "U") since a VTK text
+        actor's positioning/justification doesn't guarantee it stays
+        fully inside the viewport the way a real widget placed above the
+        image trivially does."""
+        azim, elev = np.radians(self.level_azim), np.radians(self.level_elev)
+        direction = np.array([np.cos(elev) * np.cos(azim), np.cos(elev) * np.sin(azim),
+                               np.sin(elev)])
+        center, half = self._level_center[level], self._level_half[level]
+        distance = half * 4
+        plotter = self.level_plotters[level]
+        camera = plotter.camera
+        camera.parallel_projection = True
+        camera.focal_point = tuple(center)
+        camera.position = tuple(center + direction * distance)
+        camera.up = (0.0, 0.0, 1.0)
+        # parallel_scale sets the camera's vertical half-height in world
+        # units -- the horizontal half-width it implies is narrower by
+        # the window's own aspect ratio (width/height), which would crop
+        # the shape's wider dimension on this portrait-shaped panel if
+        # left at exactly `half`. Scaling up by height/width (when
+        # portrait) guarantees the full half-extent fits in BOTH
+        # directions, matching what set_box_aspect([1,1,1]) effectively
+        # gave the old matplotlib panels for free; dividing by
+        # LEVEL_ZOOM_FILL then shrinks the shape within that
+        # guaranteed-fitting frame.
+        panel_width, panel_height = LEVEL_PANEL_SIZE
+        camera.parallel_scale = half * max(1.0, panel_height / panel_width) / LEVEL_ZOOM_FILL
+        plotter.reset_camera_clipping_range()
+        # plotter.screenshot() does NOT re-render on a camera-only change
+        # by itself -- verified directly: two screenshots taken after
+        # only moving the camera, with no explicit render() between them,
+        # come back pixel-IDENTICAL. An explicit render() first is what
+        # actually asks VTK to redraw the scene from the camera's current
+        # position before screenshot() reads the framebuffer back -- this
+        # was the actual cause of rotation looking "stuck" (nothing to do
+        # with Tk's own redraw/event-queue timing, which earlier fixes in
+        # this area wrongly assumed).
+        plotter.render()
+        image = plotter.screenshot(return_img=True)
+        self.level_photos[level] = ImageTk.PhotoImage(Image.fromarray(image))
+        self.level_labels[level].configure(image=self.level_photos[level])
+
+    # ---- theme ----
 
     def _style_2d_axis(self, ax, theme):
         ax.title.set_color(theme["fg"])
         ax.set_axis_off()
 
     def _apply_plot_theme(self):
-        """Recolor the figure/axes chrome to match the (fixed, dark-only)
-        plot theme -- ax.cla() (called every draw()) resets all of this to
-        matplotlib's defaults, so it has to be re-applied on every redraw.
-        Returns the theme dict so draw() can reuse its colors."""
+        """Recolor the Net figure's chrome to match the (fixed,
+        dark-only) plot theme -- ax.cla() (called every draw()) resets
+        this to matplotlib's defaults, so it has to be re-applied on
+        every redraw. Every "Level N" panel is PyVista, not matplotlib
+        (see LEVEL_PANEL_SIZE's own comment) -- its background/text
+        color is set once, at panel construction (_build_level_pv_panel/
+        _render_level_pv), not re-applied here. Returns the theme dict so
+        draw() can reuse its colors."""
         theme = PLOT_THEME
         self.fig_net.patch.set_facecolor(theme["bg"])
         self.ax2d.set_facecolor(theme["bg"])
         self._style_2d_axis(self.ax2d, theme)
-        for ax in self.ax3d_by_level.values():
-            ax.figure.patch.set_facecolor(theme["bg"])
-            ax.set_facecolor(theme["bg"])
-            self._style_3d_axis(ax, theme)
         return theme
 
     def _draw_idle_all(self):
-        """Every panel now has its OWN canvas (see __init__'s Design
-        notes) -- redraw them all rather than the single shared canvas
-        this used to be."""
+        """The Net panel is matplotlib and needs an explicit idle-redraw
+        request; every "Level N" panel already pushed its own freshly
+        rendered image straight to its Label inside _render_level_pv, so
+        there's nothing further to do for those here."""
         self.canvas_net.draw_idle()
-        for canvas in self.level_canvases.values():
-            canvas.draw_idle()
-
-    def _canvas_for_axis(self, ax):
-        for level, level_ax in self.ax3d_by_level.items():
-            if level_ax is ax:
-                return self.level_canvases[level]
-        return None
-
-    def _refresh_plot(self):
-        if self.positions is not None:
-            self.draw()
-        else:
-            self._apply_plot_theme()
-            self._draw_idle_all()
-
-    def _on_3d_drag_start(self, event):
-        """mplot3d's own left-click-drag rotation starts here -- hide the
-        vertex-marker scatter for the duration (see its own comment in
-        __init__ for why), leaving the (live-culled) faces/edges alone.
-        Remembers WHICH axis this drag is on (see _on_3d_motion) --
-        `event.inaxes` during a later motion event isn't reliable once
-        the mouse strays outside that axis's own bounds mid-drag, but
-        mplot3d itself keeps rotating based on where the drag started."""
-        if event.inaxes not in self.ax3d_by_level.values() or event.button != 1:
-            return
-        self._dragging_3d = True
-        self._active_drag_ax = event.inaxes
-        if self.vertex_scatter is not None:
-            self.vertex_scatter.set_visible(False)
-            self._canvas_for_axis(event.inaxes).draw_idle()
-
-    def _sync_views_to(self, reference_ax):
-        """Copies `reference_ax`'s exact elev/azim (and roll, on a
-        matplotlib new enough to have it) onto every OTHER "Level N"
-        panel -- a direct view-matrix copy, not a relative nudge, so
-        every panel ends up looking from exactly the same angle as
-        `reference_ax` rather than each just spinning from wherever it
-        already was. Caller is responsible for redrawing afterward."""
-        view = dict(elev=reference_ax.elev, azim=reference_ax.azim)
-        if hasattr(reference_ax, "roll"):
-            view["roll"] = reference_ax.roll
-        for ax in self.ax3d_by_level.values():
-            if ax is not reference_ax:
-                ax.view_init(**view)
-
-    def _on_3d_motion(self, event):
-        """Rotation is always synced (no user choice, see __init__'s
-        Design notes) -- keeps every other panel matching the DRAGGED
-        axis's live view on every mouse-move, connected AFTER mplot3d's
-        own internal rotation handler (both on the same canvas, in
-        connection order), so `self._active_drag_ax`'s elev/azim already
-        reflect this move by the time this runs."""
-        if not self._dragging_3d or self._active_drag_ax is None:
-            return
-        self._sync_views_to(self._active_drag_ax)
-        for canvas in self.level_canvases.values():
-            canvas.draw_idle()
-
-    def _on_3d_drag_end(self, event):
-        if not self._dragging_3d:
-            return
-        self._dragging_3d = False
-        # One last explicit sync at the FINAL view, in case the button
-        # release didn't come with its own trailing motion event (so the
-        # last _on_3d_motion tick wasn't necessarily at the exact final
-        # angle) -- done before clearing _active_drag_ax, and before
-        # _refresh_plot's own full redraw below.
-        if self._active_drag_ax is not None:
-            self._sync_views_to(self._active_drag_ax)
-        self._active_drag_ax = None
-        # A full redraw (not just set_visible(True)) so the vertex culling
-        # itself is recomputed for wherever the drag left the view angle.
-        self._refresh_plot()
 
     # ---- net picker ----
 
     def refresh_net_list(self, keep_selection=True):
-        """Rescan data/input/stretchy_nets/ and rebuild the dropdown -- a net with no
-        matching stretchy_cache/*.json gets a "(not computed)" suffix
-        (purely informational: selecting it still works, it just means
-        the precomputed coarse-solve-then-drape starting point isn't
-        ready yet, so on_select_net's background load will solve it
-        fresh instead of an instant cache read -- see module docstring)."""
+        """Rescan data/input/stretchy_nets/ and rebuild the dropdown. No
+        more "(not computed)" distinction -- every net now starts from a
+        cheap, instant random start (see module docstring), so there's no
+        precomputed-vs-not state left to flag."""
         paths = sorted(glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.json")))
         self.label_to_path = {}
         for path in paths:
-            base_label = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
-            label = base_label if is_cached(path, cache_path_for(path, CACHE_DIR)) else base_label + DISABLED_SUFFIX
+            label = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
             self.label_to_path[label] = path
 
         labels = list(self.label_to_path.keys())
@@ -644,89 +795,72 @@ class InflatePolyhedronApp:
         # with subdivision level, only its overlay does.
         self.target_layout = build_stretchy_net_layout(self.base_faces)
 
+        # Level 0 and Level 1 share this exact fan-triangulated topology
+        # (see module docstring) -- computed once here, up front, rather
+        # than re-derived on promotion.
+        self.faces, self.edge_length, self.face_of_fine = _build_level1_topology(self.base_faces)
         self.current_path = path
         self.subdivision_level = 0
-        self.faces = self.base_faces
-        self.face_of_fine = list(range(len(self.base_faces)))
-        self.edge_length = EDGE_LENGTH
+        self.positions = random_initial_positions(self.faces, seed=0)
         self.iteration_count = 0
-        self.last_stats = {}
+        self.last_stats = self._compute_stretch_stats()
         self.level_history = {}
         self.level_snapshots = {}
         self.history_tree.delete(*self.history_tree.get_children())
-        self.positions = None
         self.stop_event = None
-        self._update_subdivide_button_state()
-        self._load_generation += 1
-        generation = self._load_generation
-        self._run_background(
-            _solve_level0, (path, self.base_faces, legacy_coarse_faces is not None, CACHE_DIR),
-            lambda payload: self._on_loaded(payload, generation))
-
-    def _on_loaded(self, payload, generation):
-        if generation != self._load_generation:
-            return  # a newer net selection has since started; this result is stale
-        positions, stats, _cached_name = payload
-        self.positions = positions
-        self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
-                            "rms_stretch_pct": stats["rms_stretch_pct"],
-                            "optimality": None, "converged": None}
-        # Every net starts already advanced to STARTING_LEVEL rather than
-        # shown at the raw level-0 base faces (see its own comment) --
-        # level 0 itself never gets a history row, since the user never
-        # interacts with it directly.
-        while self.subdivision_level < STARTING_LEVEL:
-            self._subdivide_step()
-        self._update_inflate_button_state()
-        self._update_subdivide_button_state()  # reflect STARTING_LEVEL, not level 0
-        self.refresh_net_list()  # the net just loaded may have just gained a cache entry
+        self._record_level_history()
+        self._update_level_action_buttons()
         self.draw()
 
     # ---- subdivide ----
 
-    def _update_subdivide_button_state(self):
-        """Enforces the intended workflow (Inflate, Subdivide, Inflate,
-        Subdivide, ... one level at a time): a level's Subdivide button
-        only enables once IT has actually converged -- combined with
-        _update_inflate_button_state disabling Inflate once converged,
-        exactly one of the two buttons for the frontier level is ever
-        enabled at a time, and every other level's stays disabled
-        regardless (subdividing only ever acts on the current frontier
-        level). MAX_LEVEL has no Subdivide button at all (nothing further
-        to subdivide TO) -- its green "DONE!" label lights up in its
-        place once IT converges, instead."""
-        can_subdivide = self.positions is not None and self.subdivision_level < MAX_LEVEL
+    def _update_level_action_buttons(self):
+        """Single source of truth for every level's one action button
+        (see __init__'s Design notes): only the current frontier level's
+        button is ever enabled -- idle it reads "Relax" (level 0) or
+        "Inflate" (levels 1+), once that level converges it becomes
+        "Subdivide" (clickable, advances to the next level) or "DONE!"
+        (MAX_LEVEL, nothing further to subdivide to and so left
+        disabled). A run in progress overrides this via
+        _set_level_action_button_running instead -- this method is never
+        called while one is active."""
         converged = bool(self.last_stats.get("converged"))
-        for level, button in self.level_subdivide_buttons.items():
-            enabled = can_subdivide and converged and level == self.subdivision_level
-            button.state(["!disabled"] if enabled else ["disabled"])
-        done = self.subdivision_level == MAX_LEVEL and converged
-        self.level_done_label_var.set("DONE!" if done else "")
+        for level, button in self.level_action_buttons.items():
+            if level != self.subdivision_level or self.positions is None:
+                button.state(["disabled"])
+            elif not converged:
+                label = "Relax" if level == 0 else "Inflate"
+                command = self.on_relax_clicked if level == 0 else self.on_inflate_clicked
+                button.config(text=label, command=command)
+                button.state(["!disabled"])
+            elif level < MAX_LEVEL:
+                button.config(text="Subdivide", command=self.on_subdivide_clicked)
+                button.state(["!disabled"])
+            else:
+                button.config(text="DONE!")
+                button.state(["disabled"])
 
     def _subdivide_step(self):
-        """The actual level-advancing work, shared by on_subdivide_clicked
-        and _on_loaded's auto-advance to STARTING_LEVEL -- no status
-        message or redraw of its own, so the caller can run this several
-        times in a row (e.g. level 0 -> STARTING_LEVEL) and only report/
-        draw once at the end.
+        """The actual level-advancing work behind on_subdivide_clicked --
+        no status message or redraw of its own, so the caller reports/
+        draws once itself. Only ever runs from Level 1 upward (Level 0's
+        own advance to Level 1 is a promotion, not a subdivide_once call
+        -- see _finish_relax).
 
         Freezes the level being LEFT into self.level_snapshots (its own
         "Level N" panel stops updating from here on -- see draw()) using
         whatever state that level had reached, before overwriting
-        self.faces/positions/etc. with the new level's. Level 0 is never
-        snapshotted (or shown at all -- see STARTING_LEVEL)."""
-        if self.subdivision_level >= 1:
-            self.level_snapshots[self.subdivision_level] = {
-                "faces": self.faces, "positions": self.positions,
-                "face_of_fine": self.face_of_fine,
-            }
+        self.faces/positions/etc. with the new level's."""
+        self.level_snapshots[self.subdivision_level] = {
+            "faces": self.faces, "positions": self.positions,
+            "face_of_fine": self.face_of_fine,
+        }
         self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
             self.faces, self.positions, self.edge_length, self.face_of_fine,
             self.subdivision_level)
         self.subdivision_level += 1
         # The face set just changed entirely (more, smaller faces) --
-        # recomputed fresh for the NEW mesh, same as a brand new net load
-        # (see _on_loaded).
+        # recomputed fresh for the NEW mesh, same as a brand new net load.
         self.last_stats = self._compute_stretch_stats()
         # Each level's own step count starts over at 0 -- a level's
         # "how many steps to converge" is only meaningful counted from
@@ -739,8 +873,7 @@ class InflatePolyhedronApp:
         if self.positions is None or self.subdivision_level >= MAX_LEVEL:
             return
         self._subdivide_step()
-        self._update_subdivide_button_state()
-        self._update_inflate_button_state()  # a fresh subdivision hasn't converged yet
+        self._update_level_action_buttons()  # a fresh subdivision hasn't converged yet
         self._set_status(
             f"Subdivided to level {self.subdivision_level} ({len(self.faces)} faces, "
             f"{len(self.positions)} vertices, edges stretched up to "
@@ -752,21 +885,26 @@ class InflatePolyhedronApp:
 
     def _record_level_history(self):
         """Records/updates the CURRENT level's row: the pressure last
-        calibrated for it, steps so far this level (self.iteration_count,
-        see _subdivide_step), the stretch stats at this point, and the
-        actual stopping-condition value -- relax_once's own `optimality`
-        (None before any Inflate at this level, or if a Stop request
-        aborted before any step ran -- see relax_once's docstring) -- all
-        from self.last_stats. Called on every subdivide, every live
-        Inflate progress update, and when an Inflate run finishes, so the
-        row always reflects the level's latest state rather than only its
+        calibrated for it (None for Level 0, which has no pressure at all
+        -- relax_initial_configuration is pure springs, see
+        stretchy_mesh's docstring -- shown as "n/a" by
+        _refresh_history_table), steps so far this level
+        (self.iteration_count, see _subdivide_step/_finish_relax), the
+        stretch stats at this point, and the actual stopping-condition
+        value -- the relax's own `optimality` (None before any
+        Inflate/Relax at this level, or if a Stop request aborted before
+        any step ran -- see relax_once's docstring) -- all from
+        self.last_stats. Called on every subdivide/promotion, every live
+        Inflate/Relax progress update, and when a run finishes, so the row
+        always reflects the level's latest state rather than only its
         final converged one."""
         self.level_history[self.subdivision_level] = {
-            "pressure": self.pressure_value,
+            "pressure": None if self.subdivision_level == 0 else self.pressure_value,
             "steps": self.iteration_count,
             "max_stretch_pct": self.last_stats.get("max_stretch_pct", 0.0),
             "rms_stretch_pct": self.last_stats.get("rms_stretch_pct", 0.0),
             "optimality": self.last_stats.get("optimality"),
+            "converged": self.last_stats.get("converged"),
         }
         self._refresh_history_table()
 
@@ -785,27 +923,41 @@ class InflatePolyhedronApp:
             rec = self.level_history[level]
             optimality = rec["optimality"]
             if optimality is None:
-                convergence = "n/a"
+                convergence, tags = "n/a", ()
             else:
+                # The checkmark tracks the algorithm's own `converged`
+                # flag, not a fresh optimality-vs-GTOL comparison redone
+                # here -- convergence can also come from the stall-window
+                # criterion (see _explicit_relax_loop) with optimality
+                # still numerically above CONVERGENCE_GTOL, and the mark
+                # would otherwise wrongly call that a failure.
+                converged = rec["converged"]
                 op = "<" if optimality < CONVERGENCE_GTOL else ">"
-                mark = "✅" if optimality < CONVERGENCE_GTOL else "❌"
+                mark = "✔" if converged else "✘"  # colored via row tag, not the glyph itself
                 convergence = (f"{self._format_sci(optimality)} {op} "
                                 f"{self._format_sci(CONVERGENCE_GTOL, precision=0)} {mark}")
-            values = (level, f"{rec['pressure']:.4g}", rec["steps"], f"{rec['max_stretch_pct']:.2f}",
-                      f"{rec['rms_stretch_pct']:.2f} (target: {target_rms_pct:g})",
-                      convergence)
+                tags = ("converged",) if converged else ("not_converged",)
+            pressure_str = "n/a" if rec["pressure"] is None else f"{rec['pressure']:.4g}"
+            # Level 0 has no target stretch to chase (relax_initial_configuration
+            # is pure springs, not calibrated against the spinner at all).
+            rms_str = f"{rec['rms_stretch_pct']:.2f}"
+            if level != 0:
+                rms_str += f" (target: {target_rms_pct:.1f})"
+            values = (level, pressure_str, rec["steps"], f"{rec['max_stretch_pct']:.2f}",
+                      rms_str, convergence)
             iid = str(level)
             if self.history_tree.exists(iid):
-                self.history_tree.item(iid, values=values)
+                self.history_tree.item(iid, values=values, tags=tags)
             else:
-                self.history_tree.insert("", "end", iid=iid, values=values)
+                self.history_tree.insert("", "end", iid=iid, values=values, tags=tags)
 
     def _compute_stretch_stats(self):
         """max/rms edge stretch of the CURRENT self.faces/self.positions
         against self.edge_length -- the same two stats relax_once/
-        solve_wireframe report, computed directly rather than via a solve,
-        for the freshly-interpolated (not yet relaxed) mesh right after a
-        Subdivide click."""
+        relax_initial_configuration report, computed directly rather than
+        via a relax, for a mesh that hasn't been relaxed at all yet (a
+        fresh random start, or the freshly-interpolated positions right
+        after a Subdivide click)."""
         edges = mesh_edges(self.faces)
         rest = (np.array([self.edge_length[e] for e in edges])
                 if isinstance(self.edge_length, dict) else self.edge_length)
@@ -822,26 +974,10 @@ class InflatePolyhedronApp:
         self.steps_spin.state(["!disabled"] if self.iterate_mode_var.get() == "steps"
                                else ["disabled"])
 
-    def _update_inflate_button_state(self):
-        """Greys out a level's Inflate button once self.last_stats reports
-        it already converged at the current pressure -- clicking again
-        would just burn steps without moving anything, since relax_once
-        from an already-converged point starts with near-zero force
-        already. Re-armed by _on_target_rms_changed, a new net load, or a
-        Stop (which leaves converged=False since it didn't run to
-        completion). Only the CURRENT frontier level's button is ever
-        eligible at all -- inflating only ever acts on wherever
-        self.subdivision_level currently is, so every other level's
-        Inflate button stays disabled regardless of convergence."""
-        converged = bool(self.last_stats.get("converged"))
-        for level, button in self.level_inflate_buttons.items():
-            enabled = not converged and level == self.subdivision_level
-            button.state(["!disabled"] if enabled else ["disabled"])
-
     def _on_target_rms_changed(self, *_args):
         if self.last_stats.get("converged"):
             self.last_stats["converged"] = None
-            self._update_inflate_button_state()
+            self._update_level_action_buttons()
 
     def on_inflate_clicked(self):
         """Two phases: first calibrate a pressure for the current "Target
@@ -869,7 +1005,7 @@ class InflatePolyhedronApp:
         self.pressure_value = pressure
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
-        self._set_level_inflate_button_running(True)
+        self._set_level_action_button_running(True)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
         status = (f"Inflating at pressure {pressure:.4g} for {target_steps} steps..."
@@ -878,57 +1014,60 @@ class InflatePolyhedronApp:
         self._set_status(status, "info")
         self._run_inflate_stream(pressure, target_steps, self.stop_event)
 
-    def _set_level_inflate_button_running(self, running):
+    def _set_level_action_button_running(self, running):
         """Neither mode has a separate Stop button -- instead, the
-        CURRENT frontier level's own Inflate button turns into the Stop
-        control for the duration of a run, then back again once it
-        finishes (see _finish_inflate). Safe to assume the frontier level
-        doesn't change mid-run: Subdivide is disabled for the whole run
-        too (see _set_controls_enabled)."""
-        button = self.level_inflate_buttons.get(self.subdivision_level)
+        CURRENT frontier level's own action button turns into the Stop
+        control for the duration of a run, then back to its normal
+        Inflate/Relax/Subdivide/DONE! state once it finishes (delegated
+        to _update_level_action_buttons, the single source of truth for
+        that -- see _finish_inflate/_finish_relax). Safe to assume the
+        frontier level doesn't change mid-run: every other level's button
+        is disabled for the whole run too (see _set_controls_enabled),
+        and Relax's own promotion only happens in _finish_relax, after
+        the run is over."""
+        button = self.level_action_buttons.get(self.subdivision_level)
         if button is None:
             return
         if running:
             button.config(text="Stop", command=self.on_stop_clicked)
             button.state(["!disabled"])
         else:
-            button.config(text="Inflate", command=self.on_inflate_clicked)
+            self._update_level_action_buttons()
 
     def on_stop_clicked(self):
         if self.stop_event is not None:
             self.stop_event.set()
-            frontier_button = self.level_inflate_buttons.get(self.subdivision_level)
+            frontier_button = self.level_action_buttons.get(self.subdivision_level)
             if frontier_button is not None:
                 frontier_button.state(["disabled"])  # one request is enough; avoid repeat clicks
             self._set_status("Stopping...", "warn")
 
-    def _run_inflate_stream(self, pressure, target_steps, stop_event):
-        """Runs relax_once in a growing sequence of chunks (5, 10, 20, ...,
-        capped at INFLATE_CHUNK_MAX) in a background thread, pushing a
-        "progress" message to the queue after every chunk so the main
-        thread can update the iteration counter/plot incrementally
-        instead of jumping straight from the start count to the end one.
-        Tk isn't thread-safe, so the worker only ever pushes to the
-        queue; the main thread (via the scheduled poll below) is the
-        only one that touches Tk widgets."""
+    def _run_chunked_relax_stream(self, step_fn, target_steps, stop_event, on_progress, on_finished):
+        """Shared driver behind _run_inflate_stream and _run_relax_stream:
+        calls `step_fn(chunk, stop_event) -> result` (result's own shape:
+        (positions, nfev, max_stretch_pct, rms_stretch_pct, optimality,
+        converged), same for relax_once and relax_initial_configuration)
+        in a growing sequence of chunks (5, 10, 20, ..., capped at
+        INFLATE_CHUNK_MAX) in a background thread, pushing a "progress"
+        message to the queue after every chunk so the main thread can
+        update the iteration counter/plot incrementally instead of
+        jumping straight from the start count to the end one. Tk isn't
+        thread-safe, so the worker only ever pushes to the queue; the
+        main thread (via the scheduled poll below) is the only one that
+        touches Tk widgets."""
         q = queue.Queue()
-        faces, edge_length = self.faces, self.edge_length
-        start_positions = self.positions
 
         def worker():
-            positions = start_positions
             completed = 0
             chunk = INFLATE_CHUNK_START
             try:
                 while True:
                     this_chunk = max(1, chunk if target_steps is None
                                       else min(chunk, target_steps - completed))
-                    result = relax_once(positions, faces, edge_length, pressure,
-                                         PLANARITY_WEIGHT, max_nfev=this_chunk, stop_event=stop_event)
-                    trial_positions, nfev, max_stretch, rms_stretch, optimality, converged = result
+                    result = step_fn(this_chunk, stop_event)
+                    nfev, converged = result[1], result[5]
                     stopped = stop_event is not None and stop_event.is_set()
 
-                    positions = trial_positions
                     completed += nfev
                     q.put(("progress", result))
                     reached_target = target_steps is not None and completed >= target_steps
@@ -947,9 +1086,9 @@ class InflatePolyhedronApp:
                 while True:
                     kind, payload = q.get_nowait()
                     if kind == "progress":
-                        self._apply_inflate_progress(payload)
+                        on_progress(payload)
                     elif kind == "final":
-                        self._finish_inflate()
+                        on_finished()
                         return
                     elif kind == "error":
                         self.progress.stop()
@@ -962,6 +1101,19 @@ class InflatePolyhedronApp:
             self.root.after(80, poll)
 
         self.root.after(80, poll)
+
+    def _run_inflate_stream(self, pressure, target_steps, stop_event):
+        faces, edge_length = self.faces, self.edge_length
+        state = {"positions": self.positions}
+
+        def step_fn(chunk, stop_event):
+            result = relax_once(state["positions"], faces, edge_length, pressure,
+                                 PLANARITY_WEIGHT, max_nfev=chunk, stop_event=stop_event)
+            state["positions"] = result[0]
+            return result
+
+        self._run_chunked_relax_stream(step_fn, target_steps, stop_event,
+                                        self._apply_inflate_progress, self._finish_inflate)
 
     def _apply_inflate_progress(self, result):
         positions, nfev, max_stretch, rms_stretch, optimality, converged = result
@@ -979,7 +1131,7 @@ class InflatePolyhedronApp:
         self.progress.stop()
         self.progress.pack_forget()
         self._set_controls_enabled(True)
-        self._set_level_inflate_button_running(False)
+        self._set_level_action_button_running(False)
         was_stopped = self.stop_event is not None and self.stop_event.is_set()
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
@@ -1002,7 +1154,89 @@ class InflatePolyhedronApp:
                 f"(RMS {rms_stretch:.2f}%).",
                 "info")
 
-    # ---- background worker (used by the initial cache load) ----
+    # ---- relax (Level 0 only) ----
+
+    def on_relax_clicked(self):
+        """Level 0's analogue of on_inflate_clicked -- no pressure to
+        calibrate first (relax_initial_configuration is pure springs, no
+        pressure term at all, see stretchy_mesh's docstring), so this
+        goes straight to the streamed run. Always runs to convergence
+        (ignores the debug-mode steps-vs-convergence choice, which only
+        applies to Inflate) -- Relax's whole point is to finish the
+        initial-configuration algorithm, not to be steppable."""
+        if self.positions is None or self.subdivision_level != 0 or self.last_stats.get("converged"):
+            return
+        self.stop_event = threading.Event()
+        self._set_controls_enabled(False)
+        self._set_level_action_button_running(True)
+        self.progress.pack(side=tk.LEFT, padx=(10, 0))
+        self.progress.start(12)
+        self._set_status("Relaxing random start into a well-separated shape...", "info")
+        self._run_relax_stream(self.stop_event)
+
+    def _run_relax_stream(self, stop_event):
+        faces, edge_length = self.faces, self.edge_length
+        state = {"positions": self.positions}
+
+        def step_fn(chunk, stop_event):
+            result = relax_initial_configuration(state["positions"], faces, edge_length,
+                                                  max_nfev=chunk, stop_event=stop_event)
+            state["positions"] = result[0]
+            return result
+
+        self._run_chunked_relax_stream(step_fn, None, stop_event,
+                                        self._apply_relax_progress, self._finish_relax)
+
+    def _apply_relax_progress(self, result):
+        positions, nfev, max_stretch, rms_stretch, optimality, converged = result
+        self.positions = positions
+        self.iteration_count += nfev
+        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
+                            "optimality": optimality, "converged": converged}
+        self._record_level_history()
+        self._set_status(f"Relaxing... {self.iteration_count} steps so far "
+                          f"(edges stretched up to {max_stretch:.2f}%).", "info")
+        self.draw()
+
+    def _finish_relax(self):
+        self.progress.stop()
+        self.progress.pack_forget()
+        was_stopped = self.stop_event is not None and self.stop_event.is_set()
+        converged = self.last_stats.get("converged")
+        max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
+        rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
+        self._record_level_history()
+        if was_stopped:
+            self._set_status(
+                f"Stopped ({self.iteration_count} relax steps): edges stretched up to "
+                f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "warn")
+        elif converged:
+            # Level 0 and Level 1 share the exact fan-triangulated
+            # topology (see module docstring) -- promoting the
+            # just-relaxed result into Level 1's starting position is a
+            # pure relabeling, not a new subdivide_once call.
+            self.level_snapshots[0] = {"faces": self.faces, "positions": self.positions,
+                                        "face_of_fine": self.face_of_fine}
+            level0_button = self.level_action_buttons.get(0)
+            if level0_button is not None:
+                level0_button.config(text="Relax", command=self.on_relax_clicked)
+            self.subdivision_level = 1
+            self.iteration_count = 0
+            self.last_stats = self._compute_stretch_stats()
+            self._record_level_history()
+            self._set_status(
+                f"Relaxed (edges stretched up to {max_stretch:.2f}% from rest length, RMS "
+                f"{rms_stretch:.2f}%). Promoted to Level 1 -- press Inflate to continue.", "info")
+        else:
+            self._set_status(
+                f"Relaxed ({self.iteration_count} steps, step cap reached): edges stretched up "
+                f"to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%). Press Relax "
+                "again to continue.", "info")
+        self._set_controls_enabled(True)
+        self._set_level_action_button_running(False)
+        self.draw()
+
+    # ---- background worker (used by pressure calibration) ----
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
@@ -1011,32 +1245,31 @@ class InflatePolyhedronApp:
             widget.state(state)
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
-            self._update_inflate_button_state()  # respect the converged-at-this-pressure gate
-            self._update_subdivide_button_state()  # respect the at-MAX_LEVEL gate
+            self._update_level_action_buttons()  # respect the converged-at-this-pressure gate
         else:
             self.steps_spin.state(["disabled"])
-            for button in self.level_subdivide_buttons.values():
-                button.state(["disabled"])
-            # The frontier level's Inflate button is deliberately left
-            # alone here -- _on_pressure_calibrated re-enables it right
-            # after this runs, turned into the Stop control (see
-            # _set_level_inflate_button_running); every OTHER level's
+            # The frontier level's action button is deliberately left
+            # alone here -- the caller (_on_pressure_calibrated/
+            # on_relax_clicked) re-enables it right after this runs,
+            # turned into the Stop control (see
+            # _set_level_action_button_running); every OTHER level's
             # stays disabled like normal, since it was never eligible
-            # anyway (see _update_inflate_button_state). Neither mode has
+            # anyway (see _update_level_action_buttons). Neither mode has
             # a separate Stop button to arm/disarm here.
-            for level, button in self.level_inflate_buttons.items():
+            for level, button in self.level_action_buttons.items():
                 if level != self.subdivision_level:
                     button.state(["disabled"])
 
     def _run_background(self, fn, args, on_done):
         """Run fn(*args) in a background thread and call on_done(result)
-        on the main thread once it finishes -- used for the initial
-        precomputed-shape load (see module docstring), which can take a
-        moment on a cache miss. Tk isn't thread-safe, so the worker only
-        ever pushes to a queue; the main thread (via the scheduled poll
-        below) is the only one that touches Tk widgets. ("Inflate" has
-        its own streaming variant, _run_inflate_stream, since it reports
-        incremental progress rather than one final result.)"""
+        on the main thread once it finishes -- used for on_inflate_clicked's
+        pressure calibration (estimate_pressure_for_target_stretch), which
+        can take a moment. Tk isn't thread-safe, so the worker only ever
+        pushes to a queue; the main thread (via the scheduled poll below)
+        is the only one that touches Tk widgets. (Inflate/Relax each have
+        their own streaming variant, _run_inflate_stream/_run_relax_stream,
+        since they report incremental progress rather than one final
+        result.)"""
         self._set_controls_enabled(False)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
@@ -1113,104 +1346,32 @@ class InflatePolyhedronApp:
         self.ax2d.set_xlim(lo[0] - pad, hi[0] + pad)
         self.ax2d.set_ylim(lo[1] - pad, hi[1] + pad)
         self.ax2d.set_aspect("equal")
-        self.ax2d.set_title("Net")
-
-    def _draw_wireframe_panel(self, ax, theme, level, faces, positions, face_of_fine):
-        """One "Level N" panel: possibly non-planar faces (drawn opaque)
-        plus the raw vertex/edge wireframe on top, since a "face" here is
-        just a rendering convenience -- the thing actually being relaxed
-        is the vertex positions and edge lengths. `faces` is None for a
-        level not yet reached this net session (see draw()) -- drawn as
-        an empty panel with just its title.
-
-        Colors every fine triangle by its ORIGINAL base face
-        (`face_of_fine`, indexing the same per-base-face self.colors the
-        Net panel uses) so the base faces stay visually distinct as color
-        blocks, with the fine mesh edges thin and faint (see
-        SUBDIVISION_EDGE_ALPHA/WIDTH) so the subdivision reads as texture
-        rather than a bold wireframe.
-
-        Wraps (positions, faces) into a Polyhedron -- its .edges gives the
-        wireframe segments for the (rarer) open-mesh fallback below
-        (positions re-indexed to Polyhedron's own dense 0..N-1 space, so
-        `polyhedron.vertices[i]` is the position for edge endpoint `i`
-        directly, no dict lookup needed), and .is_closed() gates whether
-        _CullableFace's exact backface culling applies (see its own
-        docstring: only valid for a closed CONVEX solid). When closed,
-        each face is drawn as a _CullableFace carrying its OWN boundary
-        edges, so a face's wireframe lines disappear together with the
-        face itself once it's facing away from the camera -- drawing
-        every edge as one separate, undivided Line3DCollection (the
-        open-mesh fallback below) has no per-face depth information at
-        all, so back-face lines would otherwise render right through the
-        opaque near faces regardless of view angle."""
-        ax.cla()
-        self._style_3d_axis(ax, theme)
-        if faces is None:
-            ax.set_title(f"Level {level}")
-            return
-
-        face_colors = [self.colors[c % len(self.colors)] for c in face_of_fine]
-        polyhedron = mesh_to_polyhedron(positions, faces)
-        closed = polyhedron.is_closed()
-
-        all_pts = np.array(list(positions.values()))
-        for face_index, (face, color) in enumerate(zip(faces, face_colors)):
-            pts = np.array([positions[v] for v in face])
-            if closed:
-                normal = polyhedron.face_normal(face_index)
-                ax.add_collection3d(_CullableFace(
-                    [pts], normal, base_alpha=1.0,
-                    facecolor=color, edgecolor=theme["fg"], linewidths=SUBDIVISION_EDGE_WIDTH))
-            else:
-                ax.add_collection3d(
-                    Poly3DCollection([pts], facecolor=color, edgecolor="none", alpha=1.0))
-
-        if not closed:
-            # No exact culling is possible without closed convexity (see
-            # _CullableFace's docstring) -- fall back to one plain,
-            # undivided wireframe overlay.
-            edge_segments = [(polyhedron.vertices[a], polyhedron.vertices[b])
-                              for a, b in polyhedron.edges]
-            ax.add_collection3d(Line3DCollection(
-                edge_segments, colors=theme["fg"], linewidths=SUBDIVISION_EDGE_WIDTH,
-                alpha=SUBDIVISION_EDGE_ALPHA))
-
-        lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
-        center = (lo + hi) / 2
-        half = (hi - lo).max() / 2 * WIREFRAME_VIEW_FILL + 1e-6
-        ax.set_xlim(center[0] - half, center[0] + half)
-        ax.set_ylim(center[1] - half, center[1] + half)
-        ax.set_zlim(center[2] - half, center[2] + half)
-        ax.set_box_aspect([1, 1, 1])
-        ax.set_title(f"Level {level}")
+        # No ax.set_title() here -- "Net" is a plain Tkinter Label above
+        # this canvas instead, same as every "Level N" panel's title (see
+        # __init__'s Design notes on why titles live outside the drawing
+        # area now).
 
     def draw(self):
         """Redraws the Net panel plus every "Level N" panel: level ==
         self.subdivision_level draws LIVE from current state; a level in
-        self.level_snapshots (already subdivided past) draws its frozen
+        self.level_snapshots (already subdivided past, or -- for Level
+        0 -- promoted away from by a converged Relax) draws its frozen
         state; any other level hasn't been reached yet and draws empty
-        (see _draw_wireframe_panel). Then re-syncs every panel's view to
-        the current frontier level's (rotation is always synced, no user
-        choice -- see __init__'s Design notes) so a level just revealed
-        by Subdivide inherits whatever view the others are already at,
-        rather than starting at mplot3d's own default one."""
+        (see _draw_level_panel). Every level panel shares ONE camera
+        angle (self.level_azim/level_elev, see __init__'s Design notes)
+        -- nothing further to sync here, since _draw_level_panel already
+        renders every panel from that same shared state on every call."""
         theme = self._apply_plot_theme()
         self._draw_target_faces(theme)
-        for level, ax in self.ax3d_by_level.items():
+        for level in self.level_plotters:
             if level == self.subdivision_level:
-                self._draw_wireframe_panel(ax, theme, level, self.faces, self.positions,
-                                            self.face_of_fine)
+                self._draw_level_panel(level, self.faces, self.positions, self.face_of_fine)
             elif level in self.level_snapshots:
                 snap = self.level_snapshots[level]
-                self._draw_wireframe_panel(ax, theme, level, snap["faces"], snap["positions"],
-                                            snap["face_of_fine"])
+                self._draw_level_panel(level, snap["faces"], snap["positions"],
+                                        snap["face_of_fine"])
             else:
-                self._draw_wireframe_panel(ax, theme, level, None, None, None)
-        reference_ax = self.ax3d_by_level.get(self.subdivision_level) or next(
-            iter(self.ax3d_by_level.values()), None)
-        if reference_ax is not None:
-            self._sync_views_to(reference_ax)
+                self._draw_level_panel(level, None, None, None)
         self._draw_idle_all()
 
 
