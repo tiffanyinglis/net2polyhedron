@@ -149,6 +149,15 @@ STARTING_LEVEL = 1
 SUBDIVISION_EDGE_ALPHA = 0.35
 SUBDIVISION_EDGE_WIDTH = 0.5
 
+# How much of each "Level N" panel's frame the shape's own bounding
+# box fills: axis half-range = shape's half-extent * this. 1.0 would
+# exactly touch the frame edge; below 1.0 crops in past it, making the
+# shape look bigger within the same panel ("zooming in" without actually
+# resizing the panel/window). 0.8 (was 1.2, a 20% MARGIN, before any
+# zooming) makes the shape 1.2/0.8 = 50% larger within the frame than
+# that original size.
+WIREFRAME_VIEW_FILL = 0.8
+
 # Shown on the Pressure readout before the user has ever clicked "Auto"
 # -- pressure isn't user-editable (see the "Auto" button), so this only
 # matters if "Inflate" is clicked with no calibration done yet.
@@ -192,55 +201,44 @@ def _solve_level0(path, base_faces, is_legacy_fabric, cache_dir):
 class InflatePolyhedronApp:
     def __init__(self, root):
         self.root = root
-        root.title("Inflate Polyhedron")
-        root.geometry("1200x820")
+        root.geometry("1500x820")
         root.minsize(820, 600)
 
         sv_ttk.set_theme("dark")
 
-        # ---- Net selection + Subdivision, side by side to save vertical
-        # space -- unrelated topics, but both are small/short controls. ----
-        top_row = ttk.Frame(root)
-        top_row.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
+        # ---- Debug mode vs. release mode: the ONLY difference between
+        # them is whether "Iterate for N steps" is offered at all (see
+        # the steps row below) -- release mode always drives straight to
+        # convergence. Everything else (net/target Setup, one
+        # Inflate/Subdivide button pair per level, always-synced
+        # rotation, no separate Stop button, the green "Converged"
+        # message suppressed) is shared and identical either way.
+        # Release mode is what a session starts in (it's the one meant
+        # for an actual user, not someone working on this app); "d"
+        # toggles between them at any time -- bind_all so it fires
+        # regardless of which widget currently has focus (there's no
+        # free-text entry in this app for a stray "d" keystroke to
+        # collide with).
+        self.debug_mode = False
+        self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
 
-        net_frame = ttk.LabelFrame(top_row, text="Net", padding=12)
-        net_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # ---- Setup: net picker + target RMS stretch, shared by both
+        # modes, plus (debug mode only) the steps-vs-convergence choice. ----
+        setup_frame = ttk.LabelFrame(root, text="Setup", padding=12)
+        setup_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
 
-        picker_row = ttk.Frame(net_frame)
+        picker_row = ttk.Frame(setup_frame)
         picker_row.pack(fill=tk.X)
         ttk.Label(picker_row, text="Choose a net:").pack(side=tk.LEFT, padx=(0, 8))
-        self.combo = ttk.Combobox(picker_row, state="readonly", width=30)
+        self.net_var = tk.StringVar()
+        self.combo = ttk.Combobox(picker_row, state="readonly", width=30,
+                                   textvariable=self.net_var)
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
-        status_row = ttk.Frame(net_frame)
-        status_row.pack(fill=tk.X, pady=(10, 0))
-        self.progress = ttk.Progressbar(status_row, mode="indeterminate", length=160)
-        self.status_var = tk.StringVar(value="")
-        self.status_label = ttk.Label(status_row, textvariable=self.status_var)
-        self.status_label.pack(side=tk.LEFT)
-
-        # ---- Subdivision: nested-level mesh refinement (level 0 is the
-        # net's own base faces; each press adds one level, up to
-        # MAX_LEVEL -- see mesh_levels' docstring). ----
-        subdivide_frame = ttk.LabelFrame(top_row, text="Subdivide", padding=12)
-        subdivide_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
-        self.subdivide_button = ttk.Button(subdivide_frame, text="Subdivide",
-                                            command=self.on_subdivide_clicked)
-        self.subdivide_button.pack(side=tk.LEFT)
-        self.subdivide_level_var = tk.StringVar(value="Level: 0")
-        ttk.Label(subdivide_frame, textvariable=self.subdivide_level_var).pack(
-            side=tk.LEFT, padx=(10, 0))
-
-        # ---- Inflation: everything about running relax_once lives here,
-        # in the order it's used -- pick a pressure, pick how much work to
-        # do, then Inflate (or Stop one that's already running). ----
-        inflate_frame = ttk.LabelFrame(root, text="Inflate", padding=12)
-        inflate_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
-
-        pressure_row = ttk.Frame(inflate_frame)
-        pressure_row.pack(fill=tk.X)
-        ttk.Label(pressure_row, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
+        target_row = ttk.Frame(setup_frame)
+        target_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(target_row, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
         self.target_rms_var = tk.DoubleVar(value=DEFAULT_TARGET_RMS_STRETCH_PCT)
         # A "converged" verdict only applies to the target it was reached
         # at -- changing this means the current pressure hasn't actually
@@ -250,42 +248,46 @@ class InflatePolyhedronApp:
         # refusing to recalibrate even after the user asks for a
         # different target.
         self.target_rms_var.trace_add("write", self._on_target_rms_changed)
-        self.target_rms_spin = ttk.Spinbox(pressure_row, from_=0.1, to=200.0,
+        self.target_rms_spin = ttk.Spinbox(target_row, from_=0.1, to=200.0,
                                             increment=1.0, width=6,
                                             textvariable=self.target_rms_var, format="%.1f")
         self.target_rms_spin.pack(side=tk.LEFT)
-        ttk.Label(pressure_row, text="%").pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Label(target_row, text="%").pack(side=tk.LEFT, padx=(2, 8))
         # Pressure is no longer user-editable or separately displayed --
         # "Inflate" calibrates it itself (see on_inflate_clicked) and it's
         # already logged per level in the Convergence History table.
         self.pressure_value = DEFAULT_PRESSURE
 
-        mode_row = ttk.Frame(inflate_frame)
-        mode_row.pack(fill=tk.X, pady=(8, 0))
+        # Debug-mode-only: "Iterate for N steps" vs. "until convergence"
+        # -- the one thing that actually differs between the two modes.
+        # Shown/hidden by _apply_mode_visibility; forced back to
+        # "convergence" whenever leaving debug mode, so release mode
+        # never runs a stray fixed-step request left over from before.
+        self.mode_row = ttk.Frame(setup_frame)
         self.iterate_mode_var = tk.StringVar(value="convergence")
-        self.steps_radio = ttk.Radiobutton(mode_row, text="Iterate for", value="steps",
+        self.steps_radio = ttk.Radiobutton(self.mode_row, text="Iterate for", value="steps",
                                             variable=self.iterate_mode_var,
                                             command=self._update_mode_state)
         self.steps_radio.pack(side=tk.LEFT)
         self.steps_var = tk.IntVar(value=DEFAULT_STEPS)
-        self.steps_spin = ttk.Spinbox(mode_row, from_=1, to=1000000, width=7,
+        self.steps_spin = ttk.Spinbox(self.mode_row, from_=1, to=1000000, width=7,
                                        textvariable=self.steps_var)
         self.steps_spin.pack(side=tk.LEFT, padx=(4, 4))
-        ttk.Label(mode_row, text="steps").pack(side=tk.LEFT, padx=(0, 18))
-        self.convergence_radio = ttk.Radiobutton(mode_row, text="Iterate until convergence",
+        ttk.Label(self.mode_row, text="steps").pack(side=tk.LEFT, padx=(0, 18))
+        self.convergence_radio = ttk.Radiobutton(self.mode_row, text="Iterate until convergence",
                                                   value="convergence",
                                                   variable=self.iterate_mode_var,
                                                   command=self._update_mode_state)
         self.convergence_radio.pack(side=tk.LEFT)
 
-        button_row = ttk.Frame(inflate_frame)
-        button_row.pack(fill=tk.X, pady=(8, 0))
-        self.inflate_button = ttk.Button(button_row, text="Inflate",
-                                          command=self.on_inflate_clicked)
-        self.inflate_button.pack(side=tk.LEFT)
-        self.stop_button = ttk.Button(button_row, text="Stop", command=self.on_stop_clicked)
-        self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.stop_button.state(["disabled"])
+        # ---- Status/progress: shared by both modes, always visible,
+        # positioned right after Setup. ----
+        status_frame = ttk.Frame(root)
+        status_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+        self.progress = ttk.Progressbar(status_frame, mode="indeterminate", length=160)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(status_frame, textvariable=self.status_var)
+        self.status_label.pack(side=tk.LEFT)
 
         # ---- Convergence history: one row per subdivision level visited
         # this net session, showing the pressure last calibrated for it
@@ -303,11 +305,11 @@ class InflatePolyhedronApp:
         # _refresh_history_table). height=MAX_LEVEL since that's the most
         # rows this table will ever hold -- a taller fixed height would
         # just reserve blank space below whatever's actually populated. ----
-        history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
-        history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+        self.history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
+        self.history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
         history_columns = ("level", "pressure", "steps", "max_stretch", "rms_stretch",
                             "convergence")
-        self.history_tree = ttk.Treeview(history_frame, columns=history_columns,
+        self.history_tree = ttk.Treeview(self.history_frame, columns=history_columns,
                                           show="headings", height=MAX_LEVEL)
         for col, heading, width in (
                 ("level", "Level", 50), ("pressure", "Pressure", 80), ("steps", "Steps", 70),
@@ -318,33 +320,94 @@ class InflatePolyhedronApp:
         self.history_tree.pack(fill=tk.X)
 
         # ---- Net (flat layout) + one 3D panel per level (1..MAX_LEVEL),
-        # side by side. Level N's panel is LIVE (redrawn every Inflate
+        # side by side, each its OWN Figure/Canvas (not one shared
+        # figure) specifically so a native Tkinter Inflate/Subdivide
+        # button pair can sit directly above/below each level's own
+        # panel in release mode (see _apply_mode_visibility) -- a single
+        # shared canvas has no way to embed a real button over just one
+        # of its subplots. Level N's panel is LIVE (redrawn every Inflate
         # progress update) only while self.subdivision_level == N; once
         # the user subdivides past it, that level's last state is frozen
         # into self.level_snapshots and its panel stops updating -- see
         # draw()/_subdivide_step. ----
+        # No "Sync rotation" choice -- panels are always kept in the same
+        # view (see _sync_views_to's callers: every drag, and once per
+        # draw() so a level revealed by Subdivide inherits the current
+        # shared view instead of starting at mplot3d's default one).
         view_frame = ttk.Frame(root)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(6, 14))
-        self.fig = plt.figure(figsize=(18, 5))
-        n_panels = 1 + MAX_LEVEL
-        self.ax2d = self.fig.add_subplot(1, n_panels, 1)
-        self.ax3d_by_level = {
-            level: self.fig.add_subplot(1, n_panels, 1 + level, projection="3d")
-            for level in range(1, MAX_LEVEL + 1)
-        }
-        self.canvas = FigureCanvasTkAgg(self.fig, master=view_frame)
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        # Vertex markers are only culled/positioned correctly for whatever
-        # orientation was current the last time draw() ran (see
-        # _draw_wireframe_panel's docstring) -- mplot3d's own interactive
-        # rotation changes elev/azim continuously without ever calling our
-        # draw() again, so hide them for the DURATION of a drag rather than
-        # show stale, wrongly-culled markers mid-rotation; they reappear,
-        # freshly culled for the new angle, on mouse release.
+
+        panels_row = ttk.Frame(view_frame)
+        panels_row.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        net_panel_frame = ttk.Frame(panels_row)
+        net_panel_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.fig_net = plt.figure(figsize=(3.2, 4.5))
+        self.ax2d = self.fig_net.add_subplot(1, 1, 1)
+        self.canvas_net = FigureCanvasTkAgg(self.fig_net, master=net_panel_frame)
+        self.canvas_net.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.level_canvases = {}
+        self.level_frames = {}
+        self.level_inflate_buttons = {}
+        self.level_subdivide_buttons = {}
+        self.level_done_label_var = None
+        self.ax3d_by_level = {}
+        for level in range(1, MAX_LEVEL + 1):
+            level_frame = ttk.Frame(panels_row)
+            level_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            self.level_frames[level] = level_frame
+            self.level_inflate_buttons[level] = ttk.Button(
+                level_frame, text="Inflate", command=self.on_inflate_clicked)
+            # The last level has nowhere further to subdivide TO -- a
+            # green "DONE!" label takes the Subdivide button's usual spot
+            # instead, shown once that level converges (see
+            # _update_subdivide_button_state), so the layout stays
+            # symmetric with every other level's button pair.
+            if level < MAX_LEVEL:
+                self.level_subdivide_buttons[level] = ttk.Button(
+                    level_frame, text="Subdivide", command=self.on_subdivide_clicked)
+            else:
+                self.level_done_label_var = tk.StringVar(value="")
+                self.level_done_label = ttk.Label(
+                    level_frame, textvariable=self.level_done_label_var,
+                    foreground=STATUS_COLORS["success"], anchor=tk.CENTER,
+                    font=("TkDefaultFont", 11, "bold"))
+            fig = plt.figure(figsize=(3.2, 4.5))
+            self.ax3d_by_level[level] = fig.add_subplot(1, 1, 1, projection="3d")
+            self.level_canvases[level] = FigureCanvasTkAgg(fig, master=level_frame)
+            # Inflate/the bottom widget packed BEFORE the canvas, and the
+            # bottom one on side=BOTTOM specifically -- packing either
+            # AFTER an expand=True canvas would starve it of space, since
+            # the canvas (packed first) would already have claimed the
+            # entire remaining cavity by the time it's placed. Same
+            # layout in both modes now, so this is unconditional.
+            self.level_inflate_buttons[level].pack(side=tk.TOP, fill=tk.X, in_=level_frame)
+            bottom_widget = (self.level_subdivide_buttons[level] if level < MAX_LEVEL
+                              else self.level_done_label)
+            bottom_widget.pack(side=tk.BOTTOM, fill=tk.X, in_=level_frame)
+            self.level_canvases[level].get_tk_widget().pack(
+                side=tk.TOP, fill=tk.BOTH, expand=True, in_=level_frame)
+
+        # All the 3D canvases (Net has no rotation-sync/vertex-culling
+        # concerns of its own) share these three handlers -- `event.inaxes`
+        # inside them identifies which Axes3D was involved regardless of
+        # which canvas actually fired the event, so one set of handlers
+        # connected to every 3D canvas works the same as one handler on
+        # one shared canvas used to.
         self._dragging_3d = False
         self.vertex_scatter = None
-        self.canvas.mpl_connect("button_press_event", self._on_3d_drag_start)
-        self.canvas.mpl_connect("button_release_event", self._on_3d_drag_end)
+        # Which 3D axes the current drag started on -- "Sync rotation"
+        # (see _on_3d_motion) copies THIS axis's live elev/azim onto every
+        # other "Level N" panel on every mouse-move, not just when the
+        # drag ends, and not by adding some relative offset -- all
+        # panels end up sharing the exact same view matrix, not just
+        # each spinning from wherever it happened to already be.
+        self._active_drag_ax = None
+        for canvas in self.level_canvases.values():
+            canvas.mpl_connect("button_press_event", self._on_3d_drag_start)
+            canvas.mpl_connect("button_release_event", self._on_3d_drag_end)
+            canvas.mpl_connect("motion_notify_event", self._on_3d_motion)
 
         # Per-level frozen snapshots of {faces, positions, face_of_fine,
         # edge_length} taken the moment the user subdivides PAST that
@@ -377,10 +440,35 @@ class InflatePolyhedronApp:
         self.label_to_path = {}
         self._apply_plot_theme()
         self.refresh_net_list()
+        self._apply_mode_visibility()
         if self.current_label:
             self.on_select_net()
 
+    def _on_toggle_debug_mode(self, _event=None):
+        self.debug_mode = not self.debug_mode
+        self._apply_mode_visibility()
+
+    def _apply_mode_visibility(self):
+        """The only actual difference between the two modes: whether the
+        steps-vs-convergence radio row is shown. Forces the choice back
+        to "convergence" when leaving debug mode, so release mode never
+        runs a stray fixed-step request left over from before."""
+        self.root.title(f"Inflate Polyhedron{' (debug mode)' if self.debug_mode else ''}")
+        if self.debug_mode:
+            self.mode_row.pack(fill=tk.X, pady=(8, 0))
+        else:
+            self.mode_row.pack_forget()
+            self.iterate_mode_var.set("convergence")
+
     def _set_status(self, text, kind="info"):
+        # The "success" (green) message is always dropped -- e.g.
+        # "Converged after N steps..." -- since the per-level button
+        # states, the green "DONE!" label, and the Convergence History
+        # table already show that; other kinds (info/warn/error) still
+        # carry useful feedback while something's running or has gone
+        # wrong, so those stay.
+        if kind == "success":
+            text = ""
         self.status_var.set(text)
         self.status_label.configure(foreground=STATUS_COLORS.get(kind, ""))
 
@@ -400,36 +488,91 @@ class InflatePolyhedronApp:
         matplotlib's defaults, so it has to be re-applied on every redraw.
         Returns the theme dict so draw() can reuse its colors."""
         theme = PLOT_THEME
-        self.fig.patch.set_facecolor(theme["bg"])
+        self.fig_net.patch.set_facecolor(theme["bg"])
         self.ax2d.set_facecolor(theme["bg"])
         self._style_2d_axis(self.ax2d, theme)
         for ax in self.ax3d_by_level.values():
+            ax.figure.patch.set_facecolor(theme["bg"])
             ax.set_facecolor(theme["bg"])
             self._style_3d_axis(ax, theme)
         return theme
+
+    def _draw_idle_all(self):
+        """Every panel now has its OWN canvas (see __init__'s Design
+        notes) -- redraw them all rather than the single shared canvas
+        this used to be."""
+        self.canvas_net.draw_idle()
+        for canvas in self.level_canvases.values():
+            canvas.draw_idle()
+
+    def _canvas_for_axis(self, ax):
+        for level, level_ax in self.ax3d_by_level.items():
+            if level_ax is ax:
+                return self.level_canvases[level]
+        return None
 
     def _refresh_plot(self):
         if self.positions is not None:
             self.draw()
         else:
             self._apply_plot_theme()
-            self.canvas.draw_idle()
+            self._draw_idle_all()
 
     def _on_3d_drag_start(self, event):
         """mplot3d's own left-click-drag rotation starts here -- hide the
         vertex-marker scatter for the duration (see its own comment in
-        __init__ for why), leaving the (live-culled) faces/edges alone."""
+        __init__ for why), leaving the (live-culled) faces/edges alone.
+        Remembers WHICH axis this drag is on (see _on_3d_motion) --
+        `event.inaxes` during a later motion event isn't reliable once
+        the mouse strays outside that axis's own bounds mid-drag, but
+        mplot3d itself keeps rotating based on where the drag started."""
         if event.inaxes not in self.ax3d_by_level.values() or event.button != 1:
             return
         self._dragging_3d = True
+        self._active_drag_ax = event.inaxes
         if self.vertex_scatter is not None:
             self.vertex_scatter.set_visible(False)
-            self.canvas.draw_idle()
+            self._canvas_for_axis(event.inaxes).draw_idle()
+
+    def _sync_views_to(self, reference_ax):
+        """Copies `reference_ax`'s exact elev/azim (and roll, on a
+        matplotlib new enough to have it) onto every OTHER "Level N"
+        panel -- a direct view-matrix copy, not a relative nudge, so
+        every panel ends up looking from exactly the same angle as
+        `reference_ax` rather than each just spinning from wherever it
+        already was. Caller is responsible for redrawing afterward."""
+        view = dict(elev=reference_ax.elev, azim=reference_ax.azim)
+        if hasattr(reference_ax, "roll"):
+            view["roll"] = reference_ax.roll
+        for ax in self.ax3d_by_level.values():
+            if ax is not reference_ax:
+                ax.view_init(**view)
+
+    def _on_3d_motion(self, event):
+        """Rotation is always synced (no user choice, see __init__'s
+        Design notes) -- keeps every other panel matching the DRAGGED
+        axis's live view on every mouse-move, connected AFTER mplot3d's
+        own internal rotation handler (both on the same canvas, in
+        connection order), so `self._active_drag_ax`'s elev/azim already
+        reflect this move by the time this runs."""
+        if not self._dragging_3d or self._active_drag_ax is None:
+            return
+        self._sync_views_to(self._active_drag_ax)
+        for canvas in self.level_canvases.values():
+            canvas.draw_idle()
 
     def _on_3d_drag_end(self, event):
         if not self._dragging_3d:
             return
         self._dragging_3d = False
+        # One last explicit sync at the FINAL view, in case the button
+        # release didn't come with its own trailing motion event (so the
+        # last _on_3d_motion tick wasn't necessarily at the exact final
+        # angle) -- done before clearing _active_drag_ax, and before
+        # _refresh_plot's own full redraw below.
+        if self._active_drag_ax is not None:
+            self._sync_views_to(self._active_drag_ax)
+        self._active_drag_ax = None
         # A full redraw (not just set_visible(True)) so the vertex culling
         # itself is recomputed for wherever the drag left the view angle.
         self._refresh_plot()
@@ -467,10 +610,10 @@ class InflatePolyhedronApp:
             self.current_label = default_label or (labels[0] if labels else None)
 
         if self.current_label:
-            self.combo.set(self.current_label)
+            self.net_var.set(self.current_label)
 
     def on_select_net(self, event=None):
-        chosen = self.combo.get()
+        chosen = self.net_var.get()
         self.current_label = chosen
         path = self.label_to_path[chosen]
         try:
@@ -542,9 +685,23 @@ class InflatePolyhedronApp:
     # ---- subdivide ----
 
     def _update_subdivide_button_state(self):
+        """Enforces the intended workflow (Inflate, Subdivide, Inflate,
+        Subdivide, ... one level at a time): a level's Subdivide button
+        only enables once IT has actually converged -- combined with
+        _update_inflate_button_state disabling Inflate once converged,
+        exactly one of the two buttons for the frontier level is ever
+        enabled at a time, and every other level's stays disabled
+        regardless (subdividing only ever acts on the current frontier
+        level). MAX_LEVEL has no Subdivide button at all (nothing further
+        to subdivide TO) -- its green "DONE!" label lights up in its
+        place once IT converges, instead."""
         can_subdivide = self.positions is not None and self.subdivision_level < MAX_LEVEL
-        self.subdivide_button.state(["!disabled"] if can_subdivide else ["disabled"])
-        self.subdivide_level_var.set(f"Level: {self.subdivision_level}")
+        converged = bool(self.last_stats.get("converged"))
+        for level, button in self.level_subdivide_buttons.items():
+            enabled = can_subdivide and converged and level == self.subdivision_level
+            button.state(["!disabled"] if enabled else ["disabled"])
+        done = self.subdivision_level == MAX_LEVEL and converged
+        self.level_done_label_var.set("DONE!" if done else "")
 
     def _subdivide_step(self):
         """The actual level-advancing work, shared by on_subdivide_clicked
@@ -666,17 +823,20 @@ class InflatePolyhedronApp:
                                else ["disabled"])
 
     def _update_inflate_button_state(self):
-        """Greys out Inflate once self.last_stats reports the mesh already
-        converged at the current pressure -- clicking again would just
-        burn steps without moving anything, since relax_once from an
-        already-converged point starts with near-zero force already.
-        Re-armed by _on_target_rms_changed, a new net load, or a Stop
-        (which leaves converged=False since it didn't run to
-        completion)."""
-        if self.last_stats.get("converged"):
-            self.inflate_button.state(["disabled"])
-        else:
-            self.inflate_button.state(["!disabled"])
+        """Greys out a level's Inflate button once self.last_stats reports
+        it already converged at the current pressure -- clicking again
+        would just burn steps without moving anything, since relax_once
+        from an already-converged point starts with near-zero force
+        already. Re-armed by _on_target_rms_changed, a new net load, or a
+        Stop (which leaves converged=False since it didn't run to
+        completion). Only the CURRENT frontier level's button is ever
+        eligible at all -- inflating only ever acts on wherever
+        self.subdivision_level currently is, so every other level's
+        Inflate button stays disabled regardless of convergence."""
+        converged = bool(self.last_stats.get("converged"))
+        for level, button in self.level_inflate_buttons.items():
+            enabled = not converged and level == self.subdivision_level
+            button.state(["!disabled"] if enabled else ["disabled"])
 
     def _on_target_rms_changed(self, *_args):
         if self.last_stats.get("converged"):
@@ -709,7 +869,7 @@ class InflatePolyhedronApp:
         self.pressure_value = pressure
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
-        self.stop_button.state(["!disabled"])
+        self._set_level_inflate_button_running(True)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
         status = (f"Inflating at pressure {pressure:.4g} for {target_steps} steps..."
@@ -718,15 +878,29 @@ class InflatePolyhedronApp:
         self._set_status(status, "info")
         self._run_inflate_stream(pressure, target_steps, self.stop_event)
 
+    def _set_level_inflate_button_running(self, running):
+        """Neither mode has a separate Stop button -- instead, the
+        CURRENT frontier level's own Inflate button turns into the Stop
+        control for the duration of a run, then back again once it
+        finishes (see _finish_inflate). Safe to assume the frontier level
+        doesn't change mid-run: Subdivide is disabled for the whole run
+        too (see _set_controls_enabled)."""
+        button = self.level_inflate_buttons.get(self.subdivision_level)
+        if button is None:
+            return
+        if running:
+            button.config(text="Stop", command=self.on_stop_clicked)
+            button.state(["!disabled"])
+        else:
+            button.config(text="Inflate", command=self.on_inflate_clicked)
+
     def on_stop_clicked(self):
         if self.stop_event is not None:
             self.stop_event.set()
-            self.stop_button.state(["disabled"])  # one request is enough; avoid repeat clicks
+            frontier_button = self.level_inflate_buttons.get(self.subdivision_level)
+            if frontier_button is not None:
+                frontier_button.state(["disabled"])  # one request is enough; avoid repeat clicks
             self._set_status("Stopping...", "warn")
-        self._set_status(
-            f"Auto pressure {pressure:.3f}: edges stretched up to {max_stretch:.2f}% from rest "
-            f"length (RMS {rms_stretch:.2f}%).", "success")
-        self.draw()
 
     def _run_inflate_stream(self, pressure, target_steps, stop_event):
         """Runs relax_once in a growing sequence of chunks (5, 10, 20, ...,
@@ -805,6 +979,7 @@ class InflatePolyhedronApp:
         self.progress.stop()
         self.progress.pack_forget()
         self._set_controls_enabled(True)
+        self._set_level_inflate_button_running(False)
         was_stopped = self.stop_event is not None and self.stop_event.is_set()
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
@@ -838,15 +1013,20 @@ class InflatePolyhedronApp:
             self._update_mode_state()  # respect the steps/convergence choice
             self._update_inflate_button_state()  # respect the converged-at-this-pressure gate
             self._update_subdivide_button_state()  # respect the at-MAX_LEVEL gate
-            self.stop_button.state(["disabled"])
         else:
             self.steps_spin.state(["disabled"])
-            self.inflate_button.state(["disabled"])
-            self.subdivide_button.state(["disabled"])
-            # stop_button is armed separately by on_inflate_clicked (right
-            # after this runs) -- other background jobs, like the initial
-            # cache load, leave it disabled since there's nothing to
-            # usefully interrupt there.
+            for button in self.level_subdivide_buttons.values():
+                button.state(["disabled"])
+            # The frontier level's Inflate button is deliberately left
+            # alone here -- _on_pressure_calibrated re-enables it right
+            # after this runs, turned into the Stop control (see
+            # _set_level_inflate_button_running); every OTHER level's
+            # stays disabled like normal, since it was never eligible
+            # anyway (see _update_inflate_button_state). Neither mode has
+            # a separate Stop button to arm/disarm here.
+            for level, button in self.level_inflate_buttons.items():
+                if level != self.subdivision_level:
+                    button.state(["disabled"])
 
     def _run_background(self, fn, args, on_done):
         """Run fn(*args) in a background thread and call on_done(result)
@@ -998,7 +1178,7 @@ class InflatePolyhedronApp:
 
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
         center = (lo + hi) / 2
-        half = (hi - lo).max() / 2 * 1.2 + 1e-6
+        half = (hi - lo).max() / 2 * WIREFRAME_VIEW_FILL + 1e-6
         ax.set_xlim(center[0] - half, center[0] + half)
         ax.set_ylim(center[1] - half, center[1] + half)
         ax.set_zlim(center[2] - half, center[2] + half)
@@ -1010,7 +1190,11 @@ class InflatePolyhedronApp:
         self.subdivision_level draws LIVE from current state; a level in
         self.level_snapshots (already subdivided past) draws its frozen
         state; any other level hasn't been reached yet and draws empty
-        (see _draw_wireframe_panel)."""
+        (see _draw_wireframe_panel). Then re-syncs every panel's view to
+        the current frontier level's (rotation is always synced, no user
+        choice -- see __init__'s Design notes) so a level just revealed
+        by Subdivide inherits whatever view the others are already at,
+        rather than starting at mplot3d's own default one."""
         theme = self._apply_plot_theme()
         self._draw_target_faces(theme)
         for level, ax in self.ax3d_by_level.items():
@@ -1023,7 +1207,11 @@ class InflatePolyhedronApp:
                                             snap["face_of_fine"])
             else:
                 self._draw_wireframe_panel(ax, theme, level, None, None, None)
-        self.canvas.draw_idle()
+        reference_ax = self.ax3d_by_level.get(self.subdivision_level) or next(
+            iter(self.ax3d_by_level.values()), None)
+        if reference_ax is not None:
+            self._sync_views_to(reference_ax)
+        self._draw_idle_all()
 
 
 def main():

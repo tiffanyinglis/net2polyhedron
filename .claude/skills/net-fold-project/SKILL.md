@@ -900,6 +900,110 @@ be rather than making those meshes take far more steps to formally
   the precomputed `self.target_layout` on every redraw rather than
   recomputing the BFS each time; the per-face raw-vertex-id text label
   (e.g. "[4, 0, 2, 6]") that stood in for a real layout before is gone.
+- **Debug mode vs. release mode -- ONE difference only.** `self.debug_mode`
+  (starts `False` -- release mode, the one meant for an actual user, is
+  what a session starts in) toggles via the "d" key
+  (`root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)` --
+  `bind_all` rather than `bind` so it fires regardless of which widget
+  has focus; safe here since nothing in this app is a free-text field a
+  stray "d" could collide with) and sets the window title to "Inflate
+  Polyhedron (debug mode)" or plain "Inflate Polyhedron". The two modes
+  used to have substantially different layouts (a whole separate set of
+  "Net"/"Subdivide"/"Inflate" frames for debug, a "Sync rotation"
+  checkbox only in one mode, workflow enforcement only in the other,
+  the green "success" message only suppressed in one) -- ALL of that was
+  deliberately unified away at the user's request, down to the ONE thing
+  that's actually still allowed to differ: whether "Iterate for N steps"
+  is offered at all. `_apply_mode_visibility` is now just:
+  ```python
+  if self.debug_mode:
+      self.mode_row.pack(fill=tk.X, pady=(8, 0))
+  else:
+      self.mode_row.pack_forget()
+      self.iterate_mode_var.set("convergence")
+  ```
+  Everything else below applies identically regardless of `self.debug_mode`
+  -- don't reintroduce a mode check into any of it without the user
+  explicitly asking for a new difference between the two modes.
+  - **One "Setup" frame** (net picker + target RMS spinner --
+    `self.combo`/`self.target_rms_var`, single widgets now, no more
+    debug/release duplicates) always visible, with `self.mode_row` (the
+    steps-vs-convergence radio choice) as the one part that shows/hides
+    per mode.
+  - **One Inflate button above, one Subdivide button below, each
+    "Level N" panel** (`self.level_inflate_buttons`/
+    `self.level_subdivide_buttons`), packed unconditionally in `__init__`
+    (no longer toggled by `_apply_mode_visibility`) -- both packed into
+    their level's frame BEFORE the canvas, the top one with `side=tk.TOP`
+    and the bottom one with `side=tk.BOTTOM`, specifically in that order:
+    packing either AFTER the canvas (which has `expand=True`) starves it
+    of space entirely, since the canvas would already have claimed the
+    whole remaining cavity by the time a later-packed sibling asks for
+    its share (verified: the Subdivide button was invisible, silently
+    squeezed to zero height, until this was fixed).
+  - **MAX_LEVEL has no Subdivide button at all** (nothing further to
+    subdivide TO) -- a green "DONE!" label (`self.level_done_label`/
+    `self.level_done_label_var`, `foreground=STATUS_COLORS["success"]`)
+    takes its exact spot instead, shown once that level converges, so
+    the layout stays visually symmetric with every other level's pair.
+  - **Workflow enforcement: exactly one button active at a time**, in
+    BOTH modes now. `_update_inflate_button_state` disables a level's
+    Inflate button once `self.last_stats["converged"]` is true;
+    `_update_subdivide_button_state` additionally requires that SAME
+    `converged` flag before enabling a level's Subdivide button (on top
+    of "must be the current frontier level" and `can_subdivide`) -- so a
+    freshly-subdivided, not-yet-inflated level has ONLY Inflate enabled,
+    and a freshly-converged level has ONLY Subdivide enabled (or shows
+    "DONE!" at MAX_LEVEL), never both.
+  - **No separate Stop button, in either mode.** The CURRENT frontier
+    level's own Inflate button turns into the Stop control for the
+    duration of a run (`_set_level_inflate_button_running`, called from
+    `_on_pressure_calibrated`/`_finish_inflate`) -- text and `command`
+    both swap (to `self.on_stop_clicked`) while running, and swap back
+    once it finishes. `_set_controls_enabled`'s disabled branch
+    deliberately leaves the frontier level's Inflate button alone (every
+    other level's stays disabled as normal) so it's still clickable as
+    Stop.
+  - **No "Sync rotation" choice at all -- rotation is just always
+    synced**, in both modes. There's no checkbox or variable for it
+    anymore: `_on_3d_motion`/`_on_3d_drag_end` sync unconditionally on
+    every drag, and `draw()` ALSO syncs every panel to the current
+    frontier level's view at the end of every redraw (see
+    `_sync_views_to`'s callers) -- specifically so a level just revealed
+    by Subdivide inherits whatever view the others are already at,
+    rather than starting at mplot3d's own default one.
+  - **The "success" (green) status message is always suppressed**
+    (`_set_status`: `if kind == "success": text = ""`) -- e.g. "Converged
+    after N steps..." -- since the per-level button states, the green
+    "DONE!" label, and the Convergence History table already show that;
+    other kinds (info/warn/error) still show, since those carry feedback
+    while something's running or has gone wrong rather than just
+    repeating what's already visible elsewhere.
+  - `on_inflate_clicked`/`on_subdivide_clicked` are shared by both modes
+    -- every per-level button is wired to the exact same callback
+    (there's no per-level branching inside them), since only the current
+    frontier level's button is ever enabled anyway, so "which one was
+    clicked" never actually varies.
+  - Status/progress (`self.progress`/`self.status_var`) and the
+    Convergence History table were already shared before the
+    unification and still are -- placed once, always visible.
+- **Multiple small canvases, not one shared figure.** Each panel (Net
+  and every "Level N") got its OWN `matplotlib.figure.Figure` +
+  `FigureCanvasTkAgg` (`self.fig_net`/`self.canvas_net`, and
+  `self.level_canvases[level]`, each wrapping its own single-axis
+  figure, `figsize=(3.2, 4.5)`) specifically so a native Tkinter button
+  can sit directly above/below each level's own panel in release mode --
+  one shared canvas has no way to embed a real widget over just one of
+  its subplots. All 4 panels' figures at this size (4 x 3.2in x 100dpi ≈
+  1280px) need `root.geometry("1500x820")`'s width to actually fit
+  side by side without the last one running off-screen -- if either
+  changes, check the other still leaves headroom. `_draw_idle_all`/`_canvas_for_axis` are the small helpers
+  this split needs: redraw every canvas after a full `draw()` (previously
+  one `self.canvas.draw_idle()` call), and look up which canvas owns a
+  given `Axes3D` (needed by the drag/rotation handlers, which now
+  connect to EVERY level canvas rather than one shared one -- `event.inaxes`
+  still identifies which `Axes3D` fired regardless of which canvas the
+  event came from, so the handler logic itself didn't need to change).
 - **View layout: "Net" plus one 3D panel per level.** `self.ax2d` is the
   flat "Net" layout (unchanged); `self.ax3d_by_level` is a `{level:
   Axes3D}` dict, one per level 1..`MAX_LEVEL`, built once in `__init__`.
@@ -930,6 +1034,27 @@ be rather than making those meshes take far more steps to formally
   (`solve_wireframe`, `relax_once`, etc.) stay on the dict-keyed
   representation throughout, since vertices are relaxed by id and a
   mid-solve mesh isn't reliably closed or convex.
+  `WIREFRAME_VIEW_FILL` (0.8) sets how tightly each panel crops to the
+  shape's own bounding box -- below 1.0 crops in past the shape's exact
+  extent, making it look bigger within the same panel without resizing
+  anything; tuned directly against user-requested "N% bigger" asks
+  (1.2/0.8 = 1.5, i.e. 50% bigger than the original 1.2 = 20%-margin
+  baseline), so if asked again, compute the new value the same way
+  rather than guessing.
+- **"Sync rotation" checkbox** (`self.sync_rotation_var`, above the
+  panels): while checked and a mouse-drag rotation is in progress on one
+  "Level N" panel, `_on_3d_motion` (a `motion_notify_event` handler,
+  connected AFTER mplot3d's own internal rotation handler so
+  `self._active_drag_ax`'s `elev`/`azim` already reflect the current
+  move by the time it runs) copies that axis's `elev`/`azim` directly
+  onto every OTHER 3D panel via `ax.view_init(...)` -- a direct copy, not
+  a relative nudge, so all panels end up sharing the exact same view
+  matrix rather than each just spinning independently from wherever it
+  already was. `self._active_drag_ax` (set in `_on_3d_drag_start`,
+  cleared in `_on_3d_drag_end`) tracks which axis the drag STARTED on,
+  since `event.inaxes` during a motion event isn't reliable once the
+  mouse strays outside that axis's bounds mid-drag (mplot3d itself keeps
+  rotating based on drag origin, not current mouse position).
 
 ## Testing
 
