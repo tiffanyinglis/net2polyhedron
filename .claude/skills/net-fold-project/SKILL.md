@@ -711,8 +711,12 @@ be rather than making those meshes take far more steps to formally
   - **Radio buttons** control how much work one "Inflate" click does:
     "Iterate for N steps" passes `max_nfev=N` to `relax_once` (now
     literally N explicit relaxation steps); "Iterate until convergence"
-    (the default) passes `max_nfev=None`, running until every vertex's
-    own net force drops below `stretchy_mesh.CONVERGENCE_GTOL = 1e-4` --
+    (the default) passes `max_nfev=None`, running until EITHER every
+    vertex's own net force drops below `stretchy_mesh.CONVERGENCE_GTOL =
+    1e-4`, OR `max_stretch_pct` stops moving for `STALL_WINDOW` steps
+    (see its comment -- some meshes, e.g. a level-3-subdivided cube,
+    settle into a tiny persistent numerical wobble that never crosses
+    gtol even though the shape itself has visibly stopped changing) --
     picked as the default over "steps" since a large fine mesh (e.g.
     `dodecahedron_res3.json`, 1446 variables) can need many iterations
     before the shape looks settled, and there's no obvious step COUNT a

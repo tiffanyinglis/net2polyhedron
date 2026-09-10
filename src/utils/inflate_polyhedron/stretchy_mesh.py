@@ -105,6 +105,7 @@ touches them, per this project's docstring convention in skills.md):
   further ones (repeated successes land on essentially the same result
   once a mesh inflates at all).
 """
+import collections
 import json
 
 import numpy as np
@@ -747,13 +748,39 @@ STEP_MAX_FRACTION = 0.2
 # switches to _STIFF only on a step where _relax_force reports the soft
 # limit actually engaged (max_excess > 0), so ordinary inflation keeps
 # the fast, generous step size.
-STEP_MAX_MULTIPLIER_BASE = 0.1
+#
+# _BASE itself needed lowering from 0.1 to 0.05: a denser mesh has more
+# springs meeting at each vertex, which raises that vertex's EFFECTIVE
+# combined stiffness even with no soft limit involved at all -- verified
+# a level-3-subdivided cube at pressure=1 (194 vertices) settles into an
+# exact, undamped 2-cycle under 0.1 (max_stretch_pct alternates between
+# ~18.9% and ~24.4% forever, never converging), while 0.05/0.02/0.01 all
+# converge cleanly to the SAME ~8.5% fixed point.
+STEP_MAX_MULTIPLIER_BASE = 0.05
 STEP_MAX_MULTIPLIER_STIFF = 0.001
 
 # Hard cap on iterations when max_nfev=None (run-to-convergence): explicit
 # steps have no scipy-style internal budget of their own, so this stands
 # in for one.
 MAX_UNBOUNDED_STEPS = 200_000
+
+# Second convergence path, alongside gtol: some meshes settle into a
+# tiny persistent wobble or a very long, slow tail -- force stays above
+# gtol (sometimes indefinitely) while max_stretch_pct has effectively
+# stopped moving. Every vertex's force being individually near-zero is a
+# stricter demand than "the shape has stopped changing", the thing this
+# app and its user actually care about -- so relax_once also declares
+# convergence once max_stretch_pct's range over the last STALL_WINDOW
+# steps stays under STALL_TOL_PCT, mirroring scipy's own ftol/xtol (a
+# plateau check ALONGSIDE its gtol, not instead of it) that the old
+# least_squares-based relax_once used to get for free. STALL_TOL_PCT=1.0
+# (a full percentage point of stretch, not a fraction of one) is
+# deliberately generous -- verified across cube/tetrahedron/octahedron/
+# icosahedron/dodecahedron/three_squares/two_pentagons_and_a_square at
+# several pressures, plus a level-3-subdivided cube, that this still
+# lands within a point or two of what a strict gtol-only run reaches.
+STALL_WINDOW = 200
+STALL_TOL_PCT = 1.0
 
 
 def mesh_volume(positions, faces):
@@ -803,17 +830,20 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     `pressure` is a real per-face outward force, with no volume or
     remembered state anywhere in it.
 
-    `max_nfev` caps the number of steps; None runs until every vertex's
-    force drops below `gtol` (capped at MAX_UNBOUNDED_STEPS as a runaway
-    guard). `stop_event` (a threading.Event), if given, is checked before
-    each step and aborts at the next one, returning whatever position was
-    last reached.
+    `max_nfev` caps the number of steps; None runs until convergence
+    (capped at MAX_UNBOUNDED_STEPS as a runaway guard), via EITHER of two
+    criteria: every vertex's force drops below `gtol`, or max_stretch_pct
+    stops moving for STALL_WINDOW steps (see STALL_WINDOW's comment for
+    why both exist). `stop_event` (a threading.Event), if given, is
+    checked before each step and aborts at the next one, returning
+    whatever position was last reached.
 
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     max_force, converged). `max_force` is the worst vertex's net force at
     the returned position (compare against `gtol`), None if stopped
-    before a single step ran. `converged` is True only if `gtol` (not the
-    step cap or a stop request) is what stopped it."""
+    before a single step ran. `converged` is True only if one of the two
+    criteria above (not the step cap or a stop request) is what stopped
+    it."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
     pts = np.array([positions[v] for v in vertex_ids], dtype=float)
@@ -822,6 +852,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     steps_taken = 0
     converged = False
     max_force = None
+    recent_max_stretch = collections.deque(maxlen=STALL_WINDOW)
     for steps_taken in range(1, step_cap + 1):
         if stop_event is not None and stop_event.is_set():
             steps_taken -= 1
@@ -830,6 +861,12 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
                                           length_arr, pressure, planarity_weight)
         max_force = float(np.linalg.norm(force, axis=1).max())
         if max_force < gtol:
+            converged = True
+            break
+        dist = np.linalg.norm(pts[edge_bi] - pts[edge_ai], axis=1)
+        recent_max_stretch.append(float(np.max(np.abs(100 * (dist - length_arr) / length_arr))))
+        if (len(recent_max_stretch) == STALL_WINDOW
+                and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
             converged = True
             break
         step_mult = STEP_MAX_MULTIPLIER_STIFF if max_excess > 0 else STEP_MAX_MULTIPLIER_BASE
