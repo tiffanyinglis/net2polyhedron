@@ -111,12 +111,17 @@ work for anyone who wants one.
    buffer instead, which handles arbitrary triangle soups correctly
    regardless of convexity, blitted into a plain Tkinter Label as an
    off-screen-rendered image. Every level panel shares ONE click-drag
-   rotation state (self.level_azim/level_elev) -- a drag on any panel
-   rotates all of them together, matching what the old matplotlib
-   panels' rotation sync used to do. (Tried on Level 0 alone first, to
-   validate the approach before applying it to every level.) Every level
-   panel likewise shares ONE mouse-wheel zoom state (self.level_zoom) --
-   scrolling over any panel zooms all of them together, same rationale.
+   rotation state (self.level_rotation, a scipy.spatial.transform.Rotation
+   quaternion -- see _on_level_motion) -- a drag on any panel rotates all
+   of them together, matching what the old matplotlib panels' rotation
+   sync used to do. (Tried on Level 0 alone first, to validate the
+   approach before applying it to every level.) An earlier version stored
+   azimuth/elevation as two separate Euler angles, which hits gimbal lock
+   near the poles (elevation approaching +-90 degrees) -- a quaternion has
+   no such singularity, since the whole orientation is one object rather
+   than two angles applied in a fixed order. Every level panel likewise
+   shares ONE mouse-wheel zoom state (self.level_zoom) -- scrolling over
+   any panel zooms all of them together, same rationale.
 """
 import sys
 from pathlib import Path
@@ -133,6 +138,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.colors as mcolors
@@ -194,7 +200,10 @@ LEVEL_PANEL_SIZE = (320, 450)
 # alone still did too) -- 0.6 * 0.6 = 0.36.
 LEVEL_ZOOM_FILL = 0.36
 # Initial camera angle -- arbitrary, just a reasonable non-axis-aligned
-# starting view (close to mplot3d's own default elev=30/azim=-60).
+# starting view (close to mplot3d's own default elev=30/azim=-60). Only
+# used once, to build the initial self.level_rotation quaternion (see
+# _initial_level_rotation) -- nothing after that decomposes back into
+# separate elevation/azimuth angles, which is what avoids gimbal lock.
 LEVEL_DEFAULT_ELEV = 30.0
 LEVEL_DEFAULT_AZIM = -60.0
 # Degrees of camera rotation per pixel of click-drag -- tuned by feel
@@ -412,10 +421,10 @@ class InflatePolyhedronApp:
         # and its panel stops updating -- see draw()/_subdivide_step/
         # _finish_relax. ----
         # No "Sync rotation" choice -- every level panel shares ONE
-        # camera angle (self.level_azim/level_elev), updated by a drag on
-        # ANY panel (see _on_level_motion) and reapplied to a level just
-        # revealed by Subdivide so it inherits the current shared view
-        # rather than starting at some default one.
+        # camera orientation (self.level_rotation, a quaternion), updated
+        # by a drag on ANY panel (see _on_level_motion) and reapplied to a
+        # level just revealed by Subdivide so it inherits the current
+        # shared view rather than starting at some default one.
         view_frame = ttk.Frame(root)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(6, 14))
 
@@ -461,14 +470,19 @@ class InflatePolyhedronApp:
         self.level_photos = {}
         self._level_center = {}
         self._level_half = {}
-        # ONE shared camera angle across every level panel (see this
+        # ONE shared camera orientation across every level panel (see this
         # section's own Design notes above) -- updated by a drag on any
         # panel (_on_level_motion), applied to all of them
-        # (_render_all_level_panels).
-        self.level_azim = LEVEL_DEFAULT_AZIM
-        self.level_elev = LEVEL_DEFAULT_ELEV
+        # (_render_all_level_panels). A quaternion (scipy Rotation) rather
+        # than a separate azimuth/elevation pair -- two Euler angles hit
+        # gimbal lock near the poles (elevation -> +-90 degrees, where a
+        # horizontal drag stops rotating around a sensible axis); a
+        # quaternion represents the whole orientation as one object with
+        # no such singularity. _initial_level_rotation() reproduces the
+        # old LEVEL_DEFAULT_AZIM/ELEV starting view as a Rotation.
+        self.level_rotation = self._initial_level_rotation()
         # ONE shared zoom factor across every level panel, same rationale
-        # as level_azim/level_elev above -- a scroll on any panel updates
+        # as level_rotation above -- a scroll on any panel updates
         # it and re-renders all of them (see _on_level_scroll).
         self.level_zoom = 1.0
         self._level_dragging = False
@@ -592,30 +606,71 @@ class InflatePolyhedronApp:
         label.bind("<Button-4>", self._on_level_scroll)
         label.bind("<Button-5>", self._on_level_scroll)
 
+    @staticmethod
+    def _initial_level_rotation():
+        """Builds the starting self.level_rotation quaternion so it
+        reproduces the same default view LEVEL_DEFAULT_AZIM/ELEV used to
+        give directly (see _render_level_pv's old azim/elev formula) --
+        this is the ONLY place spherical angles are converted into a
+        rotation; every update after this point (_on_level_motion) works
+        with the quaternion directly and never decomposes it back into
+        angles, which is what avoids gimbal lock. Constructs an explicit
+        orthonormal (direction, right, up) frame for that view and reads
+        the rotation straight off it as a 3x3 matrix -- a rotation matrix
+        IS exactly [x-axis-image | y-axis-image | z-axis-image] as
+        columns, so mapping canonical axes (1,0,0)/(0,1,0)/(0,0,1) to
+        (direction, right, up) is this matrix by construction."""
+        azim, elev = np.radians(LEVEL_DEFAULT_AZIM), np.radians(LEVEL_DEFAULT_ELEV)
+        direction = np.array([np.cos(elev) * np.cos(azim), np.cos(elev) * np.sin(azim),
+                               np.sin(elev)])
+        world_up = np.array([0.0, 0.0, 1.0])
+        # This cross-product order (world_up x direction, then direction x
+        # right) is what makes [direction | right | up] a RIGHT-handed
+        # (determinant +1) frame -- the other order is left-handed and
+        # scipy's Rotation.from_matrix rejects it outright.
+        right = np.cross(world_up, direction)
+        right /= np.linalg.norm(right)
+        up = np.cross(direction, right)
+        return Rotation.from_matrix(np.column_stack([direction, right, up]))
+
     def _on_level_drag_start(self, event):
         self._level_dragging = True
         self._level_last_xy = (event.x, event.y)
 
     def _on_level_motion(self, event):
         """Left-click-drag on ANY level panel rotates the shared camera
-        angle (self.level_azim/level_elev) and re-renders EVERY panel
-        with it in real time -- this app's own analogue of mplot3d's
-        built-in drag rotation, reimplemented here since PyVista/VTK
-        panels are plain images, not interactive widgets (see
-        _build_level_pv_panel). Re-rendering all four costs ~30ms
-        (measured), well within real-time feel -- an earlier version of
-        this only re-rendered the dragged panel, misdiagnosing a
-        completely different bug (plotter.screenshot() not actually
-        re-rendering on a camera-only change without an explicit
-        render() first, see _render_level_pv) as a performance problem;
-        now that that's fixed, there's no reason to hold the other three
-        back until the drag ends."""
+        orientation (self.level_rotation) and re-renders EVERY panel with
+        it in real time -- this app's own analogue of mplot3d's built-in
+        drag rotation, reimplemented here since PyVista/VTK panels are
+        plain images, not interactive widgets (see _build_level_pv_panel).
+        Re-rendering all four costs ~30ms (measured), well within
+        real-time feel -- an earlier version of this only re-rendered the
+        dragged panel, misdiagnosing a completely different bug
+        (plotter.screenshot() not actually re-rendering on a camera-only
+        change without an explicit render() first, see _render_level_pv)
+        as a performance problem; now that that's fixed, there's no
+        reason to hold the other three back until the drag ends.
+
+        Composes two small rotations -- about the CURRENT up axis for a
+        horizontal drag, about the CURRENT right axis for a vertical one
+        -- onto the existing quaternion, rather than accumulating into a
+        stored azimuth/elevation pair. This is a free trackball rotation:
+        because "up" is whatever self.level_rotation currently says it
+        is (not re-pinned to world +z every frame the way the old
+        azim/elev formula did), there's no pole for elevation to
+        approach and lock up near -- the earlier version had to clamp
+        elevation to +-89 degrees for exactly this reason; this version
+        needs no clamp at all."""
         if not self._level_dragging or self._level_last_xy is None:
             return
         last_x, last_y = self._level_last_xy
         dx, dy = event.x - last_x, event.y - last_y
-        self.level_azim -= dx * LEVEL_DRAG_SENSITIVITY
-        self.level_elev = max(-89.0, min(89.0, self.level_elev + dy * LEVEL_DRAG_SENSITIVITY))
+        up = self.level_rotation.apply([0.0, 0.0, 1.0])
+        right = self.level_rotation.apply([0.0, 1.0, 0.0])
+        sensitivity = np.radians(LEVEL_DRAG_SENSITIVITY)
+        yaw = Rotation.from_rotvec(-dx * sensitivity * up)
+        pitch = Rotation.from_rotvec(-dy * sensitivity * right)
+        self.level_rotation = pitch * yaw * self.level_rotation
         self._level_last_xy = (event.x, event.y)
         self._render_all_level_panels()
 
@@ -685,7 +740,7 @@ class InflatePolyhedronApp:
 
     def _render_level_pv(self, level):
         """Positions an orthographic (parallel-projection) camera from
-        the SHARED self.level_azim/elev (see the drag handlers) at a
+        the SHARED self.level_rotation (see the drag handlers) at a
         distance derived from THIS level's own current bounding box
         (self._level_center/_level_half, set by _draw_level_panel --
         necessary since neither a pure-spring relax nor a pressure
@@ -702,9 +757,8 @@ class InflatePolyhedronApp:
         actor's positioning/justification doesn't guarantee it stays
         fully inside the viewport the way a real widget placed above the
         image trivially does."""
-        azim, elev = np.radians(self.level_azim), np.radians(self.level_elev)
-        direction = np.array([np.cos(elev) * np.cos(azim), np.cos(elev) * np.sin(azim),
-                               np.sin(elev)])
+        direction = self.level_rotation.apply([1.0, 0.0, 0.0])
+        up = self.level_rotation.apply([0.0, 0.0, 1.0])
         center, half = self._level_center[level], self._level_half[level]
         distance = half * 4
         plotter = self.level_plotters[level]
@@ -712,7 +766,12 @@ class InflatePolyhedronApp:
         camera.parallel_projection = True
         camera.focal_point = tuple(center)
         camera.position = tuple(center + direction * distance)
-        camera.up = (0.0, 0.0, 1.0)
+        # Read straight off the quaternion, NOT pinned to world (0,0,1) --
+        # a fixed world-up is exactly what forces elevation into a
+        # separate angle that locks up near the poles (see
+        # _on_level_motion's docstring); letting up rotate freely with
+        # the camera is what a quaternion buys.
+        camera.up = tuple(up)
         # parallel_scale sets the camera's vertical half-height in world
         # units -- the horizontal half-width it implies is narrower by
         # the window's own aspect ratio (width/height), which would crop
@@ -1408,7 +1467,7 @@ class InflatePolyhedronApp:
         0 -- promoted away from by a converged Relax) draws its frozen
         state; any other level hasn't been reached yet and draws empty
         (see _draw_level_panel). Every level panel shares ONE camera
-        angle (self.level_azim/level_elev, see __init__'s Design notes)
+        orientation (self.level_rotation, see __init__'s Design notes)
         -- nothing further to sync here, since _draw_level_panel already
         renders every panel from that same shared state on every call."""
         theme = self._apply_plot_theme()
