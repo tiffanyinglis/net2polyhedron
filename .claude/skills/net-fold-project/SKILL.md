@@ -108,8 +108,7 @@ two folders below exist now.)
 - `common/` — helpers SHARED by more than one app (not net-fold domain
   logic -- that's `utils/` -- and not GUI widgets -- that's `ui/`):
   - `paths.py` — the ONLY place that computes shared, cross-app
-    locations: `NETS_DIR`/`STRETCHY_NETS_DIR`/`OUTPUT_DIR`/`SAVE_DIR`
-    (input nets and the interactive apps' saved output — NOT caches,
+    locations: `NETS_DIR`/`STRETCHY_NETS_DIR` (input nets — NOT caches,
     those are per-app, above), all derived from `Path(__file__)`. An
     app one level deeper than `src/apps/` first does a tiny inline
     bootstrap (`sys.path.insert(0, str(Path(__file__).resolve().parent.parent))`)
@@ -225,11 +224,9 @@ sub-package's own `__init__.py` docstring for its module list):
   pipeline (historical)" below and the sibling `polyhedron-unfolder`
   project. `src/utils/geometry/polyhedron.py`, above, is a self-contained
   re-add of just that package's `Polyhedron` class, not a survivor of it.)
-`data/` — everything on-disk that isn't code (input specs and app output
-ONLY — no caches; those are per-app, under `src/apps/<app>/cache/`, see
-above):
-- `input/stretchy_nets/*.json` — **human-authored** STRETCHY net specs (vertex-loop format, see below). (There USED TO also be an `input/nets/*.json` directory of RIGID net specs — deleted along with the rigid pipeline, see "Removed: the rigid-unfolding pipeline (historical)" below.)
-- `output/` — user-generated saves from `inflate_polyhedron_app`'s "Save" button (see "The app" below), created on demand
+`data/` — everything on-disk that isn't code (input specs ONLY — no
+caches; those are per-app, under `src/apps/<app>/cache/`, see above):
+- `input/stretchy_nets/*.json` — **human-authored** STRETCHY net specs (vertex-loop format, see below). (There USED TO also be an `input/nets/*.json` directory of RIGID net specs — deleted along with the rigid pipeline, see "Removed: the rigid-unfolding pipeline (historical)" below.) (There USED TO also be an `output/` directory of user-generated saves from `inflate_polyhedron_app`'s "Save" button — that button was removed, see "The app" below.)
 
 `tests/` — pytest suite (see Testing below):
 - `unit/<category>/` — one test file per `src/utils/<category>/` module, mirroring `src/utils/`'s own sub-package layout exactly. (There USED TO also be a `unit/polyhedron_unfolder/` directory, one test file per module of the now-deleted rigid-pipeline package, and an `integration/` directory of tests crossing `utils` sub-package boundaries plus a shared `helpers.py` — both removed along with the rigid pipeline; see "Removed: the rigid-unfolding pipeline (historical)" below.)
@@ -666,8 +663,11 @@ be rather than making those meshes take far more steps to formally
 - **The "Inflate" `LabelFrame`** groups everything about running
   `relax_once`, top to bottom in the order it's used: Pressure spinner,
   then the iterate-mode radio buttons, then the Inflate/Stop buttons.
-  ("Save" and the net picker live in the "Net" frame above it instead --
-  not inflation controls.)
+  (The net picker lives in the "Net" frame above it instead -- not an
+  inflation control. There USED TO also be a "Save" button there,
+  writing vertex positions/stats to a `.json` plus a PNG of the current
+  view under `data/output/Save/` -- removed; see git history for
+  `on_save_clicked` if this needs reviving.)
   - **"Pressure" spinner**: a user-chosen, CONSTANT pressure passed to
     `relax_once`, continuing from wherever `self.positions` currently is
     (not from scratch) -- so repeated clicks let the user watch/steer the
@@ -693,21 +693,34 @@ be rather than making those meshes take far more steps to formally
     doubled-size "solution", or a uniform implosion to near-zero volume
     that never disagrees with itself) that a genuine small-step physical
     walk starting from the same point would never reach.
-  - **`stretchy_mesh.is_orientation_consistent`** (public wrapper around
-    `_is_orientation_consistent`) requires every face's normal to agree
-    AND point outward from the mesh's centroid -- not just agree with
-    each other, since a mesh gone fully inside-out is still internally
-    "consistent" by that weaker check alone. Used by `_run_inflate_stream`
-    as a safety net: after every chunk, if the result fails this check,
-    it's REJECTED (positions not updated) and retried at half the chunk
-    size; once a size is found to cause this, a `ceiling` permanently
-    caps how far that Inflate click's chunk is ever allowed to grow back
-    to again, so the loop can't oscillate forever between "too small to
-    move anything" and "big enough to fold" -- it settles on some safe
-    operating size instead. If even a single-step chunk fails this check,
-    inflation stops there and is reported to the user as unsafe at this
-    pressure, rather than looping forever or silently accepting a
-    corrupted result.
+  - **No orientation/fold check on the interactive Inflate loop.** An
+    earlier version of `_run_inflate_stream` rejected a chunk whenever
+    `stretchy_mesh.is_orientation_consistent` (the centroid-outward
+    heuristic -- see its own docstring, still used by `solve_wireframe`)
+    failed, on the theory that a big enough step could fold the mesh
+    through itself. That heuristic false-positives on non-convex/open
+    nets -- verified `data/input/stretchy_nets/two_pentagons_and_a_square.json`
+    subdivided to level 1 gets flagged as "folded" even completely at
+    rest, before any inflation at all. A more targeted reference-based
+    replacement was tried (comparing each internal edge's own local fold
+    sign against a known-good starting configuration, catching a genuine
+    self-intersection independent of overall mesh shape) and correctly
+    stopped flagging the at-rest false positive, but still rejected this
+    net a few real steps into inflation -- tracing it showed a few of its
+    folds sit nearly exactly flat at rest (a consequence of this net's
+    two faces already sharing more than one edge), so a normal step can
+    tip one across zero. Letting `relax_once` run to convergence with no
+    check at all (rather than the check rejecting every chunk and
+    reporting the pressure as unsafe) reaches a stable, sensible-looking
+    result -- positive volume, reasonable stretch, force below tolerance
+    -- though that one patch does stay locally self-intersecting in the
+    final shape forever (verified: it never un-crosses on its own,
+    however high the pressure). The user inspected the actual result
+    with the check removed and was fine with it, so the check was removed
+    entirely rather than kept as a safety net that was only ever refusing
+    to report a passable result; `relax_once`'s own small steps (see
+    above) are what actually keeps results sane now, not a post-hoc
+    reject-and-retry gate.
   - **Radio buttons** control how much work one "Inflate" click does:
     "Iterate for N steps" passes `max_nfev=N` to `relax_once` (now
     literally N explicit relaxation steps); "Iterate until convergence"
@@ -789,16 +802,6 @@ be rather than making those meshes take far more steps to formally
   reintroduces the coarse solve's restart search as a precomputed,
   cached, one-time setup step, while keeping the interactive "Inflate"
   loop itself restart-free either way.
-- **"Save" button** (in the "Net" frame, not "Inflate" -- it isn't an
-  inflation control) writes the current vertex positions (plus
-  `iteration`, `pressure`, `stats` -- including `optimality`/`converged`
-  -- `faces`, and -- for a fabric net --
-  `coarse_faces`/`resolution`/`face_of_fine`) to `data/output/Save/<source>_<timestamp>.json`,
-  and the current figure (which embeds the "Iteration: N | ..." line via
-  `fig.text` at the bottom -- so it's part of the rendered image, not
-  just a separate Tk label, and gets captured by `savefig` too) to
-  `data/output/Save/<source>_<timestamp>.png` -- same stem, so the two files are easy
-  to pair up later.
 - The initial cache load runs in a background thread via `_run_background`;
   each "Inflate" click runs via the streaming variant, `_run_inflate_stream`
   (see above) -- both because either can take a while and because Tk

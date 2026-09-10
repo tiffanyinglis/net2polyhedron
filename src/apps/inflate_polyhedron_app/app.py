@@ -64,10 +64,6 @@ itself still work for anyone who wants one.
      tolerance (CONVERGENCE_GTOL -- some meshes have a long, slow-shrinking
      tail after the shape has visibly settled, so this is deliberately
      looser than it might seem it needs to be).
-   - "Save" writes the current vertex positions (plus iteration count,
-     pressure, and stretch stats) and a PNG of the current view to
-     data/output/Save/, both named from the source net's filename plus a
-     timestamp.
 4. The "Convergence History" table records one row per subdivision level
    visited this net session: how many Inflate steps that level has taken
    so far (self.iteration_count -- reset to 0 by every Subdivide click,
@@ -87,11 +83,9 @@ if str(_APPS_DIR) not in sys.path:
     sys.path.insert(0, str(_APPS_DIR))
 
 import glob
-import json
 import os
 import queue
 import threading
-import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -105,11 +99,11 @@ from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import sv_ttk
 
-from common.paths import STRETCHY_NETS_DIR, SAVE_DIR
+from common.paths import STRETCHY_NETS_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS, DISABLED_SUFFIX
 from ui.cullable_face import _CullableFace
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, solve_wireframe, relax_once, is_orientation_consistent,
+    load_stretchy_mesh, solve_wireframe, relax_once,
     mesh_to_polyhedron, mesh_edges, EDGE_LENGTH, PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from utils.inflate_polyhedron.stretchy_cache import load_with_cache, is_cached, cache_path_for
@@ -205,9 +199,6 @@ class InflatePolyhedronApp:
         self.combo = ttk.Combobox(picker_row, state="readonly", width=30)
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
-
-        self.save_button = ttk.Button(picker_row, text="Save", command=self.on_save_clicked)
-        self.save_button.pack(side=tk.LEFT, padx=(12, 0))
 
         status_row = ttk.Frame(net_frame)
         status_row.pack(fill=tk.X, pady=(10, 0))
@@ -486,13 +477,12 @@ class InflatePolyhedronApp:
         generation = self._load_generation
         self._run_background(
             _solve_level0, (path, self.base_faces, legacy_coarse_faces is not None, CACHE_DIR),
-            lambda payload: self._on_loaded(payload, generation),
-            "Loading precomputed starting shape...")
+            lambda payload: self._on_loaded(payload, generation))
 
     def _on_loaded(self, payload, generation):
         if generation != self._load_generation:
             return  # a newer net selection has since started; this result is stale
-        positions, stats, cached_name = payload
+        positions, stats, _cached_name = payload
         self.positions = positions
         self.last_stats = {"max_stretch_pct": stats["max_stretch_pct"],
                             "rms_stretch_pct": stats["rms_stretch_pct"],
@@ -505,12 +495,6 @@ class InflatePolyhedronApp:
             self._subdivide_step()
         self._update_inflate_button_state()
         self._update_subdivide_button_state()  # reflect STARTING_LEVEL, not level 0
-        self._set_status(
-            f"Loaded {cached_name or self.mesh_name}: starting shape ready at level "
-            f"{self.subdivision_level} (edges stretched up to "
-            f"{self.last_stats['max_stretch_pct']:.2f}%, RMS "
-            f"{self.last_stats['rms_stretch_pct']:.2f}%). Press Inflate to relax/inflate, or "
-            f"Subdivide to refine the mesh further.", "info")
         self.refresh_net_list()  # the net just loaded may have just gained a cache entry
         self.draw()
 
@@ -657,33 +641,14 @@ class InflatePolyhedronApp:
             self._set_status("Stopping...", "warn")
 
     def _run_inflate_stream(self, pressure, target_steps, stop_event):
-        """Runs relax_once in a growing sequence of chunks (see
-        INFLATE_CHUNK_START's comment for why growing rather than one
-        call or a small fixed size) in a background thread, pushing a
+        """Runs relax_once in a growing sequence of chunks (5, 10, 20, ...,
+        capped at INFLATE_CHUNK_MAX) in a background thread, pushing a
         "progress" message to the queue after every chunk so the main
         thread can update the iteration counter/plot incrementally
         instead of jumping straight from the start count to the end one.
         Tk isn't thread-safe, so the worker only ever pushes to the
         queue; the main thread (via the scheduled poll below) is the
-        only one that touches Tk widgets.
-
-        Each chunk is checked for orientation consistency (see
-        is_orientation_consistent's docstring) before being accepted:
-        relax_once's own small steps make this unlikely, but it has no
-        restart/retry logic of its own if one still folds the mesh
-        through itself (by design, see its docstring: it's meant for
-        small incremental nudges from an already-good point). A chunk
-        that tangles the mesh is REJECTED
-        (positions not updated) and retried at half the size instead;
-        once a size is found to tangle, `ceiling` permanently caps how
-        far this click's chunk is ever allowed to grow back to again, so
-        the loop can't oscillate forever between "too small to move
-        anything" and "big enough to tangle" -- it converges on some
-        safe operating size and keeps making progress at that size
-        instead. If even a single-evaluation chunk tangles the mesh (the
-        smallest step possible), inflation is stopped there and reported
-        as unsafe rather than looping forever or accepting a corrupted
-        result."""
+        only one that touches Tk widgets."""
         q = queue.Queue()
         faces, edge_length = self.faces, self.edge_length
         start_positions = self.positions
@@ -692,7 +657,6 @@ class InflatePolyhedronApp:
             positions = start_positions
             completed = 0
             chunk = INFLATE_CHUNK_START
-            ceiling = None  # once set, chunk is never allowed to grow past this again
             try:
                 while True:
                     this_chunk = max(1, chunk if target_steps is None
@@ -702,14 +666,6 @@ class InflatePolyhedronApp:
                     trial_positions, nfev, max_stretch, rms_stretch, optimality, converged = result
                     stopped = stop_event is not None and stop_event.is_set()
 
-                    if not stopped and not is_orientation_consistent(trial_positions, faces):
-                        if this_chunk <= 1:
-                            q.put(("tangled", None))
-                            return
-                        ceiling = max(1, this_chunk - 1)
-                        chunk = max(1, this_chunk // 2)
-                        continue  # reject this chunk entirely; positions unchanged, no progress counted
-
                     positions = trial_positions
                     completed += nfev
                     q.put(("progress", result))
@@ -717,7 +673,7 @@ class InflatePolyhedronApp:
                     safety_cap_hit = target_steps is None and completed >= INFLATE_SAFETY_STEP_CAP
                     if converged or stopped or reached_target or safety_cap_hit:
                         break
-                    chunk = min(chunk * 2, INFLATE_CHUNK_MAX if ceiling is None else ceiling)
+                    chunk = min(chunk * 2, INFLATE_CHUNK_MAX)
                 q.put(("final", None))
             except Exception as e:  # surface a solver crash instead of hanging forever
                 q.put(("error", str(e)))
@@ -732,14 +688,6 @@ class InflatePolyhedronApp:
                         self._apply_inflate_progress(payload)
                     elif kind == "final":
                         self._finish_inflate()
-                        return
-                    elif kind == "tangled":
-                        self.progress.stop()
-                        self.progress.pack_forget()
-                        self._set_controls_enabled(True)
-                        self._set_status(
-                            "Stopped: this pressure folds the mesh through itself even at the "
-                            "smallest possible step. Lower the pressure and try again.", "error")
                         return
                     elif kind == "error":
                         self.progress.stop()
@@ -797,7 +745,7 @@ class InflatePolyhedronApp:
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
         for widget in (self.combo, self.pressure_spin,
-                       self.steps_radio, self.convergence_radio, self.save_button):
+                       self.steps_radio, self.convergence_radio):
             widget.state(state)
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
@@ -813,7 +761,7 @@ class InflatePolyhedronApp:
             # cache load, leave it disabled since there's nothing to
             # usefully interrupt there.
 
-    def _run_background(self, fn, args, on_done, status_text):
+    def _run_background(self, fn, args, on_done):
         """Run fn(*args) in a background thread and call on_done(result)
         on the main thread once it finishes -- used for the initial
         precomputed-shape load (see module docstring), which can take a
@@ -825,7 +773,6 @@ class InflatePolyhedronApp:
         self._set_controls_enabled(False)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
-        self._set_status(status_text, "info")
         q = queue.Queue()
 
         def worker():
@@ -851,38 +798,6 @@ class InflatePolyhedronApp:
             on_done(payload)
 
         self.root.after(100, poll)
-
-    # ---- save ----
-
-    def on_save_clicked(self):
-        if self.positions is None:
-            return
-        os.makedirs(SAVE_DIR, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(self.current_path))[0]
-        stem = f"{base_name}_{time.strftime('%Y%m%d_%H%M%S')}"
-        json_path = os.path.join(SAVE_DIR, f"{stem}.json")
-        png_path = os.path.join(SAVE_DIR, f"{stem}.png")
-
-        data = {
-            "name": self.mesh_name,
-            "source": os.path.basename(self.current_path),
-            "iteration": self.iteration_count,
-            "pressure": self.pressure_var.get(),
-            "stats": self.last_stats,
-            "faces": [list(f) for f in self.faces],
-            "positions": {str(v): [float(c) for c in p] for v, p in self.positions.items()},
-        }
-        if self.subdivision_level > 0:
-            data["coarse_faces"] = [list(f) for f in self.base_faces]
-            data["resolution"] = self.subdivision_level
-            data["face_of_fine"] = list(self.face_of_fine)
-        with open(json_path, "w") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-
-        self.fig.savefig(png_path, dpi=150)
-        self._set_status(f"Saved {os.path.basename(json_path)} and "
-                          f"{os.path.basename(png_path)} to Save/.", "success")
 
     # ---- drawing ----
 
@@ -1052,8 +967,7 @@ class InflatePolyhedronApp:
         self._draw_wireframe_result(theme)
         # fig.text accumulates across redraws unless the previous one is
         # removed first -- this is the "Iteration: N" line shown under the
-        # image, embedded directly in the figure (rather than a separate
-        # Tk label) so it's also captured by on_save_clicked's savefig.
+        # image.
         for txt in list(self.fig.texts):
             txt.remove()
         note = ""

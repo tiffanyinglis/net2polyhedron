@@ -481,7 +481,9 @@ def _is_orientation_consistent(pts, faces, idx):
     """True iff every face's normal sign (see _orientation_signs) agrees
     AND points outward (+1) -- i.e. the mesh hasn't folded through
     itself, and hasn't turned inside-out either (all faces agreeing on
-    -1 is still a single self-consistent sign, but the wrong one)."""
+    -1 is still a single self-consistent sign, but the wrong one). Used
+    by solve_wireframe to judge a fresh, unconstrained candidate embedding
+    (see its own docstring)."""
     signs = {s for s in _orientation_signs(pts, faces, idx) if s != 0}
     return signs <= {1.0}
 
@@ -807,10 +809,8 @@ def per_face_volumes(positions, faces):
 def is_orientation_consistent(positions, faces):
     """positions: {vertex_id: [x,y,z]}; faces: vertex-id loops. True iff
     every face still agrees on outward orientation (see
-    _is_orientation_consistent). Exposed as a cheap safety net for a
-    caller like inflate_polyhedron_app's interactive Inflate loop, which
-    (unlike solve_wireframe) has no random-restart search of its own to
-    fall back on if one incremental step folds the mesh through itself."""
+    _is_orientation_consistent) -- a general-purpose public wrapper
+    around it."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     pts = np.array([positions[v] for v in vertex_ids])

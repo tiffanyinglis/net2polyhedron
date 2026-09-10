@@ -1,9 +1,8 @@
-"""Shared, cross-app filesystem locations: human-authored input nets and
-the interactive apps' saved output. NOT per-app caches -- each app that
-needs a solve cache keeps it in its own folder (e.g.
-src/apps/polyhedron_unfolder/cache/), specifically so the apps don't
-depend on each other's cache directory (see that app's own paths.py or
-build_cache.py for how it computes its own CACHE_DIR).
+"""Shared, cross-app filesystem locations: human-authored input nets.
+NOT per-app caches -- each app that needs a solve cache keeps it in its
+own folder (e.g. src/apps/polyhedron_unfolder/cache/), specifically so
+the apps don't depend on each other's cache directory (see that app's
+own paths.py or build_cache.py for how it computes its own CACHE_DIR).
 
 Every app/script should import from here (or from its own local `paths`
 sibling module, if it has one) BEFORE importing anything from `utils` --
@@ -29,6 +28,3 @@ DATA_DIR = REPO_ROOT / "data"
 
 NETS_DIR = DATA_DIR / "input" / "nets"
 STRETCHY_NETS_DIR = DATA_DIR / "input" / "stretchy_nets"
-
-OUTPUT_DIR = DATA_DIR / "output"
-SAVE_DIR = OUTPUT_DIR / "Save"
