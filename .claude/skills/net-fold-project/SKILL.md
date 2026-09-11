@@ -1008,16 +1008,39 @@ file, per this project's existing convention that the rest of
   first and clipped the 7-/8-gon icons against their own small canvas,
   since their circumradius at a fixed edge length grows faster than a
   triangle's or square's. `POLYGON_COLORS` gives each polygon type ONE
-  FIXED color (never per-instance) from `ui_theme.FACE_COLORS` --
-  triangle deliberately uses `FACE_COLORS[6]` (a bright yellow) rather
-  than `FACE_COLORS[0]` (a dark navy that read as too dim against the
-  dark background); 4..8 take `FACE_COLORS[1..5]`, still each unique.
+  FIXED color (never per-instance), built from `_POLYGON_HLS` -- an
+  explicit `[(hue_deg, lightness, saturation), ...]` table, one entry
+  per `POLYGON_NS` position, fed through `_hls_hex`
+  (`colorsys.hls_to_rgb`). This started as a single FORMULA (an even hue
+  gradient, green -> blue -> purple, one flat lightness/saturation for
+  all 6 except a darker/less-saturated override for the first two
+  GREENS in that range) rather than picking discrete swatches out of
+  `ui_theme.FACE_COLORS` (tried first; triangle alone went through a
+  dark navy, a bright yellow, a darkened yellow, and a user-specified
+  brown before THAT per-shape-palette-lookup approach was scrapped for
+  the gradient -- see git history for either abandoned approach's own
+  reasoning if it matters again). The formula didn't survive later
+  requests, though: dropping the first green and shifting the rest up,
+  inserting a new hue between the darker blue and the purple, and
+  independently lightening that darker blue while darkening the
+  turquoise all left the hues unevenly spaced with several colors
+  carrying their own lightness/saturation -- at that point an explicit
+  per-entry table reads more clearly than a formula with a growing pile
+  of exceptions bolted onto it. Current table, base lightness/saturation
+  0.50/0.65 (medium / medium-high, not maxed-out) except where noted:
+  triangle 136° green (0.38/0.50, darker+less saturated -- the one
+  survivor of what used to be two greens, its own override untouched by
+  any of this), square 172° turquoise (0.40/0.65, darkened a bit from
+  base), pentagon 208° blue (base), hexagon 244° blue (0.58/0.65,
+  lightened a bit from base), 7-gon 262° violet (base -- the new
+  in-between entry), 8-gon 280° purple (base).
 - **Pick up / drop**: clicking a palette icon "arms" that type
   (`self.armed_n`, highlighted via the icon Canvas's own
   `highlightbackground`) and shows a ghost preview following the mouse
   over the canvas, drawn via `_draw_shape(..., selected=True)` -- i.e.
   EXACTLY like a real, currently-selected placed shape (solid fill,
-  white outline), not some lesser "not real yet" look. Two other looks
+  `SELECTION_OUTLINE_COLOR` outline), not some lesser "not real yet"
+  look. Two other looks
   were tried and dropped: a dashed-outline-only preview (didn't read as
   "this is what you're about to place" as clearly as showing the real
   fill), and before that a stippled fill (a stipple pattern is a small,
@@ -1025,9 +1048,14 @@ file, per this project's existing convention that the rest of
   increasingly coarse/pixelated on a shape this size, much bigger than a
   palette icon, rather than a smooth preview). Clicking the SAME icon
   again disarms it; clicking a DIFFERENT one swaps which type is armed
-  directly. Clicking anywhere in the canvas while armed drops a real
-  instance there and disarms the tool -- the new shape becomes selected.
-  Shapes are stored in `self.shapes`, a list in Z-order (back to front);
+  directly. Arming a NEW type (not disarming) also deselects whatever
+  shape/connection was selected on the canvas (`_on_palette_clicked`) --
+  picking something up to place is a distinct action from working with
+  what's already there. Clicking anywhere in the canvas while armed
+  drops a real instance there and disarms the tool -- it is NOT left
+  selected afterward (`_drop_shape` used to set `self.selected_id` to
+  the new shape; removed at the user's request). Shapes are stored in
+  `self.shapes`, a list in Z-order (back to front);
   redrawing just iterates it front-to-back, so a later drop naturally
   renders on top of anything it overlaps, with no separate Z-index
   field needed.
@@ -1042,9 +1070,160 @@ file, per this project's existing convention that the rest of
   delta on every subsequent motion event -- a plain click that never
   moves is simply a drag by zero, so it falls out for free. The selected
   shape (`self.selected_id`, at most one at a time) is drawn with a thin
-  white outline (`SELECTION_OUTLINE_COLOR`/`_WIDTH`); Delete
+  outline in `SELECTION_OUTLINE_COLOR` (`"red"` -- plain `"white"`
+  first, then an amber `"#ffb300"`, before landing here; none of
+  `POLYGON_COLORS`' green/blue/purple hues (see above) are anywhere
+  near red, so it stays unambiguous against any shape's own fill --
+  white is now reserved for a handle's resting/not-currently-relevant
+  state, see Edge connections below) at
+  `SELECTION_OUTLINE_WIDTH`; Delete
   (`root.bind_all` -- this app has no text-entry widget for the key to
-  collide with) removes it.
+  collide with) removes it (`_remove_shape`, see Edge connections below
+  for why deleting a shape isn't just a filter on `self.shapes`).
+- **Edge connections** (`self.connections`, `_connection_pending`,
+  `_pending_cursor_screen`, `_hover_shape_id`/`_hover_edge_index`): a
+  connection is stored as `{"id", "a_shape", "a_edge", "b_shape",
+  "b_edge"}` -- an EDGE INDEX (position in that shape's own vertex loop)
+  rather than a coordinate, so it stays valid automatically as either
+  shape moves or rotates;
+  `_shape_edge_midpoints` re-derives the actual world-space midpoints
+  fresh every time from a shape's CURRENT `_shape_world_vertices`, never
+  cached.
+
+  `_redraw` considers a handle for EVERY placed shape's EVERY edge --
+  selection is NOT a gate on whether one can be started from any more
+  (see below). This replaced an earlier design (`handle_points`, a SET
+  built only from the selected shape's edges, the hovered shape's edges,
+  and existing connections' own endpoints) at the user's explicit
+  request: that design meant starting a connection needed two clicks --
+  select the shape first (to make its handles appear/become clickable
+  via `_hit_test_edge_handle`, which only ever looked at
+  `self.selected_id`'s own handles), then click a handle -- when the
+  user wanted one click, straight onto any handle, selected or not.
+  `_draw_handle_circle` (`EDGE_HANDLE_RADIUS`, `EDGE_HANDLE_OUTLINE_WIDTH`)
+  takes an explicit `joined` flag alongside `lit`: an edge that's the
+  endpoint of a real connection draws as a solid filled dot
+  (`HANDLE_COLOR`, white) and is ALWAYS drawn; one that isn't draws as an
+  UNFILLED ring (empty fill, `HANDLE_COLOR` outline) but ONLY when
+  `self._cursor_screen` is currently within `HANDLE_HIT_RADIUS` of it --
+  the loop in `_redraw` skips the draw call entirely otherwise. Showing
+  every free handle on every shape all the time was tried first (right
+  after the two-click-selection design above was dropped) and immediately
+  read as clutter once there was more than a couple of shapes on the
+  canvas, hence the reveal-on-proximity behavior -- and it deliberately
+  reuses `HANDLE_HIT_RADIUS`, the exact radius an actual click needs, so
+  a handle is never visible without also being clickable or vice versa
+  (the same "highlight and action must agree" principle already applied
+  to the pending-connection hover check below). `self._cursor_screen`
+  (tracked by `_on_canvas_motion` unconditionally -- not just while
+  armed/pending, since reveal now depends on it at all times -- and
+  cleared by `_on_canvas_leave` when the mouse exits the canvas) is
+  `None` until the mouse has been seen at least once, so nothing reveals
+  before that either. `lit` (`SELECTION_OUTLINE_COLOR`, red) always
+  overrides `joined`'s color choice AND bypasses the proximity gate
+  entirely (a lit handle draws regardless of the cursor): every edge of
+  the SELECTED shape (`shape["id"] == self.selected_id` -- so any of its
+  edges can be picked to start a connection from), the pending
+  connection's own origin point (`pending_point`, which needs to stay
+  lit even though clicking it is what just deselected its shape -- see
+  the next paragraph), and its CURRENT hover target (`hover_point =
+  (self._hover_shape_id, self._hover_edge_index)`) -- deliberately just
+  that ONE edge, not the hovered shape's whole outline or every one of
+  its handles. An earlier version lit the entire target shape up like a
+  selection (mirroring `lit_shape_ids = {self.selected_id,
+  self._hover_shape_id}`, checked against `shape["id"]` rather than a
+  specific `point`) -- removed at the user's explicit request, since it
+  read as "this whole shape is selected" when only one specific edge
+  was actually about to be connected to; the shape-drawing loop above
+  now only ever lights up `self.selected_id`, never `_hover_shape_id`,
+  so a hovered target's outline stays its normal, unselected color too.
+  Never drawn for the armed/not-yet-dropped ghost, since a connection
+  needs a real, placed shape on both ends.
+
+  Click-click, not click-drag (a drag-out-a-line design was tried first
+  and replaced with this one at the user's explicit request -- see git
+  history for that version's own reasoning if it's ever wanted back).
+  `_on_canvas_press` checks handle hit-testing (`_hit_test_any_edge_handle`,
+  with no exclusion -- ANY shape's handle can start a connection now, not
+  just the selected one; `_hit_test_edge_handle`, the selected-shape-only
+  predecessor, was removed once nothing called it any more) BEFORE the
+  ordinary connection-hit-test and shape-hit-test checks, since a handle
+  can sit right on top of the shape's own body. Clicking a handle arms
+  `self._connection_pending` (the origin shape/edge) AND explicitly
+  clears `self.selected_id` (per an earlier, separate user request --
+  clicking a handle used to leave the shape looking selected the whole
+  time a connection was pending; now the POINT is the selected thing
+  instead, so the shape's outline drops, though EVERY edge -- including
+  that one -- still shows a handle regardless, per the always-visible
+  redraw above) instead of a normal shape drag/select;
+  `_on_canvas_motion` (not `_on_canvas_drag` -- there's no button held
+  between the two clicks) then calls `_hit_test_any_edge_handle` at the
+  cursor on every motion event (excluding the pending connection's own
+  origin shape this time) and sets `_hover_shape_id`/`_hover_edge_index`
+  from whatever it finds -- PROXIMITY TO A HANDLE, not just being
+  anywhere over the shape's body (a point-in-polygon `_hit_test` was
+  used here first and was an actual bug the user reported: it lit up an
+  entire shape as a valid target the moment the cursor entered its body,
+  even nowhere near any of its handles, so a click that then missed
+  every actual handle would cancel with no connection despite the shape
+  having looked ready to connect to a moment earlier). `_redraw` lights
+  up just that one `hover_point` handle in red (see above) -- not the
+  hovered shape's outline or any of its OTHER handles -- without ever
+  touching `self.selected_id` itself, so it's cosmetic only.
+
+  The SECOND click, while `self._connection_pending` is set, is handled
+  by `_complete_or_cancel_pending_connection` (called from
+  `_on_canvas_press` before any of the normal checks). Critically, it
+  does NOT re-hit-test the click's own position -- it just reads
+  whatever `_hover_shape_id`/`_hover_edge_index` ALREADY say, i.e.
+  exactly what `_on_canvas_motion` most recently lit up. This is what
+  guarantees the fix above actually holds: highlighting and completion
+  are now provably the same decision (one reads the other's output)
+  rather than two separate hit-tests that could disagree, so a
+  connection can never be made onto something that wasn't visibly about
+  to happen a moment before the click. `_hover_shape_id is not None`
+  appends the connection, deselects everything, and returns `True`;
+  `None` (own shape excluded by construction, empty background, a
+  shape's body away from any of its handles, or anywhere else) returns
+  `False` with no connection made -- "connected to itself or to the
+  background" collapses to one check, "was anything highlighted right
+  now", since both named failure cases already can't set
+  `_hover_shape_id` in the first place. `_on_canvas_press` only treats a
+  `True` (connection made) as fully handling the click; a `False`
+  deliberately does NOT consume it -- the same click still falls through
+  to the ordinary handle/connection/shape checks afterward -- and since
+  EVERY handle is now clickable regardless of selection, that fallthrough
+  can immediately re-arm a brand-new pending connection if the click that
+  canceled the first one happened to land on some OTHER handle (its own
+  shape's other edge included) -- there's no special-case needed for
+  that any more, it just falls out of "any handle click starts one." A
+  click that hits nothing (empty background) cancels AND deselects, via
+  the normal miss case. While pending, `_redraw` draws the line from the
+  live cursor position with `selected=True` -- i.e. in
+  `SELECTION_OUTLINE_COLOR` (red) and the thicker width, not the resting
+  grey -- so an in-progress connection reads as "active" the same way
+  the point it started from does. A connection line
+  (`_draw_connection_line`, light grey `CONNECTION_COLOR`/`_WIDTH`, or
+  `SELECTION_OUTLINE_COLOR` and thicker when HIGHLIGHTED) is hit-tested
+  by `_hit_test_connection` via `_point_segment_distance` (perpendicular
+  distance to the segment, not the infinite line, since a click well
+  past either endpoint shouldn't count) -- selecting one clears
+  `self.selected_id` (mirroring `self.selected_connection_id` being
+  cleared whenever a shape gets selected instead: the two are mutually
+  exclusive, never both set). A connection is "highlighted" (drawn the
+  same as a selected one) under EITHER of two conditions, checked in
+  `_redraw`: it's the one actually in `self.selected_connection_id`, OR
+  either of its own two shapes is `self.selected_id` -- so selecting a
+  shape highlights every connection touching it as a group, without
+  reassigning `self.selected_connection_id` to any specific one of them,
+  and WITHOUT lighting up the shape on the connection's OTHER end (the
+  shape-drawing loop only lights up `self.selected_id`/`_hover_shape_id`
+  itself, never a shape just because a connection links to it). Deleting
+  either shape a connection touches has to remove the connection too --
+  `_remove_shape` (used by `_on_delete_key`) does both together in one
+  step, since a connection with a missing endpoint has nothing left to
+  draw a line between; Clear (`on_clear_clicked`) empties
+  `self.connections` alongside `self.shapes` for the same reason.
 - **Rotate / pan (right button, mutually exclusive)**: `_on_right_press`
   decides once, at press time, which of the two right-drag means: if a
   shape is currently selected, ROTATE it (`_rotate_state`); otherwise

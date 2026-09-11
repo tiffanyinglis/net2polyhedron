@@ -21,8 +21,9 @@ Interaction model:
   instead) -- so the palette itself reads as a clean, evenly-sized row
   of options.
 - **Drawing area (drop)**: clicking anywhere while a type is armed drops
-  a real instance there (at the click point) and disarms the tool. A
-  freshly dropped shape becomes the selected one. Shapes are drawn in
+  a real instance there (at the click point) and disarms the tool -- it
+  is NOT left selected afterward (a freshly dropped shape used to become
+  the selected one; changed at the user's request). Shapes are drawn in
   the order they're stored, so a later drop renders on top of anything
   it overlaps.
 - **Selection**: with no tool armed, clicking a shape selects it (thin
@@ -40,6 +41,48 @@ Interaction model:
   angle around it (a trackball-style drag, not an absolute angle readout).
   With no shape selected, right-drag instead pans the view (see below) --
   the two never conflict, since one or the other is always the case.
+- **Edge connections**: every shape already on the canvas (not a still-
+  armed/not-yet-dropped ghost) has a small circular handle at the
+  midpoint of each of its edges -- selecting the shape first is NOT
+  required (an earlier version needed that, so starting a connection
+  took two clicks: select the shape, then click its handle; now a single
+  click straight onto any handle starts one, whether or not that shape
+  happens to be selected). A handle that's already the endpoint of a
+  real connection is a solid filled dot ("occupied") and stays visible
+  all the time; one that isn't is an UNFILLED (outline-only) ring that
+  only shows up once the cursor is close enough to it -- showing every
+  free handle on every shape at all times was tried first and just read
+  as clutter across a canvas with more than a couple of shapes. The
+  reveal distance is the exact same one a click needs to actually hit
+  the handle, so "visible" and "clickable" never disagree. Click-click,
+  not click-drag:
+  clicking a handle DESELECTS the shape (its outline stops being
+  highlighted, if it happened to be selected at all) and "arms" a
+  pending connection from that edge instead -- the POINT becomes the
+  selected thing now, shown as the one handle lit red, rather than the
+  whole shape (the same idea as arming a palette shape) -- and a red
+  line (the same color a selection gets) then follows the mouse from it.
+  Getting close enough to one of an OTHER shape's own handles (not just
+  anywhere over its body) lights up that ONE handle -- not the whole
+  shape -- red, as a purely visual "this is a valid target, right here"
+  cue; the rest of that shape (its outline included) stays its normal,
+  unselected look.
+  A SECOND click then either completes the connection onto whichever
+  handle is CURRENTLY lit that way, or cancels the pending attempt with
+  no connection made if nothing is lit right now (own shape, empty
+  background, a shape's body without being near any of its handles, or
+  anywhere else) -- the same proximity check drives both the highlight
+  and what a click can actually complete onto, so a connection is never
+  made onto something that wasn't visibly about to happen first. A
+  cancel doesn't swallow the click either way -- it still gets to do its
+  normal job otherwise (select a shape, deselect, etc.). A made
+  connection (drawn as a thin light-grey line between the two edges'
+  midpoints from then on, tracking both shapes if either moves/rotates)
+  deselects everything. A connection can itself be clicked (selecting it
+  turns it red and deselects any shape) and deleted with Delete, exactly
+  like a shape. Deleting either shape a connection touches removes the
+  connection too, since a connection with a missing endpoint is
+  meaningless.
 - **Pan/zoom**: with no shape selected, right-click-drag pans -- dragging
   the background moves the whole view WITH the drag, the same direction
   as the cursor, like grabbing and sliding the canvas itself under a
@@ -78,6 +121,7 @@ _APPS_DIR = Path(__file__).resolve().parent.parent
 if str(_APPS_DIR) not in sys.path:
     sys.path.insert(0, str(_APPS_DIR))
 
+import colorsys
 import tkinter as tk
 from tkinter import ttk
 import tkinter.font as tkfont
@@ -86,21 +130,43 @@ import sv_ttk
 from PIL import Image, ImageColor, ImageDraw, ImageTk
 
 import common.paths  # noqa: F401 -- import side effect: adds src/ to sys.path for utils.*
-from common.ui_theme import PLOT_THEME, FACE_COLORS
+from common.ui_theme import PLOT_THEME
 from utils.geometry.polygon_geom import regular_polygon_vertices
 
 # Palette entries, in display order.
 POLYGON_NS = [3, 4, 5, 6, 7, 8]
 
-# One FIXED color per polygon type (never per-instance, unlike
-# FACE_COLORS' usual cycling-by-index use elsewhere in this project) --
-# reuses ui_theme's existing high-variety palette rather than inventing a
-# new one. Triangle uses FACE_COLORS[6] (a bright yellow) rather than
-# FACE_COLORS[0] (a dark navy that read as too dim against the dark
-# background); 4..8 take FACE_COLORS[1..5], still unique and mutually
-# distinct.
-POLYGON_COLORS = {3: FACE_COLORS[6], 4: FACE_COLORS[1], 5: FACE_COLORS[2],
-                   6: FACE_COLORS[3], 7: FACE_COLORS[4], 8: FACE_COLORS[5]}
+# One FIXED color per polygon type (never per-instance), each an
+# explicit (hue_deg, lightness, saturation) rather than one formula
+# swept evenly across all 6 -- started that way (an even hue gradient,
+# green -> blue -> purple, flat lightness/saturation throughout except
+# a darker/less-saturated override for two green entries -- see git
+# history), but per-color tweaks since (dropping the first green and
+# shifting the rest up, inserting a new hue between the darker blue and
+# the purple, lightening that darker blue, darkening the turquoise) left
+# the hues unevenly spaced and several with their own lightness/
+# saturation -- an explicit table reads more clearly at this point than
+# a formula with growing exceptions bolted onto it. Order matches
+# POLYGON_NS (triangle..8-gon); base lightness/saturation is 0.50/0.65
+# (medium / medium-high, not maxed-out) except where a color's own tweak
+# departs from it.
+_POLYGON_HLS = [
+    (136, 0.38, 0.50),  # triangle: green (darker/less saturated -- the
+                         # untouched one of what used to be two greens)
+    (172, 0.40, 0.65),  # square: turquoise, darkened a bit
+    (208, 0.50, 0.65),  # pentagon: blue
+    (244, 0.58, 0.65),  # hexagon: darker blue, lightened a bit
+    (262, 0.50, 0.65),  # 7-gon: violet (new -- between the darker blue and purple)
+    (280, 0.50, 0.65),  # 8-gon: purple
+]
+
+
+def _hls_hex(hue_deg, lightness, saturation):
+    r, g, b = colorsys.hls_to_rgb(hue_deg / 360.0, lightness, saturation)
+    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
+
+
+POLYGON_COLORS = {n: _hls_hex(*hls) for n, hls in zip(POLYGON_NS, _POLYGON_HLS)}
 
 # Regular-polygon local vertices (centered on origin), precomputed once
 # per n rather than on every redraw -- a placed shape's world vertices
@@ -128,8 +194,28 @@ ICON_SIZE = 84
 ICON_RADIUS = 30.0
 _ICON_VERTICES = {n: _vertices_with_radius(n, ICON_RADIUS) for n in POLYGON_NS}
 
-SELECTION_OUTLINE_COLOR = "white"
+# Red -- none of the polygon fill colors above (green/blue/purple hues)
+# are anywhere near red, so it reads as clearly "selected/active"
+# without being confusable with any shape's own fill.
+SELECTION_OUTLINE_COLOR = "red"
 SELECTION_OUTLINE_WIDTH = 2.0
+
+# Edge-connection handles/lines. Sizes are constant SCREEN pixels (not
+# scaled by view_scale), same as SELECTION_OUTLINE_WIDTH above -- UI
+# chrome that stays a fixed size regardless of how zoomed-in the content
+# is, rather than handles that would themselves balloon at high zoom.
+EDGE_HANDLE_RADIUS = 5.0
+EDGE_HANDLE_OUTLINE_WIDTH = 1.5
+HANDLE_HIT_RADIUS = 9.0
+CONNECTION_HIT_RADIUS = 6.0
+# A handle's resting color, when its shape is neither selected nor the
+# current hover target of a pending connection -- SELECTION_OUTLINE_COLOR
+# is used instead in those two cases (see _redraw), so a handle reads as
+# "active" in the same color a selection does, and plain white otherwise.
+HANDLE_COLOR = "white"
+CONNECTION_COLOR = "#b0b0b0"
+CONNECTION_WIDTH = 1.5
+CONNECTION_SELECTED_WIDTH = 2.5
 
 # Supersampling factor for _rasterize_polygon's anti-aliasing -- render
 # at this many times final size, then LANCZOS-downsample. Higher looks
@@ -176,6 +262,20 @@ def _point_in_polygon(point, vertices):
             inside = not inside
         j = i
     return inside
+
+
+def _point_segment_distance(point, a, b):
+    """Shortest distance from `point` to the line SEGMENT a->b (not the
+    infinite line) -- used to hit-test a click against a thin connection
+    line, which has no interior to point-in-polygon test against."""
+    px, py = point
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
 def _rgba(hex_color, alpha=255):
@@ -232,6 +332,37 @@ class InteractiveBuilderApp:
         self._shape_photos = []  # keeps this redraw's PhotoImages alive (Tk drops GC'd ones)
         self._icon_photos = {}
 
+        # [{"id", "a_shape", "a_edge", "b_shape", "b_edge"}, ...] -- edge
+        # indices are stable across a shape's own move/rotation (they
+        # just name a position in its local vertex loop), so a
+        # connection only ever stores ids/indices, never coordinates.
+        self.connections = []
+        self._next_connection_id = 1
+        self.selected_connection_id = None
+        # {"from_shape", "from_edge"} once a handle's been clicked to
+        # start a connection, awaiting the SECOND click that either
+        # completes or cancels it; None otherwise. _pending_cursor_screen
+        # is the live mouse position, for drawing the line following it.
+        self._connection_pending = None
+        self._pending_cursor_screen = None
+        # Shape/edge the pending connection is currently close enough to
+        # complete onto, or (None, None) if it isn't near any right now
+        # -- both None together always, never just one. Lit up like a
+        # selection but never actually assigned to self.selected_id. The
+        # SAME two fields drive both the highlight (_redraw) and what a
+        # completing click actually connects to (_complete_or_cancel_
+        # pending_connection just reads them, rather than re-hit-testing
+        # the release point itself) -- so a connection can only ever be
+        # made onto something that was visibly highlighted first.
+        self._hover_shape_id = None
+        self._hover_edge_index = None
+        # Live mouse position over the canvas (None once it leaves) --
+        # tracked unconditionally, not just while armed/pending, purely
+        # so an unjoined handle can reveal itself only once the cursor
+        # is genuinely close to it (see _redraw) rather than showing
+        # every free handle on every shape all the time.
+        self._cursor_screen = None
+
         # View transform: screen = world * view_scale + (offset_x, offset_y).
         # offset starts at (0, 0) and is recentred once, on the canvas's
         # first real <Configure>, once its actual size is known.
@@ -277,6 +408,7 @@ class InteractiveBuilderApp:
                                  highlightthickness=1, highlightbackground=PLOT_THEME["fg"])
         self.canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(0, 12), pady=12)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
         self.canvas.bind("<Button-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
@@ -344,11 +476,84 @@ class InteractiveBuilderApp:
                 return shape
         return None
 
+    def _shape_edge_midpoints(self, shape):
+        """World-space midpoint of each of the shape's edges, in the
+        same order as its vertex loop -- edge i runs from vertex i to
+        vertex (i+1) % n, so index i is a stable handle for that edge
+        across any later move/rotation."""
+        verts = self._shape_world_vertices(shape)
+        n = len(verts)
+        return [((verts[i][0] + verts[(i + 1) % n][0]) / 2,
+                 (verts[i][1] + verts[(i + 1) % n][1]) / 2) for i in range(n)]
+
+    def _hit_test_any_edge_handle(self, screen_x, screen_y, exclude_shape_id=None):
+        """Nearest edge handle belonging to any shape OTHER than
+        `exclude_shape_id`, within HANDLE_HIT_RADIUS screen pixels of the
+        given point, or None. Every placed shape's every edge handle is
+        clickable this way -- there's no "must be selected first" gate
+        (that WAS the rule at one point; dropped since it took two
+        clicks, select-the-shape then click-its-handle, to start a
+        connection at all -- see module docstring). Also used, with
+        `exclude_shape_id` set to a pending connection's own origin
+        shape, for both hover highlighting (_on_canvas_motion) and
+        deciding what a completing click actually connects to
+        (_complete_or_cancel_pending_connection just reads the hover
+        state this leaves behind, rather than re-running this itself) --
+        the two MUST agree, so nothing ever connects without having
+        first been visibly highlighted."""
+        best, best_dist = None, HANDLE_HIT_RADIUS
+        for shape in self.shapes:
+            if shape["id"] == exclude_shape_id:
+                continue
+            for edge_index, (mx, my) in enumerate(self._shape_edge_midpoints(shape)):
+                sx, sy = self._world_to_screen(mx, my)
+                dist = math.hypot(screen_x - sx, screen_y - sy)
+                if dist <= best_dist:
+                    best, best_dist = {"shape_id": shape["id"], "edge_index": edge_index}, dist
+        return best
+
+    def _connection_endpoints(self, conn):
+        """Screen-space (a, b) midpoints for a connection, or None if
+        either shape it references no longer exists."""
+        a_shape, b_shape = self._shape_by_id(conn["a_shape"]), self._shape_by_id(conn["b_shape"])
+        if a_shape is None or b_shape is None:
+            return None
+        a = self._world_to_screen(*self._shape_edge_midpoints(a_shape)[conn["a_edge"]])
+        b = self._world_to_screen(*self._shape_edge_midpoints(b_shape)[conn["b_edge"]])
+        return a, b
+
+    def _hit_test_connection(self, screen_x, screen_y):
+        """Id of the connection whose line passes within
+        CONNECTION_HIT_RADIUS screen pixels of the given point, or None."""
+        best, best_dist = None, CONNECTION_HIT_RADIUS
+        for conn in self.connections:
+            endpoints = self._connection_endpoints(conn)
+            if endpoints is None:
+                continue
+            dist = _point_segment_distance((screen_x, screen_y), *endpoints)
+            if dist < best_dist:
+                best, best_dist = conn["id"], dist
+        return best
+
+    def _remove_shape(self, shape_id):
+        """Deletes the shape and every connection touching it -- a
+        connection with a missing endpoint has nothing left to draw a
+        line between, so it can't be left dangling."""
+        self.connections = [c for c in self.connections
+                             if c["a_shape"] != shape_id and c["b_shape"] != shape_id]
+        self.shapes = [s for s in self.shapes if s["id"] != shape_id]
+
     # ---- palette ----
 
     def _on_palette_clicked(self, n):
         self.armed_n = None if self.armed_n == n else n
         self._ghost_world_xy = None
+        if self.armed_n is not None:
+            # Arming a new shape to place is a distinct action from
+            # working with whatever's already on the canvas -- picking
+            # one up shouldn't leave an unrelated shape looking selected.
+            self.selected_id = None
+            self.selected_connection_id = None
         for other_n, icon in self._palette_canvases.items():
             icon.configure(highlightbackground=(
                 "white" if other_n == self.armed_n else PLOT_THEME["bg"]))
@@ -356,7 +561,9 @@ class InteractiveBuilderApp:
 
     def on_clear_clicked(self):
         self.shapes.clear()
+        self.connections.clear()
         self.selected_id = None
+        self.selected_connection_id = None
         self._drag_state = None
         self._redraw()
 
@@ -369,19 +576,77 @@ class InteractiveBuilderApp:
             self._redraw()
 
     def _on_canvas_motion(self, event):
-        if self.armed_n is not None:
+        # Tracked unconditionally (not just while armed/pending) so an
+        # unjoined handle can reveal itself on proximity alone -- see
+        # _redraw -- so this always redraws, not just in the two
+        # branches below.
+        self._cursor_screen = (event.x, event.y)
+        if self._connection_pending is not None:
+            self._pending_cursor_screen = (event.x, event.y)
+            # PROXIMITY TO A HANDLE, not just being anywhere over the
+            # shape's body -- this is the exact same test
+            # _complete_or_cancel_pending_connection relies on to decide
+            # what a completing click connects to, so a shape only ever
+            # lights up when it's actually a valid, connectable target.
+            target = self._hit_test_any_edge_handle(
+                event.x, event.y, exclude_shape_id=self._connection_pending["from_shape"])
+            self._hover_shape_id = None if target is None else target["shape_id"]
+            self._hover_edge_index = None if target is None else target["edge_index"]
+        elif self.armed_n is not None:
             self._ghost_world_xy = self._screen_to_world(event.x, event.y)
-            self._redraw()
+        self._redraw()
 
-    # ---- canvas: click-to-drop / select / drag ----
+    def _on_canvas_leave(self, _event):
+        self._cursor_screen = None
+        self._redraw()
+
+    # ---- canvas: click-to-drop / select / drag / connect ----
 
     def _on_canvas_press(self, event):
-        wx, wy = self._screen_to_world(event.x, event.y)
         if self.armed_n is not None:
+            wx, wy = self._screen_to_world(event.x, event.y)
             self._drop_shape(self.armed_n, wx, wy)
             self._on_palette_clicked(self.armed_n)  # disarm (toggles current off)
             return
+
+        if self._connection_pending is not None:
+            if self._complete_or_cancel_pending_connection():
+                # A completed connection deselects everything and stops
+                # here -- letting this SAME click fall through to the
+                # ordinary checks below would immediately re-select the
+                # handle it just landed on (or the new connection line,
+                # which passes through that exact point).
+                self._redraw()
+                return
+            # A cancel, in contrast, doesn't consume the click: fall
+            # through so it still does its normal job (select a handle/
+            # connection/shape, or deselect) -- it just never creates a
+            # SECOND connection.
+
+        handle = self._hit_test_any_edge_handle(event.x, event.y)
+        if handle is not None:
+            self._connection_pending = {"from_shape": handle["shape_id"],
+                                         "from_edge": handle["edge_index"]}
+            self._pending_cursor_screen = (event.x, event.y)
+            # The POINT becomes the selected thing now, not the shape --
+            # deselecting here is what makes _redraw stop outlining the
+            # whole shape and light up only this one handle instead.
+            self.selected_id = None
+            self.selected_connection_id = None
+            self._redraw()
+            return
+
+        conn_hit = self._hit_test_connection(event.x, event.y)
+        if conn_hit is not None:
+            self.selected_connection_id = conn_hit
+            self.selected_id = None
+            self._drag_state = None
+            self._redraw()
+            return
+
+        wx, wy = self._screen_to_world(event.x, event.y)
         hit = self._hit_test(wx, wy)
+        self.selected_connection_id = None
         if hit is None:
             self.selected_id = None
             self._drag_state = None
@@ -391,11 +656,44 @@ class InteractiveBuilderApp:
                                  "start_center": (hit["cx"], hit["cy"])}
         self._redraw()
 
+    def _complete_or_cancel_pending_connection(self):
+        """The SECOND click of a click-click connection. Returns True
+        and makes the connection if self._hover_shape_id/_edge_index are
+        currently set (i.e. a valid target is CURRENTLY HIGHLIGHTED --
+        deliberately reading this rather than re-hit-testing the click
+        point itself, so a connection can only ever be made onto
+        something the user actually saw light up first, never onto a
+        target that silently stopped being valid a pixel before the
+        click landed); returns False (no connection) if nothing is
+        highlighted right now. Either way, self._connection_pending/
+        _hover_shape_id/_edge_index are cleared before returning -- what
+        the caller does with a False (whether to let the click fall
+        through to its ordinary job) is its own decision, not this
+        method's."""
+        made = self._hover_shape_id is not None
+        if made:
+            self.connections.append({
+                "id": self._next_connection_id,
+                "a_shape": self._connection_pending["from_shape"],
+                "a_edge": self._connection_pending["from_edge"],
+                "b_shape": self._hover_shape_id, "b_edge": self._hover_edge_index,
+            })
+            self._next_connection_id += 1
+            # A freshly-made connection deselects everything -- the
+            # origin shape was selected (that's how its handle was
+            # showing in the first place), but the connection itself is
+            # the thing that just changed, not that shape.
+            self.selected_id = None
+            self.selected_connection_id = None
+        self._connection_pending = None
+        self._hover_shape_id = None
+        self._hover_edge_index = None
+        return made
+
     def _drop_shape(self, n, wx, wy):
         shape = {"id": self._next_shape_id, "n": n, "cx": wx, "cy": wy, "rotation": 0.0}
         self._next_shape_id += 1
         self.shapes.append(shape)
-        self.selected_id = shape["id"]
 
     def _on_canvas_drag(self, event):
         if self._drag_state is None:
@@ -414,8 +712,12 @@ class InteractiveBuilderApp:
 
     def _on_delete_key(self, _event):
         if self.selected_id is not None:
-            self.shapes = [s for s in self.shapes if s["id"] != self.selected_id]
+            self._remove_shape(self.selected_id)
             self.selected_id = None
+            self._redraw()
+        elif self.selected_connection_id is not None:
+            self.connections = [c for c in self.connections if c["id"] != self.selected_connection_id]
+            self.selected_connection_id = None
             self._redraw()
 
     # ---- canvas: right button -- rotate selected shape, else pan ----
@@ -487,13 +789,112 @@ class InteractiveBuilderApp:
         self._shape_photos.append(photo)  # keep alive -- Tk drops a GC'd PhotoImage
         self.canvas.create_image(left, top, anchor="nw", image=photo)
 
+    def _draw_connection_line(self, a, b, selected):
+        self.canvas.create_line(
+            *a, *b, fill=SELECTION_OUTLINE_COLOR if selected else CONNECTION_COLOR,
+            width=CONNECTION_SELECTED_WIDTH if selected else CONNECTION_WIDTH)
+
+    def _draw_handle_circle(self, shape, edge_index, lit, joined):
+        """lit (selected/hovered/the pending point itself) always wins,
+        drawn filled red. Otherwise: filled white if `joined` (this edge
+        already has a real connection on it -- a solid dot reads as
+        "occupied"), or an UNFILLED (outline-only) white ring if it's
+        free -- so an edge with nothing on it yet doesn't visually
+        compete with real connection endpoints, at a glance, across a
+        canvas full of shapes that now show every one of their handles
+        all the time (see module docstring)."""
+        mx, my = self._shape_edge_midpoints(shape)[edge_index]
+        sx, sy = self._world_to_screen(mx, my)
+        if lit:
+            fill, outline = SELECTION_OUTLINE_COLOR, ""
+        elif joined:
+            fill, outline = HANDLE_COLOR, ""
+        else:
+            fill, outline = "", HANDLE_COLOR
+        self.canvas.create_oval(sx - EDGE_HANDLE_RADIUS, sy - EDGE_HANDLE_RADIUS,
+                                 sx + EDGE_HANDLE_RADIUS, sy + EDGE_HANDLE_RADIUS,
+                                 fill=fill, outline=outline, width=EDGE_HANDLE_OUTLINE_WIDTH)
+
     def _redraw(self):
         self.canvas.delete("all")
         self._shape_photos = []
         for shape in self.shapes:
             screen_vertices = [self._world_to_screen(*wv) for wv in self._shape_world_vertices(shape)]
-            self._draw_shape(screen_vertices, POLYGON_COLORS[shape["n"]],
-                              selected=shape["id"] == self.selected_id)
+            self._draw_shape(screen_vertices, POLYGON_COLORS[shape["n"]], selected=shape["id"] == self.selected_id)
+
+        for conn in self.connections:
+            endpoints = self._connection_endpoints(conn)
+            if endpoints is not None:
+                # A connection highlights whenever it's explicitly
+                # selected OR it touches the currently-selected shape --
+                # the shape at its OTHER end stays its normal color (see
+                # the shape-drawing loop above, which only lights up
+                # self.selected_id), so only the line itself, not its
+                # neighbour, reads as "part of this".
+                highlighted = (conn["id"] == self.selected_connection_id
+                               or self.selected_id in (conn["a_shape"], conn["b_shape"]))
+                self._draw_connection_line(*endpoints, selected=highlighted)
+
+        if self._connection_pending is not None:
+            from_shape = self._shape_by_id(self._connection_pending["from_shape"])
+            if from_shape is not None:
+                anchor = self._world_to_screen(
+                    *self._shape_edge_midpoints(from_shape)[self._connection_pending["from_edge"]])
+                self._draw_connection_line(anchor, self._pending_cursor_screen, selected=True)
+
+        # EVERY placed shape's EVERY edge gets a handle, always -- not
+        # just the selected one -- so a connection can be started with a
+        # single click straight onto any handle, with no "select the
+        # shape first" step (see module docstring). A handle lights up
+        # red if its own shape is SELECTED (every one of that shape's
+        # edges, so any of them can be picked to start a connection
+        # from), or it's the pending connection's own origin point
+        # (`pending_point`, which needs to stay lit even though clicking
+        # it just DESELECTED that shape -- see _on_canvas_press: the
+        # POINT is the selected thing now, not the shape it belongs to)
+        # or its CURRENT hover target (`hover_point`) -- deliberately
+        # just that one edge, not every edge of the shape it's on: an
+        # earlier version lit the whole target shape (mirroring how a
+        # real selection looks), and the user asked for it to stop doing
+        # that -- only the specific edge a second click would actually
+        # complete onto lights up now, leaving the rest of that shape
+        # (including its outline, in the shape-drawing loop above) at
+        # its normal, unselected look. Otherwise a handle is filled
+        # white if some connection already uses it, or an unfilled ring
+        # if not (see _draw_handle_circle).
+        pending_point = (None if self._connection_pending is None else
+                          (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
+        hover_point = (None if self._hover_shape_id is None else
+                        (self._hover_shape_id, self._hover_edge_index))
+        joined_points = set()
+        for conn in self.connections:
+            joined_points.add((conn["a_shape"], conn["a_edge"]))
+            joined_points.add((conn["b_shape"], conn["b_edge"]))
+
+        for shape in self.shapes:
+            mids = self._shape_edge_midpoints(shape)
+            for edge_index, (mx, my) in enumerate(mids):
+                point = (shape["id"], edge_index)
+                lit = shape["id"] == self.selected_id or point in (pending_point, hover_point)
+                joined = point in joined_points
+                if not lit and not joined:
+                    # An unjoined, not-currently-active handle only
+                    # reveals itself once the cursor is genuinely close
+                    # -- HANDLE_HIT_RADIUS again, same as what actually
+                    # clicking it requires, so "visible" and "clickable"
+                    # never disagree (same principle as the pending-
+                    # connection hover check above). Showing every free
+                    # handle on every shape all the time was tried first
+                    # and read as visual noise across a canvas with more
+                    # than a couple of shapes.
+                    if self._cursor_screen is None:
+                        continue
+                    sx, sy = self._world_to_screen(mx, my)
+                    cx, cy = self._cursor_screen
+                    if math.hypot(cx - sx, cy - sy) > HANDLE_HIT_RADIUS:
+                        continue
+                self._draw_handle_circle(shape, edge_index, lit=lit, joined=joined)
+
         if self.armed_n is not None and self._ghost_world_xy is not None:
             # Drawn exactly like a real, selected shape (solid fill, white
             # outline) -- it's the shape about to be dropped as-is, not a

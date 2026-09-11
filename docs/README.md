@@ -93,7 +93,14 @@ convex hull.
   drop instances of it into the drawing area on the right, then
   select/drag/delete them. With a shape selected, right-click-drag
   rotates it; with nothing selected, right-click-drag pans the view
-  instead. Scroll to zoom.
+  instead. Scroll to zoom. Every shape's edges have a small handle at
+  their midpoint — a connected edge shows a solid dot at all times; an
+  unconnected one only reveals its (empty) ring once the cursor is
+  close enough to click it. Click one, then click another shape's own
+  handle to connect them (a thin grey line); clicking empty space
+  instead cancels the attempt.
+  Connections can be
+  selected and deleted too.
 
 ## Running the tests
 
