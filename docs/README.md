@@ -87,6 +87,14 @@ convex hull.
   fine triangular mesh, as a preview of the kind of mesh the stretchy
   pipeline solves over once subdivided.
 
+- **`src/apps/interactive_builder_app/app.py`** — an unrelated 2D
+  shape-placement canvas: pick a regular polygon (triangle through
+  8-gon, each with its own fixed color) from the left palette, click to
+  drop instances of it into the drawing area on the right, then
+  select/drag/delete them. With a shape selected, right-click-drag
+  rotates it; with nothing selected, right-click-drag pans the view
+  instead. Scroll to zoom.
+
 ## Running the tests
 
 ```bash
@@ -117,6 +125,8 @@ src/
       app.py                    entry point, class InflatePolyhedronApp
     polygon_subdivision_app/  unrelated 2D-only subdivision demo
       app.py                    entry point, class PolygonSubdivisionApp
+    interactive_builder_app/  unrelated 2D shape-placement canvas
+      app.py                    entry point, class InteractiveBuilderApp
     common/                    helpers SHARED by more than one app
       paths.py                   cross-app filesystem locations
       ui_theme.py                shared Tk/matplotlib look-and-feel constants

@@ -11,6 +11,15 @@ These files are considered DONE -- the user has finished them and
 deliberately doesn't want them touched, since editing them (even
 additively) risks messing up code structure they've already settled on:
 
+**As of the start of work on `src/apps/interactive_builder_app/` (a new,
+unrelated shape-placement app -- see "Interactive builder" below), the
+user marked EVERY file that already existed in the project untouchable,
+wholesale.** The per-file annotations below (mostly about the
+polyhedron-unfolder sync/deletion history) predate that wholesale marking
+and are kept only as historical context for WHY each file looks the way
+it does -- not as a signal that some of these are more untouchable than
+others. The list:
+
 - `src/utils/geometry/polygon_geom.py`
 - `src/utils/geometry/polyhedron.py` (`Polyhedron`: pure 3D solid geometry
   -- shared, indexed vertices; CCW faces; derived `.edges`; `.face_vertices()`,
@@ -18,26 +27,47 @@ additively) risks messing up code structure they've already settled on:
   from the sibling `polyhedron-unfolder` project's own `Polyhedron`, with
   `face_normal` inlined rather than imported from a fold engine, since this
   project doesn't have one.)
+- `src/utils/geometry/__init__.py`
+- `src/utils/inflate_polyhedron/__init__.py`
+- `src/utils/inflate_polyhedron/hull_to_spec.py`
+- `src/utils/inflate_polyhedron/mesh_levels.py`
+- `src/utils/inflate_polyhedron/stretchy_mesh.py`
+- `src/utils/inflate_polyhedron/stretchy_net_layout.py`
+- `src/utils/subdivisions/__init__.py`
+- `src/utils/subdivisions/polygon_subdivisions.py`
+- `src/utils/subdivisions/mesh_subdivide.py`
+- `src/utils/__init__.py`
 - `src/apps/ui/tooltip.py`
 - `src/apps/ui/cullable_face.py`
 - `src/apps/ui/__init__.py`
 - `src/apps/common/bounding_box.py`
 - `src/apps/common/ui_theme.py`
+- `src/apps/common/paths.py`
+- `src/apps/common/__init__.py`
+- `src/apps/polygon_subdivision_app/app.py`
+- `src/apps/inflate_polyhedron_app/app.py`
+- `data/input/stretchy_nets/*.json` (every shipped net)
+- `docs/README.md`
+- `docs/algorithm.md`
 - `.gitignore`
 - `requirements.txt`
 - `pytest.ini`
 - `.claude/settings.local.json`
+- `.claude/skills/net-fold-project/SKILL.md` (this file)
+- `tests/run_tests.py`
 - `tests/unit/apps_common/test_bounding_box.py`
 - `tests/unit/geometry/test_polygon_geom.py`
-- `src/apps/polygon_subdivision_app/app.py`
-- `src/utils/subdivisions/__init__.py`
-- `src/utils/subdivisions/polygon_subdivisions.py`
-- `src/utils/subdivisions/mesh_subdivide.py`
+- `tests/unit/geometry/test_polyhedron.py`
+- `tests/unit/inflate_polyhedron/test_hull_to_spec.py`
+- `tests/unit/inflate_polyhedron/test_mesh_levels.py`
+- `tests/unit/inflate_polyhedron/test_stretchy_mesh.py`
+- `tests/unit/inflate_polyhedron/test_stretchy_net_layout.py`
+- `tests/unit/subdivisions/test_polygon_subdivisions.py`
 
 (The `polygon_subdivision_app`/`utils/subdivisions/` entries above are
 NOT part of the polyhedron-unfolder sync described below -- they're this
 project's own polygon-subdivision demo, considered separately finished
-and settled by the user. Everything else in this list is synced from the
+and settled by the user. Most of the rest of this list is synced from the
 sibling `polyhedron-unfolder` project --
 each is either byte-identical there or differs only in import paths for
 net2polyhedron's package layout, verified file-by-file. Files there that
@@ -54,8 +84,7 @@ synced here. `tests/unit/inflate_polyhedron/test_hull_to_spec.py` and
 `tests/unit/inflate_polyhedron/test_stretchy_mesh.py` had their own borrowed copies
 of rigid-net vertex coordinates (used only as fixture data, not a real
 functional dependency) inlined directly so they didn't need to change
-behavior. `src/apps/common/paths.py` still defines `NETS_DIR` even though
-nothing reads it anymore -- harmless, but a cleanup candidate.)
+behavior.)
 
 Do not read these as a target for changes and do not modify them --
 adding, removing, or "just cleaning up" anything in them is off limits --
@@ -64,7 +93,9 @@ NAME or by unambiguous description in their current request. If a task
 would otherwise require touching one, stop and explicitly ask the user
 for permission first, naming the file and what change is needed, rather
 than proceeding or silently working around it. This list is expected to
-grow -- check it before editing anything in this project.
+grow -- check it before editing anything in this project, including
+whatever gets newly added for `interactive_builder_app` itself, once the
+user considers a given piece of it finished.
 
 ## No hacky terms in the physics without explicit permission
 
@@ -93,7 +124,7 @@ if a pressure/stretch/convergence problem shows up, explain the actual
 cause and propose the fix (including a new term, if one is genuinely
 warranted) rather than silently adding one to make a symptom go away.
 
-Two Tkinter entry points currently live in this project (a third,
+Three Tkinter entry points currently live in this project (a fourth,
 `polyhedron_unfolder`, existed for the now-DELETED rigid-unfolding
 pipeline described below — see "Untouchable files" above and "Removed:
 the rigid-unfolding pipeline (historical)" further down):
@@ -109,6 +140,11 @@ the rigid-unfolding pipeline (historical)" further down):
   itself, see "Stretchy meshes" below) — every net's starting
   configuration is now a cheap random start plus a live-in-the-UI spring
   relax (the "Relax" button, "Level 0"), not a precomputed/cached search.
+- `interactive_builder_app` (`src/apps/interactive_builder_app/app.py`) —
+  a 2D shape-placement canvas, unrelated to solving anything: pick a
+  regular polygon (triangle..8-gon) from a left-side palette, click to
+  drop instances of it into a pan/zoomable drawing area, drag/select/
+  delete them. See "Interactive builder" below.
 
 ## Directory layout
 
@@ -124,7 +160,7 @@ shared across more than one of them. (A third app folder,
 `polyhedron_unfolder/`, used to hold the merged rigid-pipeline app
 described in "Removed: the rigid-unfolding pipeline (historical)" below
 — it has been deleted along with the rest of that pipeline, so only the
-two folders below exist now.)
+three folders below exist now.)
 - `inflate_polyhedron_app/` — the stretchy-mesh viewer (see "Stretchy meshes" below)
   - `app.py` — entry point, class `InflatePolyhedronApp`. No `cache/`
     or `build_cache.py` any more (removed along with `solve_wireframe`
@@ -132,22 +168,26 @@ two folders below exist now.)
     is precomputed ahead of time.
 - `polygon_subdivision_app/` — 2D-only fine-triangle-mesh demo (see below), no cache
   - `app.py` — entry point, class `PolygonSubdivisionApp`
+- `interactive_builder_app/` — 2D shape-placement canvas, unrelated to
+  solving/folding (see "Interactive builder" below), no cache
+  - `app.py` — entry point, class `InteractiveBuilderApp`
 - `common/` — helpers SHARED by more than one app (not net-fold domain
   logic -- that's `utils/` -- and not GUI widgets -- that's `ui/`):
   - `paths.py` — the ONLY place that computes shared, cross-app
-    locations: `NETS_DIR`/`STRETCHY_NETS_DIR` (input nets — NOT caches,
-    those are per-app, above), all derived from `Path(__file__)`. An
-    app one level deeper than `src/apps/` first does a tiny inline
-    bootstrap (`sys.path.insert(0, str(Path(__file__).resolve().parent.parent))`)
+    locations: `STRETCHY_NETS_DIR` (input nets — NOT caches, those are
+    per-app, above), derived from `Path(__file__)`. An app one level
+    deeper than `src/apps/` first does a tiny inline bootstrap
+    (`sys.path.insert(0, str(Path(__file__).resolve().parent.parent))`)
     so `common`/`ui` are importable at all, THEN imports from
     `common.paths` before importing anything from `utils` — as an
     import side effect, `common/paths.py` inserts `src/` onto
     `sys.path`, which is what makes `from utils.<category> import ...`
     resolve when a script is run directly (`python src/apps/<app>/app.py`)
-    rather than as an installed package. `NETS_DIR` (pointing at the
-    now-deleted `data/input/nets/`) is a leftover from the removed rigid
-    pipeline (see "Removed: the rigid-unfolding pipeline (historical)"
-    below) — nothing reads it anymore; harmless, but a cleanup candidate.
+    rather than as an installed package. (`interactive_builder_app`
+    needs no name from `paths.py` itself -- it has no net files to
+    locate -- but still `import common.paths` for exactly this
+    sys.path side effect, purely to make its own `from utils.geometry...`
+    import resolve.)
   - `ui_theme.py` — `STATUS_COLORS`/`PLOT_THEME`/`FACE_COLORS`/
     `DISABLED_SUFFIX`/`COMPUTE_TOOLTIP`, extracted here (they used to
     live in `polygon_fold_app.py`, imported by the other apps from it)
@@ -946,6 +986,144 @@ be rather than making those meshes take far more steps to formally
   EVERY level's plotter from the same updated angle -- a direct
   recomputation from shared state each time, not a relative nudge
   copied panel-to-panel, so every panel always agrees exactly.
+
+## Interactive builder (`src/apps/interactive_builder_app/app.py`)
+
+A 2D shape-placement canvas -- unrelated to solving/folding anything, and
+to the other two apps' domain logic (`src/utils/`) entirely. No test
+file, per this project's existing convention that the rest of
+`src/apps/` (beyond `apps_common`) stays untested (see "Testing" below).
+
+- **Palette**: one icon per regular polygon, triangle through 8-gon, a
+  small `tk.Canvas` drawn from `utils.geometry.polygon_geom.
+  regular_polygon_vertices` -- no text label, just the shape itself.
+  Every icon shares the same CIRCUMRADIUS (`ICON_RADIUS`, via
+  `_vertices_with_radius`, which solves for the edge length that gives a
+  regular_polygon_vertices call a chosen radius instead of a chosen edge
+  length) rather than a shared edge length -- unlike a shape actually
+  PLACED on the canvas (`_LOCAL_VERTICES`, built directly from
+  `DEFAULT_SHAPE_EDGE_LENGTH`), where a bigger n legitimately means a
+  bigger shape, sharing edge length the way every other net/mesh in this
+  project does. Using a shared edge length for the ICONS too was tried
+  first and clipped the 7-/8-gon icons against their own small canvas,
+  since their circumradius at a fixed edge length grows faster than a
+  triangle's or square's. `POLYGON_COLORS` gives each polygon type ONE
+  FIXED color (never per-instance) from `ui_theme.FACE_COLORS` --
+  triangle deliberately uses `FACE_COLORS[6]` (a bright yellow) rather
+  than `FACE_COLORS[0]` (a dark navy that read as too dim against the
+  dark background); 4..8 take `FACE_COLORS[1..5]`, still each unique.
+- **Pick up / drop**: clicking a palette icon "arms" that type
+  (`self.armed_n`, highlighted via the icon Canvas's own
+  `highlightbackground`) and shows a ghost preview following the mouse
+  over the canvas, drawn via `_draw_shape(..., selected=True)` -- i.e.
+  EXACTLY like a real, currently-selected placed shape (solid fill,
+  white outline), not some lesser "not real yet" look. Two other looks
+  were tried and dropped: a dashed-outline-only preview (didn't read as
+  "this is what you're about to place" as clearly as showing the real
+  fill), and before that a stippled fill (a stipple pattern is a small,
+  fixed-pixel bitmap tiled across the polygon, so it read as
+  increasingly coarse/pixelated on a shape this size, much bigger than a
+  palette icon, rather than a smooth preview). Clicking the SAME icon
+  again disarms it; clicking a DIFFERENT one swaps which type is armed
+  directly. Clicking anywhere in the canvas while armed drops a real
+  instance there and disarms the tool -- the new shape becomes selected.
+  Shapes are stored in `self.shapes`, a list in Z-order (back to front);
+  redrawing just iterates it front-to-back, so a later drop naturally
+  renders on top of anything it overlaps, with no separate Z-index
+  field needed.
+- **Select / drag / delete**: `_on_canvas_press` hit-tests
+  (`_hit_test`, topmost-first via `reversed(self.shapes)`, each shape's
+  containment via `_point_in_polygon`'s ray-casting against its CURRENT,
+  possibly-rotated vertices -- see Rotate below) and either selects
+  the hit shape (setting up `self._drag_state`) or, on a miss, deselects.
+  Dragging is not a separate click-vs-drag code path: `_drag_state`
+  records the press's starting world position and the shape's starting
+  center, and `_on_canvas_drag` just re-applies that same world-space
+  delta on every subsequent motion event -- a plain click that never
+  moves is simply a drag by zero, so it falls out for free. The selected
+  shape (`self.selected_id`, at most one at a time) is drawn with a thin
+  white outline (`SELECTION_OUTLINE_COLOR`/`_WIDTH`); Delete
+  (`root.bind_all` -- this app has no text-entry widget for the key to
+  collide with) removes it.
+- **Rotate / pan (right button, mutually exclusive)**: `_on_right_press`
+  decides once, at press time, which of the two right-drag means: if a
+  shape is currently selected, ROTATE it (`_rotate_state`); otherwise
+  PAN the view (`_pan_last_xy`) -- the two fields are never both set, so
+  `_on_right_drag` just checks which one is live. Rotation is trackball-
+  style, not an absolute-angle readout: each motion event measures the
+  mouse's CURRENT angle around the shape's screen-space center
+  (`atan2`), diffs it against the angle recorded at the previous event,
+  and adds that delta straight onto the shape's own `rotation` (radians,
+  stored per-shape, applied in `_shape_world_vertices` before
+  translating by `(cx, cy)`) -- this is safe to do directly in SCREEN
+  space rather than converting through `_screen_to_world` first, since
+  the view transform is scale-plus-translate only (no shear/rotation of
+  its own), so a screen-space angle and the corresponding world-space
+  angle are identical. Panning adds the drag's screen delta to the view
+  offset directly (a plain `+=`) -- dragging the background moves the
+  view WITH the cursor, like grabbing and sliding the canvas itself (a
+  `-=`, moving the view opposite the drag as if pulling the canvas out
+  from under a fixed viewport, was tried per an earlier request and
+  then explicitly reverted back to this `+=` version).
+- **Zoom**: the scroll wheel (`<MouseWheel>` on Windows/macOS,
+  `<Button-4>`/`<Button-5>` on X11 -- all three bound, same as
+  `inflate_polyhedron_app`'s level-panel zoom) zooms about the CURSOR:
+  `_on_zoom` solves for the world point under the cursor at the OLD
+  scale, then re-derives the offset so that same world point lands back
+  under the cursor at the NEW one -- without this, zooming would drift
+  whatever's under the mouse sideways instead of zooming into/out of it.
+- **Coordinates**: shapes are stored in "world" coordinates, entirely
+  independent of the current pan/zoom; `_world_to_screen`/
+  `_screen_to_world` (a single scale-plus-offset transform) are the ONLY
+  two places that ever convert between the two, so panning/zooming is
+  purely a transform applied at draw/hit-test/drag time, never a
+  rewrite of every shape's stored position.
+- **Rendering / anti-aliasing (`_rasterize_polygon`)**: a plain
+  `tk.Canvas` polygon item has NO anti-aliasing in Tk at all -- every
+  edge came out visibly jagged, worst on a pentagon/hexagon/etc's
+  diagonal sides. Every polygon (each placed shape, the ghost preview,
+  and each palette icon) is instead rasterized through Pillow at
+  `SUPERSAMPLE` (4x) its final pixel size and LANCZOS-downsampled -- the
+  standard supersample-then-downsample anti-aliasing trick. Only each
+  polygon's own padded bounding box is rasterized (not the whole
+  canvas), so cost tracks the shapes actually on screen, not canvas
+  area; `main()` also calls `_enable_windows_dpi_awareness()` (a no-op
+  off Windows) before creating the root Tk window, since without it
+  Windows renders this (like any DPI-unaware Tk app) at a virtualized 96
+  DPI and bitmap-stretches the result to the display's real scaling,
+  which independently made everything look soft on a scaled display --
+  a separate cause of blur from the lack of polygon anti-aliasing, and
+  both needed fixing. Because rendering is a plain `tk.Canvas` with a
+  solid background plus `create_image` blits (not matplotlib, unlike the
+  other two apps' 2D panels), the actual hit-test/drag/rotate LOGIC never
+  looks at what's drawn -- it works entirely off each shape's own stored
+  world-space geometry, unaffected by how it happens to be rasterized.
+  `_redraw` clears the canvas and re-rasterizes every shape from
+  scratch each call (`self._shape_photos` holds this call's images so Tk
+  doesn't garbage-collect them out from under the canvas) -- simple and
+  fast enough given there are only ever a handful of shapes on screen; a
+  palette ICON, by contrast, is rasterized ONCE at build time
+  (`self._icon_photos`), since it never changes. The canvas itself is
+  given a visible 1px border (`highlightthickness=1,
+  highlightbackground=PLOT_THEME["fg"]`) so the drawing area reads as a
+  clearly boxed-in region rather than blending into the rest of the
+  (also dark) window.
+- **Clear button**: `on_clear_clicked` empties `self.shapes` and clears
+  the selection; no confirmation prompt.
+- **Font scaling**: `_scale_ui_fonts` (called once, right after
+  `sv_ttk.set_theme`) is copied from `inflate_polyhedron_app`'s own
+  method of the same name -- scales every NAMED Tk/ttk font by
+  `UI_FONT_SCALE` (1.3, matching the other app's value) so the whole
+  app's text (the "Shapes" heading, the Clear button, ...) grows
+  together, including sv_ttk's own Tcl-level fonts that back most ttk
+  widget styles (a per-widget `font=` override would miss those). The
+  "Shapes" heading's own literal `("TkDefaultFont", ..., "bold")` tuple
+  is scaled by hand (`round(11 * UI_FONT_SCALE)`) for the same reason
+  `inflate_polyhedron_app`'s `LEVEL_TITLE_FONT` is -- a literal size
+  tuple isn't a NAMED font `_scale_ui_fonts`'s loop can reach on its own.
+- Dark mode only, like the other two apps: `sv_ttk.set_theme("dark")`
+  for the ttk palette/Clear button, `ui_theme.PLOT_THEME["bg"]`/`["fg"]`
+  for the canvas, its border, and the palette icon backgrounds.
 
 ## Testing
 
