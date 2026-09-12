@@ -214,6 +214,7 @@ entirely in world coordinates against each shape's own stored geometry,
 exactly as it did before this module used Pillow at all.
 """
 import colorsys
+import itertools
 import json
 import math
 import os
@@ -329,6 +330,16 @@ HANDLE_COLOR = "white"
 CONNECTION_COLOR = "#b0b0b0"
 CONNECTION_WIDTH = 1.5
 CONNECTION_SELECTED_WIDTH = 2.5
+
+# _infer_shape_flips' own combinatorial search: how large a single
+# "suspect set" (the shapes implicated in one self-loop's own traced
+# chain) it will brute-force over before giving up on auto-fixing that
+# one and falling through to the plain, unflipped validation error --
+# 2**MAX_FLIP_SEARCH_SHAPES trial validations in the worst case, so this
+# stays small enough to always be fast even though each trial re-walks
+# every connection.
+MAX_FLIP_SEARCH_SHAPES = 16
+MAX_FLIP_SEARCH_OUTER_ITERATIONS = 30
 
 # Supersampling factor for _rasterize_polygon's anti-aliasing -- render
 # at this many times final size, then LANCZOS-downsample. Higher looks
@@ -566,29 +577,69 @@ def _infer_connections(faces):
     return connections
 
 
+def _true_edge_slots(shape, edge_index):
+    """The (v_slot, w_slot) corner-slot pair edge `edge_index` of `shape`
+    represents in TRUE (CCW-from-outside) direction: (corner i, corner
+    i+1) normally, or REVERSED -- (corner i+1, corner i) -- when `shape`
+    is flipped (see _infer_shape_flips' module-level Design notes). A
+    regular polygon placed in this app can only be rotated, never
+    mirrored, so its DRAWN corner order always has the same fixed
+    handedness; "flipped" is a per-shape bit saying that shape's face is
+    meant to be viewed from the OTHER side of the solid, which reverses
+    every one of its edges' TRUE direction relative to how they're drawn
+    -- this is the one place that fact gets applied, so every caller
+    (_connection_pairs, _faces_from_shapes, _validate_shapes_connections)
+    agrees. Set automatically by _infer_shape_flips at Save time -- never
+    user-editable."""
+    sid, n = shape["id"], shape["n"]
+    a, b = (sid, edge_index), (sid, (edge_index + 1) % n)
+    return (b, a) if shape.get("flipped", False) else (a, b)
+
+
+def _shape_face_corner_order(shape):
+    """The corner-index order _faces_from_shapes/_validate_shapes_connections
+    read a shape's OWN face loop in, matching _true_edge_slots: forward
+    (0, 1, ..., n-1) normally, or reversed (n-1, ..., 1, 0) when flipped
+    -- a flipped shape's consecutive TRUE edges only chain into a valid
+    cyclic loop when its corners are visited in reverse (see
+    _infer_shape_flips' module-level Design notes)."""
+    n = shape["n"]
+    return range(n - 1, -1, -1) if shape.get("flipped", False) else range(n)
+
+
+def _connection_pairs(shapes_by_id, conn):
+    """The two corner-slot pairs one connection unions (_vertex_roots) or
+    links (_connection_chain's own adjacency): shape A's edge `a_edge`,
+    in its TRUE direction (_true_edge_slots), must run the OPPOSITE way
+    from shape B's edge `b_edge` in ITS true direction -- the standard
+    CCW-from-outside net convention load_stretchy_mesh validates, applied
+    to each shape's true (flip-adjusted) direction rather than its raw
+    drawn one."""
+    a_shape, b_shape = shapes_by_id[conn["a_shape"]], shapes_by_id[conn["b_shape"]]
+    a_v, a_w = _true_edge_slots(a_shape, conn["a_edge"])
+    b_v, b_w = _true_edge_slots(b_shape, conn["b_edge"])
+    return ((a_v, b_w), (a_w, b_v))
+
+
 def _vertex_roots(shapes, connections):
-    """shapes: [{"id", "n", ...}, ...]; connections: [{"a_shape",
-    "a_edge", "b_shape", "b_edge"}, ...]. Returns {(shape_id,
-    corner_index): root_slot} -- a UNION-FIND over each shape's own
-    corner slots (`corner i` is the vertex where edge `i-1` meets edge
-    `i`, i.e. edge `i` runs corner `i` -> corner `(i+1) % n`, the same
-    indexing _shape_edge_midpoints uses), merged pairwise -- REVERSED,
-    not edge-to-edge straight across -- for every connection, so a
-    shared edge ends up as `v -> w` in one face's loop and `w -> v` in
-    the other's (the winding convention load_stretchy_mesh validates;
-    pairing straight across would instead produce the SAME direction in
-    both, which that loader rejects). The root itself is a `(shape_id,
-    corner_index)` slot -- deliberately NOT a freshly-assigned sequential
-    integer (that numbering is _faces_from_shapes' own job, layered on
-    top of this, only for the exported JSON's vertex-id integers) --
-    since a slot's root is STABLE across any edit that doesn't touch its
-    own group, unlike a from-scratch sequential renumbering, which can
-    shift for every corner processed after wherever the edit happened to
-    land (adding one connection anywhere merges two groups into one,
-    which shifts every id assigned afterward down by one). This is what
-    _draw_debug_vertex_label displays instead, precisely so a corner's
-    shown identity doesn't change just because some UNRELATED connection
-    was added or removed elsewhere."""
+    """shapes: [{"id", "n", "flipped", ...}, ...]; connections:
+    [{"a_shape", "a_edge", "b_shape", "b_edge"}, ...]. Returns
+    {(shape_id, corner_index): root_slot} -- a UNION-FIND over each
+    shape's own corner slots (`corner i` is the vertex where edge `i-1`
+    meets edge `i`, i.e. edge `i` runs corner `i` -> corner `(i+1) % n`,
+    the same indexing _shape_edge_midpoints uses), merged pairwise per
+    _connection_pairs for every connection. The root itself is a
+    `(shape_id, corner_index)` slot -- deliberately NOT a freshly-assigned
+    sequential integer (that numbering is _faces_from_shapes' own job,
+    layered on top of this, only for the exported JSON's vertex-id
+    integers) -- since a slot's root is STABLE across any edit that
+    doesn't touch its own group, unlike a from-scratch sequential
+    renumbering, which can shift for every corner processed after
+    wherever the edit happened to land (adding one connection anywhere
+    merges two groups into one, which shifts every id assigned afterward
+    down by one). This is what _draw_debug_vertex_label displays instead,
+    precisely so a corner's shown identity doesn't change just because
+    some UNRELATED connection was added or removed elsewhere."""
     parent = {(s["id"], corner): (s["id"], corner) for s in shapes for corner in range(s["n"])}
 
     def find(slot):
@@ -603,10 +654,8 @@ def _vertex_roots(shapes, connections):
 
     shapes_by_id = {s["id"]: s for s in shapes}
     for conn in connections:
-        n_a, n_b = shapes_by_id[conn["a_shape"]]["n"], shapes_by_id[conn["b_shape"]]["n"]
-        a_edge, b_edge = conn["a_edge"], conn["b_edge"]
-        union((conn["a_shape"], a_edge), (conn["b_shape"], (b_edge + 1) % n_b))
-        union((conn["a_shape"], (a_edge + 1) % n_a), (conn["b_shape"], b_edge))
+        for slot_a, slot_b in _connection_pairs(shapes_by_id, conn):
+            union(slot_a, slot_b)
 
     return {slot: find(slot) for slot in parent}
 
@@ -616,7 +665,11 @@ def _faces_from_shapes(shapes, connections):
     "faces" list for exporting: each distinct root from _vertex_roots
     gets one fresh sequential integer id (assigned in shape/corner
     visiting order), and each shape's own face is just its corners' ids
-    in order. This sequential numbering only ever happens HERE, inside
+    in _shape_face_corner_order (forward normally, reversed if flipped --
+    see _infer_shape_flips' module-level Design notes for why a flipped
+    shape's own face loop must be read backward to come out
+    CCW-from-outside like every other face's). This sequential numbering
+    only ever happens HERE, inside
     _export_faces_and_layout (Save) -- never live while editing (see
     module docstring's Edge connections section for why treating a live
     version of this as a gate on new connections turned out to be the
@@ -627,7 +680,7 @@ def _faces_from_shapes(shapes, connections):
     faces = []
     for shape in shapes:
         face = []
-        for corner in range(shape["n"]):
+        for corner in _shape_face_corner_order(shape):
             root = roots[(shape["id"], corner)]
             if root not in vertex_ids:
                 vertex_ids[root] = len(vertex_ids)
@@ -699,18 +752,15 @@ def _connection_chain(shapes, connections, slot_a, slot_b):
     always this transitive chain, possibly running through many other
     shapes, that the two ends of some offending edge got swept into.
     BFS over the same slot-to-slot links _vertex_roots' own union calls
-    make (each connection contributes two: `a_edge`<->`b_edge+1` and
-    `a_edge+1`<->`b_edge`), so the path found here traces the exact
-    unions that produced the shared root. Returns None if slot_a/slot_b
+    make (each connection contributes the same two pairs _connection_pairs
+    gives it), so the path found here traces the exact unions that
+    produced the shared root. Returns None if slot_a/slot_b
     aren't actually linked (shouldn't happen for two slots already
     confirmed to share a root, but guards against it regardless)."""
     shapes_by_id = {s["id"]: s for s in shapes}
     adjacency = {}
     for conn in connections:
-        n_a, n_b = shapes_by_id[conn["a_shape"]]["n"], shapes_by_id[conn["b_shape"]]["n"]
-        a_edge, b_edge = conn["a_edge"], conn["b_edge"]
-        for u, v in (((conn["a_shape"], a_edge), (conn["b_shape"], (b_edge + 1) % n_b)),
-                     ((conn["a_shape"], (a_edge + 1) % n_a), (conn["b_shape"], b_edge))):
+        for u, v in _connection_pairs(shapes_by_id, conn):
             adjacency.setdefault(u, []).append((v, conn))
             adjacency.setdefault(v, []).append((u, conn))
 
@@ -798,26 +848,120 @@ def _validate_shapes_connections(shapes, connections):
     for shape in shapes:
         n, sid = shape["n"], shape["id"]
         for i in range(n):
-            slot_v, slot_w = (sid, i), (sid, (i + 1) % n)
+            # _true_edge_slots, not the raw (sid, i)/(sid, (i+1)%n) pair --
+            # a flipped shape's edge i has its TRUE v/w corners reversed
+            # (see _infer_shape_flips' Design notes), and this check has
+            # to agree with _connection_pairs/_faces_from_shapes about
+            # what each shape's own edges actually connect to.
+            slot_v, slot_w = _true_edge_slots(shape, i)
             v, w = roots[slot_v], roots[slot_w]
             if v == w:
                 problems.append(
-                    f"shape {sid} edge {i} (corners {i}->{(i + 1) % n}) "
+                    f"shape {sid} edge {i} (corners {slot_v[1]}->{slot_w[1]}) "
                     f"is a self-loop at {vlabel(v)}{chain_text(slot_v, slot_w)}")
                 self_loop_slots.add(slot_v)
                 self_loop_slots.add(slot_w)
-            counts.setdefault((v, w), []).append((sid, i))
+            counts.setdefault((v, w), []).append((sid, i, slot_v))
     for (v, w), edges in counts.items():
         if len(edges) > 1:
-            where = ", ".join(f"shape {sid} edge {i}" for sid, i in edges)
-            first_slot = (edges[0][0], edges[0][1])
-            second_slot = (edges[1][0], edges[1][1])
+            where = ", ".join(f"shape {sid} edge {i}" for sid, i, _ in edges)
+            first_slot = edges[0][2]
+            second_slot = edges[1][2]
             problems.append(
                 f"edge {vlabel(v)}->{vlabel(w)} appears {len(edges)} times "
                 f"({where}); need at most once{chain_text(first_slot, second_slot)}")
     if problems:
         raise NetValidationError(
             "Not a valid net, refusing to save:\n  " + "\n  ".join(problems), self_loop_slots)
+
+
+def _infer_shape_flips(shapes, connections):
+    """Automatically finds a set of shape ids to mark "flipped" (see
+    _true_edge_slots) so _validate_shapes_connections passes -- WITHOUT
+    the user ever choosing anything -- or returns None if no such set
+    was found (the caller then just validates unflipped, exactly as if
+    this function didn't exist, so the reported error is unaffected).
+
+    Design notes -- why this can't be a simple, always-correct rule:
+    every shape's own drawn corner order has a single, fixed handedness
+    (only rotation, never mirroring, is available when placing it), and
+    _connection_pairs' default (REVERSED, "viewed from outside") pairing
+    handles most nets built this way with no help. But some valid nets
+    genuinely need a face read the OTHER way relative to its neighbors
+    -- e.g. 3 triangles connected pairwise around a shared apex, plus a
+    4th "base" face closing all 3 of their remaining edges, needs that
+    4th face's connections to use the OPPOSITE pairing, since gluing it
+    the default way makes two of its own corners collide into one
+    vertex (a self-loop) no matter which of its edges are chosen for
+    which connection. A user hit exactly this building a tetrahedron
+    this way and reported it as a bug.
+
+    Critically, a single connection's own (a_edge, b_edge) never says by
+    itself whether it needs the default or opposite pairing -- either
+    is equally valid in isolation (it only fixes WHICH physical edges
+    are glued, not their relative orientation) -- so this can only be
+    determined by REQUIRING GLOBAL CONSISTENCY across every connection
+    at once, exactly like determining whether a surface built by gluing
+    polygons along edges (with no pre-existing shared vertex labels) is
+    orientable at all. That's solvable, but not by a single linear
+    pass with a fixed per-edge rule (verified directly: brute-forcing a
+    small worked example found relative orientation constraints that
+    only became visible once enough of the mesh existed to create a
+    cycle, and satisfying one cycle's constraint could just as well have
+    required UNDOING an earlier, individually-harmless choice made
+    elsewhere). Instead: start from the default (nothing flipped, i.e.
+    today's original behavior, unchanged for every net that never needed
+    this at all) and only search when that fails -- a failed check's own
+    self-loop already NAMES the specific corners involved and, via
+    _connection_chain, the specific chain of connections responsible
+    (see _validate_shapes_connections), so the "suspect set" of shapes
+    that might need flipping is exactly those named, not the whole net.
+    Brute-forcing increasing-size subsets of just that (small, for any
+    reasonably localized problem) set, retrying validation after each,
+    finds a fix quickly in practice (confirmed on the tetrahedron
+    example above and on every net already shipped under
+    data/input/stretchy_nets/, which validate instantly with an empty
+    flip set -- i.e. this changes nothing for a net that already worked).
+    MAX_FLIP_SEARCH_SHAPES/MAX_FLIP_SEARCH_OUTER_ITERATIONS cap the
+    search so a genuinely non-orientable net (no flip assignment can
+    ever fix it) or an unusually large tangle fails fast rather than
+    hanging, falling back to the plain validation error."""
+    flip_set = set()
+    for _ in range(MAX_FLIP_SEARCH_OUTER_ITERATIONS):
+        trial = [dict(s, flipped=(s["id"] in flip_set)) for s in shapes]
+        try:
+            _validate_shapes_connections(trial, connections)
+            return flip_set
+        except NetValidationError as e:
+            if not e.self_loop_slots:
+                return None  # a pure duplicate-edge conflict -- no self-loop to localize from
+            suspects = {slot[0] for slot in e.self_loop_slots}
+            slots = list(e.self_loop_slots)
+            chain = _connection_chain(shapes, connections, slots[0], slots[1]) if len(slots) >= 2 else None
+            if chain:
+                for c in chain:
+                    suspects.add(c["a_shape"])
+                    suspects.add(c["b_shape"])
+        if len(suspects) > MAX_FLIP_SEARCH_SHAPES:
+            return None
+        candidates = sorted(suspects)
+        found = None
+        for size in range(1, len(candidates) + 1):
+            for combo in itertools.combinations(candidates, size):
+                trial_flips = flip_set.symmetric_difference(combo)
+                trial = [dict(s, flipped=(s["id"] in trial_flips)) for s in shapes]
+                try:
+                    _validate_shapes_connections(trial, connections)
+                    found = trial_flips
+                    break
+                except NetValidationError:
+                    continue
+            if found is not None:
+                break
+        if found is None:
+            return None
+        flip_set = found
+    return None
 
 
 class InteractiveBuilderApp:
@@ -1169,8 +1313,11 @@ class InteractiveBuilderApp:
         `net_layout` is each shape's own {"cx", "cy", "rotation"}, in the
         same order as `faces`. Raises NetValidationError (a ValueError
         subclass, from _validate_shapes_connections) if the current
-        connections would produce an invalid mesh -- the ONLY place that
-        ever happens (see module docstring: every corner is deliberately
+        connections would produce an invalid mesh even after
+        _infer_shape_flips' own automatic search for a working
+        "flipped" assignment (see its own Design notes for why some
+        valid nets need one at all) -- the ONLY place either of these
+        ever run (see module docstring: every corner is deliberately
         treated as its own, separate vertex while editing, no matter
         what any OTHER connection's own merge already implies about it;
         only Save actually computes the full picture and validates it,
@@ -1178,9 +1325,15 @@ class InteractiveBuilderApp:
         directly (in "vSHAPE.CORNER" terms, the same live identity debug
         mode shows), before _faces_from_shapes ever renumbers anything
         for export, so a failed Save's error names corners the user can
-        actually go find on screen."""
-        _validate_shapes_connections(self.shapes, self.connections)
-        faces = _faces_from_shapes(self.shapes, self.connections)
+        actually go find on screen -- and reflects the SAME (unflipped)
+        assignment shown there if no working flip was found, so the
+        error is never phrased in terms of a flip the user never asked
+        for and can't see."""
+        flip_set = _infer_shape_flips(self.shapes, self.connections)
+        shapes = ([dict(s, flipped=(s["id"] in flip_set)) for s in self.shapes]
+                   if flip_set is not None else self.shapes)
+        _validate_shapes_connections(shapes, self.connections)
+        faces = _faces_from_shapes(shapes, self.connections)
         net_layout = [{"cx": s["cx"], "cy": s["cy"], "rotation": s["rotation"]} for s in self.shapes]
         return faces, net_layout
 
@@ -1240,7 +1393,13 @@ class InteractiveBuilderApp:
             shape_id = self._next_shape_id
             self._next_shape_id += 1
             shape_ids.append(shape_id)
-            self.shapes.append({"id": shape_id, "n": len(face), "cx": 0.0, "cy": 0.0, "rotation": 0.0})
+            # "flipped" always starts False for a LOADED shape -- never
+            # needed here even for a face that a builder session had
+            # flipped originally, since _infer_connections derives
+            # connections straight from the file's own already-consistent
+            # winding (see its own docstring), not via _connection_pairs.
+            self.shapes.append({"id": shape_id, "n": len(face), "cx": 0.0, "cy": 0.0,
+                                 "rotation": 0.0, "flipped": False})
 
         if net_layout is not None and len(net_layout) == len(faces):
             for shape, layout in zip(self.shapes, net_layout):
@@ -1409,7 +1568,8 @@ class InteractiveBuilderApp:
         return made
 
     def _drop_shape(self, n, wx, wy):
-        shape = {"id": self._next_shape_id, "n": n, "cx": wx, "cy": wy, "rotation": 0.0}
+        shape = {"id": self._next_shape_id, "n": n, "cx": wx, "cy": wy, "rotation": 0.0,
+                 "flipped": False}
         self._next_shape_id += 1
         self.shapes.append(shape)
 
