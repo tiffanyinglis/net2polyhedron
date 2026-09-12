@@ -305,7 +305,7 @@ from PIL import Image, ImageTk
 import pyvista as pv
 import sv_ttk
 
-from common.paths import STRETCHY_NETS_DIR
+from common.paths import STRETCHY_NETS_DIR, DATA_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
@@ -323,6 +323,13 @@ from session_state import (
 )
 
 DEFAULT_NET_BASENAME = "cube"
+
+# File > Save/Load's own default directory for a whole SESSION (see
+# on_save_session_clicked/on_load_session_clicked) -- deliberately NOT
+# STRETCHY_NETS_DIR (data/input/stretchy_nets/, the hand-authored nets
+# the "Choose a net" combo scans), since a saved session is a generated
+# artifact of using this app, not an input to it.
+SESSION_OUTPUT_DIR = DATA_DIR / "output"
 
 # A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
 # subdivision reads as texture rather than a bold wireframe competing
@@ -1525,8 +1532,9 @@ class InflatePolyhedronApp:
         if self.positions is None:
             messagebox.showwarning("Save", "No net is loaded yet.")
             return
+        SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(
-            title="Save session", initialdir=str(STRETCHY_NETS_DIR),
+            title="Save session", initialdir=str(SESSION_OUTPUT_DIR),
             defaultextension=".json", filetypes=[("JSON", "*.json")])
         if not path:
             return
@@ -1568,7 +1576,7 @@ class InflatePolyhedronApp:
         every level's mesh, the pressure/iteration/history readouts, and
         every spinner come straight from the file."""
         path = filedialog.askopenfilename(
-            title="Load session", initialdir=str(STRETCHY_NETS_DIR),
+            title="Load session", initialdir=str(SESSION_OUTPUT_DIR),
             filetypes=[("JSON", "*.json")])
         if not path:
             return
