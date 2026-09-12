@@ -23,26 +23,64 @@ Interaction model:
   instead) -- so the palette itself reads as a clean, evenly-sized row
   of options.
 - **Drawing area (drop)**: clicking anywhere while a type is armed drops
-  a real instance there (at the click point) and disarms the tool -- it
-  is NOT left selected afterward (a freshly dropped shape used to become
-  the selected one; changed at the user's request). Shapes are drawn in
-  the order they're stored, so a later drop renders on top of anything
-  it overlaps.
-- **Selection**: with no tool armed, clicking a shape selects it (thin
-  white outline) and deselects whatever was selected before; clicking
-  empty space deselects. At most one shape is ever selected. Delete (the
-  key, checked globally via bind_all since this app has no text-entry
-  widget for it to collide with) removes the selected shape.
-- **Drag**: pressing on a shape both selects it and arms a drag -- moving
-  the mouse while the button stays down drags the shape by the same
-  screen-space delta, converted through the current pan/zoom transform.
-  A plain click (no motion) is just a zero-distance drag, so no separate
-  click-vs-drag code path is needed.
-- **Rotate**: with a shape selected, holding the RIGHT button down and
-  dragging rotates that shape about its own centre, tracking the mouse's
-  angle around it (a trackball-style drag, not an absolute angle readout).
-  With no shape selected, right-drag instead pans the view (see below) --
-  the two never conflict, since one or the other is always the case.
+  a real instance there (at the click point), disarms the tool, and
+  LEAVES it selected (so it can be immediately rotated, connected, or
+  copied with no extra click). Shapes are drawn in the order they're
+  stored, so a later drop renders on top of anything it overlaps.
+- **Selection (self.selected_ids, possibly more than one shape)**: with
+  no tool armed, clicking a shape selects JUST it, replacing whatever was
+  selected before, UNLESS it's already part of the current selection (in
+  which case the whole group stays selected, so it can be dragged/
+  rotated/deleted together -- see Drag/Rotate below); clicking empty
+  space deselects everything. Two ways to build up a multi-shape
+  selection:
+  - **Ctrl+click** a shape to TOGGLE just it in or out of the selection,
+    leaving every other selected shape untouched.
+  - **Marquee (rubber-band) drag**: pressing on EMPTY space and dragging
+    draws a dashed rectangle (`_finish_marquee_select`, on release) --
+    every shape it intersects (a proper convex-polygon/rectangle test,
+    `_rect_intersects_polygon`, not just a bounding-box check) becomes
+    the new selection; holding Ctrl when the drag STARTS adds them to
+    the existing selection instead of replacing it.
+
+  Delete (the key, checked globally via bind_all since this app has no
+  text-entry widget for it to collide with) removes every selected
+  shape.
+- **Copy/paste (Ctrl+C / Ctrl+V)**: copies every SELECTED shape's own
+  type, rotation, and position, PLUS every connection between two
+  selected shapes (one connecting a selected shape to one that ISN'T
+  copied along with it has no other end to reproduce, so it's simply
+  dropped) (on_copy_key/on_paste_key) -- a no-op with nothing selected;
+  pasting drops a fresh instance of each shape, all offset together by
+  PASTE_OFFSET so they never land exactly on top of the originals -- a
+  multi-shape copy reproduces the exact same relative arrangement AND
+  internal connections it was copied with, just shifted as a group.
+  Repeated Ctrl+V cascades further each time (each paste advances the
+  clipboard's own remembered positions) rather than stacking every copy
+  in the same spot. The new shapes (not the new connections) are left
+  selected afterward, same as a fresh drop.
+- **Drag**: pressing on an already-selected shape (or a shape that press
+  is about to select, per Selection above) arms a drag of the WHOLE
+  current selection together -- moving the mouse while the button stays
+  down moves every selected shape by the same screen-space delta,
+  converted through the current pan/zoom transform. A plain click (no
+  motion) is just a zero-distance drag, so no separate click-vs-drag
+  code path is needed.
+- **Rotate**: with a non-empty selection, holding the RIGHT button down
+  and dragging rotates the WHOLE selection as one rigid body about its
+  own centroid -- every selected shape both spins by the same angle AND
+  revolves around that shared point, tracking the mouse's angle around
+  it (a trackball-style drag, not an absolute angle readout). For a
+  selection of exactly one shape this is identical to the original
+  single-shape behavior (its own centroid IS its own center, so
+  "revolving" moves it by nothing -- see _on_right_press's own
+  docstring), so there's no special-casing between the two cases. With
+  nothing selected, right-drag instead pans the view (see below) -- the
+  two never conflict, since one or the other is always the case.
+- **Esc** cancels a connection that's been armed from one handle (the
+  first click of the click-click gesture below) but not yet completed
+  onto a second one -- the line following the cursor just disappears,
+  with no connection made (`_on_escape_key`).
 - **Edge connections**: every shape already on the canvas (not a still-
   armed/not-yet-dropped ghost) has a small circular handle at the
   midpoint of each of its edges -- selecting the shape first is NOT
@@ -281,6 +319,14 @@ POLYGON_COLORS = {n: _hls_hex(*hls) for n, hls in zip(POLYGON_NS, _POLYGON_HLS)}
 DEFAULT_SHAPE_EDGE_LENGTH = 70.0
 _LOCAL_VERTICES = {n: regular_polygon_vertices(n, DEFAULT_SHAPE_EDGE_LENGTH) for n in POLYGON_NS}
 
+# Ctrl+V's own offset (world units, both x and y) from wherever the
+# copied shape currently sits -- so a pasted copy never lands exactly on
+# top of the original (invisible, indistinguishable) or, repeated, on
+# top of the previous paste (see on_paste_key -- each paste advances the
+# clipboard's own stored position by this amount, so repeated Ctrl+V
+# cascades diagonally instead of stacking).
+PASTE_OFFSET = DEFAULT_SHAPE_EDGE_LENGTH * 0.4
+
 
 def _vertices_with_radius(n, radius):
     """Regular n-gon vertices (centered on origin) with the given
@@ -330,6 +376,16 @@ HANDLE_COLOR = "white"
 CONNECTION_COLOR = "#b0b0b0"
 CONNECTION_WIDTH = 1.5
 CONNECTION_SELECTED_WIDTH = 2.5
+
+# Marquee (rubber-band) select's own drag rectangle -- see
+# _on_canvas_press/_on_canvas_drag/_finish_marquee_select. Plain white
+# dashed outline, no fill (a filled/tinted rectangle would need the same
+# Pillow-alpha-compositing trick _draw_debug_vertex_label uses for its
+# label background, not worth it just for this) -- distinct enough from
+# SELECTION_OUTLINE_COLOR (red, solid) that a marquee in progress can't
+# be confused with an actual selected shape's outline.
+MARQUEE_OUTLINE_COLOR = "white"
+MARQUEE_DASH = (4, 2)
 
 # _infer_shape_flips' own combinatorial search: how large a single
 # "suspect set" (the shapes implicated in one self-loop's own traced
@@ -400,6 +456,31 @@ def _point_segment_distance(point, a, b):
         return math.hypot(px - ax, py - ay)
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _rect_intersects_polygon(rx0, ry0, rx1, ry1, vertices):
+    """True if the axis-aligned rectangle [rx0, rx1] x [ry0, ry1]
+    (marquee-select's own drag rectangle, see _on_canvas_drag)
+    intersects the CONVEX polygon `vertices` (every shape this app
+    places is a regular, hence convex, polygon) -- separating-axis test:
+    two convex shapes are disjoint iff SOME axis exists (perpendicular to
+    one shape's own edge) along which their projections don't overlap,
+    so for an axis-aligned rectangle plus a convex polygon, the
+    rectangle's own 2 axes plus each polygon edge's own normal are the
+    only candidates that could ever separate them."""
+    rect_pts = ((rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1))
+    n = len(vertices)
+    axes = [(1.0, 0.0), (0.0, 1.0)]
+    for i in range(n):
+        x1, y1 = vertices[i]
+        x2, y2 = vertices[(i + 1) % n]
+        axes.append((y1 - y2, x2 - x1))  # edge normal
+    for ax, ay in axes:
+        r_proj = [px * ax + py * ay for px, py in rect_pts]
+        p_proj = [px * ax + py * ay for px, py in vertices]
+        if max(r_proj) < min(p_proj) or max(p_proj) < min(r_proj):
+            return False
+    return True
 
 
 def _rgba(hex_color, alpha=255):
@@ -977,8 +1058,28 @@ class InteractiveBuilderApp:
         # in z-order, back to front: [{"id", "n", "cx", "cy", "rotation"}, ...]
         self.shapes = []
         self._next_shape_id = 1
-        self.selected_id = None
+        # {shape_id, ...} -- every currently-selected shape (possibly
+        # empty, possibly more than one via marquee-drag or Ctrl+click,
+        # see _on_canvas_press/_finish_marquee_select). A shape click
+        # without Ctrl held replaces this wholesale UNLESS the clicked
+        # shape is already a member, in which case the whole group stays
+        # selected (so it can be dragged/rotated/deleted together).
+        self.selected_ids = set()
         self.armed_n = None
+        # Marquee (rubber-band) select: screen-space start/current corner
+        # of the drag rectangle while one is in progress, else None/None
+        # -- see _on_canvas_press/_on_canvas_drag/_finish_marquee_select.
+        # _marquee_additive records whether Ctrl was held when the drag
+        # started (add to the existing selection) vs replace it.
+        self._marquee_start = None
+        self._marquee_current = None
+        self._marquee_additive = False
+        # {"shapes": [{"n", "rotation", "cx", "cy"}, ...], "connections":
+        # [{"a_index", "a_edge", "b_index", "b_edge"}, ...]} for the last
+        # Ctrl+C (shapes/connections index into that same "shapes" list,
+        # not real shape ids, which won't exist again until paste time),
+        # or None -- see on_copy_key/on_paste_key.
+        self._clipboard = None
         self._ghost_world_xy = None
         self._drag_state = None
         self._pan_last_xy = None
@@ -1007,7 +1108,7 @@ class InteractiveBuilderApp:
         # Shape/edge the pending connection is currently close enough to
         # complete onto, or (None, None) if it isn't near any right now
         # -- both None together always, never just one. Lit up like a
-        # selection but never actually assigned to self.selected_id. The
+        # selection but never actually added to self.selected_ids. The
         # SAME two fields drive both the highlight (_redraw) and what a
         # completing click actually connects to (_complete_or_cancel_
         # pending_connection just reads them, rather than re-hit-testing
@@ -1097,6 +1198,9 @@ class InteractiveBuilderApp:
         # always hold keyboard focus.
         self.root.bind_all("<Delete>", self._on_delete_key)
         self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
+        self.root.bind_all("<Control-c>", self.on_copy_key)
+        self.root.bind_all("<Control-v>", self.on_paste_key)
+        self.root.bind_all("<Escape>", self._on_escape_key)
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
@@ -1255,7 +1359,7 @@ class InteractiveBuilderApp:
             # Arming a new shape to place is a distinct action from
             # working with whatever's already on the canvas -- picking
             # one up shouldn't leave an unrelated shape looking selected.
-            self.selected_id = None
+            self.selected_ids = set()
             self.selected_connection_id = None
         for other_n, icon in self._palette_canvases.items():
             icon.configure(highlightbackground=(
@@ -1265,7 +1369,7 @@ class InteractiveBuilderApp:
     def on_clear_clicked(self):
         self.shapes.clear()
         self.connections.clear()
-        self.selected_id = None
+        self.selected_ids = set()
         self.selected_connection_id = None
         self._drag_state = None
         self._redraw()
@@ -1379,13 +1483,15 @@ class InteractiveBuilderApp:
         saved at instead of resetting to the default 1.0."""
         self.shapes = []
         self.connections = []
-        self.selected_id = None
+        self.selected_ids = set()
         self.selected_connection_id = None
         self.armed_n = None
         self._connection_pending = None
         self._hover_shape_id = None
         self._hover_edge_index = None
         self._drag_state = None
+        self._marquee_start = None
+        self._marquee_current = None
         self._self_loop_highlight = set()
 
         shape_ids = []
@@ -1507,7 +1613,7 @@ class InteractiveBuilderApp:
             # The POINT becomes the selected thing now, not the shape --
             # deselecting here is what makes _redraw stop outlining the
             # whole shape and light up only this one handle instead.
-            self.selected_id = None
+            self.selected_ids = set()
             self.selected_connection_id = None
             self._redraw()
             return
@@ -1515,7 +1621,7 @@ class InteractiveBuilderApp:
         conn_hit = self._hit_test_connection(event.x, event.y)
         if conn_hit is not None:
             self.selected_connection_id = conn_hit
-            self.selected_id = None
+            self.selected_ids = set()
             self._drag_state = None
             self._redraw()
             return
@@ -1523,13 +1629,43 @@ class InteractiveBuilderApp:
         wx, wy = self._screen_to_world(event.x, event.y)
         hit = self._hit_test(wx, wy)
         self.selected_connection_id = None
+        ctrl_held = bool(event.state & 0x0004)
         if hit is None:
-            self.selected_id = None
+            # Empty space: a plain click deselects everything and starts
+            # a marquee-select drag from here (see _on_canvas_drag/
+            # _finish_marquee_select); Ctrl+click on empty space starts
+            # one too, but ADDS whatever it encloses to the CURRENT
+            # selection instead of replacing it, so it leaves the
+            # existing selection alone until release actually confirms
+            # something new.
+            if not ctrl_held:
+                self.selected_ids = set()
             self._drag_state = None
+            self._marquee_start = (event.x, event.y)
+            self._marquee_current = (event.x, event.y)
+            self._marquee_additive = ctrl_held
         else:
-            self.selected_id = hit["id"]
-            self._drag_state = {"id": hit["id"], "start_world": (wx, wy),
-                                 "start_center": (hit["cx"], hit["cy"])}
+            if ctrl_held:
+                # Ctrl+click TOGGLES this one shape's membership, leaving
+                # every other selected shape exactly as it was.
+                self.selected_ids.symmetric_difference_update({hit["id"]})
+            elif hit["id"] not in self.selected_ids:
+                # Clicking a shape that ISN'T already part of the current
+                # selection replaces the whole selection with just it --
+                # clicking one that ALREADY is (below) leaves the whole
+                # group selected instead, so it can be dragged together.
+                self.selected_ids = {hit["id"]}
+            if hit["id"] in self.selected_ids:
+                # Drag the WHOLE current selection together, not just
+                # the shape that happened to be clicked.
+                starts = {}
+                for sid in self.selected_ids:
+                    s = self._shape_by_id(sid)
+                    if s is not None:
+                        starts[sid] = (s["cx"], s["cy"])
+                self._drag_state = {"start_world": (wx, wy), "starts": starts}
+            else:
+                self._drag_state = None
         self._redraw()
 
     def _complete_or_cancel_pending_connection(self):
@@ -1560,7 +1696,7 @@ class InteractiveBuilderApp:
             # origin shape was selected (that's how its handle was
             # showing in the first place), but the connection itself is
             # the thing that just changed, not that shape.
-            self.selected_id = None
+            self.selected_ids = set()
             self.selected_connection_id = None
         self._connection_pending = None
         self._hover_shape_id = None
@@ -1572,26 +1708,68 @@ class InteractiveBuilderApp:
                  "flipped": False}
         self._next_shape_id += 1
         self.shapes.append(shape)
+        # Left selected (per explicit user request) so it can be
+        # immediately rotated, connected, or copied without a separate
+        # click -- the _on_palette_clicked call right after this (in
+        # _on_canvas_press) only clears a selection when ARMING a new
+        # type, not when disarming (which is what actually happens
+        # here), so this survives that call.
+        self.selected_ids = {shape["id"]}
+        self.selected_connection_id = None
 
     def _on_canvas_drag(self, event):
-        if self._drag_state is None:
-            return
-        wx, wy = self._screen_to_world(event.x, event.y)
-        start_wx, start_wy = self._drag_state["start_world"]
-        start_cx, start_cy = self._drag_state["start_center"]
-        shape = self._shape_by_id(self._drag_state["id"])
-        if shape is not None:
-            shape["cx"] = start_cx + (wx - start_wx)
-            shape["cy"] = start_cy + (wy - start_wy)
+        if self._drag_state is not None:
+            wx, wy = self._screen_to_world(event.x, event.y)
+            start_wx, start_wy = self._drag_state["start_world"]
+            dx, dy = wx - start_wx, wy - start_wy
+            for sid, (start_cx, start_cy) in self._drag_state["starts"].items():
+                shape = self._shape_by_id(sid)
+                if shape is not None:
+                    shape["cx"] = start_cx + dx
+                    shape["cy"] = start_cy + dy
             self._redraw()
+            return
+        if self._marquee_start is not None:
+            self._marquee_current = (event.x, event.y)
+            self._redraw()
+
+    def _finish_marquee_select(self):
+        """Computes which shapes the marquee rectangle (screen-space
+        self._marquee_start/_current, see _on_canvas_press/_on_canvas_drag)
+        intersects -- each shape's own CURRENT polygon, in world
+        coordinates, tested via _rect_intersects_polygon -- and either
+        REPLACES the selection with them, or (self._marquee_additive,
+        Ctrl was held when the drag started) adds them to whatever was
+        already selected. A drag that never actually moved (a plain
+        click on empty space) already deselected everything -- or, if
+        Ctrl was held, left the existing selection untouched -- at press
+        time, so there's nothing further to do for it here."""
+        sx0, sy0 = self._marquee_start
+        sx1, sy1 = self._marquee_current
+        if sx0 == sx1 and sy0 == sy1:
+            return
+        wx0, wy0 = self._screen_to_world(min(sx0, sx1), min(sy0, sy1))
+        wx1, wy1 = self._screen_to_world(max(sx0, sx1), max(sy0, sy1))
+        hit_ids = {s["id"] for s in self.shapes
+                   if _rect_intersects_polygon(wx0, wy0, wx1, wy1, self._shape_world_vertices(s))}
+        if self._marquee_additive:
+            self.selected_ids |= hit_ids
+        else:
+            self.selected_ids = hit_ids
 
     def _on_canvas_release(self, _event):
         self._drag_state = None
+        if self._marquee_start is not None:
+            self._finish_marquee_select()
+            self._marquee_start = None
+            self._marquee_current = None
+            self._redraw()
 
     def _on_delete_key(self, _event):
-        if self.selected_id is not None:
-            self._remove_shape(self.selected_id)
-            self.selected_id = None
+        if self.selected_ids:
+            for shape_id in self.selected_ids:
+                self._remove_shape(shape_id)
+            self.selected_ids = set()
             self._redraw()
         elif self.selected_connection_id is not None:
             self.connections = [c for c in self.connections if c["id"] != self.selected_connection_id]
@@ -1599,22 +1777,111 @@ class InteractiveBuilderApp:
             self._self_loop_highlight = set()
             self._redraw()
 
+    def _on_escape_key(self, _event=None):
+        """Esc: cancels a connection that's been armed from one handle
+        (the first click of the click-click gesture -- see module
+        docstring's Edge connections section) but not yet completed onto
+        a second one -- the dragging-behind red line just disappears,
+        with no connection made. A no-op at any other time (no
+        in-progress gesture to cancel -- a marquee-drag is abandoned by
+        releasing the mouse button outside any shape instead, which
+        already just re-selects whatever it happens to enclose)."""
+        if self._connection_pending is not None:
+            self._connection_pending = None
+            self._pending_cursor_screen = None
+            self._hover_shape_id = None
+            self._hover_edge_index = None
+            self._redraw()
+
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
         self.root.title(f"Interactive Builder{' (debug mode)' if self.debug_mode else ''}")
         self._redraw()
 
-    # ---- canvas: right button -- rotate selected shape, else pan ----
+    def on_copy_key(self, _event=None):
+        """Ctrl+C: remembers every SELECTED shape's own type, rotation,
+        and ABSOLUTE position, PLUS every connection with BOTH endpoints
+        among the selected shapes -- one connecting a selected shape to
+        one that ISN'T copied along with it has nothing on the other end
+        to reproduce, so it's simply dropped, same as _remove_shape
+        already does for a shape that's actually deleted. No-op if
+        nothing's selected. Storing each shape's own absolute position,
+        not an offset relative to the others, is what lets a
+        multi-shape paste reproduce the exact same relative arrangement,
+        just moved as a whole -- see on_paste_key. Connections reference
+        their two shapes by INDEX into this same list (not by id, which
+        won't exist yet until paste time creates fresh ones)."""
+        if not self.selected_ids:
+            return
+        copied_shapes = [s for s in self.shapes if s["id"] in self.selected_ids]
+        index_of = {s["id"]: i for i, s in enumerate(copied_shapes)}
+        self._clipboard = {
+            "shapes": [{"n": s["n"], "rotation": s["rotation"], "cx": s["cx"], "cy": s["cy"]}
+                       for s in copied_shapes],
+            "connections": [
+                {"a_index": index_of[c["a_shape"]], "a_edge": c["a_edge"],
+                 "b_index": index_of[c["b_shape"]], "b_edge": c["b_edge"]}
+                for c in self.connections
+                if c["a_shape"] in index_of and c["b_shape"] in index_of
+            ],
+        }
+
+    def on_paste_key(self, _event=None):
+        """Ctrl+V: drops a fresh instance of every copied shape, each at
+        its own remembered rotation, ALL offset together by PASTE_OFFSET
+        from their remembered positions -- so a multi-shape copy pastes
+        back in the same relative arrangement it was copied in, just
+        shifted as a group -- PLUS a fresh connection for every one
+        copied alongside them (see on_copy_key), between the
+        corresponding NEW shapes. No-op if nothing's been copied yet.
+        Advances the clipboard's OWN stored positions by that same
+        offset every paste, so repeated Ctrl+V cascades diagonally
+        outward instead of stacking every copy exactly on top of the
+        last one. The new shapes (not the new connections) are left
+        selected afterward (replacing whatever was selected before),
+        same as a fresh drop."""
+        if not self._clipboard:
+            return
+        new_ids = []
+        for entry in self._clipboard["shapes"]:
+            entry["cx"] += PASTE_OFFSET
+            entry["cy"] += PASTE_OFFSET
+            shape = {"id": self._next_shape_id, "n": entry["n"],
+                     "cx": entry["cx"], "cy": entry["cy"],
+                     "rotation": entry["rotation"], "flipped": False}
+            self._next_shape_id += 1
+            self.shapes.append(shape)
+            new_ids.append(shape["id"])
+        for conn in self._clipboard["connections"]:
+            self.connections.append({
+                "id": self._next_connection_id,
+                "a_shape": new_ids[conn["a_index"]], "a_edge": conn["a_edge"],
+                "b_shape": new_ids[conn["b_index"]], "b_edge": conn["b_edge"],
+            })
+            self._next_connection_id += 1
+        self.selected_ids = set(new_ids)
+        self.selected_connection_id = None
+        self._redraw()
+
+    # ---- canvas: right button -- rotate selected shape(s), else pan ----
 
     def _on_right_press(self, event):
         """Right-drag has two mutually exclusive meanings, chosen once
-        here at press time: rotate the selected shape (if any), else pan
-        the view. `_rotate_state`/`_pan_last_xy` are never both set."""
-        if self.selected_id is not None:
-            shape = self._shape_by_id(self.selected_id)
-            cx, cy = self._world_to_screen(shape["cx"], shape["cy"])
-            self._rotate_state = {"id": shape["id"],
-                                   "last_angle": math.atan2(event.y - cy, event.x - cx)}
+        here at press time: rotate the CURRENT selection (if non-empty),
+        else pan the view. `_rotate_state`/`_pan_last_xy` are never both
+        set. A multi-shape selection rotates as one rigid body about its
+        own centroid (each shape spins by the same angle AND revolves
+        around that shared point) -- for a selection of exactly one,
+        this reduces to the original single-shape behavior exactly
+        (its own centroid IS its own center, so "revolving" it moves it
+        by zero), so there's no special-casing needed between the two."""
+        shapes = [s for s in (self._shape_by_id(sid) for sid in self.selected_ids) if s is not None]
+        if shapes:
+            cx = sum(s["cx"] for s in shapes) / len(shapes)
+            cy = sum(s["cy"] for s in shapes) / len(shapes)
+            scx, scy = self._world_to_screen(cx, cy)
+            self._rotate_state = {"ids": [s["id"] for s in shapes], "center_world": (cx, cy),
+                                   "last_angle": math.atan2(event.y - scy, event.x - scx)}
             self._pan_last_xy = None
         else:
             self._pan_last_xy = (event.x, event.y)
@@ -1622,13 +1889,20 @@ class InteractiveBuilderApp:
 
     def _on_right_drag(self, event):
         if self._rotate_state is not None:
-            shape = self._shape_by_id(self._rotate_state["id"])
-            if shape is None:
-                return
-            cx, cy = self._world_to_screen(shape["cx"], shape["cy"])
-            angle = math.atan2(event.y - cy, event.x - cx)
-            shape["rotation"] += angle - self._rotate_state["last_angle"]
+            cx, cy = self._rotate_state["center_world"]
+            scx, scy = self._world_to_screen(cx, cy)
+            angle = math.atan2(event.y - scy, event.x - scx)
+            delta = angle - self._rotate_state["last_angle"]
             self._rotate_state["last_angle"] = angle
+            cos_d, sin_d = math.cos(delta), math.sin(delta)
+            for sid in self._rotate_state["ids"]:
+                shape = self._shape_by_id(sid)
+                if shape is None:
+                    continue
+                dx, dy = shape["cx"] - cx, shape["cy"] - cy
+                shape["cx"] = cx + dx * cos_d - dy * sin_d
+                shape["cy"] = cy + dx * sin_d + dy * cos_d
+                shape["rotation"] += delta
             self._redraw()
             return
         if self._pan_last_xy is None:
@@ -1704,19 +1978,20 @@ class InteractiveBuilderApp:
         self._shape_photos = []
         for shape in self.shapes:
             screen_vertices = [self._world_to_screen(*wv) for wv in self._shape_world_vertices(shape)]
-            self._draw_shape(screen_vertices, POLYGON_COLORS[shape["n"]], selected=shape["id"] == self.selected_id)
+            self._draw_shape(screen_vertices, POLYGON_COLORS[shape["n"]], selected=shape["id"] in self.selected_ids)
 
         for conn in self.connections:
             endpoints = self._connection_endpoints(conn)
             if endpoints is not None:
                 # A connection highlights whenever it's explicitly
-                # selected OR it touches the currently-selected shape --
+                # selected OR it touches any currently-selected shape --
                 # the shape at its OTHER end stays its normal color (see
                 # the shape-drawing loop above, which only lights up
-                # self.selected_id), so only the line itself, not its
+                # self.selected_ids), so only the line itself, not its
                 # neighbour, reads as "part of this".
                 highlighted = (conn["id"] == self.selected_connection_id
-                               or self.selected_id in (conn["a_shape"], conn["b_shape"]))
+                               or conn["a_shape"] in self.selected_ids
+                               or conn["b_shape"] in self.selected_ids)
                 self._draw_connection_line(*endpoints, selected=highlighted)
 
         if self._connection_pending is not None:
@@ -1756,7 +2031,7 @@ class InteractiveBuilderApp:
             mids = self._shape_edge_midpoints(shape)
             for edge_index, (mx, my) in enumerate(mids):
                 point = (shape["id"], edge_index)
-                lit = shape["id"] == self.selected_id or point in (pending_point, hover_point)
+                lit = shape["id"] in self.selected_ids or point in (pending_point, hover_point)
                 joined = point in joined_points
                 if not lit and not joined:
                     # An unjoined, not-currently-active handle only
@@ -1789,6 +2064,12 @@ class InteractiveBuilderApp:
             self._draw_debug_vertex_label()
 
         self._draw_self_loop_highlight()
+
+        if self._marquee_start is not None:
+            x0, y0 = self._marquee_start
+            x1, y1 = self._marquee_current
+            self.canvas.create_rectangle(x0, y0, x1, y1, outline=MARQUEE_OUTLINE_COLOR,
+                                          dash=MARQUEE_DASH, width=1.5)
 
     def _draw_self_loop_highlight(self):
         """Rings every corner in self._self_loop_highlight (set by a
