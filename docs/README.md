@@ -29,11 +29,17 @@ there:
 - **Inflate** calibrates a pressure for the "Target RMS stretch" spinner
   and runs one relaxation pass at that pressure, rounding the shape out
   like blowing up a balloon or stuffing a plush toy. Click repeatedly to
-  keep steering it.
+  keep steering it. The target defaults to 30%/20%/10% at Level 1/2/3
+  respectively (a finer mesh needs less relative stretch per edge to
+  trace the same overall curvature) — still yours to edit at any level.
 - **Subdivide** refines the current mesh into finer triangles (up to a
   max level), carrying forward whatever shape you've already inflated.
 - **Tolerance** sets how strict "iterate until convergence" is (the
-  worst vertex's own net force must drop below this), default `1e-2`.
+  worst vertex's own net force must drop below this), default `1e-3`.
+- **Auto** runs the whole pipeline unattended — Relax, then Inflate/
+  Subdivide/Inflate all the way to the final level — clicking Inflate
+  again automatically if a level doesn't converge right away. Click it
+  again mid-run (it becomes "Stop Auto") to interrupt.
 
 Drag any 3D panel to rotate it (every panel shares one camera, so they
 all turn together); scroll to zoom. The left "Net" panel always shows

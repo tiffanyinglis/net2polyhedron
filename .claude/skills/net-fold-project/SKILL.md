@@ -706,13 +706,44 @@ be rather than making those meshes take far more steps to formally
     (1.9-3.2) while raw pressure varies 12.6x (0.11-1.44) and doesn't
     correlate with vertex/face count at all. The function starts from
     that area-based geometric estimate, then refines by relaxing at that
-    pressure and rescaling by (target/achieved) -- clamped to avoid a
-    wild jump -- up to a few times, keeping whichever trial landed
-    closest rather than just the last one: the rescale assumes more
+    pressure, keeping whichever SANE trial landed closest to the target
+    rather than just the last one (a trial's own rescale assumes more
     pressure means more stretch, which is false on `three_squares.json`
-    (a real property of that topology -- it stretches LESS as pressure
-    rises), and without tracking the best result that case would
-    escalate pressure forever chasing a target moving away from it.
+    -- a real property of that topology, it stretches LESS as pressure
+    rises -- so without tracking the best result that case would
+    escalate pressure forever chasing a target moving away from it).
+
+    **Bracket-then-bisect, not just repeated rescale** (added after a
+    user reported calibration failing to reach a large target, 60% RMS
+    stretch, on `data/input/stretchy_nets/hippo.json` at Level 1):
+    directly traced the old single-rescale-only algorithm's actual
+    failure mode -- a low pressure (0.165) gave 9.55% stretch; the naive
+    rescale (target/achieved ≈ 6.3x, clamped by `_PRESSURE_RATIO_CLAMP`
+    to its max of 5x) jumped to 0.827, which DIVERGED (70,185% stretch,
+    a genuine numerical blow-up, not a real equilibrium); the NEXT
+    rescale (target/achieved ≈ 0.00086, clamped to its min of 0.2x)
+    landed back at approximately the ORIGINAL 0.165 -- and this repeated
+    FOREVER, alternating between the exact same two pressures, never
+    trying anything in between, since a single multiplicative rescale
+    has no way to remember "I've now seen one pressure too low and
+    another too high" and narrow the gap between them. Fixed by tracking
+    an explicit bracket: `lo_pressure` (largest pressure so far
+    confirmed sane -- see `_INSANE_STRETCH_FLOOR_PCT`/
+    `_INSANE_STRETCH_TARGET_MULTIPLE`'s divergence-detection threshold --
+    and at or under target) and `hi_pressure` (smallest pressure so far
+    confirmed insane or over target); once BOTH exist, every remaining
+    trial simply bisects the midpoint instead of rescaling -- the only
+    way to actually converge on an intermediate pressure once the mesh's
+    real response to pressure turns out sharply nonlinear near some
+    critical value, which a target this large routinely runs into.
+    Before a bracket exists, behavior is UNCHANGED from the original
+    algorithm (same geometric initial guess, same rescale-by-ratio) --
+    verified this doesn't regress the well-behaved low-stretch case
+    (10% target) on all 5 Platonic solids plus `three_squares.json`
+    (still converges close to target on every one), and verified the
+    reported `hippo.json`/60% case directly: pressure 0.434, landing at
+    56.13% -- previously 9.55%, stuck oscillating between the same two
+    pressures forever.
   - **`stretchy_mesh._relax_force`**: a genuine mechanical force balance,
     no volume or target anywhere in it -- each edge is a Hooke's-law
     spring, each face applies a real `pressure * area * outward_normal`
@@ -958,31 +989,81 @@ be rather than making those meshes take far more steps to formally
     step size"/"Stall detection" above) hard-stops "until convergence"
     mode if a mesh/pressure combination genuinely never reaches the
     current tolerance, instead of looping forever.
-  - **Tolerance spinner** (`self.tolerance_var`, a `tk.DoubleVar`,
-    `Spinbox(from_=1e-10, to=1e-1, increment=1e-7, format="%.0e")`,
-    default `DEFAULT_TOLERANCE = 1e-2`, was `1e-6` -- loosened per
-    explicit user request now that STEP_MAX_MULTIPLIER/STALL_WINDOW no
-    longer need a very tight force threshold to actually finish
-    converging in reasonable time) is the `gtol`
-    `relax_once`/`relax_initial_configuration`/`estimate_pressure_for_
-    target_stretch` actually run against -- previously a fixed,
-    non-user-facing `stretchy_mesh.CONVERGENCE_GTOL = 1e-4` (that
-    constant, and the module-level default parameter value it still
-    backs on a bare call with no `gtol` argument, are both UNCHANGED;
-    only this app started overriding it per-run). Captured once per
-    Relax/Inflate click into `self._current_gtol` (not re-read live
-    mid-run -- the spinner is disabled for the run's duration anyway,
-    same as `target_rms_spin`), and recorded per level-history row
-    (`_record_level_history`'s `"gtol"` field) so a row always shows the
-    threshold that run actually used even after the spinner's value
-    later changes. `estimate_pressure_for_target_stretch` needed a new
-    optional `gtol=CONVERGENCE_GTOL` parameter (forwarded to its own
-    internal `relax_once` call, backward compatible) to make this
-    possible -- see "Untouchable files" above for this being one of the
-    explicit, as-needed exceptions to that file's own wholesale marking.
-    Same "converged" gate/reset rationale as `target_rms_var`
+  - **Tolerance spinner** (`self.tolerance_var`, default
+    `DEFAULT_TOLERANCE = 1e-3` -- was `1e-6`, then `1e-2`, each per
+    explicit user request, now settled tighter again than `1e-2` now
+    that STEP_MAX_MULTIPLIER/STALL_WINDOW no longer need a very tight
+    force threshold to actually finish converging in reasonable time)
+    is the `gtol` `relax_once`/`relax_initial_configuration`/
+    `estimate_pressure_for_target_stretch` actually run against --
+    previously a fixed, non-user-facing `stretchy_mesh.CONVERGENCE_GTOL
+    = 1e-4` (that constant, and the module-level default parameter value
+    it still backs on a bare call with no `gtol` argument, are both
+    UNCHANGED; only this app started overriding it per-run).
+
+    A `tk.StringVar` (formatted scientific-notation TEXT, e.g. `"1e-03"`)
+    holding it, NOT a `tk.DoubleVar` -- ttk's `Spinbox(..., format=
+    "%.0e")` only reformats a value the spinbox's OWN up/down arrows
+    generate, never one set programmatically (verified directly: with a
+    DoubleVar, the widget showed the DEFAULT as `"0.001"`, ignoring
+    `format` entirely, until switched to a StringVar). `_get_tolerance()`
+    parses it back to a float wherever a numeric `gtol` is actually
+    needed (falling back to `DEFAULT_TOLERANCE` for anything
+    unparseable, e.g. a momentarily-empty field mid-edit) -- every
+    former `self.tolerance_var.get()` call site (three of them) now goes
+    through this instead.
+
+    Captured once per Relax/Inflate click into `self._current_gtol` (not
+    re-read live mid-run -- the spinner is disabled for the run's
+    duration anyway, same as `target_rms_spin`), and recorded per
+    level-history row (`_record_level_history`'s `"gtol"` field) so a
+    row always shows the threshold that run actually used even after the
+    spinner's value later changes. `estimate_pressure_for_target_stretch`
+    needed a new optional `gtol=CONVERGENCE_GTOL` parameter (forwarded to
+    its own internal `relax_once` call, backward compatible) to make
+    this possible -- see "Untouchable files" above for this being one of
+    the explicit, as-needed exceptions to that file's own wholesale
+    marking. Same "converged" gate/reset rationale as `target_rms_var`
     (`_on_tolerance_changed`): a verdict reached under one tolerance
     doesn't apply once the tolerance changes.
+  - **Per-level "Target RMS stretch" defaults**
+    (`LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 30.0, 2: 20.0, 3: 10.0}` --
+    was `{1: 60.0, 2: 30.0, 3: 15.0}`, lowered per a later explicit user
+    request): `self.target_rms_var` is set to the
+    relevant entry the MOMENT that level is first reached -- Relax's own
+    promotion to Level 1 (`_finish_relax`) and every `_subdivide_step`
+    call for Level 2/3 -- overriding whatever the spinner was left at,
+    though still user-editable afterward at any level. Tapered DOWN as
+    level increases: a finer mesh needs LESS relative stretch per edge
+    to trace the SAME overall curvature (more, shorter edges bending
+    through the same total arc), so chasing the SAME target RMS stretch
+    at every level would mean asking a fine mesh to bulge out FURTHER,
+    relative to its own edge length, than a coarse one needs to for the
+    same visual roundness -- these per-level values keep the actual 3D
+    TARGET SHAPE consistent across levels instead, matching
+    `mesh_levels.py`'s own "ideal target shape stays fixed as resolution
+    increases" design (see its module docstring). No entry for Level 0
+    (no target RMS stretch at all there -- `relax_initial_configuration`
+    is pure springs, never calibrated toward any target).
+    `stretchy_mesh.DEFAULT_TARGET_RMS_STRETCH_PCT` (10.0) is now only
+    ever visible as the spinner's own INITIAL value, before any level's
+    been reached at all -- superseded the instant Level 1 is.
+
+    **`self._current_target_rms_pct` tracks which target a given level
+    was ACTUALLY calibrated against, same "gtol" pattern as
+    `self._current_gtol` above** -- added after a user reported every
+    row in Convergence History showing the SAME "(target: N)" (whatever
+    Level 3's own default happened to be, since `_refresh_history_table`
+    read `self.target_rms_var.get()` LIVE for every row, rather than
+    each row's own value at the time it was calibrated -- the exact same
+    bug class `self._current_gtol` was already added to fix for the
+    "Convergence" column, just not yet applied to this column too). Set
+    wherever `self.target_rms_var` itself is set to a level default
+    (`_finish_relax`/`_subdivide_step`) AND in `on_inflate_clicked` (in
+    case the user edited the spinner away from that default before
+    clicking Inflate), threaded through `last_stats`/`level_history`
+    exactly like `"gtol"`, and read per-row in `_refresh_history_table`
+    (`rec.get("target_rms_pct")`) instead of the live spinner.
   - **Convergence History's checkmark tracks the algorithm's own
     `converged` flag, not a fresh `optimality < gtol` comparison redone
     in the table.** `_explicit_relax_loop` (shared by
@@ -1036,6 +1117,87 @@ be rather than making those meshes take far more steps to formally
     `fig.text`) repeating the current level/iteration/stretch/optimality
     numbers under the plots -- removed as redundant once the
     Convergence History table already showed all of it per level.
+- **"Auto" button** (`self.auto_button`, in `setup_row` alongside the net
+  picker/Target RMS/Tolerance -- visible and usable in BOTH modes, unlike
+  the debug-only diagnostics below, per explicit user request): runs the
+  WHOLE pipeline unattended from wherever it currently is -- Relax at
+  Level 0, then Inflate/Subdivide/Inflate/.../Level `MAX_LEVEL` -- the
+  exact sequence a user would otherwise click through by hand, driven by
+  `on_auto_clicked`/`_auto_step`/`_auto_try` calling the SAME
+  `on_relax_clicked`/`on_inflate_clicked`/`on_subdivide_clicked` a manual
+  click would.
+  - **`_auto_step` is the actual state machine**, called once from
+    `on_auto_clicked` to start, then AGAIN from the tail of
+    `_finish_relax`/`_finish_inflate` every time a step it started
+    actually finishes (a no-op, via `if not self._auto_active: return`,
+    whenever a plain manual click triggers those same two methods) --
+    there's no separate "wait for completion" mechanism, since
+    `_finish_relax`/`_finish_inflate` ARE the completion callbacks
+    Relax/Inflate already use. Per call: not yet converged at the
+    current level -> (re)try Relax/Inflate there (`_auto_try`); just
+    converged, below `MAX_LEVEL` -> Subdivide, then immediately re-enter
+    `_auto_step` in the SAME call (Subdivide is synchronous and
+    schedules no callback of its own, unlike Relax/Inflate, so nothing
+    else would ever re-enter this function for the newly-subdivided
+    level otherwise); just converged AT `MAX_LEVEL` -> done, `self.
+    _auto_active = False`. Level 0 converging is a special case: `_finish_
+    relax` ALREADY promotes to Level 1 unconditionally (not
+    Auto-specific), so `_auto_step`'s own Level-0-converged branch is a
+    no-op by construction -- the NEXT call (from that same `_finish_
+    relax`, after the promotion) sees Level 1 instead.
+  - **"If inflation doesn't reach convergence, it keeps trying at the
+    same level"** (`_auto_try`), per the request that prompted this
+    feature -- bounded by `AUTO_MAX_RETRIES_PER_LEVEL` (10) so a target
+    that's genuinely unreachable for some mesh (an over-ambitious Target
+    RMS stretch, say) doesn't retry forever with nothing to show for it
+    and no way to notice short of watching the status bar indefinitely;
+    Auto stops and reports this plainly instead. `self._auto_retry_level`
+    (compared against `self.subdivision_level` at the TOP of every
+    `_auto_step` call, resetting `self._auto_retry_count` the moment
+    they differ) tracks which level the current retry count applies to,
+    rather than resetting it by hand at each of the several places the
+    level actually changes (Level-0 promotion, each Subdivide) -- one
+    check, one place, instead of statefully keeping N call sites in sync.
+  - **While running, the button itself becomes "Stop Auto"**
+    (`_update_auto_button`, the single source of truth for this button's
+    text/command/enabled state, mirroring `_update_level_action_buttons`'
+    own role for the per-level buttons) -- deliberately kept ENABLED
+    through the run despite `_set_controls_enabled(False)` blanket-
+    disabling it like every other Setup control (added to that same
+    widget list) -- `_set_controls_enabled` calls `_update_auto_button`
+    itself, unconditionally, at the end of EITHER branch, which is what
+    re-enables it specifically while `self._auto_active` is true: the
+    exact "frontier button survives the blanket disable" exception
+    `_set_level_action_button_running` already makes for the per-level
+    buttons, applied here to the one control that can actually interrupt
+    a multi-step Auto sequence while ones of ITS OWN steps is mid-run.
+  - **Interrupting Auto**: `on_auto_stop_clicked` (the button's own
+    command while running) calls `_abort_auto` (clears `self.
+    _auto_active`, relabels the button) THEN `self.on_stop_clicked`
+    (sets `self.stop_event`, same as a per-level Stop click) -- ending
+    the sequence and interrupting whatever's currently running. Going
+    the OTHER direction, `on_stop_clicked` itself ALSO calls
+    `_abort_auto` unconditionally at its own end, so a per-level Stop
+    button clicked DIRECTLY (not through "Stop Auto") while an Auto
+    sequence happens to be running halts the sequence too, rather than
+    `_auto_step` (called once the stopped run actually winds down)
+    naively starting the next step right back up as if nothing happened.
+    `_abort_auto` is also called from BOTH worker-thread failure paths
+    (`_run_background`/`_run_chunked_relax_stream`'s own `"error"`
+    branches) -- neither of those ever reaches `_finish_relax`/
+    `_finish_inflate` on a genuine exception, so without this the button
+    would otherwise get stuck showing "Stop Auto" for a sequence that's
+    actually already silently dead.
+  - Verified directly (headless, `cube.json`): one `on_auto_clicked`
+    call converges cleanly all the way to Level 3 with NO further
+    interaction, using the (lowered) per-level Target RMS defaults
+    (30/20/10, see "Per-level 'Target RMS stretch' defaults" above) --
+    each level's own row in Convergence History showed its correct
+    target and a converged checkmark. Also verified `on_auto_stop_
+    clicked` mid-run: `self._auto_active` and the button's own text/
+    enabled state update immediately (synchronously) and the level stops
+    advancing, without needing to wait for the interrupted background
+    run to actually finish first.
 - **Debug-mode-only diagnostics** ("Validate Mesh"/"Show normals",
   appended to `self.mode_row` -- the same debug-only row the steps-vs-
   convergence radio buttons already live in, so both are shown/hidden by

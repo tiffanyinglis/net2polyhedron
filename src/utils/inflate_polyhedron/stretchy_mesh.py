@@ -871,59 +871,127 @@ _PRESSURE_RATIO_CLAMP = (0.2, 5.0)
 DEFAULT_TARGET_RMS_STRETCH_PCT = 10.0
 
 
+
+# A trial reading RMS stretch beyond this multiple of the target (and
+# beyond this ABSOLUTE floor, so a tiny target -- 1%, say -- doesn't
+# make an ordinary 20% stretch look "insane") is treated as the mesh
+# having blown up rather than settled, in estimate_pressure_for_target_
+# stretch's own bracket search -- not a usable data point for "how
+# stretchy is this pressure", since a diverged run's own stretch number
+# reflects numerical blow-up, not the mesh's real response to pressure.
+_INSANE_STRETCH_FLOOR_PCT = 500.0
+_INSANE_STRETCH_TARGET_MULTIPLE = 5.0
+
+
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
-                                          planarity_weight=PLANARITY_WEIGHT, max_iterations=4,
+                                          planarity_weight=PLANARITY_WEIGHT, max_iterations=8,
                                           tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None,
                                           gtol=CONVERGENCE_GTOL, rng=None):
     """positions/faces/edge_length: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
-    unevenly, and RMS is what the "Target RMS stretch" spinner asks for),
-    starting from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess and
-    refining it by relaxing at that pressure, then rescaling pressure by
-    (target / achieved) -- clamped by _PRESSURE_RATIO_CLAMP -- and trying
-    again, up to `max_iterations` times. Every trial starts fresh from
-    the given `positions` (not chained from the previous trial's
-    result), since different pressures can have very different equilibria
-    and this is searching for the pressure, not steering a shape. `gtol`
-    and `rng` are both forwarded to every trial's own relax_once call
-    unchanged (defaults CONVERGENCE_GTOL/None, same as relax_once's own
-    defaults) -- so a caller with its own convergence tolerance and/or
-    stuck-vertex kick (e.g. inflate_polyhedron_app's "Tolerance" setting)
-    calibrates pressure against the SAME settings it'll actually inflate
-    with, rather than silently recalibrating against different ones (a
-    trial that's genuinely stuck oscillating, same as any other
-    relax_once call, would otherwise misreport its own achieved stretch
-    as whatever it happened to be mid-oscillation, throwing off the
-    pressure estimate this function derives from it).
+    unevenly, and RMS is what the "Target RMS stretch" spinner asks for).
+    `gtol` and `rng` are both forwarded to every trial's own relax_once
+    call unchanged (defaults CONVERGENCE_GTOL/None, same as relax_once's
+    own defaults) -- so a caller with its own convergence tolerance
+    and/or stuck-vertex kick (e.g. inflate_polyhedron_app's "Tolerance"
+    setting) calibrates pressure against the SAME settings it'll
+    actually inflate with, rather than silently recalibrating against
+    different ones. Every trial starts fresh from the given `positions`
+    (not chained from the previous trial's result), since different
+    pressures can have very different equilibria and this is searching
+    for the pressure, not steering a shape.
 
-    Keeps whichever trial got CLOSEST to the target rather than just the
-    last one: the rescale step assumes more pressure means more stretch,
-    which fails on at least one known net (data/input/stretchy_nets/
-    three_squares.json actually stretches LESS as pressure rises -- a
-    genuine property of that topology, not a bug here) -- without this,
-    a net where that assumption is wrong would escalate pressure every
-    iteration chasing a target it's moving away from. Returns (pressure,
-    new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
-    max_force, converged) -- the last five exactly as relax_once's own
-    return, from whichever trial this settled on."""
+    Starts from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess, same
+    as before, but the search itself is now BRACKET-then-BISECT rather
+    than a single multiplicative rescale repeated blindly: as long as
+    every trial so far has landed on the SAME side of the target (all
+    under it, or all "insane" -- see _INSANE_STRETCH_FLOOR_PCT/
+    _INSANE_STRETCH_TARGET_MULTIPLE, a mesh that's blown up rather than
+    settled), it keeps rescaling by (target / achieved), clamped by
+    _PRESSURE_RATIO_CLAMP, exactly as the original single-rescale version
+    did. The MOMENT a trial lands on the OPPOSITE side from the best one
+    seen so far (a sane, under-target trial and an over-target-or-insane
+    one now both exist), pressure is bracketed between them and every
+    remaining trial simply bisects the bracket -- the only way to
+    actually CONVERGE on an intermediate pressure once the mesh's own
+    response to pressure turns out highly nonlinear near some critical
+    value, rather than the old rescale-only approach's real failure
+    mode: a large target whose naive rescale ratio overshoots straight
+    past the mesh's own stable range and into catastrophic divergence,
+    then rescales right back down from THAT diverged reading to
+    approximately the ORIGINAL too-low pressure, forever alternating
+    between the same two pressures without ever trying anything in
+    between (verified directly: data/input/stretchy_nets/hippo.json at
+    Level 1, target 60% RMS stretch, oscillated exactly this way under
+    the old algorithm -- 0.165 giving 9.55%, rescaled up to 0.827 giving
+    a diverged 70,185%, rescaled back down to 0.165, repeating
+    indefinitely, never landing anywhere near 60%).
+
+    Keeps whichever SANE trial got CLOSEST to the target rather than
+    just the last one (an insane/diverged trial is never a candidate,
+    however numerically close its own stretch number might coincidentally
+    land, since that number doesn't reflect a real equilibrium): the
+    rescale step (still used before a bracket exists) assumes more
+    pressure means more stretch, which fails on at least one known net
+    (data/input/stretchy_nets/three_squares.json actually stretches LESS
+    as pressure rises -- a genuine property of that topology, not a bug
+    here) -- without keeping the best-so-far, a net where that
+    assumption is wrong would escalate pressure every iteration chasing
+    a target it's moving away from; this is unchanged from the original
+    algorithm, and this net's own existing test coverage still passes
+    with the bracket/bisect logic added. Returns (pressure, new_positions,
+    steps_taken, max_stretch_pct, rms_stretch_pct, max_force, converged)
+    -- the last five exactly as relax_once's own return, from whichever
+    trial this settled on (if every single trial was insane, the LAST
+    one anyway, so this never raises for an irrecoverably bad target)."""
     total_area = _total_rest_area(faces, edge_length)
     pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
+    insane_ceiling = max(_INSANE_STRETCH_FLOOR_PCT, target_rms_pct * _INSANE_STRETCH_TARGET_MULTIPLE)
     best_error, best_pressure, best_result = None, None, None
+    # Once both are set, every remaining trial bisects between them:
+    # lo_pressure is the LARGEST pressure so far confirmed sane and AT OR
+    # UNDER target; hi_pressure is the SMALLEST pressure so far confirmed
+    # either insane or over target.
+    lo_pressure = hi_pressure = None
+    result = None
     for _ in range(max_iterations):
         result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
                              max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
                              rng=rng)
         _, _, _, rms_stretch, _, _ = result
-        error = abs(rms_stretch - target_rms_pct)
-        if best_error is None or error < best_error:
-            best_error, best_pressure, best_result = error, pressure, result
+        sane = rms_stretch < insane_ceiling
+        if sane:
+            error = abs(rms_stretch - target_rms_pct)
+            if best_error is None or error < best_error:
+                best_error, best_pressure, best_result = error, pressure, result
         stopped = stop_event is not None and stop_event.is_set()
-        if stopped or error < tol_pct or rms_stretch <= 0:
+        if stopped or (sane and error < tol_pct):
             break
-        ratio = target_rms_pct / rms_stretch
-        ratio = min(max(ratio, _PRESSURE_RATIO_CLAMP[0]), _PRESSURE_RATIO_CLAMP[1])
-        pressure *= ratio
+        if sane and rms_stretch <= target_rms_pct:
+            lo_pressure = pressure
+        else:
+            hi_pressure = pressure
+        if lo_pressure is not None and hi_pressure is not None:
+            pressure = (lo_pressure + hi_pressure) / 2
+        elif hi_pressure is not None:
+            # No sane/under-target trial yet to bracket against -- the
+            # very first guess was already too high; keep halving until
+            # one shows up (then the branch above takes over).
+            pressure = hi_pressure / 2
+        elif rms_stretch > 0:
+            ratio = target_rms_pct / rms_stretch
+            ratio = min(max(ratio, _PRESSURE_RATIO_CLAMP[0]), _PRESSURE_RATIO_CLAMP[1])
+            pressure *= ratio
+        else:
+            break  # degenerate reading (zero stretch) with nothing to bracket against yet
+    if best_result is None:
+        # Every trial was insane -- no sane candidate exists at all
+        # within max_iterations; report the last attempt anyway rather
+        # than raising, same as the original algorithm's own contract
+        # (always returns SOMETHING derived from an actual relax_once
+        # call).
+        best_pressure, best_result = pressure, result
     new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged = best_result
     return best_pressure, new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged

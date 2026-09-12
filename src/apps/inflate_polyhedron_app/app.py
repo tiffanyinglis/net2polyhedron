@@ -55,9 +55,20 @@ work for anyone who wants one.
    consistent answer instead of each level chasing a different target.
    Greyed out once MAX_LEVEL is reached.
 4. At Level 1 and up, the "Inflate" button first CALIBRATES a pressure (see
-   stretchy_mesh.estimate_pressure_for_target_stretch) landing near the
-   "Target RMS stretch" spinner's value (% of rest edge length, default
-   DEFAULT_TARGET_RMS_STRETCH_PCT), then applies ONE relaxation pass
+   stretchy_mesh.estimate_pressure_for_target_stretch -- a bracket-then-
+   bisect search now, not just a repeated rescale, specifically so a
+   LARGE target like 60% can actually be reached rather than the
+   calibration oscillating forever between one pressure too low and
+   another that diverges outright -- see its own docstring) landing near
+   the "Target RMS stretch" spinner's value (% of rest edge length --
+   stretchy_mesh.DEFAULT_TARGET_RMS_STRETCH_PCT is only the WIDGET's own
+   initial value, before any level's actually been reached; the moment
+   Level 1/2/3 is reached, the spinner is automatically set to THAT
+   level's own default instead -- LEVEL_DEFAULT_TARGET_RMS_PCT, 30/20/10%
+   respectively, tapered down as resolution increases since a finer mesh
+   needs LESS relative stretch per edge to trace the SAME overall
+   curvature -- overriding whatever it was left at, though still
+   user-editable afterward), then applies ONE relaxation pass
    (stretchy_mesh.relax_once) at that pressure, continuing from wherever
    the mesh currently is -- so repeated clicks let you watch/steer the
    shape settle incrementally, and re-calibrate each time since pressure
@@ -127,7 +138,11 @@ work for anyone who wants one.
    every Subdivide/promotion, so it always counts from when that level's
    mesh was first created, not carried over from a coarser level), the
    stretch stats at whatever point it's currently at (RMS shown against
-   the CURRENT "Target RMS stretch" spinner value), and a single combined
+   THAT level's OWN target -- self._current_target_rms_pct, recorded at
+   calibration time, same "gtol" pattern as point 4 above, NOT re-read
+   live from the spinner -- a user reported every row wrongly showing
+   whichever level's default the spinner CURRENTLY happened to show), and
+   a single combined
    "Convergence" cell -- the relax's own `max_force` (the worst vertex's
    net force) against the tolerance that run actually used (recorded per
    row, not re-read live -- see point 4 above), with a check or cross
@@ -233,6 +248,33 @@ work for anyone who wants one.
      on screen (a full edge length, tried first, read too long against a
      dense mesh), regardless of overall mesh scale or how far from rest
      it's currently stretched.
+8. "Auto" (on_auto_clicked/_auto_step; visible and usable in BOTH modes,
+   unlike debug mode's own diagnostics above) runs the WHOLE pipeline
+   unattended, from wherever it currently is: Relax at Level 0, then
+   Inflate/Subdivide/Inflate/.../Level MAX_LEVEL -- exactly the sequence
+   a user would otherwise click through by hand, one button click.
+   _auto_step decides what "next" means each time it's called (once to
+   start, then again from the tail of _finish_relax/_finish_inflate
+   every time a step it started actually finishes): (re)try Relax/
+   Inflate at the current level if it hasn't converged yet, Subdivide
+   once it has (immediately continuing to the newly-subdivided level's
+   own first Inflate attempt, since Subdivide itself is synchronous and
+   schedules no callback of its own), or stop once Level MAX_LEVEL
+   converges. "If inflation doesn't reach convergence, it keeps trying
+   at the same level" per an explicit user request -- bounded by
+   AUTO_MAX_RETRIES_PER_LEVEL (_auto_try) so a target that's genuinely
+   unreachable for some mesh doesn't retry forever with no way to
+   notice; Auto stops and reports this plainly rather than hanging.
+   While running, the button itself becomes "Stop Auto" (the one
+   control deliberately kept enabled through the run -- see
+   _update_auto_button/_set_controls_enabled, the same "frontier button
+   survives the blanket disable" exception the per-level buttons
+   already use for their own "Stop"), interrupting whatever Relax/
+   Inflate step is currently mid-run via the SAME stop_event a per-level
+   Stop click uses -- and a per-level Stop clicked directly, instead,
+   halts the Auto sequence too (_abort_auto, called from on_stop_clicked
+   itself), so there's only one real way to stop things regardless of
+   which button triggered it.
 """
 import sys
 from pathlib import Path
@@ -370,15 +412,35 @@ DEFAULT_STEPS = 10
 # self._current_gtol), NOT stretchy_mesh.CONVERGENCE_GTOL (1e-4, that
 # module's own hardcoded default for a caller that never passes gtol at
 # all -- untouched, still what a bare relax_once/relax_initial_
-# configuration call elsewhere defaults to). Was 1e-6 (tighter than
-# CONVERGENCE_GTOL); loosened to 1e-2 per explicit user request, now
-# that STEP_MAX_MULTIPLIER/STALL_WINDOW (stretchy_mesh.py) no longer
-# need a very tight force threshold to actually finish converging in
-# reasonable time -- the stall-window criterion alongside it (see
-# _refresh_history_table's "(stalled)" note) already catches a mesh
-# that's visibly stopped changing well before force alone would settle
-# this loose a threshold anyway.
-DEFAULT_TOLERANCE = 1e-2
+# configuration call elsewhere defaults to). Was 1e-6, then 1e-2 (each
+# per explicit user request); settled on 1e-3 -- tighter again than
+# 1e-2 now that STEP_MAX_MULTIPLIER/STALL_WINDOW (stretchy_mesh.py) no
+# longer need a very tight force threshold to actually finish converging
+# in reasonable time, but not as loose as 1e-2 -- the stall-window
+# criterion alongside it (see _refresh_history_table's "(stalled)" note)
+# already catches a mesh that's visibly stopped changing well before
+# force alone would settle even this tighter a threshold anyway.
+DEFAULT_TOLERANCE = 1e-3
+
+# Per-level default for the "Target RMS stretch" spinner, applied
+# automatically the moment a level is first reached (Relax's promotion
+# to Level 1; each Subdivide click for Level 2/3 -- see _finish_relax/
+# _subdivide_step) -- overriding whatever the spinner was left at,
+# rather than carrying one number forward across every level. Tapered
+# DOWN as level increases per explicit user request: a finer mesh
+# approximates the SAME overall curvature with a SMALLER stretch per
+# edge (more, shorter edges bending through the same total arc), so
+# chasing the SAME target RMS stretch at every level would mean asking
+# a fine mesh to bulge out FURTHER, relative to its own edge length,
+# than a coarse one needs to for the same visual roundness -- these
+# values keep the actual 3D shape's target consistent across levels
+# instead, matching mesh_levels.py's own "ideal target shape stays
+# fixed as resolution increases" design (module docstring, point 3).
+# No entry for Level 0 -- it has no target RMS stretch at all
+# (relax_initial_configuration is pure springs, not calibrated toward
+# any target). Was {1: 60.0, 2: 30.0, 3: 15.0}; lowered per explicit
+# user request.
+LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 30.0, 2: 20.0, 3: 10.0}
 
 # Debug mode's "Show normals" toggle (_draw_level_panel) draws each
 # triangle's own outward normal as a line segment in this color, from
@@ -411,6 +473,17 @@ INFLATE_CHUNK_MAX = 200
 # more real budget to actually reach gtol, not just a bigger number
 # before giving up on the SAME amount of real solving.
 INFLATE_SAFETY_STEP_CAP = 20000
+
+# "Auto" (on_auto_clicked/_auto_step): how many consecutive un-converged
+# Relax/Inflate clicks it will (re)try at the SAME level -- each one
+# already runs up to INFLATE_SAFETY_STEP_CAP steps on its own, so this
+# is a second, outer safety net specifically for "keeps trying at the
+# same level" per an explicit user request, not a substitute for that
+# per-click cap. Without SOME bound here, a mesh that can genuinely
+# never reach the current tolerance (e.g. an unreachable Target RMS
+# stretch) would make Auto retry that level forever with no way to
+# notice or report it short of the user clicking "Stop Auto" by hand.
+AUTO_MAX_RETRIES_PER_LEVEL = 10
 
 
 def _build_level1_topology(base_faces):
@@ -636,17 +709,36 @@ class InflatePolyhedronApp:
         # The `gtol` every relax_once/relax_initial_configuration/
         # estimate_pressure_for_target_stretch call actually uses (see
         # self._current_gtol, set from this at the start of every
-        # Relax/Inflate click) -- previously a fixed, non-user-facing
-        # stretchy_mesh.CONVERGENCE_GTOL. Same "converged" gate/reset
-        # rationale as target_rms_var above: a looser-or-tighter
-        # tolerance than whatever a past "converged" verdict was reached
-        # under means that verdict no longer applies.
-        self.tolerance_var = tk.DoubleVar(value=DEFAULT_TOLERANCE)
+        # Relax/Inflate click, via _get_tolerance) -- previously a fixed,
+        # non-user-facing stretchy_mesh.CONVERGENCE_GTOL. Same
+        # "converged" gate/reset rationale as target_rms_var above: a
+        # looser-or-tighter tolerance than whatever a past "converged"
+        # verdict was reached under means that verdict no longer
+        # applies. A `tk.StringVar` (formatted scientific-notation text,
+        # e.g. "1e-03"), not a `tk.DoubleVar` -- a DoubleVar's own string
+        # form is whatever Tcl's default float-to-string gives it
+        # ("0.001"), which only gets reformatted through `format` for a
+        # value the SPINBOX ITSELF generates (its up/down arrows), never
+        # for one set programmatically (the initial default here) --
+        # verified directly: the default showed as "0.001", not "1e-03",
+        # until switched to a StringVar. `_get_tolerance` parses it back
+        # to a float wherever a numeric `gtol` is actually needed.
+        self.tolerance_var = tk.StringVar(value=f"{DEFAULT_TOLERANCE:.0e}")
         self.tolerance_var.trace_add("write", self._on_tolerance_changed)
         self.tolerance_spin = ttk.Spinbox(tolerance_group, from_=1e-10, to=1e-1,
                                            increment=1e-7, width=10,
                                            textvariable=self.tolerance_var, format="%.0e")
         self.tolerance_spin.pack(side=tk.LEFT)
+
+        # "Auto": visible/usable in BOTH modes (unlike the debug-only row
+        # below), since it's just a scripted sequence of the SAME
+        # Relax/Inflate/Subdivide actions a user could click by hand --
+        # see on_auto_clicked/_auto_step for the actual driving logic.
+        auto_group = ttk.Frame(setup_row)
+        auto_group.pack(side=tk.LEFT, padx=(24, 0))
+        self.auto_button = ttk.Button(auto_group, text="Auto", command=self.on_auto_clicked)
+        self.auto_button.pack(side=tk.LEFT)
+        self.auto_button.state(["disabled"])  # no net loaded yet -- _update_auto_button syncs this
 
         # Debug-mode-only row: "Iterate for N steps" vs. "until
         # convergence" (the one thing that actually differs between the
@@ -878,6 +970,27 @@ class InflatePolyhedronApp:
         # threshold an already-finished run actually used, even after
         # the spinner's own value later changes.
         self._current_gtol = DEFAULT_TOLERANCE
+        # Same rationale as self._current_gtol, for the "Target RMS
+        # stretch" spinner instead -- captured whenever it's actually
+        # USED (on_inflate_clicked, or a level's own default being
+        # applied at _finish_relax/_subdivide_step), not re-read live
+        # from self.target_rms_var by _refresh_history_table, so an
+        # already-finished level's row keeps showing the target IT was
+        # actually calibrated against even after the spinner shows a
+        # later level's different default (a user reported every row
+        # showing the CURRENT level's target instead of its own).
+        self._current_target_rms_pct = DEFAULT_TARGET_RMS_STRETCH_PCT
+        # Whether the "Auto" button's own scripted sequence is currently
+        # driving the app (see on_auto_clicked/_auto_step) -- _auto_retry_
+        # count/_auto_retry_level track how many consecutive Relax/Inflate
+        # retries have been spent on the level named by _auto_retry_level
+        # (reset to 0 the moment _auto_step notices the CURRENT level has
+        # changed since the last time it ran, rather than at every
+        # individual Subdivide/promotion call site, so there's exactly
+        # ONE place this logic lives).
+        self._auto_active = False
+        self._auto_retry_count = 0
+        self._auto_retry_level = None
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
@@ -1340,8 +1453,16 @@ class InflatePolyhedronApp:
         self.level_snapshots = {}
         self.history_tree.delete(*self.history_tree.get_children())
         self.stop_event = None
+        # A fresh net starts over cleanly -- an Auto sequence from the
+        # PREVIOUS net (the combo/other controls it would need are
+        # disabled during a run anyway, so this can only really happen
+        # between runs, but reset defensively regardless).
+        self._auto_active = False
+        self._auto_retry_count = 0
+        self._auto_retry_level = None
         self._record_level_history()
         self._update_level_action_buttons()
+        self._update_auto_button()
         self.draw()
 
     # ---- subdivide ----
@@ -1400,6 +1521,13 @@ class InflatePolyhedronApp:
             self.faces, self.positions, self.edge_length, self.face_of_fine,
             self.subdivision_level)
         self.subdivision_level += 1
+        # This new level's own default "Target RMS stretch" (see
+        # LEVEL_DEFAULT_TARGET_RMS_PCT's own comment) -- overrides
+        # whatever the spinner was left at, since each level's sensible
+        # target is different, not a value that should carry forward.
+        if self.subdivision_level in LEVEL_DEFAULT_TARGET_RMS_PCT:
+            self._current_target_rms_pct = LEVEL_DEFAULT_TARGET_RMS_PCT[self.subdivision_level]
+            self.target_rms_var.set(self._current_target_rms_pct)
         # The face set just changed entirely (more, smaller faces) --
         # recomputed fresh for the NEW mesh, same as a brand new net load.
         self.last_stats = self._compute_stretch_stats()
@@ -1453,6 +1581,12 @@ class InflatePolyhedronApp:
             # CONVERGENCE_GTOL for a row recorded before this field
             # existed (self.last_stats.get("gtol") is None then).
             "gtol": self.last_stats.get("gtol") or CONVERGENCE_GTOL,
+            # Same idea as "gtol" above, for self._current_target_rms_pct
+            # -- None for Level 0 (no target stretch there at all, see
+            # _refresh_history_table).
+            "target_rms_pct": (None if self.subdivision_level == 0
+                                else self.last_stats.get("target_rms_pct")
+                                or self._current_target_rms_pct),
         }
         self._refresh_history_table()
 
@@ -1466,7 +1600,6 @@ class InflatePolyhedronApp:
         return f"{mantissa}e{int(exponent)}"
 
     def _refresh_history_table(self):
-        target_rms_pct = self.target_rms_var.get()
         for level in sorted(self.level_history):
             rec = self.level_history[level]
             optimality = rec["optimality"]
@@ -1495,9 +1628,14 @@ class InflatePolyhedronApp:
             pressure_str = "n/a" if rec["pressure"] is None else f"{rec['pressure']:.4g}"
             # Level 0 has no target stretch to chase (relax_initial_configuration
             # is pure springs, not calibrated against the spinner at all).
+            # This row's OWN target_rms_pct (recorded at the time IT was
+            # calibrated, not read live from the spinner -- see this
+            # field's own comment in __init__), so a level's row keeps
+            # showing what it was actually chasing even after the
+            # spinner later shows a different level's own default.
             rms_str = f"{rec['rms_stretch_pct']:.2f}"
-            if level != 0:
-                rms_str += f" (target: {target_rms_pct:.1f})"
+            if level != 0 and rec.get("target_rms_pct") is not None:
+                rms_str += f" (target: {rec['target_rms_pct']:.1f})"
             values = (level, pressure_str, rec["steps"], f"{rec['max_stretch_pct']:.2f}",
                       rms_str, convergence)
             iid = str(level)
@@ -1543,6 +1681,18 @@ class InflatePolyhedronApp:
             self.last_stats["converged"] = None
             self._update_level_action_buttons()
 
+    def _get_tolerance(self):
+        """Parses self.tolerance_var's text (e.g. "1e-03") as a float --
+        a StringVar, not a DoubleVar, specifically so it can always
+        DISPLAY in scientific notation (see its own comment in __init__)
+        -- falling back to DEFAULT_TOLERANCE for anything unparseable
+        (e.g. a momentarily-empty field mid-edit), the same silent-
+        fallback spirit a plain Spinbox gives an invalid entry."""
+        try:
+            return float(self.tolerance_var.get())
+        except ValueError:
+            return DEFAULT_TOLERANCE
+
     def on_inflate_clicked(self):
         """Two phases: first calibrate a pressure for the current "Target
         RMS stretch" (stretchy_mesh.estimate_pressure_for_target_stretch,
@@ -1558,7 +1708,11 @@ class InflatePolyhedronApp:
             return
         faces, edge_length, positions = self.faces, self.edge_length, self.positions
         target_rms_pct = self.target_rms_var.get()
-        tolerance = self.tolerance_var.get()
+        # Captured here too, not just at the level-default sites (see its
+        # own comment in __init__), in case the user edited the spinner
+        # away from that default before clicking Inflate.
+        self._current_target_rms_pct = target_rms_pct
+        tolerance = self._get_tolerance()
         target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
         self._set_status(f"Finding a pressure that settles around {target_rms_pct:.1f}% "
                           "RMS stretch...", "info")
@@ -1578,7 +1732,7 @@ class InflatePolyhedronApp:
         # progress update this run records the SAME threshold it's
         # actually converging against, even if the spinner's value
         # changes later (after the run finishes).
-        self._current_gtol = self.tolerance_var.get()
+        self._current_gtol = self._get_tolerance()
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
         self._set_level_action_button_running(True)
@@ -1617,6 +1771,139 @@ class InflatePolyhedronApp:
             if frontier_button is not None:
                 frontier_button.state(["disabled"])  # one request is enough; avoid repeat clicks
             self._set_status("Stopping...", "warn")
+        # A per-level Stop clicked directly (not via "Stop Auto" itself)
+        # while an Auto sequence is running must ALSO halt the sequence
+        # -- otherwise _auto_step (called from _finish_relax/_finish_
+        # inflate once the stopped run actually winds down) would just
+        # start the NEXT step right back up, ignoring the stop.
+        self._abort_auto()
+
+    # ---- "Auto": Relax -> Inflate -> Subdivide -> ... -> Level MAX_LEVEL ----
+
+    def on_auto_clicked(self):
+        """Runs the whole pipeline unattended: Relax at Level 0, then
+        Inflate/Subdivide/Inflate/.../Level MAX_LEVEL, exactly the
+        sequence a user would otherwise click through by hand -- see
+        _auto_step, which drives one step at a time and is what actually
+        decides what "next" means at any given moment. Disabled (so this
+        can't even be reached) whenever a net isn't loaded or ANY run is
+        already in progress -- see _update_auto_button/
+        _set_controls_enabled."""
+        if self.positions is None or self._auto_active:
+            return
+        self._auto_active = True
+        self._auto_retry_count = 0
+        self._auto_retry_level = None
+        self._update_auto_button()
+        self._auto_step()
+
+    def on_auto_stop_clicked(self):
+        """The Auto button's own command while a sequence is running (see
+        _update_auto_button) -- ends the sequence AND interrupts whatever
+        Relax/Inflate step is currently mid-run, via the same stop_event
+        on_stop_clicked already uses (a per-level Stop click reaches the
+        exact same place from the other direction -- see its own
+        docstring)."""
+        self._abort_auto()
+        self.on_stop_clicked()
+
+    def _abort_auto(self):
+        """Ends an in-progress Auto sequence without itself touching
+        whatever Relax/Inflate run might currently be underway (see
+        on_stop_clicked/on_auto_stop_clicked for that) -- also called
+        from every worker-thread failure path (_run_background/
+        _run_chunked_relax_stream's own "error" branches) that would
+        otherwise leave self._auto_active stuck True with nothing left
+        actually driving it forward, which would leave the button
+        showing "Stop Auto" for a sequence that's already silently dead.
+        A no-op if Auto isn't running."""
+        if self._auto_active:
+            self._auto_active = False
+            self._update_auto_button()
+
+    def _update_auto_button(self):
+        """Single source of truth for the Auto button, mirroring
+        _update_level_action_buttons' own state machine for the per-level
+        buttons: idle (self._auto_active is False) it reads "Auto",
+        enabled only once a net is loaded -- otherwise disabled like
+        every other control while ANY run is in progress (see
+        _set_controls_enabled, which calls this itself after toggling
+        everything else, and which this does NOT need to independently
+        duplicate for the "disabled during a run" case). While Auto
+        itself is driving a run (self._auto_active is True), it instead
+        reads "Stop Auto" and is explicitly RE-ENABLED regardless of
+        what _set_controls_enabled(False) just did -- the same "frontier
+        button survives the blanket disable" pattern
+        _set_level_action_button_running uses for the per-level buttons
+        -- so the one control that can interrupt a multi-step Auto
+        sequence stays clickable throughout every step of it."""
+        if self._auto_active:
+            self.auto_button.config(text="Stop Auto", command=self.on_auto_stop_clicked)
+            self.auto_button.state(["!disabled"])
+        else:
+            self.auto_button.config(text="Auto", command=self.on_auto_clicked)
+            self.auto_button.state(["!disabled"] if self.positions is not None else ["disabled"])
+
+    def _auto_step(self):
+        """Decides what Auto should do next, called once from
+        on_auto_clicked to kick the sequence off and again from the tail
+        of _finish_relax/_finish_inflate every time a step it started
+        actually finishes -- a no-op whenever Auto isn't active, so a
+        plain manual button click never triggers any of this.
+
+        - Level 0, not yet converged: (re)try Relax.
+        - Level 0, converged: _finish_relax has ALREADY promoted to
+          Level 1 unconditionally by the time this runs (that promotion
+          isn't Auto-specific), so there's nothing left to do here --
+          the NEXT call to this function will see Level 1 instead.
+        - Current level converged, below MAX_LEVEL: Subdivide, then
+          immediately re-enter this function (now one level higher, not
+          yet converged there) rather than waiting for a callback that
+          Subdivide itself never schedules (it's synchronous, unlike
+          Relax/Inflate).
+        - Current level converged, AT MAX_LEVEL: done -- nothing further
+          to subdivide to.
+        - Current level NOT converged (below or at MAX_LEVEL): (re)try
+          Inflate -- "if inflation doesn't reach convergence, it keeps
+          trying at the same level", per an explicit user request,
+          bounded by AUTO_MAX_RETRIES_PER_LEVEL (_auto_try) so a mesh
+          that can genuinely never converge doesn't retry forever with
+          no way to notice."""
+        if not self._auto_active:
+            return
+        if self._auto_retry_level != self.subdivision_level:
+            self._auto_retry_level = self.subdivision_level
+            self._auto_retry_count = 0
+        if self.subdivision_level == 0:
+            if not self.last_stats.get("converged"):
+                self._auto_try(self.on_relax_clicked)
+            return
+        if self.last_stats.get("converged"):
+            if self.subdivision_level < MAX_LEVEL:
+                self.on_subdivide_clicked()
+                self._auto_step()
+            else:
+                self._auto_active = False
+                self._update_auto_button()
+                self._set_status(f"Auto: reached Level {MAX_LEVEL} and converged.", "success")
+        else:
+            self._auto_try(self.on_inflate_clicked)
+
+    def _auto_try(self, action):
+        """Runs `action` (on_relax_clicked or on_inflate_clicked) as
+        Auto's next attempt at the CURRENT level, unless
+        AUTO_MAX_RETRIES_PER_LEVEL has already been spent there -- see
+        its own comment for why some bound has to exist."""
+        if self._auto_retry_count >= AUTO_MAX_RETRIES_PER_LEVEL:
+            self._auto_active = False
+            self._update_auto_button()
+            self._set_status(
+                f"Auto: Level {self.subdivision_level} still hasn't converged after "
+                f"{AUTO_MAX_RETRIES_PER_LEVEL} attempts -- stopping the automatic sequence "
+                f"(Inflate is still available to keep trying by hand).", "warn")
+            return
+        self._auto_retry_count += 1
+        action()
 
     def _run_chunked_relax_stream(self, step_fn, target_steps, stop_event, on_progress, on_finished):
         """Shared driver behind _run_inflate_stream and _run_relax_stream:
@@ -1671,6 +1958,7 @@ class InflatePolyhedronApp:
                         self.progress.pack_forget()
                         self._set_controls_enabled(True)
                         self._set_status(f"Failed: {payload}", "error")
+                        self._abort_auto()  # nothing left to call _auto_step from otherwise
                         return
             except queue.Empty:
                 pass
@@ -1700,7 +1988,8 @@ class InflatePolyhedronApp:
         self.iteration_count += nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged,
-                            "gtol": self._current_gtol}
+                            "gtol": self._current_gtol,
+                            "target_rms_pct": self._current_target_rms_pct}
         self._record_level_history()
         self._set_status(f"Inflating at level {self.subdivision_level}... "
                           f"{self.iteration_count} steps so far "
@@ -1733,6 +2022,7 @@ class InflatePolyhedronApp:
                 f"step cap reached): edges stretched up to {max_stretch:.2f}% from rest length "
                 f"(RMS {rms_stretch:.2f}%).",
                 "info")
+        self._auto_step()  # no-op unless Auto is what actually drove this run
 
     # ---- relax (Level 0 only) ----
 
@@ -1748,7 +2038,7 @@ class InflatePolyhedronApp:
             return
         # Same capture-once rationale as _on_pressure_calibrated -- see
         # self._current_gtol's own comment.
-        self._current_gtol = self.tolerance_var.get()
+        self._current_gtol = self._get_tolerance()
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
         self._set_level_action_button_running(True)
@@ -1809,6 +2099,11 @@ class InflatePolyhedronApp:
                 level0_button.config(text="Relax", command=self.on_relax_clicked)
             self.subdivision_level = 1
             self.iteration_count = 0
+            # This new level's own default "Target RMS stretch" -- same
+            # as _subdivide_step's own (see LEVEL_DEFAULT_TARGET_RMS_PCT).
+            if 1 in LEVEL_DEFAULT_TARGET_RMS_PCT:
+                self._current_target_rms_pct = LEVEL_DEFAULT_TARGET_RMS_PCT[1]
+                self.target_rms_var.set(self._current_target_rms_pct)
             self.last_stats = self._compute_stretch_stats()
             self._record_level_history()
             self._set_status(
@@ -1822,6 +2117,7 @@ class InflatePolyhedronApp:
         self._set_controls_enabled(True)
         self._set_level_action_button_running(False)
         self.draw()
+        self._auto_step()  # no-op unless Auto is what actually drove this run
 
     # ---- debug mode only: mesh validation ----
 
@@ -1849,7 +2145,8 @@ class InflatePolyhedronApp:
         state = ["!disabled"] if enabled else ["disabled"]
         for widget in (self.combo, self.target_rms_spin, self.tolerance_spin,
                        self.steps_radio, self.convergence_radio,
-                       self.validate_button, self.show_normals_check):
+                       self.validate_button, self.show_normals_check,
+                       self.auto_button):
             widget.state(state)
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
@@ -1867,6 +2164,14 @@ class InflatePolyhedronApp:
             for level, button in self.level_action_buttons.items():
                 if level != self.subdivision_level:
                     button.state(["disabled"])
+        # self.auto_button was just blanket-(dis)abled above like every
+        # other control -- re-sync it regardless of which branch ran:
+        # while an Auto sequence itself is driving the run that's
+        # starting/finishing, this RE-ENABLES it (reading "Stop Auto"),
+        # the same "frontier button survives the blanket disable"
+        # exception _set_level_action_button_running makes for the
+        # per-level buttons -- see _update_auto_button's own docstring.
+        self._update_auto_button()
 
     def _run_background(self, fn, args, on_done):
         """Run fn(*args) in a background thread and call on_done(result)
@@ -1902,6 +2207,7 @@ class InflatePolyhedronApp:
             self._set_controls_enabled(True)
             if kind == "error":
                 self._set_status(f"Failed: {payload}", "error")
+                self._abort_auto()  # nothing left to call _auto_step from otherwise
                 return
             on_done(payload)
 
