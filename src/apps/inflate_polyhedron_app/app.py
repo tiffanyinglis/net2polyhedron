@@ -289,7 +289,7 @@ import os
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import tkinter.font as tkfont
 
 import numpy as np
@@ -317,6 +317,10 @@ from utils.subdivisions.mesh_subdivide import load_fabric_spec
 from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
 from utils.geometry.polygon_geom import regular_polygon_vertices, apply_rigid
 from utils.subdivisions import subdivide as subdivide_polygon
+
+from session_state import (
+    SessionStateModel, LevelStateModel, LevelHistoryRecordModel, LastStatsModel,
+)
 
 DEFAULT_NET_BASENAME = "cube"
 
@@ -436,9 +440,9 @@ DEFAULT_TOLERANCE = 1e-3
 # fixed as resolution increases" design (module docstring, point 3).
 # No entry for Level 0 -- it has no target RMS stretch at all
 # (relax_initial_configuration is pure springs, not calibrated toward
-# any target). Was {1: 60.0, 2: 30.0, 3: 15.0}; lowered per explicit
-# user request.
-LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 30.0, 2: 20.0, 3: 10.0}
+# any target). Was {1: 60.0, 2: 30.0, 3: 15.0}, then {1: 30.0, 2: 20.0,
+# 3: 10.0}; raised back per explicit later user request.
+LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 60.0, 2: 40.0, 3: 20.0}
 
 # Debug mode's "Show normals" toggle (_draw_level_panel) draws each
 # triangle's own outward normal as a line segment in this color, from
@@ -641,6 +645,7 @@ class InflatePolyhedronApp:
 
         sv_ttk.set_theme("dark")
         self._scale_ui_fonts()
+        self._build_menu()
 
         # ---- Debug mode vs. release mode: the ONLY difference between
         # them is whether "Iterate for N steps" is offered at all (see
@@ -1010,6 +1015,10 @@ class InflatePolyhedronApp:
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
+        # The currently-loaded net's own raw file content (see
+        # on_select_net/on_save_session_clicked/on_load_session_clicked)
+        # -- None until a net (or a saved session carrying one) is loaded.
+        self._net_file_json = None
         self._apply_plot_theme()
         self.refresh_net_list()
         self._apply_mode_visibility()
@@ -1046,6 +1055,18 @@ class InflatePolyhedronApp:
         # SunValleyBodyFont has its final scaled size.
         body_font = tkfont.nametofont("SunValleyBodyFont", root=self.root)
         ttk.Style(self.root).configure("Treeview", rowheight=body_font.metrics("linespace") + 3)
+
+    def _build_menu(self):
+        """This app's only menu bar -- File > Load.../Save..., Load above
+        Save since it's the more common entry point (opening a
+        previously-saved session before continuing it). See
+        on_save_clicked/on_load_clicked for what the two actually do."""
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Load...", command=self.on_load_session_clicked)
+        file_menu.add_command(label="Save...", command=self.on_save_session_clicked)
+        menubar.add_cascade(label="File", menu=file_menu)
+        self.root.config(menu=menubar)
 
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
@@ -1448,9 +1469,16 @@ class InflatePolyhedronApp:
         # over shared edges, attaching each face to whichever neighbor
         # discovers it first (see its own docstring) -- _draw_target_
         # faces just reuses whichever of the two this is on every
-        # redraw, rather than recomputing either one every time.
+        # redraw, rather than recomputing either one every time. The raw
+        # parsed file is kept as self._net_file_json too -- not just its
+        # "net_layout" -- so on_save_session_clicked can embed a full
+        # copy of it (session_state.SessionStateModel's own "net_file"),
+        # letting on_load_session_clicked reproduce this exact layout
+        # decision later without the original file needing to still
+        # exist on disk.
         with open(path) as f:
-            net_layout = json.load(f).get("net_layout")
+            self._net_file_json = json.load(f)
+        net_layout = self._net_file_json.get("net_layout")
         if net_layout is not None and len(net_layout) == len(self.base_faces):
             self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
         else:
@@ -1480,6 +1508,129 @@ class InflatePolyhedronApp:
         self._update_level_action_buttons()
         self._update_auto_button()
         self.draw()
+
+    # ---- session save/load (File menu) ----
+
+    def on_save_session_clicked(self):
+        """File > Save -- serializes the WHOLE current session (the net,
+        every "Target RMS stretch"/Tolerance spinner, the Convergence
+        History table, and the mesh at every subdivision level reached so
+        far) to one JSON file via session_state.SessionStateModel, enough
+        for on_load_session_clicked to reopen it exactly as left with no
+        re-solving. self.level_snapshots holds every level already left
+        behind (see _subdivide_step/_finish_relax); the current frontier
+        level's own live self.faces/positions/face_of_fine/edge_length
+        aren't in there yet, so this adds them under self.subdivision_level
+        itself before writing."""
+        if self.positions is None:
+            messagebox.showwarning("Save", "No net is loaded yet.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save session", initialdir=str(STRETCHY_NETS_DIR),
+            defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+
+        levels = {level: LevelStateModel.from_mesh(snap["faces"], snap["positions"],
+                                                     snap["face_of_fine"])
+                  for level, snap in self.level_snapshots.items()}
+        levels[self.subdivision_level] = LevelStateModel.from_mesh(
+            self.faces, self.positions, self.face_of_fine, self.edge_length)
+        state = SessionStateModel(
+            net_name=self.mesh_name,
+            base_faces=[list(face) for face in self.base_faces],
+            net_file=self._net_file_json,
+            subdivision_level=self.subdivision_level,
+            pressure_value=self.pressure_value,
+            iteration_count=self.iteration_count,
+            debug_mode=self.debug_mode,
+            tolerance=self.tolerance_var.get(),
+            target_rms_pct={level: var.get() for level, var in self.target_rms_vars.items()},
+            last_stats=LastStatsModel(**{k: v for k, v in self.last_stats.items()
+                                          if k in LastStatsModel.model_fields}),
+            level_history={level: LevelHistoryRecordModel(**rec)
+                           for level, rec in self.level_history.items()},
+            levels=levels,
+        )
+        try:
+            with open(path, "w") as f:
+                f.write(state.model_dump_json(indent=2))
+        except OSError as e:
+            messagebox.showerror("Save", f"Could not save session: {e}")
+            return
+        self._set_status(f"Session saved to {os.path.basename(path)}.", "info")
+
+    def on_load_session_clicked(self):
+        """File > Load -- the inverse of on_save_session_clicked. Fully
+        replaces the current net/mesh/history (like on_select_net does
+        for a fresh net pick) rather than merging into whatever's
+        currently loaded, and touches nothing that needs re-solving --
+        every level's mesh, the pressure/iteration/history readouts, and
+        every spinner come straight from the file."""
+        path = filedialog.askopenfilename(
+            title="Load session", initialdir=str(STRETCHY_NETS_DIR),
+            filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                state = SessionStateModel.model_validate_json(f.read())
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Load", f"Could not load session: {e}")
+            return
+
+        self.mesh_name = state.net_name
+        self.net_var.set(state.net_name)
+        self.current_label = state.net_name
+        self.current_path = None  # not tied to any file under STRETCHY_NETS_DIR
+        self.base_faces = [list(face) for face in state.base_faces]
+        self._net_file_json = state.net_file
+        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.base_faces))]
+        # Same layout decision as on_select_net (see its own comment): a
+        # net_file carrying its own "net_layout" (e.g. one built and
+        # connected in interactive_builder_app) reproduces THAT exact
+        # arrangement for the "Net" panel next to Level 0, rather than
+        # falling back to a fresh BFS layout that ignores how the user
+        # actually arranged it.
+        net_layout = (self._net_file_json or {}).get("net_layout")
+        if net_layout is not None and len(net_layout) == len(self.base_faces):
+            self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
+        else:
+            self.target_layout = build_stretchy_net_layout(self.base_faces)
+
+        self.subdivision_level = state.subdivision_level
+        self.pressure_value = state.pressure_value
+        self.iteration_count = state.iteration_count
+        self.debug_mode = state.debug_mode
+        self.tolerance_var.set(state.tolerance)
+        for level, value in state.target_rms_pct.items():
+            if level in self.target_rms_vars:
+                self.target_rms_vars[level].set(value)
+        self.last_stats = state.last_stats.model_dump()
+        self.level_history = {level: rec.model_dump() for level, rec in state.level_history.items()}
+
+        self.level_snapshots = {}
+        for level, level_state in state.levels.items():
+            faces, positions, face_of_fine, edge_length = level_state.to_mesh()
+            if level == state.subdivision_level:
+                self.faces, self.positions, self.face_of_fine = faces, positions, face_of_fine
+                if edge_length is not None:
+                    self.edge_length = edge_length
+            else:
+                self.level_snapshots[level] = {"faces": faces, "positions": positions,
+                                                "face_of_fine": face_of_fine}
+
+        self.history_tree.delete(*self.history_tree.get_children())
+        self.stop_event = None
+        self._auto_active = False
+        self._auto_retry_count = 0
+        self._auto_retry_level = None
+        self._apply_mode_visibility()
+        self._refresh_history_table()
+        self._update_level_action_buttons()
+        self._update_auto_button()
+        self.draw()
+        self._set_status(f"Session loaded from {os.path.basename(path)}.", "info")
 
     # ---- subdivide ----
 

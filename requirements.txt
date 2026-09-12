@@ -5,6 +5,7 @@ matplotlib
 pillow
 pyvista
 sv-ttk
+pydantic
 
 # dev/test only
 pytest
