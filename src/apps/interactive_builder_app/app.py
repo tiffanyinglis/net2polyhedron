@@ -81,6 +81,26 @@ Interaction model:
   first click of the click-click gesture below) but not yet completed
   onto a second one -- the line following the cursor just disappears,
   with no connection made (`_on_escape_key`).
+- **Undo/redo (Ctrl+Z / Ctrl+Y)**: a plain snapshot stack over
+  `self.shapes`/`self.connections` (`_push_undo`/`on_undo_key`/
+  `on_redo_key`) -- restores the whole canvas as it was one action ago,
+  not a field-by-field diff. One entry per WHOLE action: dropping a
+  shape, deleting shape(s)/a connection, making a connection, copy/
+  paste, Clear, and Load each push one snapshot right before they
+  mutate anything, same as any instantaneous action would. A drag (move)
+  or right-drag (rotate) gesture is a SINGLE undo step for the whole
+  gesture, not one per intermediate mouse-move update --
+  `_begin_undoable_change`/`_commit_undoable_change` snapshot at the
+  gesture's START and only actually push that snapshot once it ends, and
+  only if something about the shapes/connections actually differs from
+  it (so a plain click that never moved, or a right-click-drag that
+  immediately released, doesn't leave a no-op entry to undo through for
+  no reason). Any fresh action clears the redo stack, same as any
+  ordinary undo system -- redoing only ever replays what THIS session's
+  most recent undo(s) took back, not some independent alternate history.
+  Selection is deliberately NOT part of what's restored (undoing back to
+  a state where a selected shape no longer exists would leave a
+  dangling reference) -- both directions simply clear it.
 - **Edge connections**: every shape already on the canvas (not a still-
   armed/not-yet-dropped ghost) has a small circular handle at the
   midpoint of each of its edges -- selecting the shape first is NOT
@@ -252,6 +272,7 @@ entirely in world coordinates against each shape's own stored geometry,
 exactly as it did before this module used Pillow at all.
 """
 import colorsys
+import copy
 import itertools
 import json
 import math
@@ -326,6 +347,13 @@ _LOCAL_VERTICES = {n: regular_polygon_vertices(n, DEFAULT_SHAPE_EDGE_LENGTH) for
 # clipboard's own stored position by this amount, so repeated Ctrl+V
 # cascades diagonally instead of stacking).
 PASTE_OFFSET = DEFAULT_SHAPE_EDGE_LENGTH * 0.4
+
+# Ctrl+Z/Ctrl+Y's own undo/redo stack (_push_undo/on_undo_key/
+# on_redo_key) -- caps how many whole-canvas snapshots it keeps so an
+# extremely long editing session can't grow it unboundedly; a project
+# built by hand in this app is never going to need more than this many
+# steps back.
+UNDO_STACK_LIMIT = 100
 
 
 def _vertices_with_radius(n, radius):
@@ -1080,6 +1108,17 @@ class InteractiveBuilderApp:
         # not real shape ids, which won't exist again until paste time),
         # or None -- see on_copy_key/on_paste_key.
         self._clipboard = None
+        # Ctrl+Z/Ctrl+Y: lists of whole-canvas snapshots
+        # (_snapshot_state's own {"shapes", "connections",
+        # "_next_shape_id", "_next_connection_id"} shape), oldest first
+        # -- see _push_undo/on_undo_key/on_redo_key. _pending_undo_snapshot
+        # is the snapshot taken at the START of a drag/rotate gesture
+        # still in progress, not yet committed to _undo_stack (see
+        # _begin_undoable_change/_commit_undoable_change) -- None when no
+        # such gesture is live.
+        self._undo_stack = []
+        self._redo_stack = []
+        self._pending_undo_snapshot = None
         self._ghost_world_xy = None
         self._drag_state = None
         self._pan_last_xy = None
@@ -1200,6 +1239,8 @@ class InteractiveBuilderApp:
         self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
         self.root.bind_all("<Control-c>", self.on_copy_key)
         self.root.bind_all("<Control-v>", self.on_paste_key)
+        self.root.bind_all("<Control-z>", self.on_undo_key)
+        self.root.bind_all("<Control-y>", self.on_redo_key)
         self.root.bind_all("<Escape>", self._on_escape_key)
 
     def _build_menu(self):
@@ -1367,6 +1408,8 @@ class InteractiveBuilderApp:
         self._redraw()
 
     def on_clear_clicked(self):
+        if self.shapes or self.connections:
+            self._push_undo()
         self.shapes.clear()
         self.connections.clear()
         self.selected_ids = set()
@@ -1481,6 +1524,8 @@ class InteractiveBuilderApp:
         `view_scale` (this app's own saved "view"."scale", see module
         docstring), when present, restores the zoom level the net was
         saved at instead of resetting to the default 1.0."""
+        if self.shapes or self.connections:
+            self._push_undo()
         self.shapes = []
         self.connections = []
         self.selected_ids = set()
@@ -1587,6 +1632,7 @@ class InteractiveBuilderApp:
     def _on_canvas_press(self, event):
         if self.armed_n is not None:
             wx, wy = self._screen_to_world(event.x, event.y)
+            self._push_undo()
             self._drop_shape(self.armed_n, wx, wy)
             self._on_palette_clicked(self.armed_n)  # disarm (toggles current off)
             return
@@ -1664,6 +1710,7 @@ class InteractiveBuilderApp:
                     if s is not None:
                         starts[sid] = (s["cx"], s["cy"])
                 self._drag_state = {"start_world": (wx, wy), "starts": starts}
+                self._begin_undoable_change()
             else:
                 self._drag_state = None
         self._redraw()
@@ -1684,6 +1731,7 @@ class InteractiveBuilderApp:
         method's."""
         made = self._hover_shape_id is not None
         if made:
+            self._push_undo()
             self.connections.append({
                 "id": self._next_connection_id,
                 "a_shape": self._connection_pending["from_shape"],
@@ -1759,6 +1807,7 @@ class InteractiveBuilderApp:
 
     def _on_canvas_release(self, _event):
         self._drag_state = None
+        self._commit_undoable_change()
         if self._marquee_start is not None:
             self._finish_marquee_select()
             self._marquee_start = None
@@ -1767,11 +1816,13 @@ class InteractiveBuilderApp:
 
     def _on_delete_key(self, _event):
         if self.selected_ids:
+            self._push_undo()
             for shape_id in self.selected_ids:
                 self._remove_shape(shape_id)
             self.selected_ids = set()
             self._redraw()
         elif self.selected_connection_id is not None:
+            self._push_undo()
             self.connections = [c for c in self.connections if c["id"] != self.selected_connection_id]
             self.selected_connection_id = None
             self._self_loop_highlight = set()
@@ -1796,6 +1847,118 @@ class InteractiveBuilderApp:
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
         self.root.title(f"Interactive Builder{' (debug mode)' if self.debug_mode else ''}")
+        self._redraw()
+
+    # ---- undo/redo (Ctrl+Z / Ctrl+Y) ----
+
+    def _snapshot_state(self):
+        """A deep-copied {"shapes", "connections", "_next_shape_id",
+        "_next_connection_id"} -- everything Ctrl+Z/Ctrl+Y need to
+        restore the canvas exactly, deep-copied so neither the snapshot
+        nor later live edits can ever mutate the other's data (every
+        value here is a plain int/float/bool/dict/list, so this is cheap
+        and never needs anything smarter than copy.deepcopy)."""
+        return {"shapes": copy.deepcopy(self.shapes), "connections": copy.deepcopy(self.connections),
+                "_next_shape_id": self._next_shape_id, "_next_connection_id": self._next_connection_id}
+
+    def _restore_snapshot(self, snap):
+        """The inverse of _snapshot_state -- also deep-copies OUT of the
+        snapshot, so continuing to edit afterward can never reach back
+        and corrupt a still-live undo/redo stack entry. Selection is
+        deliberately left untouched by the snapshot itself -- both
+        on_undo_key/on_redo_key clear it explicitly right after calling
+        this, since a restored canvas may no longer even contain
+        whatever used to be selected."""
+        self.shapes = copy.deepcopy(snap["shapes"])
+        self.connections = copy.deepcopy(snap["connections"])
+        self._next_shape_id = snap["_next_shape_id"]
+        self._next_connection_id = snap["_next_connection_id"]
+
+    def _record_undo_snapshot(self, snap):
+        """Pushes an ALREADY-CAPTURED snapshot onto the undo stack
+        (capping it at UNDO_STACK_LIMIT, dropping the OLDEST entry once
+        full) and clears the redo stack -- a fresh action, like any
+        ordinary undo system, discards whatever redo history existed
+        before it, since it's no longer the alternate future that
+        history led to."""
+        self._undo_stack.append(snap)
+        if len(self._undo_stack) > UNDO_STACK_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _push_undo(self):
+        """Call BEFORE an instantaneous action (drop, delete, make a
+        connection, copy/paste, Clear, Load) that's about to change
+        shapes/connections -- captures and records the state right
+        before it. A drag/rotate GESTURE uses _begin_undoable_change/
+        _commit_undoable_change instead (see their own docstrings for
+        why an instantaneous push here isn't the right fit for those)."""
+        self._record_undo_snapshot(self._snapshot_state())
+
+    def _begin_undoable_change(self):
+        """Call at the START of a gesture that MIGHT change shapes/
+        connections (a drag or a rotate) -- captures a snapshot, but
+        does NOT push it onto the undo stack yet (see
+        _commit_undoable_change, called at the gesture's END, for why:
+        a plain click that never actually moved anything shouldn't leave
+        a no-op entry in the undo history for a user to needlessly step
+        through)."""
+        self._pending_undo_snapshot = self._snapshot_state()
+
+    def _commit_undoable_change(self):
+        """Call at the END of a gesture begun with _begin_undoable_change
+        (on mouse release) -- pushes the snapshot taken at its start onto
+        the undo stack, but ONLY if self.shapes/self.connections actually
+        differ from it now (a plain click that never moved, or a
+        right-click-drag that released immediately, leaves them
+        identical) -- comparing the actual dicts/lists rather than, say,
+        tracking "did any drag event fire" directly, so this stays
+        correct even if a future gesture ends up being a no-op for some
+        other reason. A no-op (nothing pending) when called with no
+        gesture in progress, so every mouse-release handler can call
+        this unconditionally."""
+        snap = self._pending_undo_snapshot
+        self._pending_undo_snapshot = None
+        if snap is None:
+            return
+        if snap["shapes"] != self.shapes or snap["connections"] != self.connections:
+            self._record_undo_snapshot(snap)
+
+    def on_undo_key(self, _event=None):
+        """Ctrl+Z: restores the canvas to right before the most recent
+        action (_undo_stack's own last entry), pushing the CURRENT state
+        onto the redo stack first so Ctrl+Y can step back forward through
+        it. No-op with nothing to undo. Clears the selection rather than
+        trying to preserve it -- the restored canvas may not even
+        contain whatever used to be selected."""
+        if not self._undo_stack:
+            return
+        self._redo_stack.append(self._snapshot_state())
+        self._restore_snapshot(self._undo_stack.pop())
+        self.selected_ids = set()
+        self.selected_connection_id = None
+        self._drag_state = None
+        self._rotate_state = None
+        self._connection_pending = None
+        self._self_loop_highlight = set()
+        self._redraw()
+
+    def on_redo_key(self, _event=None):
+        """Ctrl+Y: the inverse of on_undo_key -- restores the state most
+        recently undone, pushing the current state back onto the undo
+        stack first. No-op with nothing to redo (including right after
+        any fresh action, which clears this stack -- see
+        _record_undo_snapshot)."""
+        if not self._redo_stack:
+            return
+        self._undo_stack.append(self._snapshot_state())
+        self._restore_snapshot(self._redo_stack.pop())
+        self.selected_ids = set()
+        self.selected_connection_id = None
+        self._drag_state = None
+        self._rotate_state = None
+        self._connection_pending = None
+        self._self_loop_highlight = set()
         self._redraw()
 
     def on_copy_key(self, _event=None):
@@ -1842,6 +2005,7 @@ class InteractiveBuilderApp:
         same as a fresh drop."""
         if not self._clipboard:
             return
+        self._push_undo()
         new_ids = []
         for entry in self._clipboard["shapes"]:
             entry["cx"] += PASTE_OFFSET
@@ -1883,6 +2047,7 @@ class InteractiveBuilderApp:
             self._rotate_state = {"ids": [s["id"] for s in shapes], "center_world": (cx, cy),
                                    "last_angle": math.atan2(event.y - scy, event.x - scx)}
             self._pan_last_xy = None
+            self._begin_undoable_change()
         else:
             self._pan_last_xy = (event.x, event.y)
             self._rotate_state = None
@@ -1919,6 +2084,7 @@ class InteractiveBuilderApp:
     def _on_right_release(self, _event):
         self._rotate_state = None
         self._pan_last_xy = None
+        self._commit_undoable_change()
 
     def _on_zoom(self, event):
         """Scroll-to-zoom, centered on the cursor: solves for the world
