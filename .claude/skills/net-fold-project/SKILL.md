@@ -835,6 +835,74 @@ be rather than making those meshes take far more steps to formally
     is one `(N,3) x (N,3)` matrix product plus one 3x3 SVD per step --
     negligible next to the force computation itself, which is already
     doing comparable or larger per-vertex work.
+  - **Escaping a genuine local minimum: the "kick"** (`rng` parameter on
+    `_explicit_relax_loop`/`relax_once`/`relax_initial_configuration`/
+    `estimate_pressure_for_target_stretch`, `KICK_WINDOW`/
+    `KICK_STALL_RATIO`/`KICK_MAGNITUDE_FRACTION`): a follow-up to
+    rigid-motion removal above, from the SAME "head not popping out"
+    report -- a user hypothesized a bigger step size would fix it.
+    Investigated first, empirically, rather than just trying it: tracked
+    the worst vertex's own force on `data/input/stretchy_nets/
+    hippo_head.json` over 30,000 steps and found it OSCILLATING in a
+    fixed band (~0.04-0.07), never trending down -- the signature of a
+    genuine local-minimum "dimple," not a merely-slow correction. Then
+    DISPROVED the user's own hypothesis directly: tried step multipliers
+    from 0.2 up to 1.5x edge length -- got WORSE, not better (more
+    overshoot, still no escape) -- and tried raising pressure instead,
+    which just diverges catastrophically past a critical value (the
+    SAME divergence happens with the unmodified original code too, at
+    the same pressure, ruling out a regression). Traced the actual root
+    cause instead: the mesh's worst vertex has DEGREE 2 (touches only 2
+    triangles) -- confirmed across ALL 8 tested random starting seeds
+    getting stuck the identical way, ruling out "just unlucky", and
+    confirmed this mesh is a CUT-OUT PIECE of the full net
+    (`data/input/stretchy_nets/hippo.json`), which has NO degree-2
+    vertices at all (min degree 4) and converges that same solver
+    cleanly in 69 steps -- i.e. the weak bracing is an artifact of
+    testing the piece standalone, not a property of the assembled net or
+    a solver deficiency step size could fix.
+
+    Given a bigger step doesn't work, the user chose (over "add momentum
+    to the integrator" and "leave the solver alone, fix the net data
+    instead") an occasional small random perturbation when a vertex is
+    detected stuck: if `max_force` hasn't dropped to at most
+    `KICK_STALL_RATIO` (0.5) of what it was `KICK_WINDOW` steps ago, every
+    vertex is nudged by Gaussian noise scaled by `KICK_MAGNITUDE_
+    FRACTION * scale` (0.3), WEIGHTED by that vertex's own current force
+    relative to the worst one -- concentrating the kick on whichever
+    region is actually stuck, leaving an already-settled part of the
+    mesh (near-zero weight) essentially undisturbed. `rng=None` (every
+    function's default) skips this entirely at zero cost -- deliberately
+    opt-in, so every existing caller, including this module's own tests
+    (which expect exact, reproducible results), keeps its current fully
+    deterministic behavior; `inflate_polyhedron_app` passes its own
+    `np.random.default_rng()` for its actual Relax/Inflate/calibration
+    calls (one shared Generator per streamed run, not a fresh one per
+    chunk).
+
+    `KICK_WINDOW` (150) is DELIBERATELY kept <= `inflate_polyhedron_
+    app.INFLATE_CHUNK_MAX` (200) -- UNLIKE `STALL_WINDOW`, which was
+    deliberately raised PAST it (see its own comment): `recent_max_
+    force` resets fresh every relax_once/relax_initial_configuration
+    call, and the app never makes one call longer than
+    `INFLATE_CHUNK_MAX` steps, so a bigger window could never fill
+    within a single chunk and would silently NEVER fire through the
+    app's actual UI -- verified directly (first tried 500, matching an
+    earlier draft of this fix -- zero kicks fired over 20,000 chunked
+    steps; 150 fired about 100).
+
+    Honesty check on what this fix actually achieves, since the initial
+    KICK_WINDOW=500 draft would have shipped silently non-functional
+    otherwise: it does NOT fully rescue `hippo_head.json` tested
+    standalone even after the KICK_WINDOW fix -- still doesn't converge
+    within 20,000 steps, kicks firing throughout, because that vertex is
+    weakly-braced enough that no reachable nearby configuration is a
+    real equilibrium for it to land in. It DOES work in general for a
+    vertex that's stuck but has SOME reachable escape (the whole point
+    of testing it against a known-pathological case first was to find
+    this boundary honestly rather than assume success). The actually
+    reliable fix for THIS class of problem is testing the full,
+    assembled net rather than a cut-out piece in isolation.
   - **No orientation/fold check on the interactive Inflate loop.** An
     earlier version of `_run_inflate_stream` rejected a chunk whenever
     `stretchy_mesh.is_orientation_consistent` (the centroid-outward

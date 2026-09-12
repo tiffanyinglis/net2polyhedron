@@ -97,6 +97,29 @@ work for anyone who wants one.
      them, even though that shared rotation state was never touched --
      see _remove_rigid_motion's own docstring in stretchy_mesh.py for
      the full reasoning and verification.
+   - Every Relax/Inflate call also passes its own `np.random.default_
+     rng()` as `rng` to relax_once/relax_initial_configuration/
+     estimate_pressure_for_target_stretch, opting into their occasional
+     random-perturbation "kick" when a vertex is genuinely stuck
+     OSCILLATING rather than slowly converging (stretchy_mesh.
+     KICK_WINDOW/_explicit_relax_loop -- see their own comments) -- a
+     user asked for this after a small, weakly-braced part of a net (a
+     boundary vertex touching only 2 triangles, from testing a cut-out
+     piece of a larger net standalone) got stuck this way and wouldn't
+     "pop out" no matter the step size. Directly verified this can't be
+     fixed by step size alone (tried larger AND smaller -- oscillation
+     either way, never an escape) nor by raising pressure (diverges past
+     a critical value instead); the kick helps in general but ISN'T
+     guaranteed to rescue every case -- a sufficiently under-constrained
+     vertex (as in the case above) can still fail to fully converge even
+     with it, since there's no strong nearby equilibrium for a kick to
+     land in either. The most reliable actual fix for that SPECIFIC
+     class of problem is testing the full, assembled net rather than an
+     isolated cut-out piece -- a boundary vertex on a piece's own free
+     edge is often an interior, well-braced vertex (degree 4+) once
+     neighboring pieces are back in place, with no local-minimum problem
+     left to kick at all (verified directly on this project's own
+     hippo.json vs. its own cut-out hippo_head.json).
 5. The "Convergence History" table records one row per subdivision level
    visited this net session: the pressure last calibrated for it (n/a for
    Level 0, which has no pressure at all), how many Inflate/Relax steps
@@ -1542,7 +1565,8 @@ class InflatePolyhedronApp:
         self._run_background(
             lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                                            target_rms_pct=target_rms_pct,
-                                                           gtol=tolerance),
+                                                           gtol=tolerance,
+                                                           rng=np.random.default_rng()),
             (), lambda result: self._on_pressure_calibrated(result, target_steps))
 
     def _on_pressure_calibrated(self, result, target_steps):
@@ -1657,12 +1681,13 @@ class InflatePolyhedronApp:
     def _run_inflate_stream(self, pressure, target_steps, stop_event):
         faces, edge_length = self.faces, self.edge_length
         gtol = self._current_gtol
+        rng = np.random.default_rng()
         state = {"positions": self.positions}
 
         def step_fn(chunk, stop_event):
             result = relax_once(state["positions"], faces, edge_length, pressure,
                                  PLANARITY_WEIGHT, max_nfev=chunk, stop_event=stop_event,
-                                 gtol=gtol)
+                                 gtol=gtol, rng=rng)
             state["positions"] = result[0]
             return result
 
@@ -1735,12 +1760,13 @@ class InflatePolyhedronApp:
     def _run_relax_stream(self, stop_event):
         faces, edge_length = self.faces, self.edge_length
         gtol = self._current_gtol
+        rng = np.random.default_rng()
         state = {"positions": self.positions}
 
         def step_fn(chunk, stop_event):
             result = relax_initial_configuration(state["positions"], faces, edge_length,
                                                   max_nfev=chunk, stop_event=stop_event,
-                                                  gtol=gtol)
+                                                  gtol=gtol, rng=rng)
             state["positions"] = result[0]
             return result
 

@@ -519,8 +519,53 @@ MAX_UNBOUNDED_STEPS = 200_000
 # leans on the real gtol/INFLATE_SAFETY_STEP_CAP criteria instead of a
 # same-size coincidence, letting a genuinely slow correction (like the
 # reported stuck vertex) keep going rather than being cut off early.
+#
+# This alone turned out NOT to fix that reported stuck vertex, though --
+# investigated further (see KICK_WINDOW below): its own force wasn't
+# slowly shrinking at all, it was OSCILLATING indefinitely in a fixed
+# band (~0.04-0.07 over 30,000 steps, on data/input/stretchy_nets/
+# hippo_head.json), the signature of a genuine local-minimum "dimple"
+# rather than a merely-slow correction. Directly verified a bigger step
+# size does NOT help this case -- it gets WORSE (more overshoot, still
+# no escape) -- and that higher pressure just diverges outright past a
+# critical value (see module docstring's own "No runaway guard on
+# pressure" note); neither is a matter of degree here, this needed an
+# actual different mechanism (KICK_WINDOW below).
 STALL_WINDOW = 2000
 STALL_TOL_PCT = 1.0
+
+# Escaping a genuine local-minimum "dimple" (see STALL_WINDOW's own
+# comment for how this was diagnosed): a pure explicit gradient-style
+# walk has no momentum to coast through a shallow energy barrier with,
+# so once a vertex settles into one, smaller OR larger steps both just
+# oscillate around it forever rather than crossing over. `rng`
+# (optional, `None` by default on every function here -- see their own
+# docstrings) opts a caller into an occasional small random perturbation
+# instead: if `max_force` hasn't dropped to at most KICK_STALL_RATIO of
+# what it was KICK_WINDOW steps ago (still oscillating, not genuinely
+# progressing toward `gtol`), every vertex gets nudged by Gaussian noise
+# scaled by KICK_MAGNITUDE_FRACTION * `scale`, WEIGHTED by that vertex's
+# own current force relative to the worst one -- concentrating the kick
+# on whichever vertex/region is actually stuck, leaving an
+# already-settled part of the mesh (low force, near-zero weight)
+# essentially undisturbed. `rng=None` (the default) skips all of this at
+# zero cost -- deliberately opt-in, not automatic, so every existing
+# caller (including this module's own tests, which expect exact,
+# reproducible results) keeps its current fully-deterministic behavior;
+# inflate_polyhedron_app opts in for its own Relax/Inflate runs.
+#
+# UNLIKE STALL_WINDOW, this must stay <= inflate_polyhedron_app's own
+# INFLATE_CHUNK_MAX (200): `recent_max_force` resets FRESH on every
+# relax_once/relax_initial_configuration call, and the app's own
+# streamed Inflate/Relax (_run_chunked_relax_stream) never makes one
+# call longer than INFLATE_CHUNK_MAX steps -- a window bigger than that
+# could NEVER fill within a single chunk, so it would silently never
+# fire through the app's actual UI at all (verified directly: with
+# KICK_WINDOW=500 chunked at 200, zero kicks fired over 20,000 steps;
+# with 150, ~100 did). 150 leaves comfortable room under 200.
+KICK_WINDOW = 150
+KICK_STALL_RATIO = 0.5
+KICK_MAGNITUDE_FRACTION = 0.3
 
 
 def mesh_volume(positions, faces):
@@ -602,7 +647,7 @@ def _remove_rigid_motion(pts_before, pts_after):
 
 
 def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
-                          max_nfev, stop_event, gtol):
+                          max_nfev, stop_event, gtol, rng=None):
     """Shared explicit-relaxation driver for relax_once and
     relax_initial_configuration -- the only thing that varies between
     them is the force itself (`force_fn(pts) -> (N,3)`); the walking
@@ -610,26 +655,31 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
     once rather than being kept in sync by hand in two places.
 
     Repeatedly nudges `pts` a small step along `force_fn(pts)` (see
-    STEP_MAX_FRACTION/STEP_MAX_MULTIPLIER), then removes whatever rigid
-    rotation/translation that step introduced (_remove_rigid_motion,
-    see its own docstring for why a free-floating system needs this),
-    until EITHER every vertex's force drops below `gtol`, or
-    max_stretch_pct stops moving for STALL_WINDOW steps (see
-    STALL_WINDOW's own comment for why both exist), or `max_nfev`/
-    `stop_event` cuts it off first. Returns (pts, steps_taken, max_force,
-    converged) -- callers each compute their own final positions/stretch
-    stats from `pts`."""
+    STEP_MAX_FRACTION/STEP_MAX_MULTIPLIER); if `rng` is given and the
+    worst vertex's force has been OSCILLATING rather than genuinely
+    dropping (see KICK_WINDOW's own comment), nudges every vertex by a
+    small random perturbation weighted toward whichever one is actually
+    stuck; either way then removes whatever rigid rotation/translation
+    the step (plus any kick) introduced (_remove_rigid_motion, see its
+    own docstring for why a free-floating system needs this) -- until
+    EITHER every vertex's force drops below `gtol`, or max_stretch_pct
+    stops moving for STALL_WINDOW steps (see STALL_WINDOW's own comment
+    for why both exist), or `max_nfev`/`stop_event` cuts it off first.
+    Returns (pts, steps_taken, max_force, converged) -- callers each
+    compute their own final positions/stretch stats from `pts`."""
     step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
     steps_taken = 0
     converged = False
     max_force = None
     recent_max_stretch = collections.deque(maxlen=STALL_WINDOW)
+    recent_max_force = collections.deque(maxlen=KICK_WINDOW) if rng is not None else None
     for steps_taken in range(1, step_cap + 1):
         if stop_event is not None and stop_event.is_set():
             steps_taken -= 1
             break
         force = force_fn(pts)
-        max_force = float(np.linalg.norm(force, axis=1).max())
+        per_vertex_force = np.linalg.norm(force, axis=1)
+        max_force = float(per_vertex_force.max())
         if max_force < gtol:
             converged = True
             break
@@ -640,13 +690,22 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
             converged = True
             break
         dt = min(STEP_MAX_MULTIPLIER * scale, STEP_MAX_FRACTION * scale / max_force)
-        pts = _remove_rigid_motion(pts, pts + dt * force)
+        new_pts = pts + dt * force
+        if rng is not None:
+            recent_max_force.append(max_force)
+            if (len(recent_max_force) == KICK_WINDOW
+                    and max_force > KICK_STALL_RATIO * recent_max_force[0]):
+                weight = (per_vertex_force / max_force)[:, None]
+                kick = rng.normal(scale=KICK_MAGNITUDE_FRACTION * scale, size=pts.shape)
+                new_pts = new_pts + kick * weight
+                recent_max_force.clear()  # give the kick a fresh window to show its effect
+        pts = _remove_rigid_motion(pts, new_pts)
     return pts, steps_taken, max_force, converged
 
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL):
+                gtol=CONVERGENCE_GTOL, rng=None):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
     as _edge_setup. Runs ONE relaxation pass at a fixed `pressure` -- no
     automatic ramp; call again with the result to keep steering it. Each
@@ -663,7 +722,12 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     stops moving for STALL_WINDOW steps (see STALL_WINDOW's comment for
     why both exist). `stop_event` (a threading.Event), if given, is
     checked before each step and aborts at the next one, returning
-    whatever position was last reached.
+    whatever position was last reached. `rng` (a numpy Generator, e.g.
+    `np.random.default_rng()`), if given, opts into an occasional random
+    perturbation when a vertex is stuck oscillating rather than
+    genuinely converging -- see KICK_WINDOW's own comment; `None`
+    (the default) is fully deterministic, exactly this function's
+    original behavior.
 
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     max_force, converged). `max_force` is the worst vertex's net force at
@@ -680,7 +744,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
                              length_arr, pressure, planarity_weight)
 
     pts, steps_taken, max_force, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol)
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng)
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
     return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
 
@@ -724,7 +788,7 @@ def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
 
 
 def relax_initial_configuration(positions, faces, edge_length,
-                                 max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL):
+                                 max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None):
     """positions/faces/edge_length: as relax_once, but `positions` is
     typically random_initial_positions' output here, not a meaningful
     embedding -- this is what turns it into one, WITHOUT ever touching
@@ -747,8 +811,10 @@ def relax_initial_configuration(positions, faces, edge_length,
 
     Same stopping rule as relax_once (see _explicit_relax_loop): `gtol`
     on the worst vertex's force, OR max_stretch_pct stalling for
-    STALL_WINDOW steps, OR `max_nfev`/`stop_event`. Returns
-    (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
+    STALL_WINDOW steps, OR `max_nfev`/`stop_event`. `rng`, as in
+    relax_once, opts into an occasional random perturbation when stuck
+    oscillating (`None` -- the default -- is fully deterministic).
+    Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     max_force, converged) -- exactly relax_once's own return shape."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
@@ -758,7 +824,7 @@ def relax_initial_configuration(positions, faces, edge_length,
         return _spring_only_force(pts, edge_ai, edge_bi, length_arr)
 
     pts, steps_taken, max_force, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol)
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng)
 
     # A pure-spring relax has no notion of "outward" at all -- nothing in
     # the force cares which way a face's normal points, so it lands
@@ -809,7 +875,7 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
                                           planarity_weight=PLANARITY_WEIGHT, max_iterations=4,
                                           tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None,
-                                          gtol=CONVERGENCE_GTOL):
+                                          gtol=CONVERGENCE_GTOL, rng=None):
     """positions/faces/edge_length: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
@@ -821,12 +887,16 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     the given `positions` (not chained from the previous trial's
     result), since different pressures can have very different equilibria
     and this is searching for the pressure, not steering a shape. `gtol`
-    is forwarded to every trial's own relax_once call unchanged (default
-    CONVERGENCE_GTOL, same as relax_once's own default) -- so a caller
-    with its own convergence tolerance (e.g. inflate_polyhedron_app's
-    "Tolerance" setting) calibrates pressure against the SAME threshold
-    it'll actually inflate at, rather than silently recalibrating against
-    a different, fixed one.
+    and `rng` are both forwarded to every trial's own relax_once call
+    unchanged (defaults CONVERGENCE_GTOL/None, same as relax_once's own
+    defaults) -- so a caller with its own convergence tolerance and/or
+    stuck-vertex kick (e.g. inflate_polyhedron_app's "Tolerance" setting)
+    calibrates pressure against the SAME settings it'll actually inflate
+    with, rather than silently recalibrating against different ones (a
+    trial that's genuinely stuck oscillating, same as any other
+    relax_once call, would otherwise misreport its own achieved stretch
+    as whatever it happened to be mid-oscillation, throwing off the
+    pressure estimate this function derives from it).
 
     Keeps whichever trial got CLOSEST to the target rather than just the
     last one: the rescale step assumes more pressure means more stretch,
@@ -843,7 +913,8 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     best_error, best_pressure, best_result = None, None, None
     for _ in range(max_iterations):
         result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
-                             max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol)
+                             max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
+                             rng=rng)
         _, _, _, rms_stretch, _, _ = result
         error = abs(rms_stretch - target_rms_pct)
         if best_error is None or error < best_error:
