@@ -60,15 +60,15 @@ work for anyone who wants one.
    LARGE target like 60% can actually be reached rather than the
    calibration oscillating forever between one pressure too low and
    another that diverges outright -- see its own docstring) landing near
-   the "Target RMS stretch" spinner's value (% of rest edge length --
-   stretchy_mesh.DEFAULT_TARGET_RMS_STRETCH_PCT is only the WIDGET's own
-   initial value, before any level's actually been reached; the moment
-   Level 1/2/3 is reached, the spinner is automatically set to THAT
-   level's own default instead -- LEVEL_DEFAULT_TARGET_RMS_PCT, 30/20/10%
-   respectively, tapered down as resolution increases since a finer mesh
-   needs LESS relative stretch per edge to trace the SAME overall
-   curvature -- overriding whatever it was left at, though still
-   user-editable afterward), then applies ONE relaxation pass
+   the CURRENT level's OWN "Target RMS stretch" spinner value (% of rest
+   edge length) -- there are three separate spinners, one each for Level
+   1/2/3 (self.target_rms_vars), defaulting to LEVEL_DEFAULT_TARGET_RMS_PCT
+   (30/20/10% respectively, tapered down as resolution increases since a
+   finer mesh needs LESS relative stretch per edge to trace the SAME
+   overall curvature) but independently user-editable at any time, and
+   used identically by a manual Inflate click and by "Auto" (both just
+   call on_inflate_clicked, which always reads whichever level is
+   current). Then applies ONE relaxation pass
    (stretchy_mesh.relax_once) at that pressure, continuing from wherever
    the mesh currently is -- so repeated clicks let you watch/steer the
    shape settle incrementally, and re-calibrate each time since pressure
@@ -310,7 +310,7 @@ from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
     estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
-    PLANARITY_WEIGHT, CONVERGENCE_GTOL, DEFAULT_TARGET_RMS_STRETCH_PCT,
+    PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
@@ -422,11 +422,9 @@ DEFAULT_STEPS = 10
 # force alone would settle even this tighter a threshold anyway.
 DEFAULT_TOLERANCE = 1e-3
 
-# Per-level default for the "Target RMS stretch" spinner, applied
-# automatically the moment a level is first reached (Relax's promotion
-# to Level 1; each Subdivide click for Level 2/3 -- see _finish_relax/
-# _subdivide_step) -- overriding whatever the spinner was left at,
-# rather than carrying one number forward across every level. Tapered
+# Default value for each level's own "Target RMS stretch" spinner
+# (self.target_rms_vars[level] -- one independent tk.DoubleVar per
+# level, not one shared spinner reset on every level change). Tapered
 # DOWN as level increases per explicit user request: a finer mesh
 # approximates the SAME overall curvature with a SMALLER stretch per
 # edge (more, shorter edges bending through the same total arc), so
@@ -684,20 +682,37 @@ class InflatePolyhedronApp:
         target_group = ttk.Frame(setup_row)
         target_group.pack(side=tk.LEFT, padx=(24, 0))
         ttk.Label(target_group, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
-        self.target_rms_var = tk.DoubleVar(value=DEFAULT_TARGET_RMS_STRETCH_PCT)
-        # A "converged" verdict only applies to the target it was reached
-        # at -- changing this means the current pressure hasn't actually
-        # been (re)calibrated for the new target yet, so the gate on
-        # re-clicking Inflate (see _update_level_action_buttons) needs to
-        # lift, since otherwise a converged mesh would stay stuck
-        # refusing to recalibrate even after the user asks for a
-        # different target.
-        self.target_rms_var.trace_add("write", self._on_target_rms_changed)
-        self.target_rms_spin = ttk.Spinbox(target_group, from_=0.1, to=200.0,
-                                            increment=1.0, width=6,
-                                            textvariable=self.target_rms_var, format="%.1f")
-        self.target_rms_spin.pack(side=tk.LEFT)
-        ttk.Label(target_group, text="%").pack(side=tk.LEFT, padx=(2, 0))
+        # One independent spinner per level (1-3), not a single spinner
+        # reset to a new default every time the frontier level changes --
+        # a user asked to be able to see/set every level's own target at
+        # once, rather than only the current one. Both the manual
+        # Inflate click (on_inflate_clicked) and "Auto" (on_auto_clicked/
+        # _auto_step, which just calls on_inflate_clicked itself) read
+        # self.target_rms_vars[self.subdivision_level] -- there's no
+        # separate code path for either workflow.
+        self.target_rms_vars = {}
+        self.target_rms_spins = {}
+        for level in (1, 2, 3):
+            ttk.Label(target_group, text=f"L{level}:").pack(side=tk.LEFT, padx=(8, 2))
+            var = tk.DoubleVar(value=LEVEL_DEFAULT_TARGET_RMS_PCT[level])
+            # A "converged" verdict only applies to the target it was
+            # reached at -- editing THIS level's own target while it's
+            # the current frontier means the current pressure hasn't
+            # actually been (re)calibrated for the new value yet, so the
+            # gate on re-clicking Inflate (see _update_level_action_buttons)
+            # needs to lift, since otherwise a converged mesh would stay
+            # stuck refusing to recalibrate even after the user asks for
+            # a different target. Editing a level that ISN'T current
+            # (e.g. tweaking Level 3's target while still on Level 1)
+            # doesn't touch any gate -- there's nothing to invalidate yet.
+            var.trace_add("write", lambda *_a, lv=level: self._on_target_rms_changed(lv))
+            spin = ttk.Spinbox(target_group, from_=0.1, to=200.0,
+                                increment=1.0, width=5,
+                                textvariable=var, format="%.1f")
+            spin.pack(side=tk.LEFT)
+            ttk.Label(target_group, text="%").pack(side=tk.LEFT, padx=(2, 0))
+            self.target_rms_vars[level] = var
+            self.target_rms_spins[level] = spin
         # Pressure is no longer user-editable or separately displayed --
         # "Inflate" calibrates it itself (see on_inflate_clicked) and it's
         # already logged per level in the Convergence History table.
@@ -711,7 +726,8 @@ class InflatePolyhedronApp:
         # self._current_gtol, set from this at the start of every
         # Relax/Inflate click, via _get_tolerance) -- previously a fixed,
         # non-user-facing stretchy_mesh.CONVERGENCE_GTOL. Same
-        # "converged" gate/reset rationale as target_rms_var above: a
+        # "converged" gate/reset rationale as each target_rms_vars[level]
+        # spinner above: a
         # looser-or-tighter tolerance than whatever a past "converged"
         # verdict was reached under means that verdict no longer
         # applies. A `tk.StringVar` (formatted scientific-notation text,
@@ -970,16 +986,16 @@ class InflatePolyhedronApp:
         # threshold an already-finished run actually used, even after
         # the spinner's own value later changes.
         self._current_gtol = DEFAULT_TOLERANCE
-        # Same rationale as self._current_gtol, for the "Target RMS
-        # stretch" spinner instead -- captured whenever it's actually
-        # USED (on_inflate_clicked, or a level's own default being
-        # applied at _finish_relax/_subdivide_step), not re-read live
-        # from self.target_rms_var by _refresh_history_table, so an
-        # already-finished level's row keeps showing the target IT was
-        # actually calibrated against even after the spinner shows a
-        # later level's different default (a user reported every row
-        # showing the CURRENT level's target instead of its own).
-        self._current_target_rms_pct = DEFAULT_TARGET_RMS_STRETCH_PCT
+        # Same rationale as self._current_gtol, for the current level's
+        # own "Target RMS stretch" spinner instead -- captured whenever
+        # it's actually USED (on_inflate_clicked, or a level's own
+        # spinner value being read at _finish_relax/_subdivide_step), not
+        # re-read live from self.target_rms_vars by _refresh_history_table,
+        # so an already-finished level's row keeps showing the target IT
+        # was actually calibrated against even if that level's spinner is
+        # edited again afterward (a user reported every row showing the
+        # CURRENT level's target instead of its own).
+        self._current_target_rms_pct = self.target_rms_vars[1].get()
         # Whether the "Auto" button's own scripted sequence is currently
         # driving the app (see on_auto_clicked/_auto_step) -- _auto_retry_
         # count/_auto_retry_level track how many consecutive Relax/Inflate
@@ -1521,13 +1537,13 @@ class InflatePolyhedronApp:
             self.faces, self.positions, self.edge_length, self.face_of_fine,
             self.subdivision_level)
         self.subdivision_level += 1
-        # This new level's own default "Target RMS stretch" (see
-        # LEVEL_DEFAULT_TARGET_RMS_PCT's own comment) -- overrides
-        # whatever the spinner was left at, since each level's sensible
-        # target is different, not a value that should carry forward.
-        if self.subdivision_level in LEVEL_DEFAULT_TARGET_RMS_PCT:
-            self._current_target_rms_pct = LEVEL_DEFAULT_TARGET_RMS_PCT[self.subdivision_level]
-            self.target_rms_var.set(self._current_target_rms_pct)
+        # This new level's own "Target RMS stretch" spinner (its default,
+        # or whatever the user already edited it to, independent of every
+        # other level's own spinner) -- just for the history row this
+        # method records below, before Inflate has even run once at this
+        # level yet.
+        if self.subdivision_level in self.target_rms_vars:
+            self._current_target_rms_pct = self.target_rms_vars[self.subdivision_level].get()
         # The face set just changed entirely (more, smaller faces) --
         # recomputed fresh for the NEW mesh, same as a brand new net load.
         self.last_stats = self._compute_stretch_stats()
@@ -1667,8 +1683,12 @@ class InflatePolyhedronApp:
         self.steps_spin.state(["!disabled"] if self.iterate_mode_var.get() == "steps"
                                else ["disabled"])
 
-    def _on_target_rms_changed(self, *_args):
-        if self.last_stats.get("converged"):
+    def _on_target_rms_changed(self, level):
+        # Only the CURRENT frontier level's own spinner invalidates a
+        # "converged" verdict -- editing some other level's target (one
+        # already finished, or not yet reached) doesn't affect the
+        # pressure just calibrated for this one.
+        if level == self.subdivision_level and self.last_stats.get("converged"):
             self.last_stats["converged"] = None
             self._update_level_action_buttons()
 
@@ -1707,7 +1727,7 @@ class InflatePolyhedronApp:
         if self.positions is None or self.last_stats.get("converged"):
             return
         faces, edge_length, positions = self.faces, self.edge_length, self.positions
-        target_rms_pct = self.target_rms_var.get()
+        target_rms_pct = self.target_rms_vars[self.subdivision_level].get()
         # Captured here too, not just at the level-default sites (see its
         # own comment in __init__), in case the user edited the spinner
         # away from that default before clicking Inflate.
@@ -2099,11 +2119,9 @@ class InflatePolyhedronApp:
                 level0_button.config(text="Relax", command=self.on_relax_clicked)
             self.subdivision_level = 1
             self.iteration_count = 0
-            # This new level's own default "Target RMS stretch" -- same
-            # as _subdivide_step's own (see LEVEL_DEFAULT_TARGET_RMS_PCT).
-            if 1 in LEVEL_DEFAULT_TARGET_RMS_PCT:
-                self._current_target_rms_pct = LEVEL_DEFAULT_TARGET_RMS_PCT[1]
-                self.target_rms_var.set(self._current_target_rms_pct)
+            # Level 1's own "Target RMS stretch" spinner -- same as
+            # _subdivide_step's own (see its comment).
+            self._current_target_rms_pct = self.target_rms_vars[1].get()
             self.last_stats = self._compute_stretch_stats()
             self._record_level_history()
             self._set_status(
@@ -2143,10 +2161,10 @@ class InflatePolyhedronApp:
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.target_rms_spin, self.tolerance_spin,
+        for widget in (self.combo, self.tolerance_spin,
                        self.steps_radio, self.convergence_radio,
                        self.validate_button, self.show_normals_check,
-                       self.auto_button):
+                       self.auto_button, *self.target_rms_spins.values()):
             widget.state(state)
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
