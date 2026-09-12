@@ -35,7 +35,10 @@ there:
 
 Drag any 3D panel to rotate it (every panel shares one camera, so they
 all turn together); scroll to zoom. The left "Net" panel always shows
-the flat, unfolded layout for reference.
+the flat, unfolded layout for reference — laid out fresh via a spanning
+tree over shared edges, unless the file itself was saved from
+`interactive_builder_app` (below) with its own flat arrangement, in
+which case that exact arrangement is shown instead.
 
 ## Describing your own net
 
@@ -101,6 +104,18 @@ convex hull.
   instead cancels the attempt.
   Connections can be
   selected and deleted too.
+  **File > Save** writes the whole canvas out as a `.json` in the same
+  vertex-loop format as `data/input/stretchy_nets/` (defaulting to that
+  directory), plus this app's own layout info and current zoom level so
+  reloading it reproduces the exact positions and view; **File > Load**
+  reads one back — a hand-authored net with no saved layout instead gets
+  laid out fresh, via a BFS spanning tree over shared edges with a
+  one-edge-length gap between connected faces so the net reads as
+  visibly disjoint rather than seamlessly glued. A Save that would
+  produce an invalid net (e.g. a connection that collapses a face's own
+  two adjacent corners into one point) is refused with an error message
+  naming the exact conflict, and rings every corner involved in orange
+  right on the canvas until the next edit.
 
 ## Running the tests
 

@@ -64,6 +64,19 @@ others. The list:
 - `tests/unit/inflate_polyhedron/test_stretchy_net_layout.py`
 - `tests/unit/subdivisions/test_polygon_subdivisions.py`
 
+**Exceptions actually made to the wholesale marking, so far, each ONLY
+because a specific user request could not be satisfied any other way**
+(not a signal that the marking has loosened generally -- still ask, or
+look for a change already made this way, before touching any of the
+files above for a NEW reason): `stretchy_mesh.py` (+ its test +
+`docs/README.md`), to let a stretchy mesh stay OPEN rather than
+requiring a closed 2-manifold -- see "Stretchy meshes" below; and
+`inflate_polyhedron_app/app.py`, to make its "Net" panel show a net
+saved by `interactive_builder_app` at the EXACT flat arrangement it was
+saved at, when that file has one, rather than always re-deriving a
+fresh BFS spanning-tree layout -- see `_layout_from_net_layout` in the
+"Interactive builder" section below.
+
 (The `polygon_subdivision_app`/`utils/subdivisions/` entries above are
 NOT part of the polyhedron-unfolder sync described below -- they're this
 project's own polygon-subdivision demo, considered separately finished
@@ -452,13 +465,25 @@ edges needs no special-casing. No root, no hinge tree, no fold angles: a
 bendable mesh has no single "flat net" to speak of.
 
 **Winding convention**: every face's vertex loop must go **counterclockwise
-as seen from outside the finished solid**. Concretely: for every edge
-shared by two faces, one face's loop contains it as `v -> w` and the
-other's contains it as `w -> v` — never the same direction twice.
-`load_stretchy_mesh` checks exactly that (every directed edge matched by
-exactly one reverse partner) and raises a clear error naming the offending
-edge(s) otherwise. That check alone can't catch everything, though — see
-"Orientation consistency" below for the subtler, solve-time half of this.
+as seen from outside the finished solid** (or, for a deliberately OPEN net,
+outside whichever side was chosen as the outside — the winding IS that
+choice, nothing else records it). Concretely: for every edge shared by two
+faces, one face's loop contains it as `v -> w` and the other's contains it
+as `w -> v` — never the same direction twice. `load_stretchy_mesh` only
+rejects a directed edge that appears **more than once** — a genuine error,
+since two faces would then be claiming the same directed edge. An edge
+referenced by only one face (no reverse partner at all) is a valid, free
+**boundary** edge, not an error — the mesh does **not** need to be a
+closed 2-manifold. (This used to be a stricter check, requiring every
+edge to have exactly one reverse partner — i.e. a fully closed mesh —
+until the user asked to inflate a deliberately open, hand-designed net
+from `interactive_builder_app` and there turned out to be no actual reason
+for the requirement: `relax_once`/`relax_initial_configuration` only ever
+compute per-edge spring forces and per-face pressure forces, never
+anything that assumes or needs a closed volume, so an open boundary edge
+was already physically meaningful — the loader was just refusing to admit
+it.) That check alone can't catch everything, though — see "Orientation
+consistency" below for the subtler, solve-time half of this.
 
 ### The starting-configuration algorithm (`random_initial_positions` + `relax_initial_configuration`)
 
@@ -1293,16 +1318,372 @@ file, per this project's existing convention that the rest of
   `sv_ttk.set_theme`) is copied from `inflate_polyhedron_app`'s own
   method of the same name -- scales every NAMED Tk/ttk font by
   `UI_FONT_SCALE` (1.3, matching the other app's value) so the whole
-  app's text (the "Shapes" heading, the Clear button, ...) grows
-  together, including sv_ttk's own Tcl-level fonts that back most ttk
-  widget styles (a per-widget `font=` override would miss those). The
-  "Shapes" heading's own literal `("TkDefaultFont", ..., "bold")` tuple
-  is scaled by hand (`round(11 * UI_FONT_SCALE)`) for the same reason
-  `inflate_polyhedron_app`'s `LEVEL_TITLE_FONT` is -- a literal size
-  tuple isn't a NAMED font `_scale_ui_fonts`'s loop can reach on its own.
+  app's text (the Clear button, the File menu, ...) grows together,
+  including sv_ttk's own Tcl-level fonts that back most ttk widget
+  styles (a per-widget `font=` override would miss those). (There used
+  to also be a "Shapes" heading Label above the palette, with its own
+  literal `("TkDefaultFont", ..., "bold")` tuple scaled by hand for the
+  same reason -- removed at the user's request; nothing in the left
+  panel needs a per-widget font override any more.)
 - Dark mode only, like the other two apps: `sv_ttk.set_theme("dark")`
   for the ttk palette/Clear button, `ui_theme.PLOT_THEME["bg"]`/`["fg"]`
   for the canvas, its border, and the palette icon backgrounds.
+- **File menu (`_build_menu`)**: a plain `tk.Menu` cascade, "File" ->
+  "Load..."/"Save...", attached via `root.config(menu=...)` -- this
+  app's only menu bar, added specifically to host these two commands.
+  See "Net JSON import/export" below for what they actually do.
+- **Debug mode (`self.debug_mode`, "d" key via `root.bind_all` --
+  same rationale as `Delete` above, no text-entry widget to collide
+  with)**: `_on_toggle_debug_mode` just flips the flag and updates the
+  window title (`" (debug mode)"` suffix, same convention
+  `inflate_polyhedron_app` uses for its own debug toggle). The one thing
+  it actually changes is `_redraw` calling `_draw_debug_vertex_label`
+  when on: finds the shape VERTEX (a corner via `_shape_world_vertices`,
+  NOT an edge-midpoint handle) nearest the cursor within
+  `DEBUG_VERTEX_HOVER_RADIUS`, and if one's close enough, rings it and
+  labels it `"vSHAPE.CORNER"` using that corner's OWN `(shape["id"],
+  corner)` -- ALWAYS that, never `_vertex_roots`' union-find ROOT for
+  it, even though that root can be looked up trivially the same way
+  `_validate_shapes_connections` does. The label is drawn white
+  (`fill="white"`) on a small 50%-alpha black box (`Image.new("RGBA",
+  ..., (0, 0, 0, 128))`, blitted via `create_image`/`ImageTk.PhotoImage`,
+  kept alive in `self._shape_photos` the same way `_rasterize_polygon`'s
+  shape images are -- a plain `tk.Canvas` rectangle item can't do
+  translucency), sized to the label's own measured text extent
+  (`tkfont.Font(font=...).measure`/`.metrics("linespace")`) -- a user
+  reported the original plain colored canvas text unreadable against
+  some shape colors underneath it; the original color was also yellow,
+  matching `DEBUG_VERTEX_COLOR` (still used for the hover ring only, not
+  the text any more).
+
+  This "always own address" behavior is itself the SECOND of two
+  reworks of what this label shows, both from real user reports against
+  `hippo.json` (a big, 42-shape, 102-connection net). Originally it
+  showed `_faces_from_shapes(self.shapes, self.connections)
+  [self.shapes.index(shape)][corner]` -- the EXPORTED sequential
+  integer -- and a user reported that as a bug: `vertex_ids[root] =
+  len(vertex_ids)` assigns ids in shape/corner ITERATION ORDER, the
+  first time each root is reached, so creating one new, entirely
+  unrelated connection elsewhere shifts every id assigned after it down
+  by one, making an untouched corner's displayed label change for no
+  visible reason. That was fixed by extracting `_vertex_roots` (the raw
+  `{slot: root}` union-find mapping, no numbering step) and displaying
+  the ROOT SLOT instead -- stable across unrelated edits since `find()`
+  has no path compression, but a root can belong to a DIFFERENT,
+  genuinely-connected shape than the one hovered (e.g. shape 42's own
+  corner 2 legitimately showing "v34.0", if that's really the same
+  vertex as shape 34's corner 0). On a big, densely-connected net most
+  corners of most shapes really are shared with some neighbor, so this
+  meant most hovers showed a foreign-looking label -- reported as
+  confusing on sight, even though each one was individually correct; the
+  user asked for every corner to always show its own polygon's number,
+  which is the current, final behavior. What's lost: hovering two
+  corners that already share an id no longer shows matching text (the
+  original point of computing a root here at all -- e.g. telling apart,
+  for two shapes already sharing one edge, which specific pairing of
+  their REMAINING edges continues the same "reverse traversal" the
+  shared edge implies, per `two_pentagons_and_a_square.json`'s own
+  3-edge-shared example, rather than whichever one just looks closest
+  on screen). That comparison is still possible, just no longer from
+  hovering here -- see the "Save" entry below for `_connection_chain`,
+  added specifically to cover it a different way: a failed Save now
+  spells out the actual chain of connections tying two corners together
+  by name, rather than requiring a user to notice two hover labels
+  match.
+
+### Net JSON import/export (File > Load/Save)
+
+Module-level (not on the class, since none of it touches Tk state):
+`GAP`, `_faces_shared_edges`, `_layout_faces_with_gap`,
+`_shape_from_placed_points`, `_infer_connections` -- plus the class
+methods `on_save_clicked`/`_export_faces_and_layout` and
+`on_load_clicked`/`_load_faces`/`_center_view_on_shapes`. The file
+format is exactly stretchy_mesh.py's own `{"name", "faces"}` vertex-loop
+spec (shared vertex ids ARE the adjacency -- see its module docstring),
+PLUS two extra top-level keys that only THIS app reads or writes:
+`"net_layout"`, a list, parallel to `"faces"`, of each face's own
+`{"cx", "cy", "rotation"}` -- exactly the fields a shape dict already
+carries -- and `"view"`, `{"scale": self.view_scale}`, the zoom level
+the net was saved at. Any other program reading the file (the actual
+stretchy-mesh solver included) only ever looks at `"faces"`/`"name"`
+and has no reason to choke on an unrecognized top-level key, so a saved
+file is still a perfectly normal net for `inflate_polyhedron_app` or
+anything else that reads this format.
+
+- **Save** (`on_save_clicked`): `filedialog.asksaveasfilename` with
+  `initialdir=STRETCHY_NETS_DIR` (`common.paths`, same constant every
+  other net-file-aware bit of this project uses) -- so the picker opens
+  where the project's own hand-authored nets already live, though the
+  user can navigate anywhere and save under any name.
+  `_export_faces_and_layout` derives `"faces"` from `self.shapes`/
+  `self.connections` via `_faces_from_shapes`, which itself calls
+  `_vertex_roots` -- a UNION-FIND over
+  `(shape_id, corner_index)` slots (`corner i` is the vertex where edge
+  `i-1` meets edge `i`, i.e. edge `i` runs corner `i` -> corner
+  `(i+1) % n` -- the same indexing `_shape_edge_midpoints` uses): each
+  connection unions `(a_shape, a_edge)` with `(b_shape, (b_edge+1) %
+  n_b)` and `(a_shape, (a_edge+1) % n_a)` with `(b_shape, b_edge)` --
+  REVERSED, not edge-to-edge straight across, because a shared edge must
+  appear as `v -> w` in one face's loop and `w -> v` in the other's (the
+  winding convention `load_stretchy_mesh` validates) -- pairing straight
+  across would instead produce the SAME direction in both, which that
+  loader rejects. `_vertex_roots` returns that raw `{slot: root}`
+  union-find mapping with no numbering of its own -- since `find()` has
+  no path compression, an existing group's root is unaffected by any
+  later, unrelated union, so it's what debug mode displays directly (see
+  above) for a label that never shifts just because some unrelated
+  connection was added or removed. `_faces_from_shapes` layers the
+  sequential-integer-assignment step on top of `_vertex_roots`'s output
+  (`vertex_ids`, filled in the order shapes/corners are visited, one
+  fresh id per distinct root), since the exported JSON format needs
+  simple integers -- this renumbering only ever happens at Save, never
+  for anything displayed live. Each shape's own face is just its
+  corners' ids in order.
+  `_faces_from_shapes` is a pure function of its two arguments (not a
+  method), called with the REAL `self.connections` in exactly ONE place
+  -- here, at Save (debug mode calls `_vertex_roots` directly instead,
+  not `_faces_from_shapes`, for the reason above).
+  `net_layout` is a parallel list of each shape's own
+  `{"cx","cy","rotation"}`, same order as `self.shapes` (and therefore as
+  the derived `"faces"` list). An unconnected edge's two corners just
+  keep their own unique ids -- nothing forces every edge to have a
+  partner, so an incomplete, still-being-built net saves and reloads
+  fine -- `load_stretchy_mesh` itself no longer requires closedness
+  either (see "Stretchy meshes" above: an unmatched edge is a valid,
+  free boundary edge, not an error), so a net exported this way with
+  unconnected edges is a perfectly legitimate OPEN net to
+  `inflate_polyhedron_app` too, not just to this app's own lenient
+  reading of it.
+
+  **`_validate_shapes_connections` runs in exactly ONE place: here, at
+  Save -- deliberately NOT live, while a connection is being made.** This took
+  two tries to get right. `_joined_points` (every `(shape_id,
+  edge_index)` already an endpoint of a real connection), consulted by
+  `_hit_test_any_edge_handle` to exclude an already-joined edge from its
+  search entirely, was the first and is a permanent, LOCAL rule: an edge
+  can only ever be joined once, full stop, independent of anything else
+  in the mesh (added after this actually corrupted
+  `data/input/stretchy_nets/hippo.json` in real use -- see git
+  history/the file's own repair for the forensics). A SECOND version
+  then also ran a full TRIAL merge (`_faces_from_shapes(self.shapes,
+  self.connections + [the proposed connection])`, checked with what was
+  then `_validate_faces`) before allowing any connection to complete at all,
+  reasoning that "an edge can only be joined once" alone wasn't
+  sufficient -- two individually-free edges sharing a corner with edges
+  connected elsewhere could still transitively collapse two different
+  corners of some face into one. That reasoning was correct, but
+  applying it LIVE was still the wrong call, and was REVERTED once a
+  user hit it directly: two edges that looked like an entirely ordinary,
+  correct connection got silently rejected because of what some OTHER,
+  already-existing connection elsewhere implied about a shared vertex
+  label -- confusing, because that implied sharing is exactly as fluid
+  as any other single connection (remove the connection causing it, and
+  two "same" corners stop being the same). The actual lesson: during
+  EDITING, every corner should be treated as its own, separate vertex,
+  no matter what any OTHER connection's own transitive merge currently
+  implies about it -- full merge-and-validate is only meaningful ONCE
+  the whole net is being finalized, which is Save, not mid-edit. So
+  `_export_faces_and_layout` calls `_validate_shapes_connections`
+  (self-loop check: no shape's own edge may have its two corners' roots
+  collapse together; duplicate-directed-edge check: mirrors
+  `load_stretchy_mesh` itself) directly on `self.shapes`/
+  `self.connections`, via `_vertex_roots`, BEFORE `_faces_from_shapes`
+  ever runs its export-time renumbering -- so its error messages are
+  phrased as "vSHAPE.CORNER" (e.g. "edge v9.4->v9.0 appears 2 times"),
+  the exact same live identity debug mode's own label shows, not the
+  fresh integers `_faces_from_shapes` would only assign at export
+  time. An earlier version validated the ALREADY-exported `faces` list
+  instead (`_validate_faces`, still present, still a plain pure function
+  over a `"faces"` list, just no longer called from here) and so
+  reported a failed Save in terms of numbers that only existed in the
+  file about to be written -- meaningless to a user who was only ever
+  looking at shapes and corners on screen, never at that JSON. Real
+  case: a user asked for exactly this after chasing "self-loop edge at
+  vertex 37" against a file whose corresponding vertex numbering did
+  not match what was on screen.
+
+  Every problem message also names the SPECIFIC chain of existing
+  connections responsible, via `_connection_chain` (BFS over the same
+  slot-to-slot links `_vertex_roots`' own union calls make, from one
+  conflicting corner slot to the other): e.g. "shape 42 edge 2 (corners
+  2->3) is a self-loop at v42.2 (traced through: shape 34 edge 4 <->
+  shape 42 edge 1 -> shape 19 edge 5 <-> shape 34 edge 3 -> shape 42
+  edge 3 <-> shape 19 edge 4)". Neither conflict is EVER caused by one
+  connection in isolation -- a fresh union only merges two PREVIOUSLY
+  separate groups, so a corner that was never touched by the connection
+  just added can only newly collide with another if some transitive
+  chain of OTHER, already-accepted connections already tied each side
+  to opposite halves of it -- so naming just the connection that
+  happened to trip the check, alone, would leave a user unable to tell
+  which of it or some earlier connection is actually the wrong one.
+  Real case this caught, on `hippo.json`: shape 42 (already attached to
+  shape 34 on 3 of its 5 edges) and shape 19 (also already attached to
+  shape 34) both had one matching free edge left; connecting shape 42's
+  edge 3 to shape 19's edge 4 looked like an entirely reasonable closing
+  move, but was off by one edge -- the chain traced straight through the
+  shared shape-34 attachment and showed shape 42's OWN edge 2 becoming a
+  self-loop as a result; edge 2 (not edge 3) turned out to be shape 42's
+  actual matching edge for shape 19's edge 4, confirmed by trying it,
+  which validated clean.
+
+  `_validate_shapes_connections` raises `NetValidationError` (a
+  `ValueError` subclass carrying `self_loop_slots`, a `{(shape_id,
+  corner_index), ...}` set of every corner in a found self-loop, both
+  endpoints of each one) rather than a plain `ValueError` specifically
+  so a self-loop's location can be shown, not just named:
+  `on_save_clicked` catches it, sets `self._self_loop_highlight` to
+  those slots, and calls `_redraw` BEFORE showing the `messagebox.
+  showerror` -- `_draw_self_loop_highlight` then rings each one in
+  `SELF_LOOP_HIGHLIGHT_COLOR` (orange), regardless of debug mode, since
+  this is feedback about an error in the CURRENT canvas state, not a
+  debug-only diagnostic. A duplicate-directed-edge conflict alone
+  raises the same exception type but with an empty `self_loop_slots`
+  (nothing to ring -- neither endpoint of a duplicate-edge conflict is
+  itself degenerate, only their pairing is), so nothing new gets
+  highlighted for that case. The highlight persists across redraws
+  (drags, pans, zooms) until the next actual EDIT -- a new shape/
+  connection, a delete, a fresh Load -- clears `self.
+  _self_loop_highlight` back to an empty set (every one of those sites
+  does this explicitly; see the set's own comment in `__init__`), so it
+  doesn't linger once it's stale, but also doesn't disappear on its own
+  just from panning around to go look at it.
+- **Load** (`on_load_clicked`): reads `"faces"` (required -- a `KeyError`
+  on a missing key, or empty list, surfaces as a `messagebox.showerror`,
+  same as any other read/parse failure) and `"net_layout"` (optional) via
+  `_load_faces`, which fully replaces `self.shapes`/`self.connections`
+  (clearing every piece of transient state -- selection, armed tool,
+  pending connection, drag -- along with them) rather than merging into
+  whatever was already on the canvas.
+  - If `net_layout` is present and the same length as `faces`: use it
+    directly, index-for-index -- reproduces the EXACT on-screen layout a
+    file this app itself saved had, no BFS needed at all.
+  - Otherwise (any hand-authored net, e.g. anything already under
+    `data/input/stretchy_nets/`, which predates `net_layout` and will
+    never have one): `_layout_faces_with_gap(faces, root=0, gap=GAP)`
+    -- the SAME BFS-spanning-tree-over-shared-edges idea
+    `build_stretchy_net_layout` (`utils/inflate_polyhedron/
+    stretchy_net_layout.py`) already implements for the OTHER app's
+    "Net" panel, reusing its own `attach_polygon`/
+    `regular_polygon_vertices` primitives directly (imported, not
+    reimplemented) -- but that function is on this project's
+    untouchable-files list and has no gap parameter, so it can't simply
+    be called and asked to leave space between faces; the short BFS
+    loop itself had to be written again here (`_faces_shared_edges`,
+    a local equivalent of that module's own private, unexported
+    `_shared_edge_faces`), parameterized with `GAP` (=
+    `DEFAULT_SHAPE_EDGE_LENGTH`, i.e. exactly one edge length of
+    separation, per the user's own suggestion), rather than the whole
+    algorithm being reinvented from scratch. Each child face is attached
+    `gap` world units further out along the shared edge's own outward
+    normal (from the parent's centroid) instead of flush against it,
+    via the SAME `attach_polygon` call `build_stretchy_net_layout` uses,
+    just with both target endpoints offset outward first -- the
+    resulting net is still a single connected spanning tree, just
+    visibly DISJOINT rather than seamlessly glued.
+    `_shape_from_placed_points` then solves each face's own `(cx, cy,
+    rotation)` from its placed points (their centroid, and one vertex's
+    angle relative to it, compared against the same angle in
+    `_LOCAL_VERTICES`) -- both are the same regular polygon, only
+    translated/rotated, so this recovers the shape dict fields
+    `_shape_world_vertices` needs to reproduce those exact points. A
+    face BFS never reaches (a genuinely separate connected component,
+    which a real closed polyhedron net never has, but nothing stops a
+    hand-edited or partial file from) just gets placed off to one side
+    by index, rather than crashing or stacking on the origin.
+  - `_infer_connections(faces)` derives connections the OPPOSITE
+    direction from `_export_faces_and_layout`'s union-find: for every
+    directed edge `(v, w)` in some face, if the exact reverse `(w, v)`
+    exists in (a different edge of) some face, that's one connection
+    between them; an edge with no reverse partner is simply left
+    unconnected -- an open net's boundary edges, same as
+    `load_stretchy_mesh` itself now allows (see "Stretchy meshes"
+    above). A SELF-LOOP edge (`v == w`, i.e. two adjacent corners of one
+    face sharing a vertex id -- only possible from a file an earlier,
+    buggy version of this app saved, since a correctly-behaving Save can
+    never produce one) is explicitly skipped when building the directed-
+    edge lookup, never treated as a connection: without that guard,
+    `(v, v)`'s own "reverse partner" is also `(v, v)`, so a naive lookup
+    would silently infer a connection from that edge to ITSELF (same
+    face, same edge index on both ends) -- this is the concrete bug a
+    user hit loading a stale, pre-fix `hippo.json`. `_self_loop_faces`
+    (called separately, BEFORE `_infer_connections` gets a chance to
+    skip anything) is purely diagnostic -- `on_load_clicked` uses it to
+    show a non-blocking `messagebox.showwarning` naming which face/
+    vertex was degenerate, so a malformed file still loads (rather than
+    failing to open) but the user knows exactly which edge(s) were left
+    unconnected and need redrawing, instead of finding out only when
+    some later Save fails somewhere else in the net.
+
+    More generally: a loaded file's own vertex-id NUMBERS are used only
+    TRANSIENTLY, by `_infer_connections`/`_self_loop_faces`, to work out
+    the connection graph -- they're never treated as any kind of
+    ongoing internal identity. `_load_faces` immediately re-addresses
+    every corner as `(shape_id, edge_index)` (fresh `self._next_shape_id`
+    values, per-shape-local `range(shape["n"])` indices), the exact same
+    addressing a freshly-drawn shape gets -- so the file's own labelling
+    and whatever `_faces_from_shapes` computes on the next Save are
+    never expected to match. This was a deliberate design point a user
+    asked for explicitly, worried that treating a loaded file's vertex
+    LABELS as meaningful ongoing identity (rather than a one-time
+    connection-inference input) was the root cause behind bugs like the
+    self-loop one above -- confirmed correct on inspection: it already
+    worked this way for everything except the one self-loop gap fixed
+    here.
+  - `_center_view_on_shapes` accepts a `scale` parameter (`_load_faces`'s own
+    `view_scale` parameter, read from the loaded file's `"view"."scale"`
+    by `on_load_clicked`, or 1.0 if the file has no `"view"` section --
+    any hand-authored net), sets `self.view_scale` to it, and recenters
+    `offset_x/y` (scaled by that same `scale`, since
+    `screen = world * view_scale + offset`) on the newly-loaded shapes'
+    average center -- so a file this app itself saved reopens at the
+    exact zoom level it was saved at, rather than always resetting to a
+    fixed default.
+
+### Consumed by `inflate_polyhedron_app`'s "Net" panel
+
+`on_select_net` (`inflate_polyhedron_app/app.py`) re-reads the chosen
+file's raw JSON itself (`json.load`, separate from `load_stretchy_mesh`,
+which discards everything but `"faces"`/`"name"`) purely to check for a
+`"net_layout"` section. When present and the same length as
+`self.base_faces`, `_layout_from_net_layout(faces, net_layout)`
+reproduces that EXACT saved arrangement instead of `build_stretchy_net_
+layout`'s fresh BFS spanning-tree layout -- a user asked for this
+specifically so a net they'd arranged and connected in the interactive
+builder shows up on this OTHER app's "Net" panel exactly as left, not
+re-flattened from scratch (which, per `build_stretchy_net_layout`'s own
+docstring, only follows the FIRST shared edge it reaches an
+already-visited face through, silently dropping any OTHER edge-sharing
+between two faces -- entirely normal for a stretchy mesh).
+
+`_layout_from_net_layout` reproduces each face's saved rigid transform
+(`{"cx", "cy", "rotation"}`) directly -- same rotation-matrix math as
+`interactive_builder_app`'s own `_shape_world_vertices`, verified
+bit-for-bit equal (up to float precision) by reconstructing a real
+saved net (`hippo.json`) both ways and diffing -- except built at THIS
+app's own unit edge length (`EDGE_LENGTH = 1.0`, imported from
+`stretchy_mesh.py`) rather than reproducing `interactive_builder_app`'s
+`DEFAULT_SHAPE_EDGE_LENGTH = 70.0` pixel scale verbatim: since a rigid
+transform is scale-covariant, building each polygon at `edge_length=1`
+and dividing every saved `cx`/`cy` by that same 70 (`_INTERACTIVE_
+BUILDER_EDGE_LENGTH`, duplicated as a bare constant rather than
+importing the whole unrelated Tkinter app for one number) reproduces an
+EXACTLY proportional net -- just uniformly rescaled, so this panel's
+existing fixed axis padding (`_draw_target_faces`) still looks right.
+
+Important: `interactive_builder_app` never snaps a connection's two
+edges together spatially (see its own module docstring's "Edge
+connections" section) -- shapes are positioned however the user dragged
+them, and a connection is purely topological (drawn as a thin line
+regardless of distance). So a saved `net_layout` reproduced here can
+show two CONNECTED faces sitting nowhere near each other, with no line
+between them (`_draw_target_faces` only draws the polygons themselves,
+knowing nothing about the "faces" list's shared-vertex-id adjacency
+beyond that) -- this is a faithful reproduction of the canvas exactly as
+the user left it, not a bug, and not the same thing a physically
+unfolded paper net would look like. `build_stretchy_net_layout`'s BFS
+fallback (any hand-authored net, or a legacy fabric net -- neither ever
+has a `"net_layout"`) is unaffected and still always produces
+faces sitting edge-to-edge.
 
 ## Testing
 

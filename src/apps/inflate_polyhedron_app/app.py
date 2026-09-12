@@ -131,6 +131,7 @@ if str(_APPS_DIR) not in sys.path:
     sys.path.insert(0, str(_APPS_DIR))
 
 import glob
+import json
 import os
 import queue
 import threading
@@ -161,6 +162,7 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
 from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
+from utils.geometry.polygon_geom import regular_polygon_vertices, apply_rigid
 from utils.subdivisions import subdivide as subdivide_polygon
 
 DEFAULT_NET_BASENAME = "cube"
@@ -271,6 +273,52 @@ def _build_level1_topology(base_faces):
     faces, _, edge_length, face_of_fine = subdivide_once(
         base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
     return faces, edge_length, face_of_fine
+
+
+# interactive_builder_app/app.py's own DEFAULT_SHAPE_EDGE_LENGTH -- the
+# edge length its "net_layout" section's saved cx/cy/rotation are
+# expressed at (a Tkinter-canvas pixel scale, unrelated to this app's own
+# EDGE_LENGTH=1.0 unit convention). Not imported directly from that app
+# (a whole separate, unrelated Tkinter app -- see docs/README.md) --
+# just duplicated here as the one number _layout_from_net_layout needs
+# to undo that scale.
+_INTERACTIVE_BUILDER_EDGE_LENGTH = 70.0
+
+
+def _layout_from_net_layout(faces, net_layout):
+    """faces: vertex-id loops; net_layout: interactive_builder_app's own
+    saved [{"cx", "cy", "rotation"}, ...], one entry per face, same
+    order as `faces` (its "Net JSON import/export" section). Returns
+    {face_idx: [2D point, ...]} -- the exact same shape
+    build_stretchy_net_layout returns -- by reproducing each face's
+    saved rigid transform directly, rather than re-deriving a layout
+    from scratch via a fresh BFS spanning tree. That matters because a
+    BFS can't reproduce an arrangement it wasn't given: it only follows
+    the FIRST shared edge it reaches an already-visited face through
+    (see build_stretchy_net_layout's own docstring), so any OTHER
+    edge-sharing between two faces -- entirely normal for a stretchy
+    mesh, see this module's own docstring -- is silently dropped from
+    the picture; a net a user carefully arranged in the interactive
+    builder (and re-derived exact connections for) deserves to show up
+    here exactly as left, not re-flattened from just a spanning subset
+    of its real adjacency.
+
+    Rigid transforms (rotation + translation) are scale-covariant, so
+    reproducing the same net at THIS app's own unit edge length (rather
+    than reproducing interactive_builder_app's pixel scale verbatim) is
+    just a uniform rescale by _INTERACTIVE_BUILDER_EDGE_LENGTH: build
+    each polygon at edge_length=1 instead of 70, and divide every saved
+    cx/cy by the same 70 -- every "touching" edge relationship survives
+    exactly, only the absolute unit changes, matching what this panel's
+    fixed axis padding (_draw_target_faces) already assumes."""
+    placed = {}
+    for face_idx, (face, layout) in enumerate(zip(faces, net_layout)):
+        theta = layout["rotation"]
+        c, s = np.cos(theta), np.sin(theta)
+        R = np.array([[c, -s], [s, c]])
+        t = np.array([layout["cx"], layout["cy"]]) / _INTERACTIVE_BUILDER_EDGE_LENGTH
+        placed[face_idx] = apply_rigid(regular_polygon_vertices(len(face)), R, t)
+    return placed
 
 
 class InflatePolyhedronApp:
@@ -926,15 +974,27 @@ class InflatePolyhedronApp:
         self.base_faces = legacy_coarse_faces if legacy_coarse_faces is not None else faces
         self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.base_faces))]
 
-        # Precomputed once per net selection (see build_stretchy_net_layout's
-        # docstring): a breadth-first spanning tree over shared edges,
-        # attaching each face to whichever neighbor discovers it first --
-        # the same idea utils/inflate_polyhedron/stretchy_net_layout.py uses for the rigid
-        # pipeline. _draw_target_faces just reuses this on every redraw
-        # rather than recomputing the BFS every time. Always over the
-        # BASE faces -- the left panel's flat net layout doesn't change
-        # with subdivision level, only its overlay does.
-        self.target_layout = build_stretchy_net_layout(self.base_faces)
+        # Precomputed once per net selection: this panel's flat net
+        # layout doesn't change with subdivision level, only its
+        # overlay does. A file saved BY interactive_builder_app carries
+        # its own "net_layout" section (one {"cx", "cy", "rotation"} per
+        # face, same order as "faces") -- when present and the right
+        # length, reproduce THAT exact arrangement (_layout_from_
+        # net_layout) rather than a fresh one, so a net a user actually
+        # built and connected there shows up here exactly as left, not
+        # re-derived from scratch. Otherwise (any hand-authored net, or
+        # a legacy fabric net with no such section) fall back to
+        # build_stretchy_net_layout's own breadth-first spanning tree
+        # over shared edges, attaching each face to whichever neighbor
+        # discovers it first (see its own docstring) -- _draw_target_
+        # faces just reuses whichever of the two this is on every
+        # redraw, rather than recomputing either one every time.
+        with open(path) as f:
+            net_layout = json.load(f).get("net_layout")
+        if net_layout is not None and len(net_layout) == len(self.base_faces):
+            self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
+        else:
+            self.target_layout = build_stretchy_net_layout(self.base_faces)
 
         # Level 0 and Level 1 share this exact fan-triangulated topology
         # (see module docstring) -- computed once here, up front, rather

@@ -86,12 +86,13 @@ def test_load_three_squares_example():
     assert n_verts - len(edges) + len(faces) == 2  # Euler's formula: closed, genus-0
 
 
-def test_load_stretchy_mesh_rejects_unmatched_directed_edge(tmp_path):
-    # a single triangle: every edge has no reverse partner at all
+def test_load_stretchy_mesh_allows_unmatched_directed_edge(tmp_path):
+    # a single triangle: every edge has no reverse partner at all -- an
+    # OPEN net is valid (no closedness requirement), so this loads fine.
     path = tmp_path / "open.json"
     path.write_text(json.dumps({"faces": [[0, 1, 2]]}))
-    with pytest.raises(ValueError, match="no reverse partner"):
-        load_stretchy_mesh(str(path))
+    faces, _ = load_stretchy_mesh(str(path))
+    assert faces == [[0, 1, 2]]
 
 
 def test_load_stretchy_mesh_rejects_duplicate_directed_edge(tmp_path):

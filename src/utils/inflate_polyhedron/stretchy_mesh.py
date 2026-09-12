@@ -1,6 +1,7 @@
-"""Loader + solver for STRETCHY meshes: a closed polyhedron-like net whose
-faces are combinatorially valid (every edge shared by exactly two faces)
-but that cannot necessarily be realized with perfectly RIGID, FLAT faces
+"""Loader + solver for STRETCHY meshes: a polyhedron-like net, closed or
+OPEN, whose faces are combinatorially valid (every edge shared by AT MOST
+two faces, in opposite directions -- see WINDING CONVENTION below) but
+that cannot necessarily be realized with perfectly RIGID, FLAT faces
 -- e.g. two faces glued together along more than one shared edge, which
 forces them into the same plane if both stay flat and rigid (three or
 more shared, non-collinear points determine a single plane, so any two
@@ -26,12 +27,19 @@ derive at all. JSON shape:
 WINDING CONVENTION: each face is a loop of vertex ids (ints, 0..N-1,
 referenced -- not separately declared; N is inferred as 1 + the largest
 id used) listed COUNTERCLOCKWISE as seen from OUTSIDE the finished
-solid. Concretely: for any edge (v, w) shared by two faces, one face's
-loop contains it as v -> w and the other's contains it as w -> v --
-never the same direction twice. load_stretchy_mesh checks exactly that
-(every directed edge matched by exactly one reverse partner in some
-other face) and raises a clear error naming the offending edge(s) if
-it's violated.
+solid (or, for a net that's deliberately left OPEN -- a bowl, a patch, a
+box with no lid -- OUTSIDE whichever side was chosen as the outside; the
+winding is what encodes that choice, not a separate flag). Concretely:
+for any edge (v, w) shared by two faces, one face's loop contains it as
+v -> w and the other's contains it as w -> v -- never the same direction
+twice. An edge referenced by only ONE face (no partner at all) is a free
+BOUNDARY edge -- perfectly valid, and simply not shared with anything;
+this is what lets a net stay open rather than requiring a full closed
+2-manifold. load_stretchy_mesh only rejects a directed edge that appears
+MORE than once (the one case that's always a genuine error, since two
+faces would then be claiming to own the same directed edge, or a face
+would be self-intersecting along it) -- raising a clear error naming the
+offending edge(s) if that happens.
 
 That check alone can't catch every possible mistake, though: flipping
 EVERY face at once (a full mirror image) is just as valid a loop
@@ -119,8 +127,9 @@ def _face_edges(face):
 def load_stretchy_mesh(path):
     """path: a vertex-loop stretchy-mesh .json (see module docstring).
     Returns (faces, name), faces a list of vertex-id lists. Raises
-    ValueError if any directed edge isn't matched by exactly one
-    reverse-direction partner (faces don't close into a 2-manifold)."""
+    ValueError if any directed edge appears more than once -- the mesh
+    need NOT be closed: an edge with no reverse partner at all is a
+    valid, free boundary edge, not an error."""
     with open(path) as f:
         spec = json.load(f)
 
@@ -135,14 +144,10 @@ def load_stretchy_mesh(path):
     counts = {}
     for e in directed:
         counts[e] = counts.get(e, 0) + 1
-    problems = []
-    for (v, w), c in counts.items():
-        if c > 1:
-            problems.append(f"edge {v}->{w} appears {c} times (need exactly once)")
-        if (w, v) not in counts:
-            problems.append(f"edge {v}->{w} has no reverse partner {w}->{v} in any face")
+    problems = [f"edge {v}->{w} appears {c} times (need exactly once)"
+                for (v, w), c in counts.items() if c > 1]
     if problems:
-        raise ValueError(f"{path}: not a closed, consistently-oriented mesh:\n  " +
+        raise ValueError(f"{path}: not a consistently-oriented mesh:\n  " +
                           "\n  ".join(problems))
 
     name = spec.get("name") or path
