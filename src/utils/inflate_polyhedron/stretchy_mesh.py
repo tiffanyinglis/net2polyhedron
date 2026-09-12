@@ -443,16 +443,41 @@ STEP_MAX_FRACTION = 0.2
 # which stalls convergence (verified: pressure=1 on a plain cube ran the
 # full MAX_UNBOUNDED_STEPS without ever settling below gtol, oscillating
 # rather than damping down). Capping the per-step multiplier keeps this
-# from an undamped-oscillator's back-and-forth.
+# from an undamped-oscillator's back-and-forth. Multiplied by `scale`
+# (see _explicit_relax_loop) -- a FIXED, unscaled cap here would represent
+# a shrinking FRACTION of an edge length as the mesh subdivides finer
+# (rest lengths shrink -- see mesh_levels.subdivide_once) but a GROWING
+# one as it gets coarser, since `scale` is an ABSOLUTE length and this
+# cap is what limits an ABSOLUTE per-step displacement; multiplying by
+# `scale` keeps it a constant FRACTION of an edge length at every
+# resolution, matching STEP_MAX_FRACTION's own already-scaled term.
 #
-# Needed lowering from 0.1 to 0.05: a denser mesh has more springs
-# meeting at each vertex, which raises that vertex's EFFECTIVE combined
-# stiffness -- verified a level-3-subdivided cube at pressure=1 (194
-# vertices) settles into an exact, undamped 2-cycle under 0.1
-# (max_stretch_pct alternates between ~18.9% and ~24.4% forever, never
-# converging), while 0.05/0.02/0.01 all converge cleanly to the SAME
-# ~8.5% fixed point.
-STEP_MAX_MULTIPLIER = 0.05
+# This value (as a fraction of edge length, now that it's properly
+# scaled) was found via direct verification, not derivation: run the
+# same fixed-point relax on cube/tetrahedron/icosahedron at several
+# pressures (1, 3, 5) and step multipliers, at Level 3 (194+ vertices,
+# the finest/most failure-prone resolution this app reaches), watching
+# for an undamped 2-cycle in max_stretch_pct (the same failure mode
+# below). Stable through 0.3; a genuine 2-cycle reappears at 0.4+. 0.2
+# leaves a healthy margin and matches STEP_MAX_FRACTION's own value.
+#
+# An EARLIER version of this constant (0.05, UNSCALED) was found the
+# same way but without the `scale` factor: a level-3-subdivided cube at
+# pressure=1 (194 vertices) was seen to settle into an exact, undamped
+# 2-cycle under an unscaled 0.1 (max_stretch_pct alternating ~18.9%/
+# ~24.4% forever), while unscaled 0.05 converged cleanly -- BUT that
+# 0.05 was only ever actually "5% of an edge length" at Level 0/1, where
+# `scale ≈ 1`; at Level 3 (`scale ≈ 0.18` for a cube), it was silently
+# behaving as ~28% of an edge length (0.05 / 0.18), landing in the
+# stable range purely by chance rather than by being correctly scaled --
+# and remained needlessly small (hence needlessly slow to correct a
+# small, stuck, locally-concave vertex trying to "pop out") at coarser
+# levels where `scale` is closer to 1 and a much bigger relative step
+# was actually safe. A user's report of exactly that (a slow-to-correct
+# concave vertex, network otherwise looking right) is what prompted
+# re-deriving this from scratch with the missing `scale` factor
+# included, rather than just nudging the old unscaled constant.
+STEP_MAX_MULTIPLIER = 0.2
 
 # Hard cap on iterations when max_nfev=None (run-to-convergence): explicit
 # steps have no scipy-style internal budget of their own, so this stands
@@ -474,7 +499,27 @@ MAX_UNBOUNDED_STEPS = 200_000
 # icosahedron/dodecahedron/three_squares/two_pentagons_and_a_square at
 # several pressures, plus a level-3-subdivided cube, that this still
 # lands within a point or two of what a strict gtol-only run reaches.
-STALL_WINDOW = 200
+#
+# Raised from 200 to 2000 after a user reported a single, locally
+# concave vertex sometimes getting stuck failing to "pop out" -- a real
+# but SLOW correction (max_stretch_pct barely moving over any given
+# couple hundred steps, even though the shape genuinely keeps improving
+# over a much longer span) could plateau-trigger this criterion well
+# before the vertex actually finishes correcting, mistaking "changing
+# very slowly" for "done changing" (STALL_TOL_PCT itself wasn't the
+# issue -- 200 steps just wasn't a long enough window to tell the two
+# apart). 2000 also comfortably exceeds inflate_polyhedron_app's own
+# INFLATE_CHUNK_MAX (200, the largest single relax_once call its
+# streamed Inflate/Relax ever makes) -- since this deque resets FRESH on
+# every relax_once/relax_initial_configuration call (no state carried
+# between chunks), no in-app chunk could ever have filled even the OLD
+# 200-length window on its own either; a real stall verdict from the app
+# only ever happened at the exact moment a chunk grew to 200 AND that
+# whole chunk was flat, so raising this mostly just means the app now
+# leans on the real gtol/INFLATE_SAFETY_STEP_CAP criteria instead of a
+# same-size coincidence, letting a genuinely slow correction (like the
+# reported stuck vertex) keep going rather than being cut off early.
+STALL_WINDOW = 2000
 STALL_TOL_PCT = 1.0
 
 
@@ -510,6 +555,52 @@ def is_orientation_consistent(positions, faces):
     return _is_orientation_consistent(pts, faces, idx)
 
 
+def _remove_rigid_motion(pts_before, pts_after):
+    """Re-expresses `pts_after` in the SAME rigid frame (rotation +
+    translation) `pts_before` was in, via the standard Kabsch/orthogonal-
+    Procrustes best-fit alignment -- removes whatever GLOBAL rigid
+    rotation/translation this step's own force-driven update happened to
+    introduce, leaving only the genuine shape change (every PAIRWISE
+    distance within `pts_after` is preserved exactly, since a rigid
+    transform is an isometry -- so this can never affect stretch stats,
+    convergence, or anything else the physics actually cares about).
+
+    A free-floating spring/pressure system (nothing pins any vertex to a
+    fixed point) has no preferred orientation of its own -- rotating the
+    WHOLE mesh about its own center of mass costs zero spring/pressure
+    energy, so it's an exactly-flat direction the relaxation can drift
+    along for free. Small numerical asymmetries (irregular topology,
+    floating-point rounding) can accumulate into a slow but visible net
+    spin over many steps with nothing to damp it, since nothing in
+    _relax_force/_spring_only_force distinguishes "genuine shape change"
+    from "the whole shape turning in place." A user watching
+    inflate_polyhedron_app noticed exactly this -- a net visibly rotating
+    mid-Inflate with no shape change to show for it -- and, worse, since
+    each level's starting position is whatever the previous one was left
+    at, a level frozen (Subdivide/promotion) at a DIFFERENT accumulated
+    spin than another leaves the "Level N" panels' supposedly-SHARED
+    camera (self.level_rotation) looking inconsistent between them even
+    though that shared quaternion itself was never touched -- the MESH
+    was moving, not the camera. Called every step (see
+    _explicit_relax_loop) so each step's own small rotation is what gets
+    cancelled, transitively pinning the whole run's trajectory back to
+    wherever it started -- an O(N) matrix product plus one 3x3 SVD per
+    call, negligible next to the force computation itself."""
+    c_before = pts_before.mean(axis=0)
+    c_after = pts_after.mean(axis=0)
+    a = pts_before - c_before
+    b = pts_after - c_after
+    h = b.T @ a
+    u, _, vt = np.linalg.svd(h)
+    # Guards against a reflection (det -1) rather than a pure rotation --
+    # the SVD solution to this least-squares problem is only guaranteed
+    # proper (det +1) with this sign correction; an unflipped mirror
+    # image would silently invert the mesh instead of just rotating it.
+    d = np.sign(np.linalg.det(vt.T @ u.T)) or 1.0
+    r = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+    return (r @ b.T).T + c_before
+
+
 def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
                           max_nfev, stop_event, gtol):
     """Shared explicit-relaxation driver for relax_once and
@@ -519,12 +610,15 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
     once rather than being kept in sync by hand in two places.
 
     Repeatedly nudges `pts` a small step along `force_fn(pts)` (see
-    STEP_MAX_FRACTION/STEP_MAX_MULTIPLIER) until EITHER every vertex's
-    force drops below `gtol`, or max_stretch_pct stops moving for
-    STALL_WINDOW steps (see STALL_WINDOW's own comment for why both
-    exist), or `max_nfev`/`stop_event` cuts it off first. Returns (pts,
-    steps_taken, max_force, converged) -- callers each compute their own
-    final positions/stretch stats from `pts`."""
+    STEP_MAX_FRACTION/STEP_MAX_MULTIPLIER), then removes whatever rigid
+    rotation/translation that step introduced (_remove_rigid_motion,
+    see its own docstring for why a free-floating system needs this),
+    until EITHER every vertex's force drops below `gtol`, or
+    max_stretch_pct stops moving for STALL_WINDOW steps (see
+    STALL_WINDOW's own comment for why both exist), or `max_nfev`/
+    `stop_event` cuts it off first. Returns (pts, steps_taken, max_force,
+    converged) -- callers each compute their own final positions/stretch
+    stats from `pts`."""
     step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
     steps_taken = 0
     converged = False
@@ -545,8 +639,8 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
                 and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
             converged = True
             break
-        dt = min(STEP_MAX_MULTIPLIER, STEP_MAX_FRACTION * scale / max_force)
-        pts = pts + dt * force
+        dt = min(STEP_MAX_MULTIPLIER * scale, STEP_MAX_FRACTION * scale / max_force)
+        pts = _remove_rigid_motion(pts, pts + dt * force)
     return pts, steps_taken, max_force, converged
 
 
@@ -707,13 +801,15 @@ _PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0
 # stretch regime this targets, verified against the bisection trace above).
 _PRESSURE_RATIO_CLAMP = (0.2, 5.0)
 
-DEFAULT_TARGET_RMS_STRETCH_PCT = 8.0
+# Was 8.0; raised to 10.0 per explicit user request.
+DEFAULT_TARGET_RMS_STRETCH_PCT = 10.0
 
 
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
                                           planarity_weight=PLANARITY_WEIGHT, max_iterations=4,
-                                          tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None):
+                                          tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None,
+                                          gtol=CONVERGENCE_GTOL):
     """positions/faces/edge_length: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
@@ -724,7 +820,13 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     again, up to `max_iterations` times. Every trial starts fresh from
     the given `positions` (not chained from the previous trial's
     result), since different pressures can have very different equilibria
-    and this is searching for the pressure, not steering a shape.
+    and this is searching for the pressure, not steering a shape. `gtol`
+    is forwarded to every trial's own relax_once call unchanged (default
+    CONVERGENCE_GTOL, same as relax_once's own default) -- so a caller
+    with its own convergence tolerance (e.g. inflate_polyhedron_app's
+    "Tolerance" setting) calibrates pressure against the SAME threshold
+    it'll actually inflate at, rather than silently recalibrating against
+    a different, fixed one.
 
     Keeps whichever trial got CLOSEST to the target rather than just the
     last one: the rescale step assumes more pressure means more stretch,
@@ -741,7 +843,7 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     best_error, best_pressure, best_result = None, None, None
     for _ in range(max_iterations):
         result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
-                             max_nfev=max_nfev_per_trial, stop_event=stop_event)
+                             max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol)
         _, _, _, rms_stretch, _, _ = result
         error = abs(rms_stretch - target_rms_pct)
         if best_error is None or error < best_error:

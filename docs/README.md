@@ -32,13 +32,25 @@ there:
   keep steering it.
 - **Subdivide** refines the current mesh into finer triangles (up to a
   max level), carrying forward whatever shape you've already inflated.
+- **Tolerance** sets how strict "iterate until convergence" is (the
+  worst vertex's own net force must drop below this), default `1e-2`.
 
 Drag any 3D panel to rotate it (every panel shares one camera, so they
 all turn together); scroll to zoom. The left "Net" panel always shows
-the flat, unfolded layout for reference — laid out fresh via a spanning
-tree over shared edges, unless the file itself was saved from
-`interactive_builder_app` (below) with its own flat arrangement, in
-which case that exact arrangement is shown instead.
+the flat, unfolded layout for reference (its own independent
+scroll-to-zoom) — laid out fresh via a spanning tree over shared edges,
+unless the file itself was saved from `interactive_builder_app` (below)
+with its own flat arrangement, in which case that exact arrangement is
+shown instead, right-side-up.
+
+Press "d" for debug mode: an extra row of controls includes stepping a
+fixed number of iterations instead of running to convergence, a
+**Validate Mesh** button (checks the net's underlying structure — no
+duplicate edges, every face's winding consistent with its neighbors),
+and a **Show normals** toggle (draws each face's outward normal on
+every 3D panel, so an inward-pointing one is obvious at a glance —
+this, not Validate Mesh, is how to check whether the CURRENT shape is
+facing outward).
 
 ## Describing your own net
 

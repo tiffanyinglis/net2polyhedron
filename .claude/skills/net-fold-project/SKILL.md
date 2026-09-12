@@ -69,13 +69,20 @@ because a specific user request could not be satisfied any other way**
 (not a signal that the marking has loosened generally -- still ask, or
 look for a change already made this way, before touching any of the
 files above for a NEW reason): `stretchy_mesh.py` (+ its test +
-`docs/README.md`), to let a stretchy mesh stay OPEN rather than
-requiring a closed 2-manifold -- see "Stretchy meshes" below; and
-`inflate_polyhedron_app/app.py`, to make its "Net" panel show a net
-saved by `interactive_builder_app` at the EXACT flat arrangement it was
-saved at, when that file has one, rather than always re-deriving a
-fresh BFS spanning-tree layout -- see `_layout_from_net_layout` in the
-"Interactive builder" section below.
+`docs/README.md`), first to let a stretchy mesh stay OPEN rather than
+requiring a closed 2-manifold (see "Stretchy meshes" below), later again
+to add `estimate_pressure_for_target_stretch`'s optional `gtol` parameter
+(see "Tolerance spinner" below); and `inflate_polyhedron_app/app.py`,
+repeatedly, each time for a specific feature only that file could hold:
+making its "Net" panel show a net saved by `interactive_builder_app` at
+the EXACT flat arrangement it was saved at when that file has one
+(`_layout_from_net_layout`, "Interactive builder" section below,
+including the Y-flip fix and the Net panel's own scroll-to-zoom);
+tiling "Choose a net"/"Target RMS stretch"/a new "Tolerance" spinner
+horizontally instead of stacked; explaining a "converged" checkmark
+next to an above-threshold value ("(stalled)"); and two debug-mode-only
+diagnostics, "Validate Mesh" and "Show normals" (all documented under
+"The app (`inflate_polyhedron_app`)" below).
 
 (The `polygon_subdivision_app`/`utils/subdivisions/` entries above are
 NOT part of the polyhedron-unfolder sync described below -- they're this
@@ -625,6 +632,25 @@ be rather than making those meshes take far more steps to formally
 
 - **Net picker**: defaults to `data/input/stretchy_nets/cube.json` if present
   (`DEFAULT_NET_BASENAME`), else the first net alphabetically.
+- **Setup row layout**: "Choose a net" / "Target RMS stretch" / "Tolerance"
+  are tiled HORIZONTALLY in one `setup_row` frame (three `ttk.Frame`
+  groups packed `side=tk.LEFT`, `padx=(24, 0)` between them) rather than
+  each stacked on its own row -- a user asked for this specifically to
+  save vertical space, since the debug-mode-only row below it
+  (steps-vs-convergence, Validate Mesh, Show normals) already competes
+  for the same space when debug mode is on.
+- **Net panel scroll-to-zoom** (`self.net_zoom`, `_on_net_scroll`, bound
+  directly on `self.canvas_net.get_tk_widget()`): the same idea as every
+  "Level N" panel's own `self.level_zoom` (`_on_level_scroll`), just
+  scaling `_draw_target_faces`' own bounding-box-derived half-extent
+  (`(hi - lo) / 2 + pad`, divided by `net_zoom` around the layout's own
+  center) instead of a PyVista camera's `parallel_scale` -- a separate
+  state since the Net panel is matplotlib, not PyVista, and net_zoom has
+  no effect on any "Level N" panel (only `_draw_target_faces` +
+  `draw_idle` redraw on a Net-panel scroll, not the whole `draw()`, to
+  avoid re-rendering every PyVista panel on every scroll tick for no
+  reason). `NET_ZOOM_STEP/MIN/MAX` mirror `LEVEL_ZOOM_STEP/MIN/MAX`'s own
+  values.
 - **The "Subdivide" `LabelFrame`**: the Subdivide button plus a "Level: N"
   label (`self.subdivision_level`, 0..`MAX_LEVEL`) -- sits between "Net"
   and "Inflate" since subdividing conceptually happens before/alongside
@@ -655,8 +681,9 @@ be rather than making those meshes take far more steps to formally
     EVERY click, since there's no longer a separate action that sets it
     once for the user to reuse.
   - **"Target RMS stretch" spinner** (`self.target_rms_var`, % of rest
-    edge length, default `DEFAULT_TARGET_RMS_STRETCH_PCT` = 8.0) --
-    user-editable; feeds `on_inflate_clicked`'s calibration call into
+    edge length, default `DEFAULT_TARGET_RMS_STRETCH_PCT` = 10.0, was
+    8.0 -- raised per explicit user request) -- user-editable; feeds
+    `on_inflate_clicked`'s calibration call into
     `estimate_pressure_for_target_stretch` as `target_rms_pct`.
   - **`on_inflate_clicked` calibrates pressure before inflating**: phase
     1 runs `stretchy_mesh.estimate_pressure_for_target_stretch` (in the
@@ -709,6 +736,105 @@ be rather than making those meshes take far more steps to formally
     the user explicitly asking for it** -- both were tried, both work
     around a symptom instead of the actual cause, and both were removed
     once a better fix existed.
+  - **Explicit step size** (`_explicit_relax_loop`): `dt = min(
+    STEP_MAX_MULTIPLIER * scale, STEP_MAX_FRACTION * scale / max_force)`,
+    both terms scaled by `scale` (the mesh's own current rest-edge-length
+    scale, from `_edge_setup` -- the smallest edge for a per-edge dict,
+    else the uniform scalar). The `.../max_force` term shrinks the step
+    when force is LARGE (about to overshoot) but GROWS it unboundedly as
+    force shrinks near equilibrium, so `STEP_MAX_MULTIPLIER * scale`
+    caps it -- without the `scale` factor there, a FIXED absolute cap
+    represents a shrinking FRACTION of an edge length as the mesh
+    subdivides finer (rest lengths halve each level -- see
+    `mesh_levels._quarter_triangles`) but a growing one as it gets
+    coarser, since the cap limits an ABSOLUTE displacement while `scale`
+    is itself shrinking. **This factor was MISSING until a user reported
+    a single, locally concave vertex sometimes getting stuck failing to
+    "pop out" while the normals looked otherwise correct** -- suspecting
+    the step size itself, directly verified: `STEP_MAX_MULTIPLIER = 0.05`
+    (unscaled) was ALREADY silently behaving as ~28% of an edge length at
+    Level 3 (`scale ≈ 0.18` for a cube) rather than the "5%" it actually
+    was at Level 0/1 (`scale ≈ 1`) -- landing in the stable range at
+    Level 3 by coincidence, while staying needlessly tiny (hence slow to
+    correct a stuck vertex) at the coarser levels where a much bigger
+    relative step was actually safe. Verified directly by reproducing the
+    documented Level-3-cube 2-cycle test (below) with the scale factor
+    added: STABLE through a `STEP_MAX_MULTIPLIER` of 0.3 (6x the old
+    unscaled value) on cube/tetrahedron/icosahedron at pressures 1 and 3;
+    a genuine 2-cycle reappears at 0.4+. Settled on **0.2** (matching
+    `STEP_MAX_FRACTION`'s own value) for a healthy margin. (icosahedron
+    at pressure=5 diverges outright regardless of step size or this fix
+    -- confirmed the SAME divergence happens with the ORIGINAL, unscaled
+    0.05 too, so this is the pre-existing "no runaway guard on pressure"
+    behavior described above, not a regression.)
+  - **Stall detection vs. this app's own chunking** (`STALL_WINDOW`):
+    raised 200 -> 2000 for the same underlying report above -- a
+    genuinely slow but real correction (like a stuck concave vertex)
+    could plateau-trigger the stall criterion well before actually
+    finishing, since `max_stretch_pct` barely moving over 200 steps just
+    isn't a long enough window to distinguish "very slowly still
+    correcting" from "actually done." `recent_max_stretch` resets FRESH
+    on every `relax_once`/`relax_initial_configuration` call (no state
+    carried between chunks) -- `inflate_polyhedron_app`'s own streamed
+    Inflate/Relax (`_run_chunked_relax_stream`) calls in GROWING chunks
+    capped at `INFLATE_CHUNK_MAX = 200`, which exactly matched the OLD
+    `STALL_WINDOW`, so a stall verdict from the app could only ever fire
+    at the coincidental moment a chunk grew to exactly 200 steps AND that
+    whole chunk was flat -- raising `STALL_WINDOW` well past
+    `INFLATE_CHUNK_MAX` means no single in-app chunk can ever fill it any
+    more, so the app now leans on the real gtol/`INFLATE_SAFETY_STEP_CAP`
+    criteria instead of that coincidence (a raw, unchunked
+    `max_nfev=None` call from outside the app still gets a real,
+    if longer, stall check). `inflate_polyhedron_app.INFLATE_SAFETY_STEP_
+    CAP` raised 5000 -> 20000 alongside it, so a genuinely slow
+    correction has real budget to actually reach gtol rather than just a
+    bigger number before giving up on the same amount of solving.
+    `STALL_TOL_PCT` (1.0) unchanged -- a 2000-step window is naturally
+    far more conservative already at the same tolerance.
+  - **Rigid-motion removal every step** (`_remove_rigid_motion`, called
+    from `_explicit_relax_loop` right after each `pts + dt * force`
+    update): a free-floating spring/pressure system has no fixed
+    orientation of its own -- rotating the WHOLE mesh about its own
+    center of mass costs zero energy, an exactly-flat direction the
+    relaxation can drift along for free. Spring forces are torque-free
+    by construction (an edge's force pair is collinear with the vector
+    between its two endpoints, so `(r_i - r_j) x F_i = 0` always); a
+    CLOSED mesh's pressure forces are ALSO net-torque-free (a classical
+    hydrostatic-pressure-on-a-closed-surface identity), but an OPEN net
+    (a free boundary -- see "Stretchy meshes" module docstring) has no
+    such guarantee, and CAN accumulate genuine net torque -- verified
+    directly: near-zero measured torque on `cube.json` (closed), but a
+    large, persistent one on `hippo_torso.json` (open, 13 boundary
+    edges), which is what a user actually saw spinning in place mid-
+    Inflate with no shape change to show for it. Worse, since each
+    level's OWN starting position is whatever the previous level was
+    left at, two levels frozen (Subdivide/promotion) at DIFFERENT
+    accumulated spins made the "Level N" panels' supposedly-SHARED
+    camera (`self.level_rotation`, `inflate_polyhedron_app`) look
+    inconsistent between them, even though that shared quaternion itself
+    was never touched by any of this -- confirmed by reading every
+    caller: nothing in the relax/inflate path mutates
+    `self.level_rotation`, only `_on_level_motion`/`_on_level_scroll`
+    (user drag/scroll) do.
+
+    Fix: standard Kabsch/orthogonal-Procrustes best-fit rigid alignment
+    -- after each step, re-express the NEW positions in the SAME rigid
+    frame (rotation + translation) the OLD positions were in, via SVD of
+    the (centered) cross-covariance matrix between old and new, with the
+    usual `det`-sign correction to rule out a reflection. This can NEVER
+    affect stretch/convergence (a rigid transform is an isometry, so
+    every pairwise distance in the corrected positions is identical to
+    the uncorrected ones) -- verified directly: `max_stretch_pct`/
+    `rms_stretch_pct` after many steps matched to ~10 significant figures
+    with vs. without the correction on the same run. Verified the
+    function itself against a synthetic KNOWN rotation+translation+small
+    deformation (recovers the deformation to within its own magnitude);
+    verified end-to-end on `hippo_torso.json` that a tracked reference
+    direction drifts noticeably LESS with the correction applied than
+    without it, over the same number of steps at the same pressure. Cost
+    is one `(N,3) x (N,3)` matrix product plus one 3x3 SVD per step --
+    negligible next to the force computation itself, which is already
+    doing comparable or larger per-vertex work.
   - **No orientation/fold check on the interactive Inflate loop.** An
     earlier version of `_run_inflate_stream` rejected a chunk whenever
     `stretchy_mesh.is_orientation_consistent` (the centroid-outward
@@ -742,15 +868,16 @@ be rather than making those meshes take far more steps to formally
     "Iterate for N steps" passes `max_nfev=N` to `relax_once` (now
     literally N explicit relaxation steps); "Iterate until convergence"
     (the default) passes `max_nfev=None`, running until EITHER every
-    vertex's own net force drops below `stretchy_mesh.CONVERGENCE_GTOL =
-    1e-4`, OR `max_stretch_pct` stops moving for `STALL_WINDOW` steps
-    (see its comment -- some meshes, e.g. a level-3-subdivided cube,
-    settle into a tiny persistent numerical wobble that never crosses
-    gtol even though the shape itself has visibly stopped changing) --
-    picked as the default over "steps" since a large fine mesh (e.g.
-    `dodecahedron_res3.json`, 1446 variables) can need many iterations
-    before the shape looks settled, and there's no obvious step COUNT a
-    user would otherwise know to ask for up front.
+    vertex's own net force drops below the "Tolerance" spinner's CURRENT
+    value (`self.tolerance_var`, default `DEFAULT_TOLERANCE = 1e-2` --
+    see "Tolerance spinner" below), OR `max_stretch_pct` stops moving for
+    `STALL_WINDOW` steps (see its comment -- some meshes, e.g. a
+    level-3-subdivided cube, settle into a tiny persistent numerical
+    wobble that never crosses gtol even though the shape itself has
+    visibly stopped changing) -- picked as the default over "steps" since
+    a large fine mesh (e.g. `dodecahedron_res3.json`, 1446 variables) can
+    need many iterations before the shape looks settled, and there's no
+    obvious step COUNT a user would otherwise know to ask for up front.
   - **Live progress, not one big jump**: `on_inflate_clicked` doesn't
     make ONE `relax_once` call for the whole request -- `_run_inflate_stream`
     calls it repeatedly in a GROWING sequence of chunks (`INFLATE_CHUNK_START
@@ -758,28 +885,60 @@ be rather than making those meshes take far more steps to formally
     the previous chunk's own final positions, pushing a "progress" message
     (redraws + bumps the iteration counter) after every chunk so the UI
     updates incrementally instead of jumping straight to the end.
-    `INFLATE_SAFETY_STEP_CAP = 5000` hard-stops "until convergence" mode
-    if a mesh/pressure combination genuinely never reaches
-    `CONVERGENCE_GTOL`, instead of looping forever.
+    `INFLATE_SAFETY_STEP_CAP = 20000` (was 5000, raised alongside
+    `stretchy_mesh.STALL_WINDOW`'s own 200 -> 2000 raise -- see "Explicit
+    step size"/"Stall detection" above) hard-stops "until convergence"
+    mode if a mesh/pressure combination genuinely never reaches the
+    current tolerance, instead of looping forever.
+  - **Tolerance spinner** (`self.tolerance_var`, a `tk.DoubleVar`,
+    `Spinbox(from_=1e-10, to=1e-1, increment=1e-7, format="%.0e")`,
+    default `DEFAULT_TOLERANCE = 1e-2`, was `1e-6` -- loosened per
+    explicit user request now that STEP_MAX_MULTIPLIER/STALL_WINDOW no
+    longer need a very tight force threshold to actually finish
+    converging in reasonable time) is the `gtol`
+    `relax_once`/`relax_initial_configuration`/`estimate_pressure_for_
+    target_stretch` actually run against -- previously a fixed,
+    non-user-facing `stretchy_mesh.CONVERGENCE_GTOL = 1e-4` (that
+    constant, and the module-level default parameter value it still
+    backs on a bare call with no `gtol` argument, are both UNCHANGED;
+    only this app started overriding it per-run). Captured once per
+    Relax/Inflate click into `self._current_gtol` (not re-read live
+    mid-run -- the spinner is disabled for the run's duration anyway,
+    same as `target_rms_spin`), and recorded per level-history row
+    (`_record_level_history`'s `"gtol"` field) so a row always shows the
+    threshold that run actually used even after the spinner's value
+    later changes. `estimate_pressure_for_target_stretch` needed a new
+    optional `gtol=CONVERGENCE_GTOL` parameter (forwarded to its own
+    internal `relax_once` call, backward compatible) to make this
+    possible -- see "Untouchable files" above for this being one of the
+    explicit, as-needed exceptions to that file's own wholesale marking.
+    Same "converged" gate/reset rationale as `target_rms_var`
+    (`_on_tolerance_changed`): a verdict reached under one tolerance
+    doesn't apply once the tolerance changes.
   - **Convergence History's checkmark tracks the algorithm's own
-    `converged` flag, not a fresh `optimality < CONVERGENCE_GTOL`
-    comparison redone in the table.** `_explicit_relax_loop` (shared by
+    `converged` flag, not a fresh `optimality < gtol` comparison redone
+    in the table.** `_explicit_relax_loop` (shared by
     `relax_once`/`relax_initial_configuration`) can declare convergence
     via EITHER of two criteria -- the worst vertex's force below
-    `CONVERGENCE_GTOL`, or `max_stretch_pct` stalled for `STALL_WINDOW`
+    `gtol`, or `max_stretch_pct` stalled for `STALL_WINDOW`
     steps (see its own comment) -- so a stall-converged result can still
-    show `optimality` numerically ABOVE `CONVERGENCE_GTOL` even though
+    show `optimality` numerically ABOVE `gtol` even though
     the algorithm is genuinely done; recomputing the checkmark from that
     comparison alone would then wrongly show a cross on a run that
     actually converged and visibly looks fine. `_refresh_history_table`
     stores/uses the real `converged` boolean instead, with the numeric
-    comparison kept alongside for reference. The mark itself is a plain
+    comparison kept alongside for reference -- and appends `" (stalled)"`
+    to the cell specifically when `converged` is True but `optimality >=
+    gtol`, i.e. exactly the case the numeric comparison alone would
+    misread, so a user seeing a checkmark next to a ">" doesn't have to
+    ask why (one did, before this existed). The mark itself is a plain
     ✔/✘ (not a colored emoji, which ttk doesn't reliably render in
     color) whose color comes from a per-ROW Treeview tag
     (`"converged"`/`"not_converged"`, `foreground=STATUS_COLORS["success"/"error"]`)
     -- ttk.Treeview can only tint a whole row, not one cell, so the
     Convergence column's color choice ends up applied to that row's
-    other columns too.
+    other columns too. Column width bumped 170 -> 220px to fit
+    `" (stalled)"` without truncation.
   - **Level 0's history row has no target/pressure to speak of.**
     `relax_initial_configuration` is pure springs -- no pressure
     parameter, no target RMS stretch to calibrate toward -- so its row
@@ -809,6 +968,81 @@ be rather than making those meshes take far more steps to formally
     `fig.text`) repeating the current level/iteration/stretch/optimality
     numbers under the plots -- removed as redundant once the
     Convergence History table already showed all of it per level.
+- **Debug-mode-only diagnostics** ("Validate Mesh"/"Show normals",
+  appended to `self.mode_row` -- the same debug-only row the steps-vs-
+  convergence radio buttons already live in, so both are shown/hidden by
+  `_apply_mode_visibility` exactly like that choice, with Show normals
+  ALSO forced back off when leaving debug mode, same rationale as the
+  steps choice resetting to "convergence"):
+  - **"Validate Mesh"** (`on_validate_mesh_clicked` -> module-level
+    `_validate_mesh(faces, positions)`, a pure function with no Tk
+    dependency) checks the CURRENTLY loaded `self.faces`/`self.positions`
+    (post-subdivision, mid-relax/inflate -- NOT the raw file, which
+    `load_stretchy_mesh` already validated once at Load) and reports TWO
+    things, only the FIRST of which gates pass/fail:
+    - **"Structural winding consistency"** -- PURELY COMBINATORIAL,
+      depending only on `faces`' own vertex-id loops, NEVER on
+      `positions`: the exact `load_stretchy_mesh` "no directed edge
+      appears more than once" rule, re-run against the live, possibly
+      finer mesh `mesh_levels.subdivide_once` produced -- a developer's
+      way to confirm THAT function (on the untouchable-files list)
+      hasn't corrupted the winding while subdividing. Per this project's
+      winding convention (see "The vertex-loop format" below), a
+      duplicate directed edge `(v, w)` is precisely two faces disagreeing
+      about which way their shared edge runs, which is precisely what
+      makes their right-hand-rule normals inconsistent relative to each
+      other -- so this one check IS the orientation-consistency answer,
+      not a separate thing from it.
+    - **"Current embedding: inward vs. outward"** -- GEOMETRIC,
+      `positions`-dependent, reported but explicitly labeled
+      INFORMATIONAL, never gating pass/fail: reimplements the same
+      centroid-relative sign test as `stretchy_mesh._orientation_signs`
+      locally (rather than reaching into that module's private API just
+      to get per-face outward/inward COUNTS for the report -- the public
+      `is_orientation_consistent` wrapper only returns one boolean), to
+      say whether the mesh's CURRENT 3D shape looks globally
+      inside-out. This is the ONLY way to detect "globally inside-out"
+      at all -- turning a sock inside out doesn't change which stitches
+      border which, so it's undetectable from `faces` alone, only from
+      where the vertices actually are.
+
+    An EARLIER version used the geometric, centroid-relative test AS the
+    sole/authoritative check -- a user caught this as wrong directly: a
+    freshly-loaded cube at Level 0 (`random_initial_positions`' pure
+    noise, before Relax) read as "inconsistent" for no structural reason
+    at all, then the SAME UNCHANGED `faces` structure read as
+    "consistent" once Relax gave it a coherent shape -- i.e. the verdict
+    tracked the CURRENT embedding, not the underlying structure it
+    claimed to validate, even though winding consistency is a property
+    of `faces` alone and provably can't change between Level 0 and Level
+    1 (`subdivide_once` doesn't touch it, and they share the exact same
+    topology -- see module docstring). Fixed by making the combinatorial
+    check authoritative and demoting the geometric one to a clearly
+    labeled, non-gating side note.
+
+    Result shown in a modal `messagebox` (`showinfo` if the structural
+    check passes, `showwarning` otherwise), always naming BOTH checks'
+    outcome (never silent about either) so a clean run is confirmation of
+    what was actually checked, not just an absence of complaints.
+    Synchronous (no background thread, unlike Inflate/Relax) since both
+    checks are cheap index/vector math, no iterative solve.
+  - **"Show normals"** (`self.show_normals_var`, a `tk.BooleanVar`
+    checkbutton) draws each triangle's own outward normal as one line
+    segment per face, in `NORMAL_COLOR` (yellow), on EVERY populated
+    "Level N" panel (`_draw_level_panel`, via `plotter.add_lines` --
+    PyVista's convenience for independent segments: an (N, 3) SoA array
+    with even/odd rows as each segment's start/end) -- an inward-pointing
+    one is then immediately visually obvious, the live, geometric
+    equivalent of "Validate Mesh"'s own "Current embedding" note above
+    (not its structural winding check, which has no live/visual
+    analogue since it doesn't depend on positions at all).
+    Each segment's length is `NORMAL_LENGTH_FRACTION` (0.5) of that
+    triangle's own mean CURRENT (not rest) edge length -- computed fresh
+    from `positions` every draw, so it always reads as roughly "half an
+    edge long" relative to whatever's actually on screen regardless of
+    overall mesh scale or how far from rest the mesh has stretched, per
+    an explicit user request that these "not be too long" (a full edge
+    length, tried first, read too long against a dense mesh; halved).
 - **Performance**: after vectorizing `_mesh_volume`/`_per_face_volumes`
   (precomputed flat index arrays -- plus, for the per-face case, a
   `np.bincount` grouping -- instead of a per-face Python loop with a dict
@@ -1669,6 +1903,23 @@ BUILDER_EDGE_LENGTH`, duplicated as a bare constant rather than
 importing the whole unrelated Tkinter app for one number) reproduces an
 EXACTLY proportional net -- just uniformly rescaled, so this panel's
 existing fixed axis padding (`_draw_target_faces`) still looks right.
+
+Also negates every reconstructed point's Y coordinate -- a real
+coordinate-convention mismatch, not a display quirk: Tkinter canvases
+(where `interactive_builder_app` recorded `cx`/`cy`/`rotation`) have Y
+increasing DOWNWARD; matplotlib's default axes (`self.ax2d` here) have Y
+increasing UPWARD. Reproducing the saved numbers as-is drew a mirror
+image of what the user actually built -- reported directly ("the net
+taken from the json file is flipped vertically"). The fix negates Y on
+the FINAL assembled point (after rotation+translation), not on the local
+polygon vertices or the rotation angle before composing them -- reflecting
+a rotated-and-translated point about an axis equals reflecting the whole
+already-assembled result (`Reflect_y(R(theta) @ p + t) = Reflect_y(R(theta)
+@ p) + Reflect_y(t)`, and negating the y-COMPONENT of the final 2-vector
+does exactly that) -- simpler than working out the equivalent reflected
+rotation matrix/local vertices first. Applied uniformly across every
+face (an isometry, so it preserves every relative distance/adjacency
+exactly, just mirrors the WHOLE net top-to-bottom).
 
 Important: `interactive_builder_app` never snaps a connection's two
 edges together spatially (see its own module docstring's "Edge

@@ -71,10 +71,32 @@ work for anyone who wants one.
    - The radio buttons control how much work the actual inflation part of
      each "Inflate" click does (after calibration): either a capped
      number of relax_once steps (`max_nfev`, literally N iterations now),
-     or an uncapped run to relax_once's own convergence tolerance
-     (CONVERGENCE_GTOL -- some meshes have a long, slow-shrinking tail
-     after the shape has visibly settled, so this is deliberately looser
-     than it might seem it needs to be).
+     or an uncapped run to relax_once's own convergence tolerance -- the
+     "Tolerance" spinner in Setup (self.tolerance_var, default
+     DEFAULT_TOLERANCE, NOT the fixed stretchy_mesh.CONVERGENCE_GTOL a
+     bare relax_once/relax_initial_configuration call would otherwise
+     default to -- some meshes have a long, slow-shrinking tail after the
+     shape has visibly settled, so a looser tolerance than it might seem
+     it needs to be is often the right call). Captured once per Relax/
+     Inflate click (self._current_gtol), not re-read live mid-run (the
+     spinner is disabled for the run's duration anyway), and forwarded to
+     pressure calibration too (estimate_pressure_for_target_stretch's own
+     `gtol`) so a run's calibration phase and its actual inflation settle
+     against the SAME threshold.
+   - relax_once/relax_initial_configuration also remove any RIGID
+     rotation/translation each step introduces (stretchy_mesh.
+     _remove_rigid_motion) -- a free-floating spring/pressure system has
+     no fixed orientation of its own, and an OPEN net in particular
+     (unlike a closed one, where pressure forces are torque-free by
+     construction) can pick up genuine net torque and slowly spin in
+     place with no shape change to show for it. A user watching this
+     happen mid-Inflate is what prompted the fix -- worse, since each
+     level starts from wherever the previous one was left, two levels
+     frozen at DIFFERENT accumulated spins made the "Level N" panels'
+     supposedly-shared camera (point 6 below) look inconsistent between
+     them, even though that shared rotation state was never touched --
+     see _remove_rigid_motion's own docstring in stretchy_mesh.py for
+     the full reasoning and verification.
 5. The "Convergence History" table records one row per subdivision level
    visited this net session: the pressure last calibrated for it (n/a for
    Level 0, which has no pressure at all), how many Inflate/Relax steps
@@ -84,12 +106,41 @@ work for anyone who wants one.
    stretch stats at whatever point it's currently at (RMS shown against
    the CURRENT "Target RMS stretch" spinner value), and a single combined
    "Convergence" cell -- the relax's own `max_force` (the worst vertex's
-   net force) against the fixed CONVERGENCE_GTOL threshold, with a check
-   or cross mark for whether it's below it -- updated live while
-   Inflate/Relax runs.
+   net force) against the tolerance that run actually used (recorded per
+   row, not re-read live -- see point 4 above), with a check or cross
+   mark for whether it's below it -- updated live while Inflate/Relax
+   runs. A checkmark can appear next to a `max_force` that's still ABOVE
+   that threshold: relax_once/relax_initial_configuration also declare
+   convergence via a separate stall-window criterion (max_stretch_pct
+   unchanged for many steps -- see stretchy_mesh's own STALL_WINDOW
+   comment) when force alone never quite settles; the cell adds
+   "(stalled)" in that specific case so it's self-explanatory rather than
+   looking like a contradiction. STALL_WINDOW (200 -> 2000) and this
+   app's own INFLATE_SAFETY_STEP_CAP (5000 -> 20000) were both raised
+   together after a user reported a single, locally concave vertex
+   sometimes getting stuck failing to "pop out" -- a genuinely slow but
+   real correction could plateau-trigger the OLD, shorter stall window
+   well before actually finishing, mistaking "changing very slowly" for
+   "done changing" (see stretchy_mesh.STALL_WINDOW's own comment for why
+   this specifically mattered for THIS app's own chunked streaming, not
+   just a raw uncapped relax_once call).
 6. The view below is "Net" (the flat, undeformed layout, matplotlib)
    plus one 3D panel per level, "Level 0".."Level N" (MAX_LEVEL total,
-   plus Level 0). Only the panel for self.subdivision_level is LIVE -- it
+   plus Level 0). The Net panel supports its own mouse-wheel zoom
+   (self.net_zoom, _on_net_scroll) scaling _draw_target_faces' own
+   bounding-box-derived view, independent of every "Level N" panel's own
+   self.level_zoom (they're different rendering stacks -- matplotlib
+   here, PyVista there -- with no shared camera state). When the loaded
+   file carries its own flat arrangement from interactive_builder_app
+   (`_layout_from_net_layout`, its own "net_layout" section), that
+   reconstruction also corrects a real coordinate-convention mismatch --
+   interactive_builder_app's Tkinter canvas has Y increasing DOWNWARD,
+   this panel's matplotlib axes have Y increasing UPWARD -- by flipping
+   every point's Y sign, so the net displays right-side-up rather than
+   as a mirror image of what was actually built there (see
+   _layout_from_net_layout's own docstring; a user reported the
+   unflipped version as appearing vertically flipped). Only the panel
+   for self.subdivision_level is LIVE -- it
    redraws every Inflate/Relax progress update; every level already left
    behind (by Subdivide, or by Relax's own promotion) is frozen at
    whatever state it was left in (self.level_snapshots, captured the
@@ -122,6 +173,43 @@ work for anyone who wants one.
    than two angles applied in a fixed order. Every level panel likewise
    shares ONE mouse-wheel zoom state (self.level_zoom) -- scrolling over
    any panel zooms all of them together, same rationale.
+7. Debug mode ("d" key) adds two developer-only diagnostics, neither of
+   which affects the actual solve -- purely for inspecting whatever's
+   currently loaded:
+   - "Validate Mesh" (on_validate_mesh_clicked/_validate_mesh) checks
+     the CURRENT self.faces (post-subdivision -- possibly finer than the
+     original file's own faces) for "Structural winding consistency" --
+     a PURELY COMBINATORIAL check, depending only on self.faces' own
+     vertex-id loops, NEVER on self.positions (the function doesn't even
+     take positions as a parameter): the same "no directed edge appears
+     more than once" rule load_stretchy_mesh already enforces on a raw
+     FILE at Load time, re-run here against the LIVE, possibly finer
+     mesh mesh_levels.subdivide_once produced, so a developer can
+     directly confirm that function (on this project's own untouchable-
+     files list) hasn't corrupted the winding while subdividing. Result
+     shown in a modal messagebox. An EARLIER version also reported a
+     second, self.positions-dependent check here ("does the mesh's
+     CURRENT shape look outward-facing from its own centroid") -- even
+     though clearly labeled informational and never gating pass/fail, a
+     user asked for it to be removed anyway: a `positions`-dependent
+     number had no place in a tool meant to validate STRUCTURE (see
+     _validate_mesh's own docstring for the reasoning that originally
+     surfaced the distinction -- Level 0's random positions vs. Level
+     1's relaxed ones giving different answers for the SAME unchanged
+     `faces`). That question is still answerable live via "Show normals"
+     below instead.
+   - "Show normals" (self.show_normals_var) draws each triangle's own
+     outward normal as a line segment from its centroid, in
+     NORMAL_COLOR, on every populated "Level N" panel (_draw_level_panel)
+     -- an inward-pointing one is then immediately obvious on sight; this
+     is now the ONLY way this app answers "does the CURRENT embedding
+     look inside-out", since Validate Mesh no longer does (see above).
+     Each segment is scaled to NORMAL_LENGTH_FRACTION (0.5) of that
+     triangle's own mean CURRENT edge length (not rest length), so it
+     always reads as roughly "half an edge long" relative to whatever's
+     on screen (a full edge length, tried first, read too long against a
+     dense mesh), regardless of overall mesh scale or how far from rest
+     it's currently stretched.
 """
 import sys
 from pathlib import Path
@@ -136,7 +224,7 @@ import os
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import tkinter.font as tkfont
 
 import numpy as np
@@ -222,6 +310,15 @@ LEVEL_ZOOM_STEP = 1.1
 LEVEL_ZOOM_MIN = 0.1
 LEVEL_ZOOM_MAX = 10.0
 
+# Same idea as LEVEL_ZOOM_STEP/MIN/MAX, for the Net panel's own
+# mouse-wheel zoom (_on_net_scroll) -- a separate state (self.net_zoom)
+# since the Net panel is matplotlib, not a PyVista camera: it scales the
+# half-extent _draw_target_faces derives from the flat layout's own
+# bounding box, rather than a camera parallel_scale.
+NET_ZOOM_STEP = 1.1
+NET_ZOOM_MIN = 0.2
+NET_ZOOM_MAX = 10.0
+
 # Overall UI text size multiplier -- applied once, at startup, to every
 # named Tk/ttk font (see _scale_ui_fonts) so the whole app's text (not
 # just this one label) grows together rather than each widget needing
@@ -244,6 +341,34 @@ DEFAULT_PRESSURE = 3.0
 
 DEFAULT_STEPS = 10
 
+# This app's own default for the "Tolerance" spinner (self.tolerance_var)
+# -- the `gtol` every relax_once/relax_initial_configuration/
+# estimate_pressure_for_target_stretch call actually uses (see
+# self._current_gtol), NOT stretchy_mesh.CONVERGENCE_GTOL (1e-4, that
+# module's own hardcoded default for a caller that never passes gtol at
+# all -- untouched, still what a bare relax_once/relax_initial_
+# configuration call elsewhere defaults to). Was 1e-6 (tighter than
+# CONVERGENCE_GTOL); loosened to 1e-2 per explicit user request, now
+# that STEP_MAX_MULTIPLIER/STALL_WINDOW (stretchy_mesh.py) no longer
+# need a very tight force threshold to actually finish converging in
+# reasonable time -- the stall-window criterion alongside it (see
+# _refresh_history_table's "(stalled)" note) already catches a mesh
+# that's visibly stopped changing well before force alone would settle
+# this loose a threshold anyway.
+DEFAULT_TOLERANCE = 1e-2
+
+# Debug mode's "Show normals" toggle (_draw_level_panel) draws each
+# triangle's own outward normal as a line segment in this color, from
+# its centroid, scaled to that SAME triangle's own mean edge length (so
+# an inward-pointing normal is immediately obvious regardless of overall
+# mesh scale) -- distinct from every FACE_COLORS entry and from
+# PLOT_THEME's own fg/edge color, so it reads clearly against either.
+NORMAL_COLOR = "yellow"
+# How long each normal segment is drawn, as a fraction of its own
+# triangle's mean edge length -- 1.0 (a full edge length) read too long
+# against a dense/fine mesh per a user request; halved.
+NORMAL_LENGTH_FRACTION = 0.5
+
 # on_inflate_clicked runs relax_once in a growing sequence of chunks
 # (5, 10, 20, ...) instead of one big max_nfev call, so the iteration
 # counter/plot update incrementally instead of jumping straight from the
@@ -252,11 +377,17 @@ DEFAULT_STEPS = 10
 INFLATE_CHUNK_START = 5
 INFLATE_CHUNK_MAX = 200
 # Hard stop for "iterate until convergence" mode in case a mesh/pressure
-# combination genuinely never reaches CONVERGENCE_GTOL (e.g. a topology
-# that can't hold that much pressure) -- without this, a run that plateaus
-# just short of convergence would loop forever instead of settling for
-# "as far as it got".
-INFLATE_SAFETY_STEP_CAP = 5000
+# combination genuinely never reaches the current tolerance (e.g. a
+# topology that can't hold that much pressure) -- without this, a run
+# that plateaus just short of convergence would loop forever instead of
+# settling for "as far as it got". Raised from 5000 to 20000 alongside
+# stretchy_mesh.STALL_WINDOW's own 200 -> 2000 raise (see its comment) --
+# with the stall shortcut no longer able to trigger from a same-size
+# coincidence with INFLATE_CHUNK_MAX, a run that's genuinely still
+# correcting slowly (e.g. a locally concave vertex popping out) needs
+# more real budget to actually reach gtol, not just a bigger number
+# before giving up on the SAME amount of real solving.
+INFLATE_SAFETY_STEP_CAP = 20000
 
 
 def _build_level1_topology(base_faces):
@@ -310,15 +441,89 @@ def _layout_from_net_layout(faces, net_layout):
     each polygon at edge_length=1 instead of 70, and divide every saved
     cx/cy by the same 70 -- every "touching" edge relationship survives
     exactly, only the absolute unit changes, matching what this panel's
-    fixed axis padding (_draw_target_faces) already assumes."""
+    fixed axis padding (_draw_target_faces) already assumes.
+
+    Also flips every reconstructed point's Y sign (a whole-picture
+    reflection about the X axis, applied uniformly across every face --
+    an isometry, so it preserves every relative distance/adjacency
+    exactly, just mirrors the WHOLE net top-to-bottom). This undoes a
+    real coordinate-convention mismatch, not a display quirk: Tkinter
+    canvases (interactive_builder_app's own, where cx/cy/rotation were
+    recorded) have Y increasing DOWNWARD, while matplotlib's default
+    axes (this panel's own ax2d) have Y increasing UPWARD -- reproducing
+    interactive_builder_app's cx/cy as-is here draws a mirror image of
+    what the user actually saw and built there. A user reported exactly
+    this (the net loaded from a file appeared flipped vertically)."""
     placed = {}
     for face_idx, (face, layout) in enumerate(zip(faces, net_layout)):
         theta = layout["rotation"]
         c, s = np.cos(theta), np.sin(theta)
         R = np.array([[c, -s], [s, c]])
         t = np.array([layout["cx"], layout["cy"]]) / _INTERACTIVE_BUILDER_EDGE_LENGTH
-        placed[face_idx] = apply_rigid(regular_polygon_vertices(len(face)), R, t)
+        points = apply_rigid(regular_polygon_vertices(len(face)), R, t)
+        placed[face_idx] = [np.array([p[0], -p[1]]) for p in points]
     return placed
+
+
+def _validate_mesh(faces):
+    """Debug mode's "Validate Mesh" button (on_validate_mesh_clicked):
+    checks the CURRENTLY LOADED self.faces (post-subdivision -- possibly
+    finer than the original file's own faces) for structural winding
+    consistency. Pure function of `faces` alone (no Tk, no `positions` --
+    see below for why), so it's independently testable.
+
+    Returns (ok, lines): `lines` always covers the check (never silent
+    about a passing one), so a passing run confirms what was actually
+    checked rather than staying silent about it.
+
+    **Structural winding consistency** (combinatorial -- depends ONLY on
+    `faces`' own vertex-id loops): per this project's winding convention
+    (module docstring), if face A has some edge as v->w, any OTHER face
+    sharing that same undirected edge must have it as w->v, NEVER v->w
+    again -- that's what makes the two faces' normals (each via the
+    right-hand rule off its own CCW loop) point consistently relative to
+    each other. Checking this is exactly load_stretchy_mesh's own "no
+    directed edge appears more than once" rule (a duplicate (v,w) is
+    precisely two faces disagreeing on which way that shared edge runs)
+    -- re-run here against the LIVE, possibly finer mesh mesh_levels.
+    subdivide_once produced, not just the raw file Load already checked
+    once, so a developer can directly confirm that function (on this
+    project's own untouchable-files list) hasn't corrupted the winding
+    while subdividing.
+
+    An EARLIER version ALSO reported a second, `positions`-dependent
+    check here ("does the mesh's CURRENT 3D shape look outward-facing
+    from its own centroid") -- removed at explicit user request: even
+    though it was clearly labeled informational and never affected `ok`,
+    a `positions`-dependent number showing up at all in a tool meant to
+    validate STRUCTURE was still the wrong thing to report here. That
+    question (is the CURRENT embedding inside-out) is still answerable
+    live via the separate "Show normals" toggle instead -- an
+    inward-pointing arrow is directly visible there, no separate check
+    needed. This function now reports ONLY what's actually structural,
+    with nothing that varies between Level 0 (random positions) and a
+    fully-inflated Level 3 for the exact same underlying `faces`."""
+    counts = {}
+    owners = {}
+    for fi, face in enumerate(faces):
+        n = len(face)
+        for i in range(n):
+            e = (face[i], face[(i + 1) % n])
+            counts[e] = counts.get(e, 0) + 1
+            owners.setdefault(e, []).append(fi)
+    winding_lines = [f"  edge {v}->{w} runs the SAME direction in {c} faces {owners[(v, w)]} "
+                      f"(should be reversed in all but one)"
+                      for (v, w), c in counts.items() if c > 1]
+    ok = not winding_lines
+
+    if ok:
+        lines = [f"Structural winding: all {len(faces)} faces agree with their "
+                 f"neighbors -- no shared edge runs the same direction twice (OK)."]
+    else:
+        lines = [f"Structural winding: {len(winding_lines)} edge(s) where neighboring "
+                 f"faces disagree:"]
+        lines += winding_lines
+    return ok, lines
 
 
 class InflatePolyhedronApp:
@@ -359,23 +564,30 @@ class InflatePolyhedronApp:
         self.debug_mode = False
         self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
 
-        # ---- Setup: net picker + target RMS stretch, shared by both
-        # modes, plus (debug mode only) the steps-vs-convergence choice. ----
+        # ---- Setup: net picker + target RMS stretch + tolerance, all
+        # tiled HORIZONTALLY in one row to save vertical space (an
+        # earlier version stacked net picker and target RMS stretch on
+        # their own separate rows), shared by both modes, plus (debug
+        # mode only) the steps-vs-convergence choice/Validate Mesh/Show
+        # normals row below it. ----
         setup_frame = ttk.LabelFrame(root, text="Setup", padding=12)
         setup_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
 
-        picker_row = ttk.Frame(setup_frame)
-        picker_row.pack(fill=tk.X)
-        ttk.Label(picker_row, text="Choose a net:").pack(side=tk.LEFT, padx=(0, 8))
+        setup_row = ttk.Frame(setup_frame)
+        setup_row.pack(fill=tk.X)
+
+        net_group = ttk.Frame(setup_row)
+        net_group.pack(side=tk.LEFT)
+        ttk.Label(net_group, text="Choose a net:").pack(side=tk.LEFT, padx=(0, 8))
         self.net_var = tk.StringVar()
-        self.combo = ttk.Combobox(picker_row, state="readonly", width=30,
+        self.combo = ttk.Combobox(net_group, state="readonly", width=30,
                                    textvariable=self.net_var)
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
-        target_row = ttk.Frame(setup_frame)
-        target_row.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(target_row, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
+        target_group = ttk.Frame(setup_row)
+        target_group.pack(side=tk.LEFT, padx=(24, 0))
+        ttk.Label(target_group, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
         self.target_rms_var = tk.DoubleVar(value=DEFAULT_TARGET_RMS_STRETCH_PCT)
         # A "converged" verdict only applies to the target it was reached
         # at -- changing this means the current pressure hasn't actually
@@ -385,21 +597,43 @@ class InflatePolyhedronApp:
         # refusing to recalibrate even after the user asks for a
         # different target.
         self.target_rms_var.trace_add("write", self._on_target_rms_changed)
-        self.target_rms_spin = ttk.Spinbox(target_row, from_=0.1, to=200.0,
+        self.target_rms_spin = ttk.Spinbox(target_group, from_=0.1, to=200.0,
                                             increment=1.0, width=6,
                                             textvariable=self.target_rms_var, format="%.1f")
         self.target_rms_spin.pack(side=tk.LEFT)
-        ttk.Label(target_row, text="%").pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Label(target_group, text="%").pack(side=tk.LEFT, padx=(2, 0))
         # Pressure is no longer user-editable or separately displayed --
         # "Inflate" calibrates it itself (see on_inflate_clicked) and it's
         # already logged per level in the Convergence History table.
         self.pressure_value = DEFAULT_PRESSURE
 
-        # Debug-mode-only: "Iterate for N steps" vs. "until convergence"
-        # -- the one thing that actually differs between the two modes.
-        # Shown/hidden by _apply_mode_visibility; forced back to
-        # "convergence" whenever leaving debug mode, so release mode
-        # never runs a stray fixed-step request left over from before.
+        tolerance_group = ttk.Frame(setup_row)
+        tolerance_group.pack(side=tk.LEFT, padx=(24, 0))
+        ttk.Label(tolerance_group, text="Tolerance:").pack(side=tk.LEFT, padx=(0, 4))
+        # The `gtol` every relax_once/relax_initial_configuration/
+        # estimate_pressure_for_target_stretch call actually uses (see
+        # self._current_gtol, set from this at the start of every
+        # Relax/Inflate click) -- previously a fixed, non-user-facing
+        # stretchy_mesh.CONVERGENCE_GTOL. Same "converged" gate/reset
+        # rationale as target_rms_var above: a looser-or-tighter
+        # tolerance than whatever a past "converged" verdict was reached
+        # under means that verdict no longer applies.
+        self.tolerance_var = tk.DoubleVar(value=DEFAULT_TOLERANCE)
+        self.tolerance_var.trace_add("write", self._on_tolerance_changed)
+        self.tolerance_spin = ttk.Spinbox(tolerance_group, from_=1e-10, to=1e-1,
+                                           increment=1e-7, width=10,
+                                           textvariable=self.tolerance_var, format="%.0e")
+        self.tolerance_spin.pack(side=tk.LEFT)
+
+        # Debug-mode-only row: "Iterate for N steps" vs. "until
+        # convergence" (the one thing that actually differs between the
+        # two modes) plus "Validate Mesh"/"Show normals" (debug-only
+        # diagnostics with no effect on the actual solve). Shown/hidden
+        # by _apply_mode_visibility; both the iterate choice and Show
+        # normals are forced back to their release-mode defaults whenever
+        # leaving debug mode, so release mode never runs a stray
+        # fixed-step request or shows a stale normals overlay left over
+        # from before.
         self.mode_row = ttk.Frame(setup_frame)
         self.iterate_mode_var = tk.StringVar(value="convergence")
         self.steps_radio = ttk.Radiobutton(self.mode_row, text="Iterate for", value="steps",
@@ -416,6 +650,15 @@ class InflatePolyhedronApp:
                                                   variable=self.iterate_mode_var,
                                                   command=self._update_mode_state)
         self.convergence_radio.pack(side=tk.LEFT)
+        ttk.Separator(self.mode_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=18)
+        self.validate_button = ttk.Button(self.mode_row, text="Validate Mesh",
+                                           command=self.on_validate_mesh_clicked)
+        self.validate_button.pack(side=tk.LEFT, padx=(0, 18))
+        self.show_normals_var = tk.BooleanVar(value=False)
+        self.show_normals_check = ttk.Checkbutton(self.mode_row, text="Show normals",
+                                                    variable=self.show_normals_var,
+                                                    command=self.draw)
+        self.show_normals_check.pack(side=tk.LEFT)
 
         # ---- Status/progress: shared by both modes, always visible,
         # positioned right after Setup. ----
@@ -454,7 +697,7 @@ class InflatePolyhedronApp:
         for col, heading, width in (
                 ("level", "Level", 50), ("pressure", "Pressure", 80), ("steps", "Steps", 70),
                 ("max_stretch", "Max Stretch %", 110), ("rms_stretch", "RMS Stretch %", 150),
-                ("convergence", "Convergence", 170)):
+                ("convergence", "Convergence", 220)):
             self.history_tree.heading(col, text=heading)
             self.history_tree.column(col, width=width, anchor=tk.CENTER)
         # ttk.Treeview can only color a whole ROW, not one cell -- so the
@@ -520,7 +763,21 @@ class InflatePolyhedronApp:
         self.fig_net = plt.figure(figsize=(3.2, 4.5))
         self.ax2d = self.fig_net.add_subplot(1, 1, 1)
         self.canvas_net = FigureCanvasTkAgg(self.fig_net, master=net_panel_frame)
-        self.canvas_net.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        net_widget = self.canvas_net.get_tk_widget()
+        net_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # Mouse-wheel-scroll zoom for the Net panel -- same idea as every
+        # "Level N" panel's own self.level_zoom (_on_level_scroll), just
+        # scaling _draw_target_faces' own bounding-box-derived half-extent
+        # instead of a PyVista camera's parallel_scale, since this panel
+        # is matplotlib, not PyVista (see LEVEL_PANEL_SIZE's own comment
+        # for why level panels differ). Bound directly on the canvas
+        # widget, not through any matplotlib event system, for the exact
+        # same Windows/macOS-vs-X11 event shape every level panel already
+        # handles (_on_level_scroll).
+        self.net_zoom = 1.0
+        net_widget.bind("<MouseWheel>", self._on_net_scroll)
+        net_widget.bind("<Button-4>", self._on_net_scroll)
+        net_widget.bind("<Button-5>", self._on_net_scroll)
 
         self.level_frames = {}
         self.level_plotters = {}
@@ -588,6 +845,16 @@ class InflatePolyhedronApp:
         self.last_stats = {}
         self.level_history = {}
         self.stop_event = None
+        # The gtol actually in effect for the run currently underway (or
+        # the last one that ran) -- captured from self.tolerance_var at
+        # the moment Relax/Inflate starts (_on_pressure_calibrated/
+        # on_relax_clicked), not re-read live while a run is in progress
+        # (the spinner is disabled for the duration anyway -- see
+        # _set_controls_enabled), and recorded into self.last_stats/
+        # level_history so _refresh_history_table always shows the
+        # threshold an already-finished run actually used, even after
+        # the spinner's own value later changes.
+        self._current_gtol = DEFAULT_TOLERANCE
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
@@ -634,15 +901,21 @@ class InflatePolyhedronApp:
 
     def _apply_mode_visibility(self):
         """The only actual difference between the two modes: whether the
-        steps-vs-convergence radio row is shown. Forces the choice back
-        to "convergence" when leaving debug mode, so release mode never
-        runs a stray fixed-step request left over from before."""
+        steps-vs-convergence radio row (plus Validate Mesh/Show normals)
+        is shown. Forces the steps choice back to "convergence" and Show
+        normals off when leaving debug mode, so release mode never runs a
+        stray fixed-step request or shows a stale normals overlay left
+        over from before."""
         self.root.title(f"Inflate Polyhedron{' (debug mode)' if self.debug_mode else ''}")
         if self.debug_mode:
             self.mode_row.pack(fill=tk.X, pady=(8, 0))
         else:
             self.mode_row.pack_forget()
             self.iterate_mode_var.set("convergence")
+            if self.show_normals_var.get():
+                self.show_normals_var.set(False)
+                if self.faces is not None:  # nothing to redraw before a net's ever been loaded
+                    self.draw()
 
     def _set_status(self, text, kind="info"):
         # "success" is always dropped, in both modes -- e.g. "Converged
@@ -806,7 +1079,23 @@ class InflatePolyhedronApp:
         (PyVista/VTK's own depth buffer handles occlusion correctly
         regardless of face count or convexity, unlike the old
         matplotlib/`_CullableFace` rendering this replaced -- see module
-        docstring)."""
+        docstring).
+
+        Debug mode's "Show normals" toggle (self.show_normals_var) also
+        draws each triangle's own outward normal here, as one line
+        segment per face from its centroid, in NORMAL_COLOR -- an
+        inward-pointing one (see _validate_mesh) is immediately obvious
+        this way, without needing to reason about winding order by hand.
+        Each segment is scaled to NORMAL_LENGTH_FRACTION (0.5) of that
+        SAME triangle's own mean edge length (computed directly from
+        `positions`, the mesh's CURRENT -- not rest -- geometry, so the
+        arrow always reads as "about half an edge long" relative to
+        whatever's actually on screen, regardless of overall scale or how
+        far from rest length this mesh has stretched) -- per an explicit
+        user request that these stay proportionate rather than a fixed
+        pixel/world length that could dwarf or vanish against a very
+        small or very large mesh (a full edge length, tried first, read
+        too long against a dense/fine mesh)."""
         plotter = self.level_plotters[level]
         plotter.clear()
         if faces is not None:
@@ -821,6 +1110,25 @@ class InflatePolyhedronApp:
             mesh.cell_data["colors"] = colors
             plotter.add_mesh(mesh, scalars="colors", rgb=True, show_edges=True,
                               edge_color=PLOT_THEME["fg"], line_width=SUBDIVISION_EDGE_WIDTH)
+
+            if self.show_normals_var.get():
+                starts, ends = [], []
+                for a, b, c in faces:
+                    pa, pb, pc = positions[a], positions[b], positions[c]
+                    normal = np.cross(pb - pa, pc - pa)
+                    normal_len = np.linalg.norm(normal)
+                    if normal_len < 1e-12:
+                        continue
+                    centroid = (pa + pb + pc) / 3.0
+                    edge_len = (np.linalg.norm(pb - pa) + np.linalg.norm(pc - pb)
+                                + np.linalg.norm(pa - pc)) / 3.0
+                    starts.append(centroid)
+                    ends.append(centroid + normal / normal_len * edge_len * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=NORMAL_COLOR, width=2.0)
 
             lo, hi = points.min(axis=0), points.max(axis=0)
             self._level_center[level] = (lo + hi) / 2
@@ -1115,6 +1423,13 @@ class InflatePolyhedronApp:
             "rms_stretch_pct": self.last_stats.get("rms_stretch_pct", 0.0),
             "optimality": self.last_stats.get("optimality"),
             "converged": self.last_stats.get("converged"),
+            # The gtol actually used to reach this optimality/converged
+            # reading (self._current_gtol at the time -- see its own
+            # comment) -- NOT necessarily the tolerance spinner's CURRENT
+            # value, which may have changed since. Falls back to
+            # CONVERGENCE_GTOL for a row recorded before this field
+            # existed (self.last_stats.get("gtol") is None then).
+            "gtol": self.last_stats.get("gtol") or CONVERGENCE_GTOL,
         }
         self._refresh_history_table()
 
@@ -1136,16 +1451,23 @@ class InflatePolyhedronApp:
                 convergence, tags = "n/a", ()
             else:
                 # The checkmark tracks the algorithm's own `converged`
-                # flag, not a fresh optimality-vs-GTOL comparison redone
+                # flag, not a fresh optimality-vs-gtol comparison redone
                 # here -- convergence can also come from the stall-window
                 # criterion (see _explicit_relax_loop) with optimality
-                # still numerically above CONVERGENCE_GTOL, and the mark
-                # would otherwise wrongly call that a failure.
+                # still numerically above this row's own gtol, and the
+                # mark would otherwise wrongly call that a failure. When
+                # that's what actually happened -- converged is True but
+                # optimality is still >= gtol -- "(stalled)" says so
+                # explicitly, rather than leaving a checkmark next to a
+                # ">" comparison looking like a contradiction (a user
+                # asked about exactly this after seeing it unexplained).
+                gtol = rec["gtol"]
                 converged = rec["converged"]
-                op = "<" if optimality < CONVERGENCE_GTOL else ">"
+                op = "<" if optimality < gtol else ">"
                 mark = "✔" if converged else "✘"  # colored via row tag, not the glyph itself
+                stalled_note = " (stalled)" if converged and optimality >= gtol else ""
                 convergence = (f"{self._format_sci(optimality)} {op} "
-                                f"{self._format_sci(CONVERGENCE_GTOL, precision=0)} {mark}")
+                                f"{self._format_sci(gtol, precision=0)} {mark}{stalled_note}")
                 tags = ("converged",) if converged else ("not_converged",)
             pressure_str = "n/a" if rec["pressure"] is None else f"{rec['pressure']:.4g}"
             # Level 0 has no target stretch to chase (relax_initial_configuration
@@ -1189,6 +1511,15 @@ class InflatePolyhedronApp:
             self.last_stats["converged"] = None
             self._update_level_action_buttons()
 
+    def _on_tolerance_changed(self, *_args):
+        # Same rationale as _on_target_rms_changed: a "converged" verdict
+        # only applies to the tolerance it was reached under -- changing
+        # it means the CURRENT mesh hasn't actually been checked against
+        # the new threshold yet.
+        if self.last_stats.get("converged"):
+            self.last_stats["converged"] = None
+            self._update_level_action_buttons()
+
     def on_inflate_clicked(self):
         """Two phases: first calibrate a pressure for the current "Target
         RMS stretch" (stretchy_mesh.estimate_pressure_for_target_stretch,
@@ -1197,22 +1528,33 @@ class InflatePolyhedronApp:
         (respecting the steps-vs-convergence mode and the Stop button, same
         as always). Recalibrates fresh from wherever self.positions
         currently is on every click, since the user can no longer set
-        pressure directly."""
+        pressure directly. Calibrates against the CURRENT "Tolerance"
+        spinner value too, so the pressure search settles at the same
+        threshold the actual inflate run right after it will use."""
         if self.positions is None or self.last_stats.get("converged"):
             return
         faces, edge_length, positions = self.faces, self.edge_length, self.positions
         target_rms_pct = self.target_rms_var.get()
+        tolerance = self.tolerance_var.get()
         target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
         self._set_status(f"Finding a pressure that settles around {target_rms_pct:.1f}% "
                           "RMS stretch...", "info")
         self._run_background(
             lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length,
-                                                           target_rms_pct=target_rms_pct),
+                                                           target_rms_pct=target_rms_pct,
+                                                           gtol=tolerance),
             (), lambda result: self._on_pressure_calibrated(result, target_steps))
 
     def _on_pressure_calibrated(self, result, target_steps):
         pressure = result[0]
         self.pressure_value = pressure
+        # Captured once here, not re-read live during the run -- the
+        # spinner is disabled for the duration anyway (_set_controls_
+        # enabled) -- and reused by _apply_inflate_progress so every
+        # progress update this run records the SAME threshold it's
+        # actually converging against, even if the spinner's value
+        # changes later (after the run finishes).
+        self._current_gtol = self.tolerance_var.get()
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
         self._set_level_action_button_running(True)
@@ -1314,11 +1656,13 @@ class InflatePolyhedronApp:
 
     def _run_inflate_stream(self, pressure, target_steps, stop_event):
         faces, edge_length = self.faces, self.edge_length
+        gtol = self._current_gtol
         state = {"positions": self.positions}
 
         def step_fn(chunk, stop_event):
             result = relax_once(state["positions"], faces, edge_length, pressure,
-                                 PLANARITY_WEIGHT, max_nfev=chunk, stop_event=stop_event)
+                                 PLANARITY_WEIGHT, max_nfev=chunk, stop_event=stop_event,
+                                 gtol=gtol)
             state["positions"] = result[0]
             return result
 
@@ -1330,7 +1674,8 @@ class InflatePolyhedronApp:
         self.positions = positions
         self.iteration_count += nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
-                            "optimality": optimality, "converged": converged}
+                            "optimality": optimality, "converged": converged,
+                            "gtol": self._current_gtol}
         self._record_level_history()
         self._set_status(f"Inflating at level {self.subdivision_level}... "
                           f"{self.iteration_count} steps so far "
@@ -1376,6 +1721,9 @@ class InflatePolyhedronApp:
         initial-configuration algorithm, not to be steppable."""
         if self.positions is None or self.subdivision_level != 0 or self.last_stats.get("converged"):
             return
+        # Same capture-once rationale as _on_pressure_calibrated -- see
+        # self._current_gtol's own comment.
+        self._current_gtol = self.tolerance_var.get()
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
         self._set_level_action_button_running(True)
@@ -1386,11 +1734,13 @@ class InflatePolyhedronApp:
 
     def _run_relax_stream(self, stop_event):
         faces, edge_length = self.faces, self.edge_length
+        gtol = self._current_gtol
         state = {"positions": self.positions}
 
         def step_fn(chunk, stop_event):
             result = relax_initial_configuration(state["positions"], faces, edge_length,
-                                                  max_nfev=chunk, stop_event=stop_event)
+                                                  max_nfev=chunk, stop_event=stop_event,
+                                                  gtol=gtol)
             state["positions"] = result[0]
             return result
 
@@ -1402,7 +1752,8 @@ class InflatePolyhedronApp:
         self.positions = positions
         self.iteration_count += nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
-                            "optimality": optimality, "converged": converged}
+                            "optimality": optimality, "converged": converged,
+                            "gtol": self._current_gtol}
         self._record_level_history()
         self._set_status(f"Relaxing... {self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
@@ -1446,12 +1797,33 @@ class InflatePolyhedronApp:
         self._set_level_action_button_running(False)
         self.draw()
 
+    # ---- debug mode only: mesh validation ----
+
+    def on_validate_mesh_clicked(self):
+        """Debug-mode-only "Validate Mesh" button: runs _validate_mesh
+        against the CURRENTLY loaded self.faces (whatever subdivision
+        level it's at right now) and reports the result in a modal
+        messagebox -- a synchronous, on-demand check, unlike Inflate/
+        Relax's own background-threaded runs, since the check is cheap
+        (pure index math, no iterative solve, and no dependence on
+        self.positions at all -- see _validate_mesh's own docstring)."""
+        if self.faces is None:
+            self._set_status("No mesh loaded to validate.", "warn")
+            return
+        ok, lines = _validate_mesh(self.faces)
+        report = "\n".join(lines)
+        if ok:
+            messagebox.showinfo("Validate Mesh", report)
+        else:
+            messagebox.showwarning("Validate Mesh", report)
+
     # ---- background worker (used by pressure calibration) ----
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.target_rms_spin,
-                       self.steps_radio, self.convergence_radio):
+        for widget in (self.combo, self.target_rms_spin, self.tolerance_spin,
+                       self.steps_radio, self.convergence_radio,
+                       self.validate_button, self.show_normals_check):
             widget.state(state)
         if enabled:
             self._update_mode_state()  # respect the steps/convergence choice
@@ -1553,13 +1925,37 @@ class InflatePolyhedronApp:
         all_pts = np.array(all_pts)
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
         pad = 0.6
-        self.ax2d.set_xlim(lo[0] - pad, hi[0] + pad)
-        self.ax2d.set_ylim(lo[1] - pad, hi[1] + pad)
+        # self.net_zoom (1.0 = unzoomed, matching the original fixed
+        # lo-pad..hi+pad framing exactly) shrinks/grows this same
+        # half-extent around the layout's own center -- see
+        # _on_net_scroll, the Net panel's own analogue of every "Level N"
+        # panel's self.level_zoom.
+        center = (lo + hi) / 2
+        half_range = ((hi - lo) / 2 + pad) / self.net_zoom
+        self.ax2d.set_xlim(center[0] - half_range[0], center[0] + half_range[0])
+        self.ax2d.set_ylim(center[1] - half_range[1], center[1] + half_range[1])
         self.ax2d.set_aspect("equal")
         # No ax.set_title() here -- "Net" is a plain Tkinter Label above
         # this canvas instead, same as every "Level N" panel's title (see
         # __init__'s Design notes on why titles live outside the drawing
         # area now).
+
+    def _on_net_scroll(self, event):
+        """Mouse-wheel-scroll on the Net panel zooms it (self.net_zoom) --
+        the Net panel's own analogue of _on_level_scroll, just scaling
+        _draw_target_faces' own bounding-box half-extent instead of a
+        PyVista camera. Only the Net panel redraws (_draw_target_faces +
+        draw_idle), not every "Level N" panel too -- net_zoom has no
+        effect on them, so re-rendering PyVista's off-screen scenes on
+        every Net-panel scroll tick would just be wasted work."""
+        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
+            factor = 1.0 / NET_ZOOM_STEP
+        else:
+            factor = NET_ZOOM_STEP
+        self.net_zoom = max(NET_ZOOM_MIN, min(NET_ZOOM_MAX, self.net_zoom * factor))
+        theme = self._apply_plot_theme()
+        self._draw_target_faces(theme)
+        self._draw_idle_all()
 
     def draw(self):
         """Redraws the Net panel plus every "Level N" panel: level ==
