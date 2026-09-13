@@ -128,7 +128,12 @@ Interaction model:
   most recent undo(s) took back, not some independent alternate history.
   Selection is deliberately NOT part of what's restored (undoing back to
   a state where a selected shape no longer exists would leave a
-  dangling reference) -- both directions simply clear it.
+  dangling reference) -- both directions simply clear it. Each snapshot
+  also carries the canvas's own revision NUMBER from the moment it was
+  captured (`self._revision`, see its own comment in `__init__`) --
+  restoring it, rather than assigning a fresh one, is what makes undoing
+  every change made since the last Save read as no-longer-dirty again
+  (see "unsaved changes" below), not just "some undo happened".
 - **Edge connections**: every shape already on the canvas (not a still-
   armed/not-yet-dropped ghost) has a small circular handle at the
   midpoint of each of its edges -- selecting the shape first is NOT
@@ -198,31 +203,33 @@ Interaction model:
   the connection causing it, and the "shared" vertex stops being shared).
   Treating two corners as fully, physically identified with each other
   during EDITING, rather than as a purely LOCAL, pairwise link each
-  connection independently represents, was the actual bug. Full
-  structural validation (vertex-merge-error and duplicate-directed-edge checks,
-  `_validate_shapes_connections`) now happens in exactly ONE place: Save
-  (`_export_faces_and_layout`) -- the one moment the full transitive
-  merge is the right thing to compute at all, since only then does
-  "which corners end up the same vertex" actually matter. It's checked
-  directly on `self.shapes`/`self.connections`, in the same
-  "vSHAPE.CORNER" terms debug mode (below) already shows a user live --
-  never in terms of the fresh integers `_faces_from_shapes` would only
-  assign at export time, which a user watching the live app has no
-  reason to recognize. A Save that fails names the exact problem (e.g.
-  "edge v9.4->v9.0 appears 2 times") AND the specific chain of existing
-  connections (`_connection_chain`) whose transitive merge actually ties
-  the two conflicting corners together -- neither conflict is ever
-  caused by one connection alone, so naming just the connection that
-  happened to trip it, on its own, would leave a user unable to tell
-  which of it or some earlier, already-accepted connection is the one
-  that's actually wrong. A vertex merge error specifically ALSO rings every
-  implicated corner right on the canvas, in `VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR`
-  (orange -- `_draw_vertex_merge_error_highlight`, from the `NetValidationError`
-  raised alongside the message), regardless of debug mode, until the
-  next edit clears it -- so the problem is visible at a glance, not just
-  named in the messagebox text. This is what actually lets a user go
-  find and fix the one connection actually causing it, the same way
-  debug mode does, live, without needing to attempt a Save first.
+  connection independently represents, was the actual bug -- so making
+  a connection is never REJECTED over what it implies about some other,
+  already-accepted connection elsewhere.
+
+  What changed since: full structural validation (vertex-merge-error and
+  duplicate-directed-edge checks, `_validate_shapes_connections`) is
+  still never a GATE on whether a connection can be made, but it's no
+  longer checked only once, at Save -- `_refresh_vme_state` re-runs it
+  live after every edit that could change it (making or deleting a
+  connection, deleting a shape, flipping one, undo/redo, paste, New,
+  Load), so a problem shows up the moment it exists rather than only
+  once the user tries to Save. In
+  RELEASE mode this is surfaced ONLY as the bottom status bar
+  (`_update_status_bar`, "Vertex merge error(s) detected. Fix before
+  saving." vs. "Everything is good.") and Save/Save As greying out the
+  whole time one exists (`_update_file_menu_state`) -- deliberately no
+  per-connection or per-vertex marking on the canvas itself, so a
+  release-mode user isn't shown "vSHAPE.CORNER"-flavored internals they
+  have no context for; debug mode (below) is where a vertex merge error
+  is actually pinpointed, via the always-on dedup vertex display rather
+  than anything drawn on a connection. The user can keep working (adding
+  shapes, more connections, flips) with one still showing, just can't
+  write out an invalid net. Checked directly on
+  `self.shapes`/`self.connections`, in the same "vSHAPE.CORNER" terms
+  debug mode (below) already shows a user live -- never in terms of the
+  fresh integers `_faces_from_shapes` would only assign at export time,
+  which a user watching the live app has no reason to recognize.
 - **Pan/zoom**: with no shape selected, right-click-drag pans -- dragging
   the background moves the whole view WITH the drag, the same direction
   as the cursor, like grabbing and sliding the canvas itself under a
@@ -245,11 +252,23 @@ Interaction model:
   clears the canvas back to empty and forgets that association;
   closing the window goes through the exact same check. Both are
   guarded by `_confirm_discard_unsaved`: if anything's changed since the
-  last Load/Save/New (`self._dirty`, set by every real edit -- see
-  `_record_undo_snapshot`), a dialog asks whether to save first, and a
-  "yes" there opens the Save As dialog -- cancelling either that dialog
-  or the confirmation itself aborts New/closing rather than silently
-  discarding unsaved work. Load reads a file back -- a file this app
+  last Load/Save/New (`self._dirty`, a read-only property comparing
+  `self._revision`/`self._saved_revision` -- see their own comment in
+  `__init__`), a dialog asks whether to save first, and a "yes" there
+  opens the Save As dialog -- cancelling either that dialog or the
+  confirmation itself aborts New/closing rather than silently
+  discarding unsaved work. `self._dirty` also drives the title's own "*"
+  (right after the bracketed filename, or after "Interactive Builder" if
+  none is associated yet) and whether "Save" itself is enabled in the
+  File menu at all -- greyed out whenever there's nothing NEW to write
+  (not dirty) or the net is currently invalid (see "Edge connections"
+  above for `self._vme_active`), both via `_update_file_menu_state`;
+  "Save As..." only cares about the latter, since saving a copy under a
+  new name is useful even with nothing changed since the last save.
+  Ctrl+S and a direct `on_save_as_clicked()` call both re-check
+  `self._vme_active` themselves too (a greyed-out menu entry doesn't
+  stop a keybinding), refusing with a messagebox instead of silently
+  writing an invalid file. Load reads a file back -- a file this app
   itself saved reproduces the EXACT on-screen layout (positions/
   rotations round-trip via its own "net_layout" section, now also
   carrying each shape's "flipped" bit) and zoom level, AND the exact
@@ -300,6 +319,23 @@ Interaction model:
   (`_connection_chain`) -- that, not hovering here, is now how shared or
   conflicting identity actually gets diagnosed.
 
+  Debug mode ALSO always shows a dedup vertex display
+  (`_draw_dedup_vertex_labels`, no separate toggle -- on together with
+  everything else debug mode turns on), taking the OPPOSITE approach
+  from the hover label above, deliberately: EVERY corner of EVERY shape
+  is labeled at once, white text on a small filled circle, with its
+  dedup GROUP number from `_vertex_roots` -- so two corners already
+  merged to the same vertex show the SAME number, at a glance, across
+  the whole net. A corner currently part of a genuine vertex merge error
+  (in `_validate_shapes_connections`'s own `vertex_merge_error_slots`,
+  re-run independently right here rather than reusing whatever
+  `_refresh_vme_state` last computed, so this is always exactly current)
+  fills RED instead of the usual black -- this, not anything drawn on a
+  connection (see "Edge connections" above), is how a vertex merge error
+  is actually pinpointed on the canvas. Recomputed fresh on every
+  redraw, so a connection made/deleted or a shape flipped is reflected
+  immediately with no separate refresh step.
+
 Shapes are stored in "world" coordinates, independent of the current
 pan/zoom -- `_world_to_screen`/`_screen_to_world` are the only two places
 that ever convert between the two, so panning/zooming is purely a
@@ -343,7 +379,7 @@ import sv_ttk
 from PIL import Image, ImageColor, ImageDraw, ImageTk
 
 from common.paths import STRETCHY_NETS_DIR
-from common.ui_theme import PLOT_THEME
+from common.ui_theme import PLOT_THEME, STATUS_COLORS
 from utils.geometry.polygon_geom import attach_polygon, regular_polygon_vertices
 
 # Palette entries, in display order.
@@ -441,11 +477,15 @@ CONNECTION_HIT_RADIUS = 6.0
 # exported vertex id is shown.
 DEBUG_VERTEX_HOVER_RADIUS = 10.0
 DEBUG_VERTEX_COLOR = "yellow"
-# A failed Save's vertex-merge-error check rings every implicated corner
-# in this color -- see NetValidationError/_export_faces_and_layout --
-# regardless of debug mode, since this is error feedback a user needs to
-# see even with debug mode off.
-VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR = "orange"
+# Debug mode's always-on dedup vertex display: every corner is labeled
+# with its dedup GROUP number (_vertex_roots), white text on a small
+# filled circle -- black normally, or DEDUP_VERTEX_CONFLICT_BG for a
+# corner currently part of a genuine vertex merge error -- see
+# _draw_dedup_vertex_labels.
+DEDUP_VERTEX_RADIUS = 9.0
+DEDUP_VERTEX_BG = "black"
+DEDUP_VERTEX_CONFLICT_BG = "red"
+DEDUP_VERTEX_FG = "white"
 # A handle's resting color, when its shape is neither selected nor the
 # current hover target of a pending connection -- SELECTION_OUTLINE_COLOR
 # is used instead in those two cases (see _redraw), so a handle reads as
@@ -454,6 +494,20 @@ HANDLE_COLOR = "white"
 CONNECTION_COLOR = "#b0b0b0"
 CONNECTION_WIDTH = 1.5
 CONNECTION_SELECTED_WIDTH = 2.5
+
+# File menu colors (_build_menu) -- a plain tk.Menu on Windows otherwise
+# falls back to the OS's own native menu chrome, which draws a DISABLED
+# entry (e.g. Save while self._vme_active or not self._dirty -- see
+# _update_file_menu_state) with a light, embossed 3D style meant for a
+# light-colored menu; against this app's dark theme that reads as a
+# stray light box around the disabled entry rather than a dim, greyed-
+# out one. Setting explicit colors switches Tk to its own (non-native)
+# flat menu rendering instead, which respects `disabledforeground`
+# properly. activebackground/activeforeground are the hover highlight.
+MENU_BG = PLOT_THEME["bg"]
+MENU_FG = PLOT_THEME["fg"]
+MENU_ACTIVE_BG = "#3a3a3a"
+MENU_DISABLED_FG = "#6e6e6e"
 
 # Marquee (rubber-band) select's own drag rectangle -- see
 # _on_canvas_press/_on_canvas_drag/_finish_marquee_select. Plain white
@@ -947,13 +1001,12 @@ class NetValidationError(ValueError):
     """Raised by _validate_shapes_connections instead of a plain
     ValueError, carrying `vertex_merge_error_slots` -- the {(shape_id,
     corner_index), ...} set of every corner involved in a vertex merge
-    error (a corner colliding with another corner of its own face,
-    both endpoints of each one found) -- alongside the usual
-    message, so on_save_clicked can ring them in the app (in
-    VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR) as well as naming them in the
-    messagebox. A plain `str(err)` still gives the same message a bare
-    ValueError would; only code that specifically wants the slots needs
-    to know this subclass exists."""
+    error (a corner colliding with another corner of its own face, both
+    endpoints of each one found) -- alongside the usual message.
+    Debug mode's dedup vertex display (_draw_dedup_vertex_labels) is the
+    app's own live consumer of this: it fills a corner's circle red iff
+    that corner's slot is in `vertex_merge_error_slots`. A plain
+    `str(err)` still gives the same message a bare ValueError would."""
 
     def __init__(self, message, vertex_merge_error_slots=frozenset()):
         super().__init__(message)
@@ -1090,11 +1143,15 @@ class InteractiveBuilderApp:
         self._rotate_state = None
         self._shape_photos = []  # keeps this redraw's PhotoImages alive (Tk drops GC'd ones)
         self._icon_photos = {}
-        # {(shape_id, corner_index), ...} -- corners a failed Save's
-        # vertex-merge-error check just implicated (see _export_faces_and_layout);
-        # _redraw rings each one in VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR, on top of
-        # everything else, until the next edit invalidates it.
-        self._vertex_merge_error_highlight = set()
+        # Whether the CURRENT self.shapes/self.connections has a vertex
+        # merge error right now -- see _refresh_vme_state, called after
+        # every edit that could change validity (not just at Save any
+        # more). Drives the bottom status message and disables Save/Save
+        # As (_update_file_menu_state) while True. Debug mode's own
+        # dedup vertex display (_draw_dedup_vertex_labels) independently
+        # re-validates to know which specific corners to ring red --
+        # this flag is only ever the plain yes/no answer.
+        self._vme_active = False
 
         # [{"id", "a_shape", "a_edge", "b_shape", "b_edge"}, ...] -- edge
         # indices are stable across a shape's own move/rotation (they
@@ -1140,13 +1197,25 @@ class InteractiveBuilderApp:
         # File currently associated with the canvas (a successful Load
         # or Save/Save As sets this; File > New clears it back to None)
         # -- shown in the window title (_update_title) and what Ctrl+S
-        # saves straight to without asking, see on_save_clicked. `_dirty`
-        # tracks whether anything's changed since the last Load/Save/New
-        # -- see _push_undo/_commit_undoable_change/on_undo_key/
-        # on_redo_key for where it's set, and _confirm_discard_unsaved
-        # for what actually reads it (File > New, closing the window).
+        # saves straight to without asking, see on_save_clicked.
         self.current_save_path = None
-        self._dirty = False
+        # "Unsaved changes" tracking, Ctrl+Z/Ctrl+Y-aware: self._revision
+        # is the LIVE canvas's own revision number, self._next_revision
+        # is the next brand-new number a genuine edit will be given
+        # (_record_undo_snapshot), and self._saved_revision is whatever
+        # self._revision was at the last Load/Save/New. `_dirty` (a
+        # read-only property, below) is simply self._revision !=
+        # self._saved_revision. Undo/redo restore a snapshot's own
+        # ORIGINAL revision number rather than assigning a fresh one
+        # (_snapshot_state/_restore_snapshot), so undoing every change
+        # made since the last save lands back on that exact number and
+        # correctly reads as clean again -- a plain "any edit happened"
+        # boolean can't tell that apart from a genuinely new, different
+        # state that just happens to come after the same number of
+        # undo/redo steps.
+        self._revision = 0
+        self._next_revision = 1
+        self._saved_revision = 0
 
         # View transform: screen = world * view_scale + (offset_x, offset_y).
         # offset starts at (0, 0) and is recentred once, on the canvas's
@@ -1159,6 +1228,18 @@ class InteractiveBuilderApp:
         self._palette_canvases = {}
         self._build_ui()
         self._update_title()
+        self._refresh_vme_state()
+
+    @property
+    def _dirty(self):
+        """True iff the live canvas differs from whatever was live at
+        the last Load/Save/New -- see self._revision's own comment in
+        __init__. Read-only: every place that used to just set a
+        `self._dirty` flag now updates self._revision/_saved_revision
+        instead, so this always reflects the real comparison rather
+        than a separately-maintained bit that could drift out of sync
+        with it."""
+        return self._revision != self._saved_revision
 
     def _scale_ui_fonts(self):
         """Scales every named Tk/ttk font by UI_FONT_SCALE, once at
@@ -1177,6 +1258,15 @@ class InteractiveBuilderApp:
 
     def _build_ui(self):
         self._build_menu()
+
+        # Bottom status bar -- packed BEFORE the left/canvas frames below
+        # so it claims a full-width strip at the bottom of the window
+        # first, with the palette/drawing area filling whatever's left
+        # above it. Says whether the current net has a vertex merge
+        # error right now (_update_status_bar, called by
+        # _refresh_vme_state after every edit that could change it).
+        self.status_label = ttk.Label(self.root, anchor="w", padding=(10, 4))
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
 
         left = ttk.Frame(self.root, padding=12)
         left.pack(side=tk.LEFT, fill=tk.Y)
@@ -1225,13 +1315,23 @@ class InteractiveBuilderApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit_request)
 
     def _build_menu(self):
-        menubar = tk.Menu(self.root)
-        file_menu = tk.Menu(menubar, tearoff=False)
-        file_menu.add_command(label="New", command=self.on_new_clicked)
-        file_menu.add_command(label="Load...", command=self.on_load_clicked)
-        file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.on_save_clicked)
-        file_menu.add_command(label="Save As...", command=self.on_save_as_clicked)
-        menubar.add_cascade(label="File", menu=file_menu)
+        # Explicit colors (see MENU_BG's own comment) on BOTH the menu
+        # bar and the dropdown -- otherwise only one of the two ends up
+        # with Tk's own flat rendering and the other keeps the native
+        # (here, light-embossed-disabled) look.
+        menu_kwargs = dict(bg=MENU_BG, fg=MENU_FG, activebackground=MENU_ACTIVE_BG,
+                            activeforeground=MENU_FG, disabledforeground=MENU_DISABLED_FG)
+        menubar = tk.Menu(self.root, **menu_kwargs)
+        self.file_menu = tk.Menu(menubar, tearoff=False, **menu_kwargs)
+        self.file_menu.add_command(label="New", command=self.on_new_clicked)
+        self.file_menu.add_command(label="Load...", command=self.on_load_clicked)
+        # Indices into self.file_menu, for _update_file_menu_state to
+        # enable/disable Save/Save As without hunting for them by label.
+        self._save_menu_index = self.file_menu.index(tk.END) + 1
+        self.file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.on_save_clicked)
+        self._save_as_menu_index = self.file_menu.index(tk.END) + 1
+        self.file_menu.add_command(label="Save As...", command=self.on_save_as_clicked)
+        menubar.add_cascade(label="File", menu=self.file_menu)
         self.root.config(menu=menubar)
 
     def _build_palette_entry(self, parent, n):
@@ -1368,11 +1468,13 @@ class InteractiveBuilderApp:
     def _remove_shape(self, shape_id):
         """Deletes the shape and every connection touching it -- a
         connection with a missing endpoint has nothing left to draw a
-        line between, so it can't be left dangling."""
+        line between, so it can't be left dangling. Doesn't itself
+        refresh the vertex-merge-error state -- callers that delete
+        several shapes in a loop (_on_delete_key) do that once,
+        afterward, rather than re-validating after every single one."""
         self.connections = [c for c in self.connections
                              if c["a_shape"] != shape_id and c["b_shape"] != shape_id]
         self.shapes = [s for s in self.shapes if s["id"] != shape_id]
-        self._vertex_merge_error_highlight = set()
 
     # ---- palette ----
 
@@ -1396,7 +1498,10 @@ class InteractiveBuilderApp:
         associated with it (window title, Ctrl+S's own direct-save
         target -- see current_save_path), after first checking there's
         nothing unsaved that this would silently throw away (see
-        _confirm_discard_unsaved)."""
+        _confirm_discard_unsaved). The fresh empty canvas is itself the
+        new "nothing unsaved" baseline (self._saved_revision), same as a
+        successful Load/Save -- so a blank canvas never itself warrants
+        an unsaved-changes prompt."""
         if not self._confirm_discard_unsaved():
             return
         if self.shapes or self.connections:
@@ -1407,8 +1512,9 @@ class InteractiveBuilderApp:
         self.selected_connection_id = None
         self._drag_state = None
         self.current_save_path = None
-        self._dirty = False
+        self._saved_revision = self._revision
         self._update_title()
+        self._refresh_vme_state()
         self._redraw()
 
     def _on_quit_request(self):
@@ -1442,14 +1548,68 @@ class InteractiveBuilderApp:
         """Single source of truth for the window title: the base name,
         plus the associated file's own basename in brackets if there is
         one (current_save_path, set by a successful Load/Save/Save As
-        and cleared by New), plus the debug-mode suffix if that's on.
-        Called wherever any of those change."""
+        and cleared by New), plus a "*" if self._dirty (unsaved changes
+        -- see its own comment in __init__), plus the debug-mode suffix
+        if that's on. Called wherever any of those change."""
         title = "Interactive Builder"
         if self.current_save_path is not None:
             title += f" [{os.path.basename(self.current_save_path)}]"
+        if self._dirty:
+            title += " *"
         if self.debug_mode:
             title += " (debug mode)"
         self.root.title(title)
+
+    def _update_status_bar(self):
+        """Single source of truth for the bottom status message --
+        "everything is good" while self._vme_active is False, an
+        explicit warning naming a vertex merge error otherwise. Called
+        by _refresh_vme_state whenever that flag might have changed."""
+        if self._vme_active:
+            self.status_label.config(
+                text="Vertex merge error(s) detected. Fix before saving.",
+                foreground=STATUS_COLORS["error"])
+        else:
+            self.status_label.config(
+                text="Everything is good.", foreground=STATUS_COLORS["success"])
+
+    def _update_file_menu_state(self):
+        """Save is enabled only while there's something new to write
+        (self._dirty) AND the net is currently valid (not
+        self._vme_active) -- greyed out otherwise, since there's either
+        nothing to save or nothing SAFE to save. Save As has no reason
+        to care about self._dirty (saving a copy under a new name is
+        useful even with nothing changed since the last save), but still
+        refuses a currently-invalid net, same as Save. Called by
+        _refresh_vme_state (after every edit that could change either
+        flag) and directly by _save_to_path (right after a successful
+        save flips self._dirty to False, without going through
+        _refresh_vme_state itself)."""
+        self.file_menu.entryconfig(
+            self._save_menu_index, state=tk.NORMAL if (self._dirty and not self._vme_active) else tk.DISABLED)
+        self.file_menu.entryconfig(
+            self._save_as_menu_index, state=tk.DISABLED if self._vme_active else tk.NORMAL)
+
+    def _refresh_vme_state(self):
+        """Re-validates the CURRENT self.shapes/self.connections and
+        updates self._vme_active, the status bar, and Save/Save As's
+        enabled state accordingly -- call this after any edit that could
+        change whether the net has a vertex merge error (VME): making or
+        deleting a connection, deleting a shape, flipping a shape,
+        undo/redo, paste, New, Load. Only ever the plain yes/no answer --
+        WHICH corners are actually conflicting is debug mode's own
+        concern (_draw_dedup_vertex_labels re-validates independently,
+        live, on every redraw, to ring the specific ones red), not
+        something this needs to compute or store for release mode,
+        which shows nothing more specific than the status bar text."""
+        try:
+            _validate_shapes_connections(self.shapes, self.connections)
+        except NetValidationError:
+            self._vme_active = True
+        else:
+            self._vme_active = False
+        self._update_status_bar()
+        self._update_file_menu_state()
 
     # ---- File menu: new/load/save ----
 
@@ -1465,24 +1625,18 @@ class InteractiveBuilderApp:
         state, rather than falling back to a fresh BFS layout plus
         re-derived (always-unflipped) connections, and a "view" section
         with the current zoom level so re-Loading it doesn't reset back
-        to the default zoom. A vertex-merge-error failure
-        (NetValidationError) also rings every implicated corner in
-        VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR (_redraw), so the problem is visible on
-        the canvas itself, not just named in the messagebox text --
-        cleared again by the next edit (see self._vertex_merge_error_highlight's
-        own comment in __init__). Returns True on success, False on a
-        validation or I/O failure (already reported via messagebox) --
-        callers that need to know whether the save actually happened
-        (_confirm_discard_unsaved, before letting New/quitting throw
-        away unsaved work) check this."""
+        to the default zoom. The NetValidationError branch below should
+        be unreachable in normal use -- on_save_clicked/on_save_as_clicked
+        already refuse to call this at all while self._vme_active (see
+        their own docstrings) -- kept only as a defensive fallback.
+        Returns True on success, False on a validation or I/O failure
+        (already reported via messagebox) -- callers that need to know
+        whether the save actually happened (_confirm_discard_unsaved,
+        before letting New/quitting throw away unsaved work) check
+        this."""
         try:
             faces, net_layout, builder_connections = self._export_faces_and_layout()
-        except NetValidationError as e:
-            self._vertex_merge_error_highlight = e.vertex_merge_error_slots
-            self._redraw()
-            messagebox.showerror("Save failed", str(e))
-            return False
-        except ValueError as e:
+        except (NetValidationError, ValueError) as e:
             messagebox.showerror("Save failed", str(e))
             return False
         spec = {"name": os.path.splitext(os.path.basename(path))[0], "faces": faces,
@@ -1495,18 +1649,27 @@ class InteractiveBuilderApp:
             messagebox.showerror("Save failed", str(e))
             return False
         self.current_save_path = path
-        self._dirty = False
+        self._saved_revision = self._revision
         self._update_title()
+        self._update_file_menu_state()
         return True
 
     def on_save_as_clicked(self):
         """File > Save As... -- always asks where to save (unlike
         File > Save/Ctrl+S, which reuses current_save_path if there is
         one), then associates that file with the canvas going forward.
-        Returns True on a successful save, False if the dialog was
-        cancelled or the save itself failed (see _save_to_path) --
+        Refuses outright, with a messagebox and no file dialog, while
+        self._vme_active -- Save As is greyed out in the File menu for
+        the same reason (_update_file_menu_state), but Ctrl+S/a direct
+        call here would otherwise bypass that. Returns True on a
+        successful save, False if the dialog was cancelled, a VME
+        blocked it, or the save itself failed (see _save_to_path) --
         _confirm_discard_unsaved relies on this to know whether it's
         actually safe to then discard/replace the canvas."""
+        if self._vme_active:
+            messagebox.showerror(
+                "Can't save", "Vertex merge error(s) detected. Fix before saving.")
+            return False
         path = filedialog.asksaveasfilename(
             title="Save net as", initialdir=str(STRETCHY_NETS_DIR), defaultextension=".json",
             filetypes=[("Net JSON", "*.json"), ("All files", "*.*")])
@@ -1519,10 +1682,21 @@ class InteractiveBuilderApp:
         already associated with the canvas (current_save_path, set by a
         prior Load or Save As), with no dialog; falls back to Save As if
         nothing's associated with it yet (nowhere to save "directly" to,
-        same as any other app's Save the first time). Returns True/False
-        like on_save_as_clicked, for the same reason."""
+        same as any other app's Save the first time) -- which itself
+        refuses while self._vme_active, so this doesn't need its own
+        separate check for that case. Also refuses directly when there's
+        nothing new to save (self._dirty is False) -- Save is greyed out
+        in the File menu then too (_update_file_menu_state), but Ctrl+S
+        would otherwise still fire. Returns True/False like
+        on_save_as_clicked, for the same reason."""
         if self.current_save_path is None:
             return self.on_save_as_clicked()
+        if self._vme_active:
+            messagebox.showerror(
+                "Can't save", "Vertex merge error(s) detected. Fix before saving.")
+            return False
+        if not self._dirty:
+            return True
         return self._save_to_path(self.current_save_path)
 
     def _export_faces_and_layout(self):
@@ -1544,16 +1718,16 @@ class InteractiveBuilderApp:
         ValueError subclass, from _validate_shapes_connections) if
         self.shapes' CURRENT "flipped" bits (see module docstring's
         "Flip" section -- set directly by the user, never inferred)
-        don't produce a valid mesh -- the ONLY place this ever gets
-        checked (see module docstring: every corner is deliberately
-        treated as its own, separate vertex while editing, no matter
-        what any OTHER connection's own merge already implies about it;
-        only Save actually computes the full picture and validates it,
-        once, as a whole). Validated in "vSHAPE.CORNER" terms, the same
-        live identity debug mode shows, before _faces_from_shapes ever
-        renumbers anything for export, so a failed Save's error names
-        corners the user can actually go find (and un-flip, if that's
-        the fix) on screen."""
+        don't produce a valid mesh -- should be unreachable in normal
+        use, since Save/Save As already refuse to call this while
+        self._vme_active (_refresh_vme_state re-runs the same check
+        live after every edit -- see module docstring's "Edge
+        connections" section), but kept here as the defensive,
+        authoritative check right before a file is actually written.
+        Validated in "vSHAPE.CORNER" terms, the same live identity debug
+        mode shows, before _faces_from_shapes ever renumbers anything
+        for export, so a failed check's error names corners the user can
+        actually go find (and un-flip, if that's the fix) on screen."""
         _validate_shapes_connections(self.shapes, self.connections)
         faces = _faces_from_shapes(self.shapes, self.connections)
         net_layout = [{"cx": s["cx"], "cy": s["cy"], "rotation": s["rotation"],
@@ -1583,8 +1757,9 @@ class InteractiveBuilderApp:
             self._load_faces(faces, spec.get("net_layout"), view_scale,
                               spec.get("builder_connections"))
             self.current_save_path = path
-            self._dirty = False
+            self._saved_revision = self._revision
             self._update_title()
+            self._refresh_vme_state()
             if degenerate_edges:
                 # A malformed file (from an earlier, buggy Save -- see
                 # _degenerate_edge_faces' own docstring) still loads, but
@@ -1650,7 +1825,6 @@ class InteractiveBuilderApp:
         self._drag_state = None
         self._marquee_start = None
         self._marquee_current = None
-        self._vertex_merge_error_highlight = set()
 
         layout_ok = net_layout is not None and len(net_layout) == len(faces)
         exact_connections_ok = layout_ok and builder_connections is not None
@@ -1860,7 +2034,7 @@ class InteractiveBuilderApp:
                 "b_shape": self._hover_shape_id, "b_edge": self._hover_edge_index,
             })
             self._next_connection_id += 1
-            self._vertex_merge_error_highlight = set()
+            self._refresh_vme_state()
             # A freshly-made connection deselects everything -- the
             # origin shape was selected (that's how its handle was
             # showing in the first place), but the connection itself is
@@ -1941,12 +2115,13 @@ class InteractiveBuilderApp:
             for shape_id in self.selected_ids:
                 self._remove_shape(shape_id)
             self.selected_ids = set()
+            self._refresh_vme_state()
             self._redraw()
         elif self.selected_connection_id is not None:
             self._push_undo()
             self.connections = [c for c in self.connections if c["id"] != self.selected_connection_id]
             self.selected_connection_id = None
-            self._vertex_merge_error_highlight = set()
+            self._refresh_vme_state()
             self._redraw()
 
     def _on_flip_key(self, _event=None):
@@ -1957,17 +2132,17 @@ class InteractiveBuilderApp:
         it was clicked; only which side of the flipped shape(s) reads as
         "outside" (solid fill vs. hatching -- see _draw_shape/
         _rasterize_polygon) and how their edges' TRUE direction is
-        interpreted at Save (_true_edge_slots) changes. Clears
-        self._vertex_merge_error_highlight like any other edit -- a highlight
-        from a previous failed Save no longer reflects the current
-        (about to change) flip state."""
+        interpreted at Save/live validation (_true_edge_slots) changes.
+        Re-checks for a vertex merge error afterward (_refresh_vme_state)
+        -- flipping is exactly as likely to introduce or fix one as
+        making/deleting a connection is."""
         if not self.selected_ids:
             return
         self._push_undo()
         for shape in self.shapes:
             if shape["id"] in self.selected_ids:
                 shape["flipped"] = not shape["flipped"]
-        self._vertex_merge_error_highlight = set()
+        self._refresh_vme_state()
         self._redraw()
 
     def _on_escape_key(self, _event=None):
@@ -1995,13 +2170,19 @@ class InteractiveBuilderApp:
 
     def _snapshot_state(self):
         """A deep-copied {"shapes", "connections", "_next_shape_id",
-        "_next_connection_id"} -- everything Ctrl+Z/Ctrl+Y need to
-        restore the canvas exactly, deep-copied so neither the snapshot
-        nor later live edits can ever mutate the other's data (every
-        value here is a plain int/float/bool/dict/list, so this is cheap
-        and never needs anything smarter than copy.deepcopy)."""
+        "_next_connection_id", "_rev"} -- everything Ctrl+Z/Ctrl+Y need
+        to restore the canvas exactly, deep-copied so neither the
+        snapshot nor later live edits can ever mutate the other's data
+        (every value here is a plain int/float/bool/dict/list, so this
+        is cheap and never needs anything smarter than copy.deepcopy).
+        "_rev" is the live canvas's OWN revision number at the moment of
+        capture (self._revision -- see its own comment in __init__) --
+        restoring it, rather than assigning a fresh one, is what lets
+        undoing back to a previously-saved state read as no-longer-dirty
+        again."""
         return {"shapes": copy.deepcopy(self.shapes), "connections": copy.deepcopy(self.connections),
-                "_next_shape_id": self._next_shape_id, "_next_connection_id": self._next_connection_id}
+                "_next_shape_id": self._next_shape_id, "_next_connection_id": self._next_connection_id,
+                "_rev": self._revision}
 
     def _restore_snapshot(self, snap):
         """The inverse of _snapshot_state -- also deep-copies OUT of the
@@ -2015,6 +2196,7 @@ class InteractiveBuilderApp:
         self.connections = copy.deepcopy(snap["connections"])
         self._next_shape_id = snap["_next_shape_id"]
         self._next_connection_id = snap["_next_connection_id"]
+        self._revision = snap["_rev"]
 
     def _record_undo_snapshot(self, snap):
         """Pushes an ALREADY-CAPTURED snapshot onto the undo stack
@@ -2022,17 +2204,25 @@ class InteractiveBuilderApp:
         full) and clears the redo stack -- a fresh action, like any
         ordinary undo system, discards whatever redo history existed
         before it, since it's no longer the alternate future that
-        history led to. This is also the single place that marks the
-        canvas dirty (see self._dirty's own comment in __init__) -- both
-        _push_undo and _commit_undoable_change funnel through here, so
-        every REAL change (as opposed to a plain click that moved
-        nothing) is covered without needing to set it separately at each
-        call site."""
+        history led to. This is also the single place that gives the
+        LIVE canvas a fresh revision number (see self._revision's own
+        comment in __init__, which is what self._dirty actually reads)
+        -- both _push_undo and _commit_undoable_change funnel through
+        here, so every REAL change (as opposed to a plain click that
+        moved nothing) is covered without needing to do it separately at
+        each call site. Also refreshes the title (for the "*") and the
+        vertex-merge-error state (_refresh_vme_state) -- harmless to
+        recompute even for an edit (like a drag) that can't actually
+        change validity, and it means most call sites don't need to
+        remember to do either themselves."""
         self._undo_stack.append(snap)
         if len(self._undo_stack) > UNDO_STACK_LIMIT:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
-        self._dirty = True
+        self._revision = self._next_revision
+        self._next_revision += 1
+        self._update_title()
+        self._refresh_vme_state()
 
     def _push_undo(self):
         """Call BEFORE an instantaneous action (drop, delete, make a
@@ -2078,7 +2268,12 @@ class InteractiveBuilderApp:
         onto the redo stack first so Ctrl+Y can step back forward through
         it. No-op with nothing to undo. Clears the selection rather than
         trying to preserve it -- the restored canvas may not even
-        contain whatever used to be selected."""
+        contain whatever used to be selected. _restore_snapshot puts
+        self._revision back to whatever it was at the restored point
+        (see its own comment), so self._dirty (and the title's "*")
+        automatically read correctly -- undoing all the way back to the
+        last save reads as no-longer-dirty, not just "some undo
+        happened"."""
         if not self._undo_stack:
             return
         self._redo_stack.append(self._snapshot_state())
@@ -2088,8 +2283,8 @@ class InteractiveBuilderApp:
         self._drag_state = None
         self._rotate_state = None
         self._connection_pending = None
-        self._vertex_merge_error_highlight = set()
-        self._dirty = True
+        self._update_title()
+        self._refresh_vme_state()
         self._redraw()
 
     def on_redo_key(self, _event=None):
@@ -2107,8 +2302,8 @@ class InteractiveBuilderApp:
         self._drag_state = None
         self._rotate_state = None
         self._connection_pending = None
-        self._vertex_merge_error_highlight = set()
-        self._dirty = True
+        self._update_title()
+        self._refresh_vme_state()
         self._redraw()
 
     def on_copy_key(self, _event=None):
@@ -2383,33 +2578,14 @@ class InteractiveBuilderApp:
         if self.debug_mode and self._cursor_screen is not None:
             self._draw_debug_vertex_label()
 
-        self._draw_vertex_merge_error_highlight()
+        if self.debug_mode:
+            self._draw_dedup_vertex_labels()
 
         if self._marquee_start is not None:
             x0, y0 = self._marquee_start
             x1, y1 = self._marquee_current
             self.canvas.create_rectangle(x0, y0, x1, y1, outline=MARQUEE_OUTLINE_COLOR,
                                           dash=MARQUEE_DASH, width=1.5)
-
-    def _draw_vertex_merge_error_highlight(self):
-        """Rings every corner in self._vertex_merge_error_highlight (set by a
-        failed Save -- see on_save_clicked/NetValidationError) in
-        VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR, regardless of debug mode -- this is
-        error feedback about the CURRENT state of the canvas, not a
-        debug-only diagnostic, so it stays visible even with debug mode
-        off, until the next edit clears it (self._vertex_merge_error_highlight's
-        own comment in __init__ lists every place that happens)."""
-        if not self._vertex_merge_error_highlight:
-            return
-        shapes_by_id = {s["id"]: s for s in self.shapes}
-        for shape_id, corner in self._vertex_merge_error_highlight:
-            shape = shapes_by_id.get(shape_id)
-            if shape is None or corner >= shape["n"]:
-                continue
-            vx, vy = self._shape_world_vertices(shape)[corner]
-            sx, sy = self._world_to_screen(vx, vy)
-            self.canvas.create_oval(sx - 7, sy - 7, sx + 7, sy + 7,
-                                     outline=VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR, width=2.5)
 
     def _draw_debug_vertex_label(self):
         """Debug mode only ("d" key): finds the shape VERTEX (a corner,
@@ -2459,6 +2635,47 @@ class InteractiveBuilderApp:
         self._shape_photos.append(photo)  # keep alive -- Tk drops a GC'd PhotoImage
         self.canvas.create_image(box_left, box_top, anchor="nw", image=photo)
         self.canvas.create_text(sx, sy - 12, text=label, fill="white", anchor="s", font=font)
+
+    def _draw_dedup_vertex_labels(self):
+        """Debug mode's always-on dedup vertex display (no separate
+        toggle): labels EVERY shape's EVERY corner with its dedup GROUP
+        number, white text on a small filled circle -- unlike
+        _draw_debug_vertex_label (one corner, on hover, by its OWN
+        address), two corners already merged to the same vertex via
+        _vertex_roots show the SAME number here, so a whole net's dedup
+        structure is visible at a glance rather than one corner at a
+        time. A corner currently part of a genuine vertex merge error
+        (re-validated independently, live, right here -- see
+        _validate_shapes_connections' own `vertex_merge_error_slots`,
+        NOT whatever self._vme_active last cached, so this is always
+        exactly current) fills red instead of the usual black. Numbers
+        are assigned fresh on every redraw, in shape/corner visiting
+        order (same convention _faces_from_shapes uses for its own,
+        separate export-time numbering) -- a display convenience
+        recomputed from the CURRENT self.shapes/self.connections each
+        time, not a stored id, so a connection made/deleted or a shape
+        flipped is reflected the next redraw with no separate
+        invalidation step needed."""
+        roots = _vertex_roots(self.shapes, self.connections)
+        try:
+            _validate_shapes_connections(self.shapes, self.connections)
+            conflicting_slots = frozenset()
+        except NetValidationError as e:
+            conflicting_slots = e.vertex_merge_error_slots
+        group_numbers = {}
+        font = ("TkDefaultFont", 8, "bold")
+        r = DEDUP_VERTEX_RADIUS
+        for shape in self.shapes:
+            for corner, (vx, vy) in enumerate(self._shape_world_vertices(shape)):
+                slot = (shape["id"], corner)
+                root = roots[slot]
+                if root not in group_numbers:
+                    group_numbers[root] = len(group_numbers)
+                sx, sy = self._world_to_screen(vx, vy)
+                bg = DEDUP_VERTEX_CONFLICT_BG if slot in conflicting_slots else DEDUP_VERTEX_BG
+                self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill=bg, outline="")
+                self.canvas.create_text(sx, sy, text=str(group_numbers[root]),
+                                         fill=DEDUP_VERTEX_FG, font=font)
 
 
 def main():
