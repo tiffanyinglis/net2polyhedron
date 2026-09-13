@@ -182,12 +182,14 @@ Interaction model:
   connectable target are local, unambiguous facts about the ONE edge
   being clicked: it isn't already joined (an edge can only ever be
   joined once), and it isn't on the pending connection's own origin
-  shape (no shape can connect to itself). Neither depends on what any
+  shape -- connecting a shape to one of its own other edges isn't
+  supported yet (planned for later; needed for a shape like a leg that
+  folds back onto itself). Neither depends on what any
   OTHER connection elsewhere happens to imply. An EARLIER version also
   ran a full trial merge (union-find over every corner, following every
   connection transitively) before allowing a connection to complete, and
   rejected it live if that merge would force two different corners of
-  some face to collapse into one vertex (a self-loop) -- this sounded
+  some face to collapse into one vertex (a vertex merge error) -- this sounded
   right but backfired in practice: two individually-free edges that
   LOOKED like an obviously fine, ordinary connection got silently
   rejected because of what some OTHER, unrelated connection elsewhere
@@ -197,7 +199,7 @@ Interaction model:
   Treating two corners as fully, physically identified with each other
   during EDITING, rather than as a purely LOCAL, pairwise link each
   connection independently represents, was the actual bug. Full
-  structural validation (self-loop and duplicate-directed-edge checks,
+  structural validation (vertex-merge-error and duplicate-directed-edge checks,
   `_validate_shapes_connections`) now happens in exactly ONE place: Save
   (`_export_faces_and_layout`) -- the one moment the full transitive
   merge is the right thing to compute at all, since only then does
@@ -213,9 +215,9 @@ Interaction model:
   caused by one connection alone, so naming just the connection that
   happened to trip it, on its own, would leave a user unable to tell
   which of it or some earlier, already-accepted connection is the one
-  that's actually wrong. A self-loop specifically ALSO rings every
-  implicated corner right on the canvas, in `SELF_LOOP_HIGHLIGHT_COLOR`
-  (orange -- `_draw_self_loop_highlight`, from the `NetValidationError`
+  that's actually wrong. A vertex merge error specifically ALSO rings every
+  implicated corner right on the canvas, in `VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR`
+  (orange -- `_draw_vertex_merge_error_highlight`, from the `NetValidationError`
   raised alongside the message), regardless of debug mode, until the
   next edit clears it -- so the problem is visible at a glance, not just
   named in the messagebox text. This is what actually lets a user go
@@ -270,9 +272,9 @@ Interaction model:
   shape is -- so the loaded file's own labelling and whatever gets
   exported on the next Save are never required or expected to match;
   only the LIVE `self.connections` at Save time decides that, computed
-  once, from scratch (`_faces_from_shapes`). A self-loop edge in the
+  once, from scratch (`_faces_from_shapes`). A degenerate edge in the
   source file
-  (two adjacent corners of one face sharing a vertex id -- only
+  (two adjacent corners of one face already sharing a vertex id -- only
   possible from a file an earlier, buggy version of this app saved) is
   never treated as a connection to itself; it's simply left unconnected,
   with a warning naming which face/vertex, so a malformed file still
@@ -439,11 +441,11 @@ CONNECTION_HIT_RADIUS = 6.0
 # exported vertex id is shown.
 DEBUG_VERTEX_HOVER_RADIUS = 10.0
 DEBUG_VERTEX_COLOR = "yellow"
-# A failed Save's self-loop check rings every implicated corner in this
-# color -- see NetValidationError/_export_faces_and_layout -- regardless
-# of debug mode, since this is error feedback a user needs to see even
-# with debug mode off.
-SELF_LOOP_HIGHLIGHT_COLOR = "orange"
+# A failed Save's vertex-merge-error check rings every implicated corner
+# in this color -- see NetValidationError/_export_faces_and_layout --
+# regardless of debug mode, since this is error feedback a user needs to
+# see even with debug mode off.
+VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR = "orange"
 # A handle's resting color, when its shape is neither selected nor the
 # current hover target of a pending connection -- SELECTION_OUTLINE_COLOR
 # is used instead in those two cases (see _redraw), so a handle reads as
@@ -733,17 +735,17 @@ def _infer_connections(faces):
     load_stretchy_mesh validates, but lenient rather than strict: an
     edge with no reverse partner (this app allows a still-unconnected
     edge; a fully-closed solver net never has one) is simply left
-    unconnected instead of raising. A SELF-LOOP edge (both endpoints the
+    unconnected instead of raising. A DEGENERATE edge (both endpoints the
     same vertex id -- only possible from a file saved by an earlier,
-    buggy version of this app; see _self_loop_faces) is skipped
+    buggy version of this app; see _degenerate_edge_faces) is skipped
     entirely rather than treated as its own reverse partner, which is
     what a naive directed-edge lookup would otherwise do: `(v, v)`'s
-    reverse is also `(v, v)`, so without this guard a self-loop edge
+    reverse is also `(v, v)`, so without this guard a degenerate edge
     would silently infer a connection from that edge to ITSELF (same
     face, same edge index on both ends) -- exactly the kind of
-    nonsensical entry _validate_faces exists to catch at Save, but there
-    was never any reason to let Load manufacture one in the first
-    place."""
+    nonsensical entry _validate_shapes_connections exists to catch at
+    Save, but there was never any reason to let Load manufacture one in
+    the first place."""
     directed = {}
     for fi, face in enumerate(faces):
         n = len(face)
@@ -875,18 +877,18 @@ def _faces_from_shapes(shapes, connections):
     return faces
 
 
-def _self_loop_faces(faces):
+def _degenerate_edge_faces(faces):
     """faces: vertex-id loops, as freshly read from a file (BEFORE
     _infer_connections has had a chance to skip anything). Returns
-    [(face_index, vertex_id), ...] for every SELF-LOOP edge found -- two
-    ADJACENT corners of one face sharing a vertex id, which can only
-    come from a file saved by an earlier, buggy version of this app (a
-    correctly-behaving Save can never produce one; see
-    _export_faces_and_layout/_validate_faces). Purely diagnostic: Load
-    calls this just to warn the user that edge(s) were left unconnected
-    on the way in, since _infer_connections silently skips them rather
-    than raising (a malformed file should still load, not block the
-    user from opening and fixing it)."""
+    [(face_index, vertex_id), ...] for every DEGENERATE edge found -- two
+    ADJACENT corners of one face already sharing a vertex id, which can
+    only come from a file saved by an earlier, buggy version of this app
+    (a correctly-behaving Save can never produce one; see
+    _export_faces_and_layout/_validate_shapes_connections). Purely
+    diagnostic: Load calls this just to warn the user that edge(s) were
+    left unconnected on the way in, since _infer_connections silently
+    skips them rather than raising (a malformed file should still load,
+    not block the user from opening and fixing it)."""
     problems = []
     for fi, face in enumerate(faces):
         n = len(face)
@@ -896,44 +898,14 @@ def _self_loop_faces(faces):
     return problems
 
 
-def _validate_faces(faces):
-    """faces: vertex-id loops about to be exported. Raises ValueError if
-    any face has a SELF-LOOP edge (two ADJACENT corners sharing one
-    vertex id -- geometrically two different points on that polygon,
-    never legitimately the same one) or any directed edge appears more
-    than once (the same rule load_stretchy_mesh itself enforces on
-    load). Both are symptoms of the SAME underlying mistake -- an edge
-    unioned with two different partners in _export_faces_and_layout,
-    which transitively merges unrelated vertices together -- rather than
-    something a valid net, open or closed, could ever produce; this is
-    exactly what corrupted data/input/stretchy_nets/hippo.json before
-    _hit_test_any_edge_handle started refusing to let an already-joined
-    edge be clicked again (see its own docstring). Checking again here,
-    right before writing the file, catches it even if that guard is ever
-    bypassed some other way (a loaded file with the same problem,
-    re-saved unchanged, for instance)."""
-    problems = []
-    counts = {}
-    for face in faces:
-        n = len(face)
-        for i in range(n):
-            v, w = face[i], face[(i + 1) % n]
-            if v == w:
-                problems.append(f"face {face} has a self-loop edge at vertex {v}")
-            counts[(v, w)] = counts.get((v, w), 0) + 1
-    problems += [f"edge {v}->{w} appears {c} times (need at most once)"
-                 for (v, w), c in counts.items() if c > 1]
-    if problems:
-        raise ValueError("Not a valid net, refusing to save:\n  " + "\n  ".join(problems))
-
-
 def _connection_chain(shapes, connections, slot_a, slot_b):
     """Returns the shortest list of connections (as {"a_shape", "a_edge",
     "b_shape", "b_edge"} dicts, in traversal order) whose unions link
     slot_a to slot_b -- i.e. the actual reason _vertex_roots gave them
     the same root, spelled out as the specific chain of edge-to-edge
     connections responsible, rather than just the shared root itself.
-    A self-loop or duplicate-edge conflict is never caused by one
+    A vertex merge error (a corner collapsing onto itself, or a duplicate
+    directed edge) is never caused by one
     connection in isolation (see _validate_shapes_connections) -- it's
     always this transitive chain, possibly running through many other
     shapes, that the two ends of some offending edge got swept into.
@@ -973,23 +945,28 @@ def _connection_chain(shapes, connections, slot_a, slot_b):
 
 class NetValidationError(ValueError):
     """Raised by _validate_shapes_connections instead of a plain
-    ValueError, carrying `self_loop_slots` -- the {(shape_id,
-    corner_index), ...} set of every corner involved in a self-loop
-    edge (both endpoints of each one found) -- alongside the usual
+    ValueError, carrying `vertex_merge_error_slots` -- the {(shape_id,
+    corner_index), ...} set of every corner involved in a vertex merge
+    error (a corner colliding with another corner of its own face,
+    both endpoints of each one found) -- alongside the usual
     message, so on_save_clicked can ring them in the app (in
-    SELF_LOOP_HIGHLIGHT_COLOR) as well as naming them in the
+    VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR) as well as naming them in the
     messagebox. A plain `str(err)` still gives the same message a bare
     ValueError would; only code that specifically wants the slots needs
     to know this subclass exists."""
 
-    def __init__(self, message, self_loop_slots=frozenset()):
+    def __init__(self, message, vertex_merge_error_slots=frozenset()):
         super().__init__(message)
-        self.self_loop_slots = self_loop_slots
+        self.vertex_merge_error_slots = vertex_merge_error_slots
 
 
 def _validate_shapes_connections(shapes, connections):
-    """shapes/connections: as _vertex_roots. Same two checks as
-    _validate_faces (self-loop / duplicate-directed-edge) -- but raises
+    """shapes/connections: as _vertex_roots. As _vertex_roots unions
+    connected corners together, two checks can fail: a face's own two
+    (different) corners ending up merged into the same vertex (a VERTEX
+    MERGE ERROR), or two different edges both resolving to the same
+    directed vertex pair (a duplicate-directed-edge conflict -- the same
+    rule load_stretchy_mesh itself enforces on load). Raises
     a NetValidationError (see its own docstring) phrased in terms of the
     LIVE "vSHAPE.CORNER" vertex identity _draw_debug_vertex_label
     already shows a user while editing (the root slot from
@@ -1029,7 +1006,7 @@ def _validate_shapes_connections(shapes, connections):
         return f" (traced through: {steps})"
 
     problems = []
-    self_loop_slots = set()
+    vertex_merge_error_slots = set()
     counts = {}
     for shape in shapes:
         n, sid = shape["n"], shape["id"]
@@ -1044,9 +1021,9 @@ def _validate_shapes_connections(shapes, connections):
             if v == w:
                 problems.append(
                     f"shape {sid} edge {i} (corners {slot_v[1]}->{slot_w[1]}) "
-                    f"is a self-loop at {vlabel(v)}{chain_text(slot_v, slot_w)}")
-                self_loop_slots.add(slot_v)
-                self_loop_slots.add(slot_w)
+                    f"already merges to the same vertex {vlabel(v)}{chain_text(slot_v, slot_w)}")
+                vertex_merge_error_slots.add(slot_v)
+                vertex_merge_error_slots.add(slot_w)
             counts.setdefault((v, w), []).append((sid, i, slot_v))
     for (v, w), edges in counts.items():
         if len(edges) > 1:
@@ -1058,7 +1035,7 @@ def _validate_shapes_connections(shapes, connections):
                 f"({where}); need at most once{chain_text(first_slot, second_slot)}")
     if problems:
         raise NetValidationError(
-            "Not a valid net, refusing to save:\n  " + "\n  ".join(problems), self_loop_slots)
+            "Not a valid net, refusing to save:\n  " + "\n  ".join(problems), vertex_merge_error_slots)
 
 
 class InteractiveBuilderApp:
@@ -1114,10 +1091,10 @@ class InteractiveBuilderApp:
         self._shape_photos = []  # keeps this redraw's PhotoImages alive (Tk drops GC'd ones)
         self._icon_photos = {}
         # {(shape_id, corner_index), ...} -- corners a failed Save's
-        # self-loop check just implicated (see _export_faces_and_layout);
-        # _redraw rings each one in SELF_LOOP_HIGHLIGHT_COLOR, on top of
+        # vertex-merge-error check just implicated (see _export_faces_and_layout);
+        # _redraw rings each one in VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR, on top of
         # everything else, until the next edit invalidates it.
-        self._self_loop_highlight = set()
+        self._vertex_merge_error_highlight = set()
 
         # [{"id", "a_shape", "a_edge", "b_shape", "b_edge"}, ...] -- edge
         # indices are stable across a shape's own move/rotation (they
@@ -1322,7 +1299,7 @@ class InteractiveBuilderApp:
         second time (see its own docstring for why: connecting the same
         edge twice is what corrupted data/input/stretchy_nets/hippo.json
         -- a single edge unioned with two different partners transitively
-        merged unrelated vertices together, producing self-loop and
+        merged unrelated vertices together, producing vertex-merge and
         duplicate-directed-edge errors far from where the mistake was
         actually made)."""
         joined = set()
@@ -1395,7 +1372,7 @@ class InteractiveBuilderApp:
         self.connections = [c for c in self.connections
                              if c["a_shape"] != shape_id and c["b_shape"] != shape_id]
         self.shapes = [s for s in self.shapes if s["id"] != shape_id]
-        self._self_loop_highlight = set()
+        self._vertex_merge_error_highlight = set()
 
     # ---- palette ----
 
@@ -1488,11 +1465,11 @@ class InteractiveBuilderApp:
         state, rather than falling back to a fresh BFS layout plus
         re-derived (always-unflipped) connections, and a "view" section
         with the current zoom level so re-Loading it doesn't reset back
-        to the default zoom. A self-loop failure
+        to the default zoom. A vertex-merge-error failure
         (NetValidationError) also rings every implicated corner in
-        SELF_LOOP_HIGHLIGHT_COLOR (_redraw), so the problem is visible on
+        VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR (_redraw), so the problem is visible on
         the canvas itself, not just named in the messagebox text --
-        cleared again by the next edit (see self._self_loop_highlight's
+        cleared again by the next edit (see self._vertex_merge_error_highlight's
         own comment in __init__). Returns True on success, False on a
         validation or I/O failure (already reported via messagebox) --
         callers that need to know whether the save actually happened
@@ -1501,7 +1478,7 @@ class InteractiveBuilderApp:
         try:
             faces, net_layout, builder_connections = self._export_faces_and_layout()
         except NetValidationError as e:
-            self._self_loop_highlight = e.self_loop_slots
+            self._vertex_merge_error_highlight = e.vertex_merge_error_slots
             self._redraw()
             messagebox.showerror("Save failed", str(e))
             return False
@@ -1601,24 +1578,24 @@ class InteractiveBuilderApp:
             faces = spec["faces"]
             if not faces:
                 raise ValueError("no faces declared")
-            self_loops = _self_loop_faces(faces)
+            degenerate_edges = _degenerate_edge_faces(faces)
             view_scale = spec.get("view", {}).get("scale")
             self._load_faces(faces, spec.get("net_layout"), view_scale,
                               spec.get("builder_connections"))
             self.current_save_path = path
             self._dirty = False
             self._update_title()
-            if self_loops:
+            if degenerate_edges:
                 # A malformed file (from an earlier, buggy Save -- see
-                # _self_loop_faces' own docstring) still loads, but
-                # every self-loop edge is left unconnected rather than
+                # _degenerate_edge_faces' own docstring) still loads, but
+                # every degenerate edge is left unconnected rather than
                 # silently wired up wrong -- tell the user so they know
                 # to go reconnect those specific edges, rather than
                 # discovering it only when some later Save fails.
-                where = ", ".join(f"face {fi} vertex {v}" for fi, v in self_loops)
+                where = ", ".join(f"face {fi} vertex {v}" for fi, v in degenerate_edges)
                 messagebox.showwarning(
                     "Loaded with degenerate edges",
-                    f"{len(self_loops)} self-loop edge(s) in this file were left "
+                    f"{len(degenerate_edges)} degenerate edge(s) in this file were left "
                     f"unconnected (a corrupted vertex label from an earlier bug, "
                     f"not a real connection): {where}")
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
@@ -1654,7 +1631,7 @@ class InteractiveBuilderApp:
         fully-integrated shape reverses EVERY one of its edges' true
         direction at once, which the freshly re-derived connections
         don't expect (confirmed directly: re-flipping one shape this way
-        after a round-trip produces exactly the self-loop/duplicate-edge
+        after a round-trip produces exactly the vertex-merge-error/duplicate-edge
         errors _validate_shapes_connections exists to catch). Restoring
         "flipped" is only safe together with the EXACT connections it
         was originally paired with, which is what `builder_connections`
@@ -1673,7 +1650,7 @@ class InteractiveBuilderApp:
         self._drag_state = None
         self._marquee_start = None
         self._marquee_current = None
-        self._self_loop_highlight = set()
+        self._vertex_merge_error_highlight = set()
 
         layout_ok = net_layout is not None and len(net_layout) == len(faces)
         exact_connections_ok = layout_ok and builder_connections is not None
@@ -1883,7 +1860,7 @@ class InteractiveBuilderApp:
                 "b_shape": self._hover_shape_id, "b_edge": self._hover_edge_index,
             })
             self._next_connection_id += 1
-            self._self_loop_highlight = set()
+            self._vertex_merge_error_highlight = set()
             # A freshly-made connection deselects everything -- the
             # origin shape was selected (that's how its handle was
             # showing in the first place), but the connection itself is
@@ -1969,7 +1946,7 @@ class InteractiveBuilderApp:
             self._push_undo()
             self.connections = [c for c in self.connections if c["id"] != self.selected_connection_id]
             self.selected_connection_id = None
-            self._self_loop_highlight = set()
+            self._vertex_merge_error_highlight = set()
             self._redraw()
 
     def _on_flip_key(self, _event=None):
@@ -1981,7 +1958,7 @@ class InteractiveBuilderApp:
         "outside" (solid fill vs. hatching -- see _draw_shape/
         _rasterize_polygon) and how their edges' TRUE direction is
         interpreted at Save (_true_edge_slots) changes. Clears
-        self._self_loop_highlight like any other edit -- a highlight
+        self._vertex_merge_error_highlight like any other edit -- a highlight
         from a previous failed Save no longer reflects the current
         (about to change) flip state."""
         if not self.selected_ids:
@@ -1990,7 +1967,7 @@ class InteractiveBuilderApp:
         for shape in self.shapes:
             if shape["id"] in self.selected_ids:
                 shape["flipped"] = not shape["flipped"]
-        self._self_loop_highlight = set()
+        self._vertex_merge_error_highlight = set()
         self._redraw()
 
     def _on_escape_key(self, _event=None):
@@ -2111,7 +2088,7 @@ class InteractiveBuilderApp:
         self._drag_state = None
         self._rotate_state = None
         self._connection_pending = None
-        self._self_loop_highlight = set()
+        self._vertex_merge_error_highlight = set()
         self._dirty = True
         self._redraw()
 
@@ -2130,7 +2107,7 @@ class InteractiveBuilderApp:
         self._drag_state = None
         self._rotate_state = None
         self._connection_pending = None
-        self._self_loop_highlight = set()
+        self._vertex_merge_error_highlight = set()
         self._dirty = True
         self._redraw()
 
@@ -2406,7 +2383,7 @@ class InteractiveBuilderApp:
         if self.debug_mode and self._cursor_screen is not None:
             self._draw_debug_vertex_label()
 
-        self._draw_self_loop_highlight()
+        self._draw_vertex_merge_error_highlight()
 
         if self._marquee_start is not None:
             x0, y0 = self._marquee_start
@@ -2414,25 +2391,25 @@ class InteractiveBuilderApp:
             self.canvas.create_rectangle(x0, y0, x1, y1, outline=MARQUEE_OUTLINE_COLOR,
                                           dash=MARQUEE_DASH, width=1.5)
 
-    def _draw_self_loop_highlight(self):
-        """Rings every corner in self._self_loop_highlight (set by a
+    def _draw_vertex_merge_error_highlight(self):
+        """Rings every corner in self._vertex_merge_error_highlight (set by a
         failed Save -- see on_save_clicked/NetValidationError) in
-        SELF_LOOP_HIGHLIGHT_COLOR, regardless of debug mode -- this is
+        VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR, regardless of debug mode -- this is
         error feedback about the CURRENT state of the canvas, not a
         debug-only diagnostic, so it stays visible even with debug mode
-        off, until the next edit clears it (self._self_loop_highlight's
+        off, until the next edit clears it (self._vertex_merge_error_highlight's
         own comment in __init__ lists every place that happens)."""
-        if not self._self_loop_highlight:
+        if not self._vertex_merge_error_highlight:
             return
         shapes_by_id = {s["id"]: s for s in self.shapes}
-        for shape_id, corner in self._self_loop_highlight:
+        for shape_id, corner in self._vertex_merge_error_highlight:
             shape = shapes_by_id.get(shape_id)
             if shape is None or corner >= shape["n"]:
                 continue
             vx, vy = self._shape_world_vertices(shape)[corner]
             sx, sy = self._world_to_screen(vx, vy)
             self.canvas.create_oval(sx - 7, sy - 7, sx + 7, sy + 7,
-                                     outline=SELF_LOOP_HIGHLIGHT_COLOR, width=2.5)
+                                     outline=VERTEX_MERGE_ERROR_HIGHLIGHT_COLOR, width=2.5)
 
     def _draw_debug_vertex_label(self):
         """Debug mode only ("d" key): finds the shape VERTEX (a corner,

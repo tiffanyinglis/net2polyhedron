@@ -22,11 +22,12 @@ for them.
 Ground truth for every "does/doesn't this net need a flip to be valid"
 claim below was independently verified by a plain corner-level
 union-find script checking BOTH failure modes _validate_shapes_connections
-itself checks (a self-loop AND a duplicate directed edge). See each
+itself checks (a vertex merge error -- two different corners of one face
+resolving to the same vertex -- AND a duplicate directed edge). See each
 test's own docstring for what was actually checked.
 
-Connecting a shape to one of its OWN (different) edges is not something
-this app supports at all (_hit_test_any_edge_handle refuses a handle on
+Connecting a shape to one of its OWN (different) edges is not supported
+yet (planned for later -- _hit_test_any_edge_handle refuses a handle on
 the pending connection's own origin SHAPE, not just its origin edge), so
 there is deliberately no test coverage here for a_shape == b_shape --
 _connection_pairs is never called with one."""
@@ -67,9 +68,9 @@ def shapes_and_connections_from_faces(faces):
 
 
 def is_valid_net(faces):
-    """True iff `faces` has no self-loop and no duplicate directed edge
-    -- the exact two rules stretchy_mesh.load_stretchy_mesh itself
-    enforces (see its own module docstring)."""
+    """True iff `faces` has no degenerate (v->v) edge and no duplicate
+    directed edge -- the exact two rules stretchy_mesh.load_stretchy_mesh
+    itself enforces (see its own module docstring)."""
     counts = {}
     for face in faces:
         n = len(face)
@@ -140,18 +141,18 @@ class TestTetrahedronFlip:
 class TestTwoShapeBend:
     """Two hexagons sharing TWO adjacent edges each (a genuine bend --
     see the crochet photo this was reported against) needs a shape-level
-    flip on one of them, with NO self-loop involved at all (a pure
-    duplicate-directed-edge conflict)."""
+    flip on one of them, with NO vertex merge error involved at all (a
+    pure duplicate-directed-edge conflict)."""
 
     SHAPES = [shape(1, 6), shape(6, 6)]
     CONNECTIONS = [conn(1, 1, 0, 6, 3), conn(2, 1, 5, 6, 2)]
 
-    def test_fails_unflipped_with_a_pure_duplicate_edge_conflict_no_self_loop(self):
+    def test_fails_unflipped_with_a_pure_duplicate_edge_conflict_no_vertex_merge_error(self):
         try:
             builder_app._validate_shapes_connections(self.SHAPES, self.CONNECTIONS)
             pytest.fail("expected a NetValidationError")
         except NetValidationError as e:
-            assert not e.self_loop_slots, "this failure must be a pure duplicate-edge conflict"
+            assert not e.vertex_merge_error_slots, "this failure must be a pure duplicate-edge conflict"
 
     def test_validates_once_one_hexagon_is_flipped(self):
         trial_shapes = [dict(s, flipped=(s["id"] == 6)) for s in self.SHAPES]
