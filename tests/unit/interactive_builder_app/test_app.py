@@ -127,6 +127,18 @@ class TestTetrahedronFlip:
         with pytest.raises(NetValidationError):
             builder_app._validate_shapes_connections(self.SHAPES, self.CONNECTIONS)
 
+    def test_fails_unflipped_is_a_vertex_merge_error(self):
+        """The other example in this file (TestVertexMergeErrorOnFlip)
+        shows a consistently-oriented tetrahedron breaking when ONE face
+        is flipped away from its neighbors; this is the mirror image --
+        this net only validates with the base flipped AWAY from the
+        other 3, so leaving every face facing the same way (all
+        unflipped) is itself what breaks it, with a genuine VME (not
+        just a duplicate edge) at the root of it."""
+        with pytest.raises(NetValidationError) as excinfo:
+            builder_app._validate_shapes_connections(self.SHAPES, self.CONNECTIONS)
+        assert excinfo.value.vertex_merge_error_slots, "expected a genuine vertex merge error"
+
     def test_validates_once_the_base_is_flipped(self):
         trial_shapes = [dict(s, flipped=(s["id"] == 4)) for s in self.SHAPES]
         builder_app._validate_shapes_connections(trial_shapes, self.CONNECTIONS)  # must not raise
@@ -134,6 +146,48 @@ class TestTetrahedronFlip:
         assert len(faces) == 4
         assert is_valid_net(faces)
         assert len({v for f in faces for v in f}) == 4, "a tetrahedron has exactly 4 vertices"
+
+
+# ---- a consistently-oriented tetrahedron (every face facing the same
+# ---- way) that breaks the moment any ONE face is flipped ----
+
+class TestVertexMergeErrorOnFlip:
+    """A tetrahedron over vertices A/B/C/D with faces (A,B,C), (A,D,B),
+    (B,D,C), (A,C,D), each CCW-from-outside -- the standard way to
+    consistently orient a tetrahedron's 4 triangles. Every shape starts
+    UNFLIPPED (all faces "facing the same way") and validates with no
+    vertex merge error (VME) at all: the default (unflipped) pairing
+    IS the CCW-from-outside convention, so nothing here needs a flip
+    the way TestTetrahedronFlip's own net does. Flipping any single
+    face then reverses just that face's own edges' true direction
+    relative to every neighbor still expecting the default pairing,
+    which introduces a genuine VME -- the exact opposite failure mode
+    from TestTetrahedronFlip, where leaving every face unflipped is
+    what breaks it and flipping one face is what fixes it."""
+
+    SHAPES = [shape(1, 3), shape(2, 3), shape(3, 3), shape(4, 3)]
+    CONNECTIONS = [
+        conn(1, 1, 0, 2, 2),  # shared edge A-B: shape 1 = (A,B,C), shape 2 = (A,D,B)
+        conn(2, 1, 1, 3, 2),  # shared edge B-C: shape 1 = (A,B,C), shape 3 = (B,D,C)
+        conn(3, 1, 2, 4, 0),  # shared edge C-A: shape 1 = (A,B,C), shape 4 = (A,C,D)
+        conn(4, 2, 0, 4, 2),  # shared edge A-D: shape 2 = (A,D,B), shape 4 = (A,C,D)
+        conn(5, 2, 1, 3, 0),  # shared edge D-B: shape 2 = (A,D,B), shape 3 = (B,D,C)
+        conn(6, 3, 1, 4, 1),  # shared edge D-C: shape 3 = (B,D,C), shape 4 = (A,C,D)
+    ]
+
+    def test_validates_with_every_face_facing_the_same_way(self):
+        builder_app._validate_shapes_connections(self.SHAPES, self.CONNECTIONS)  # must not raise
+        faces = builder_app._faces_from_shapes(self.SHAPES, self.CONNECTIONS)
+        assert len(faces) == 4
+        assert is_valid_net(faces)
+        assert len({v for f in faces for v in f}) == 4, "a tetrahedron has exactly 4 vertices"
+
+    @pytest.mark.parametrize("flip_id", [1, 2, 3, 4])
+    def test_flipping_any_one_face_introduces_a_vertex_merge_error(self, flip_id):
+        trial_shapes = [dict(s, flipped=(s["id"] == flip_id)) for s in self.SHAPES]
+        with pytest.raises(NetValidationError) as excinfo:
+            builder_app._validate_shapes_connections(trial_shapes, self.CONNECTIONS)
+        assert excinfo.value.vertex_merge_error_slots, "expected a genuine vertex merge error"
 
 
 # ---- two DIFFERENT shapes sharing 2 edges (a real "bend") ----
