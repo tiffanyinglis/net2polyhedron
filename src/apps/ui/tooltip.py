@@ -26,7 +26,7 @@ class Tooltip:
         self._tip.wm_overrideredirect(True)
         self._tip.wm_geometry(f"+{x}+{y}")
         label = tk.Label(self._tip, text=self.text, justify=tk.LEFT,
-                          background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                          background="#ffffe0", foreground="black", relief=tk.SOLID, borderwidth=1,
                           padx=6, pady=3, wraplength=280)
         label.pack()
 

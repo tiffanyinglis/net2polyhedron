@@ -1,17 +1,64 @@
 """Interactive Builder -- a 2D shape-placement canvas, unrelated to
 solving/folding anything: pick a regular polygon from a left-side
 palette (triangle through 8-gon, each a fixed color), click to drop
-instances of it into a pan/zoomable drawing area on the right, then
-select/drag/rotate/delete them. File > New/Load/Save/Save As round-trips
-the whole canvas to/from a stretchy-mesh-format .json (see the "net JSON
-import/export" section below, near _layout_faces_with_gap) -- the
-associated file, once there is one, shows in the window title and is
-what Ctrl+S saves straight to.
+instances of it into a pan/zoomable drawing area in the middle, then
+select/drag/rotate/delete them. A right-side tool strip (see "Tool
+modes" below) picks which of those canvas interactions is actually
+active at any moment, Photoshop/Illustrator-style. File > New/Load/Save/
+Save As round-trips the whole canvas to/from a stretchy-mesh-format
+.json (see the "net JSON import/export" section below, near
+_layout_faces_with_gap) -- the associated file, once there is one, shows
+in the window title and is what Ctrl+S saves straight to.
 
     python src/apps/interactive_builder_app/app.py
 
 Interaction model:
 
+- **Tool modes (right-side toolbar, `_build_toolbar`)**: a column of
+  icon buttons, most of them mode SELECTORS -- clicking one (or its own
+  shortcut key) sets `self.tool_mode` (`_set_tool_mode`), which gates
+  what clicking on the canvas itself actually does. Switching modes
+  clears every piece of transient state that only made sense in the one
+  being LEFT (a selection, an armed palette shape, a pending connection,
+  an in-progress marquee), so nothing carries over looking selected/
+  armed/pending somewhere it can no longer mean anything.
+  - **Move [M]** (the default): drag/select shapes (including marquee
+    and Ctrl+click multiselect), flip them ([F], `_on_flip_key`, or
+    [H]/[V], see below), rotate (right-drag), copy/paste, or delete them
+    -- everything this app could do before the toolbar existed.
+    Connections are NOT editable in this mode -- every edge's handle
+    circle is hidden entirely (`_redraw` only draws them in Join mode),
+    since they aren't clickable here; a connection LINE itself still
+    draws for context (so the net's current shape stays visible while
+    rearranging it), but can't be selected or deleted either.
+  - **Join [J]**: the OPPOSITE trade-off -- every edge's handle circle
+    shows (same click-click gesture as always, see "Edge connections"
+    below, to add a connection) and an existing connection can be
+    clicked and deleted, but shapes themselves are NOT selectable at
+    all: clicking a shape's body (away from any handle or connection
+    line) just deselects, the same as clicking empty space would.
+    Nothing can be dropped from the palette (`_on_palette_clicked` is a
+    no-op outside Move mode) or pasted (`on_paste_key`, same guard --
+    otherwise a clipboard from an EARLIER Move-mode copy would still be
+    pasteable here, landing a shape nothing could then select, move, or
+    connect to anything).
+  - **Polygon Fold [P]**: a reserved THIRD mode with no behavior
+    implemented yet -- its toolbar button is drawn dim
+    (`TOOLBAR_ICON_DISABLED_COLOR`) and never bound to a click at all,
+    so `self.tool_mode` can never actually become `"polygon_fold"` right
+    now.
+  - **Flip Horizontal [H]** / **Flip Vertical [V]**: plain immediate
+    ACTIONS on the current selection (`_flip_selected_shapes`), not
+    modes -- clicking either never touches `self.tool_mode`. Mirrors the
+    WHOLE selection together, as one rigid arrangement, about the
+    shared bounding box of every selected shape's own vertices (not
+    each shape independently about its own center) -- the same
+    convention Illustrator/Photoshop use for a multi-object flip. See
+    its own docstring for why each shape's own reorientation is a pure
+    `rotation` change (no new per-shape state, no effect on connections/
+    export validity at all) rather than a real reflection transform:
+    every shape here is a regular polygon, always congruent to its own
+    mirror image.
 - **Palette (pick up)**: clicking a palette icon "arms" that polygon
   type (highlighted with a white border) -- a ghost preview of it then
   follows the mouse over the drawing area, drawn exactly like a real,
@@ -380,6 +427,7 @@ from PIL import Image, ImageColor, ImageDraw, ImageTk
 
 from common.paths import STRETCHY_NETS_DIR
 from common.ui_theme import PLOT_THEME, STATUS_COLORS
+from ui.tooltip import Tooltip
 from utils.geometry.polygon_geom import attach_polygon, regular_polygon_vertices
 
 # Palette entries, in display order.
@@ -458,6 +506,56 @@ ICON_SIZE = 84
 ICON_RADIUS = 30.0
 _ICON_VERTICES = {n: _vertices_with_radius(n, ICON_RADIUS) for n in POLYGON_NS}
 
+
+def _draw_move_tool_icon(canvas, size, color):
+    """An arrow cursor on top of a small pentagon outline -- "Move"."""
+    cx, cy = size / 2, size / 2
+    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(5, size * 0.34)]
+    canvas.create_polygon(verts, outline=color, fill="", width=1.5)
+    # A plain arrow/cursor silhouette, tip at the pentagon's own upper
+    # right, pointing down and to the right -- small enough it reads as
+    # "a cursor sitting on a shape" rather than competing with it.
+    ax, ay, s = cx + size * 0.08, cy - size * 0.08, size * 0.42
+    points = [
+        (ax, ay), (ax, ay + s), (ax + s * 0.28, ay + s * 0.74),
+        (ax + s * 0.42, ay + s * 1.06), (ax + s * 0.58, ay + s * 0.98),
+        (ax + s * 0.44, ay + s * 0.66), (ax + s * 0.72, ay + s * 0.62),
+    ]
+    canvas.create_polygon(points, outline=color, fill=color)
+
+
+def _draw_join_tool_icon(canvas, size, color):
+    """Two small FILLED circles connected by a line -- "Join"."""
+    r = size * 0.12
+    y = size / 2
+    x1, x2 = size * 0.26, size * 0.74
+    canvas.create_line(x1, y, x2, y, fill=color, width=2)
+    canvas.create_oval(x1 - r, y - r, x1 + r, y + r, fill=color, outline="")
+    canvas.create_oval(x2 - r, y - r, x2 + r, y + r, fill=color, outline="")
+
+
+def _draw_polygon_fold_tool_icon(canvas, size, color):
+    """A pentagon with one vertex joined to a non-adjacent one by a
+    diagonal line -- "Polygon Fold" (disabled, see module docstring)."""
+    cx, cy = size / 2, size / 2
+    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(5, size * 0.34)]
+    canvas.create_polygon(verts, outline=color, fill="", width=1.5)
+    canvas.create_line(*verts[1], *verts[3], fill=color, width=1.5)
+
+
+def _draw_flip_horizontal_tool_icon(canvas, size, color):
+    """A horizontal double-headed arrow -- "Flip Horizontal"."""
+    y = size / 2
+    canvas.create_line(size * 0.18, y, size * 0.82, y, fill=color, width=2,
+                        arrow=tk.BOTH, arrowshape=(8, 10, 4))
+
+
+def _draw_flip_vertical_tool_icon(canvas, size, color):
+    """A vertical double-headed arrow -- "Flip Vertical"."""
+    x = size / 2
+    canvas.create_line(x, size * 0.18, x, size * 0.82, fill=color, width=2,
+                        arrow=tk.BOTH, arrowshape=(8, 10, 4))
+
 # Red -- none of the polygon fill colors above (green/blue/purple hues)
 # are anywhere near red, so it reads as clearly "selected/active"
 # without being confusable with any shape's own fill.
@@ -508,6 +606,20 @@ MENU_BG = PLOT_THEME["bg"]
 MENU_FG = PLOT_THEME["fg"]
 MENU_ACTIVE_BG = "#3a3a3a"
 MENU_DISABLED_FG = "#6e6e6e"
+
+# Right-side tool strip (_build_toolbar) -- see module docstring's "Tool
+# modes" section for what each button actually does.
+TOOLBAR_ICON_SIZE = 40
+TOOLBAR_ICON_COLOR = PLOT_THEME["fg"]
+# "Polygon Fold" has no behavior yet (see module docstring) -- its icon
+# is drawn in this dim color instead of TOOLBAR_ICON_COLOR, the same
+# "greyed out" idea as MENU_DISABLED_FG for a disabled File menu entry,
+# so it visibly reads as unavailable rather than identically clickable.
+TOOLBAR_ICON_DISABLED_COLOR = MENU_DISABLED_FG
+# The current tool's own icon gets this border (mirrors the palette's
+# own "armed" white border, _on_palette_clicked) -- plain PLOT_THEME["bg"]
+# (i.e. no visible border) otherwise.
+TOOLBAR_ACTIVE_BORDER = "white"
 
 # Marquee (rubber-band) select's own drag rectangle -- see
 # _on_canvas_press/_on_canvas_drag/_finish_marquee_select. Plain white
@@ -585,6 +697,16 @@ def _point_segment_distance(point, a, b):
         return math.hypot(px - ax, py - ay)
     t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _closest_point_index(point, points):
+    """Index into `points` of whichever one is nearest `point` -- used
+    by _flip_selected_shapes to work out which NEW edge index a
+    reflected shape's edge ended up at, by matching against where the
+    OLD edge's own midpoint should land once mirrored (see its own
+    docstring)."""
+    return min(range(len(points)),
+               key=lambda j: math.hypot(points[j][0] - point[0], points[j][1] - point[1]))
 
 
 def _rect_intersects_polygon(rx0, ry0, rx1, ry1, vertices):
@@ -1101,6 +1223,20 @@ class InteractiveBuilderApp:
         sv_ttk.set_theme("dark")
         self._scale_ui_fonts()
 
+        # Which canvas interaction is currently active -- "move" (drag/
+        # select/flip/copy/paste shapes; connections stay visible but
+        # unselectable) or "join" (add/delete connections; shapes become
+        # unselectable, nothing can be dropped or pasted) -- see
+        # _set_tool_mode, bound to the right-side toolbar's own buttons
+        # and to the M/J keys. "move" is the default -- everything this
+        # app could do before the toolbar existed.
+        self.tool_mode = "move"
+        # {mode_name: icon_canvas} for the toolbar's own MODE buttons
+        # (Move/Join, not the plain-action Flip buttons) -- filled in by
+        # _build_toolbar, read by _update_toolbar_highlight to ring
+        # whichever one is current.
+        self.toolbar_buttons = {}
+
         # in z-order, back to front: [{"id", "n", "cx", "cy", "rotation"}, ...]
         self.shapes = []
         self._next_shape_id = 1
@@ -1274,6 +1410,14 @@ class InteractiveBuilderApp:
         for n in POLYGON_NS:
             self._build_palette_entry(left, n)
 
+        # Right-side tool strip -- packed BEFORE the canvas below (same
+        # reason as the status bar above: whoever packs first claims
+        # their own strip of the window, leaving the canvas to fill
+        # whatever's left).
+        toolbar = ttk.Frame(self.root, padding=12)
+        toolbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._build_toolbar(toolbar)
+
         # highlightthickness/-background give the drawing area a visible
         # border, so it reads as a distinct, clearly-boxed region rather
         # than blending into the rest of the (also dark) window.
@@ -1302,6 +1446,10 @@ class InteractiveBuilderApp:
         self.root.bind_all("<Delete>", self._on_delete_key)
         self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
         self.root.bind_all("<KeyPress-f>", self._on_flip_key)
+        self.root.bind_all("<KeyPress-m>", lambda _e: self._set_tool_mode("move"))
+        self.root.bind_all("<KeyPress-j>", lambda _e: self._set_tool_mode("join"))
+        self.root.bind_all("<KeyPress-h>", lambda _e: self._flip_selected_shapes("horizontal"))
+        self.root.bind_all("<KeyPress-v>", lambda _e: self._flip_selected_shapes("vertical"))
         self.root.bind_all("<Control-c>", self.on_copy_key)
         self.root.bind_all("<Control-v>", self.on_paste_key)
         self.root.bind_all("<Control-z>", self.on_undo_key)
@@ -1352,6 +1500,85 @@ class InteractiveBuilderApp:
         icon.create_image(left, top, anchor="nw", image=photo)
         icon.bind("<Button-1>", lambda _e, n=n: self._on_palette_clicked(n))
         self._palette_canvases[n] = icon
+
+    def _build_toolbar(self, parent):
+        """The right-side tool strip: one column of icon buttons,
+        Photoshop/Illustrator-style. "Move" and "Join" SELECT a tool
+        MODE (self.tool_mode, see _set_tool_mode) that gates what
+        clicking on the canvas does; "Polygon Fold" is a reserved third
+        mode with no behavior yet, so its button is drawn dim and never
+        bound to a click at all. "Flip Horizontal"/"Flip Vertical" are
+        plain immediate ACTIONS on the current selection
+        (_flip_selected_shapes) -- clicking either never changes
+        self.tool_mode."""
+        self._add_toolbar_mode_button(parent, "move", "Move [M]", _draw_move_tool_icon)
+        self._add_toolbar_mode_button(parent, "join", "Join [J]", _draw_join_tool_icon)
+        self._add_toolbar_disabled_button(parent, "Polygon Fold [P]", _draw_polygon_fold_tool_icon)
+        self._add_toolbar_action_button(parent, "Flip Horizontal [H]", _draw_flip_horizontal_tool_icon,
+                                         lambda: self._flip_selected_shapes("horizontal"))
+        self._add_toolbar_action_button(parent, "Flip Vertical [V]", _draw_flip_vertical_tool_icon,
+                                         lambda: self._flip_selected_shapes("vertical"))
+        self._update_toolbar_highlight()
+
+    def _new_toolbar_icon(self, parent, draw_icon, color):
+        icon = tk.Canvas(parent, width=TOOLBAR_ICON_SIZE, height=TOOLBAR_ICON_SIZE,
+                          bg=PLOT_THEME["bg"], highlightthickness=2,
+                          highlightbackground=PLOT_THEME["bg"])
+        icon.pack(pady=3)
+        draw_icon(icon, TOOLBAR_ICON_SIZE, color)
+        return icon
+
+    def _add_toolbar_mode_button(self, parent, mode, tooltip_text, draw_icon):
+        icon = self._new_toolbar_icon(parent, draw_icon, TOOLBAR_ICON_COLOR)
+        icon.bind("<Button-1>", lambda _e, m=mode: self._set_tool_mode(m))
+        Tooltip(icon, tooltip_text)
+        self.toolbar_buttons[mode] = icon
+
+    def _add_toolbar_action_button(self, parent, tooltip_text, draw_icon, action):
+        icon = self._new_toolbar_icon(parent, draw_icon, TOOLBAR_ICON_COLOR)
+        icon.bind("<Button-1>", lambda _e: action())
+        Tooltip(icon, tooltip_text)
+
+    def _add_toolbar_disabled_button(self, parent, tooltip_text, draw_icon):
+        icon = self._new_toolbar_icon(parent, draw_icon, TOOLBAR_ICON_DISABLED_COLOR)
+        Tooltip(icon, f"{tooltip_text} (not implemented yet)")
+
+    def _update_toolbar_highlight(self):
+        """Rings whichever MODE button matches self.tool_mode in
+        TOOLBAR_ACTIVE_BORDER, same idea as the palette's own "armed"
+        white border (_on_palette_clicked) -- every other mode button
+        (and the plain-action Flip buttons, never in self.toolbar_buttons
+        at all) goes back to no visible border."""
+        for mode, icon in self.toolbar_buttons.items():
+            icon.configure(highlightbackground=(
+                TOOLBAR_ACTIVE_BORDER if mode == self.tool_mode else PLOT_THEME["bg"]))
+
+    def _set_tool_mode(self, mode):
+        """Switches which canvas interaction is active (see module
+        docstring's "Tool modes" section) -- a no-op if `mode` is
+        already current. Clears every piece of transient state that
+        only makes sense in the mode being LEFT (a selection, an armed
+        palette shape, a pending connection, an in-progress marquee),
+        so nothing carries over looking selected/armed/pending in a mode
+        where it can no longer mean anything."""
+        if mode == self.tool_mode:
+            return
+        self.tool_mode = mode
+        self.selected_ids = set()
+        self.selected_connection_id = None
+        self.armed_n = None
+        self._ghost_world_xy = None
+        self._drag_state = None
+        self._connection_pending = None
+        self._pending_cursor_screen = None
+        self._hover_shape_id = None
+        self._hover_edge_index = None
+        self._marquee_start = None
+        self._marquee_current = None
+        for icon in self._palette_canvases.values():
+            icon.configure(highlightbackground=PLOT_THEME["bg"])
+        self._update_toolbar_highlight()
+        self._redraw()
 
     # ---- coordinate transform ----
 
@@ -1479,6 +1706,11 @@ class InteractiveBuilderApp:
     # ---- palette ----
 
     def _on_palette_clicked(self, n):
+        # Dropping a new shape only makes sense in Move mode -- Join
+        # mode has nothing to select it or connect it FROM the moment
+        # it lands (see module docstring's "Tool modes" section).
+        if self.tool_mode != "move":
+            return
         self.armed_n = None if self.armed_n == n else n
         self._ghost_world_xy = None
         if self.armed_n is not None:
@@ -1925,46 +2157,22 @@ class InteractiveBuilderApp:
     # ---- canvas: click-to-drop / select / drag / connect ----
 
     def _on_canvas_press(self, event):
+        """Dispatches to whichever tool mode is current (see module
+        docstring's "Tool modes" section) -- Move (drag/select/marquee
+        shapes; connections aren't editable at all) or Join (add/delete
+        connections; shapes aren't selectable, so a click can never
+        start a drag)."""
+        if self.tool_mode == "move":
+            self._on_canvas_press_move(event)
+        elif self.tool_mode == "join":
+            self._on_canvas_press_join(event)
+
+    def _on_canvas_press_move(self, event):
         if self.armed_n is not None:
             wx, wy = self._screen_to_world(event.x, event.y)
             self._push_undo()
             self._drop_shape(self.armed_n, wx, wy)
             self._on_palette_clicked(self.armed_n)  # disarm (toggles current off)
-            return
-
-        if self._connection_pending is not None:
-            if self._complete_or_cancel_pending_connection():
-                # A completed connection deselects everything and stops
-                # here -- letting this SAME click fall through to the
-                # ordinary checks below would immediately re-select the
-                # handle it just landed on (or the new connection line,
-                # which passes through that exact point).
-                self._redraw()
-                return
-            # A cancel, in contrast, doesn't consume the click: fall
-            # through so it still does its normal job (select a handle/
-            # connection/shape, or deselect) -- it just never creates a
-            # SECOND connection.
-
-        handle = self._hit_test_any_edge_handle(event.x, event.y)
-        if handle is not None:
-            self._connection_pending = {"from_shape": handle["shape_id"],
-                                         "from_edge": handle["edge_index"]}
-            self._pending_cursor_screen = (event.x, event.y)
-            # The POINT becomes the selected thing now, not the shape --
-            # deselecting here is what makes _redraw stop outlining the
-            # whole shape and light up only this one handle instead.
-            self.selected_ids = set()
-            self.selected_connection_id = None
-            self._redraw()
-            return
-
-        conn_hit = self._hit_test_connection(event.x, event.y)
-        if conn_hit is not None:
-            self.selected_connection_id = conn_hit
-            self.selected_ids = set()
-            self._drag_state = None
-            self._redraw()
             return
 
         wx, wy = self._screen_to_world(event.x, event.y)
@@ -2008,6 +2216,40 @@ class InteractiveBuilderApp:
                 self._begin_undoable_change()
             else:
                 self._drag_state = None
+        self._redraw()
+
+    def _on_canvas_press_join(self, event):
+        """Shapes aren't selectable/draggable at all in Join mode -- a
+        click here only ever starts/completes a connection (via an edge
+        handle) or selects/deselects an existing connection line (for
+        Delete). Clicking a shape's body away from any handle or
+        connection line simply deselects, same as clicking empty
+        space."""
+        if self._connection_pending is not None:
+            if self._complete_or_cancel_pending_connection():
+                # A completed connection deselects everything and stops
+                # here -- letting this SAME click fall through to the
+                # ordinary checks below would immediately re-select the
+                # handle it just landed on (or the new connection line,
+                # which passes through that exact point).
+                self._redraw()
+                return
+            # A cancel, in contrast, doesn't consume the click: fall
+            # through so it still does its normal job (select a handle/
+            # connection, or deselect) -- it just never creates a SECOND
+            # connection.
+
+        handle = self._hit_test_any_edge_handle(event.x, event.y)
+        if handle is not None:
+            self._connection_pending = {"from_shape": handle["shape_id"],
+                                         "from_edge": handle["edge_index"]}
+            self._pending_cursor_screen = (event.x, event.y)
+            self.selected_connection_id = None
+            self._redraw()
+            return
+
+        conn_hit = self._hit_test_connection(event.x, event.y)
+        self.selected_connection_id = conn_hit  # None if the click missed everything
         self._redraw()
 
     def _complete_or_cancel_pending_connection(self):
@@ -2143,6 +2385,109 @@ class InteractiveBuilderApp:
             if shape["id"] in self.selected_ids:
                 shape["flipped"] = not shape["flipped"]
         self._refresh_vme_state()
+        self._redraw()
+
+    def _flip_selected_shapes(self, axis):
+        """"Flip Horizontal"/"Flip Vertical" ([H]/[V], or the matching
+        toolbar button, `axis` = "horizontal"/"vertical") -- mirrors the
+        WHOLE current selection, as one rigid arrangement, about the
+        shared bounding box of every selected shape's own world
+        vertices -- a no-op with nothing selected. For a single selected
+        shape this is the same as flipping it about its own bounding
+        box; for several, they flip TOGETHER about one shared axis (so
+        their positions relative to each other mirror too), not each
+        independently in place -- the same convention Illustrator/
+        Photoshop use for a multi-object flip.
+
+        Unrelated to _on_flip_key's "flipped" bit (which side of the
+        fabric faces out) -- this is a purely geometric reorientation.
+        Every shape here is a REGULAR polygon, always congruent to its
+        own mirror image, so a genuine reflection of ITS OWN vertices
+        produces the exact same vertex SET as some plain rotation of it
+        does -- no real reflection transform is ever needed for the
+        shape itself. Which rotation, though, is NOT simply "pi minus
+        the current angle" for one axis and "minus the current angle"
+        for the other, the way a single isolated point would reflect --
+        mirroring a whole polygon also REVERSES which direction its
+        vertices are traversed in (a genuine reflection has no fixed
+        handedness the way a rotation does), so the correct replacement
+        rotation also depends on _LOCAL_VERTICES' own starting angle.
+        Verified directly (comparing the FULL vertex set, not just one
+        point, against a true coordinate-negating reflection, for
+        n=3..6 across several rotations): for this app's own
+        _LOCAL_VERTICES convention, `rotation = -rotation` reproduces a
+        HORIZONTAL mirror (flip left-right) and `rotation = pi -
+        rotation` reproduces a VERTICAL one (flip up-down) -- the
+        reverse of what the single-point intuition suggests.
+
+        Reflecting a shape's OWN vertex set about an axis OTHER than its
+        own center (the group's shared one, generally) is then just that
+        same rotation change PLUS moving its center to the mirror image
+        of where it was: reflecting about a line at x=A is, for every
+        point, exactly reflecting about x=cx shifted by 2*(A-cx) in x
+        (a plain algebraic identity, independent of the shape's own
+        geometry) -- so `new_cx = 2*A - cx` (or `new_cy = 2*A - cy` for a
+        vertical flip) is what actually carries a shape from mirroring
+        "in place" to mirroring about the group's own shared axis.
+
+        BUT that same index-reversal is exactly why an existing
+        connection can't just be left alone: since edge index k's
+        physical direction shifts to wherever some OTHER index now
+        points, a connection anchored to "shape S edge k" would silently
+        end up glued to the WRONG physical edge once the rotation
+        changes, even though the shape's own silhouette flipped
+        correctly. So for every flipped shape, this also captures its
+        edge midpoints BEFORE changing anything, works out (by matching
+        each one's mirrored position against the shape's NEW edge
+        midpoints, `_closest_point_index`) which NEW edge index each OLD
+        one now corresponds to, and rewrites every connection touching
+        that shape to use the new index -- keeping it attached to the
+        exact same PHYSICAL edge (and neighbor) it was before, not just
+        the same-numbered one. Net validity (`_refresh_vme_state`) is
+        therefore unaffected by a flip either way: no physical gluing
+        actually changed, only which local index each shape happens to
+        call it by."""
+        if not self.selected_ids:
+            return
+        self._push_undo()
+        selected = [s for s in self.shapes if s["id"] in self.selected_ids]
+        all_vertices = [v for s in selected for v in self._shape_world_vertices(s)]
+        old_mids = {shape["id"]: self._shape_edge_midpoints(shape) for shape in selected}
+
+        if axis == "horizontal":
+            xs = [v[0] for v in all_vertices]
+            axis_value = (min(xs) + max(xs)) / 2
+
+            def mirror_point(p):
+                return (2 * axis_value - p[0], p[1])
+
+            for shape in selected:
+                shape["cx"] = 2 * axis_value - shape["cx"]
+                shape["rotation"] = -shape["rotation"]
+        else:
+            ys = [v[1] for v in all_vertices]
+            axis_value = (min(ys) + max(ys)) / 2
+
+            def mirror_point(p):
+                return (p[0], 2 * axis_value - p[1])
+
+            for shape in selected:
+                shape["cy"] = 2 * axis_value - shape["cy"]
+                shape["rotation"] = math.pi - shape["rotation"]
+
+        edge_maps = {}
+        for shape in selected:
+            new_mids = self._shape_edge_midpoints(shape)
+            edge_maps[shape["id"]] = {
+                old_edge: _closest_point_index(mirror_point(mid), new_mids)
+                for old_edge, mid in enumerate(old_mids[shape["id"]])
+            }
+        for conn in self.connections:
+            if conn["a_shape"] in edge_maps:
+                conn["a_edge"] = edge_maps[conn["a_shape"]][conn["a_edge"]]
+            if conn["b_shape"] in edge_maps:
+                conn["b_edge"] = edge_maps[conn["b_shape"]][conn["b_edge"]]
+
         self._redraw()
 
     def _on_escape_key(self, _event=None):
@@ -2319,8 +2664,12 @@ class InteractiveBuilderApp:
         arrangement, just moved as a whole -- see on_paste_key.
         Connections reference their two shapes by INDEX into this same
         list (not by id, which won't exist yet until paste time creates
-        fresh ones)."""
-        if not self.selected_ids:
+        fresh ones). Also a no-op outside Move mode -- shapes aren't
+        selectable in Join mode at all (see module docstring's "Tool
+        modes" section), so self.selected_ids is already always empty
+        there, but this makes the restriction explicit rather than
+        incidental."""
+        if self.tool_mode != "move" or not self.selected_ids:
             return
         copied_shapes = [s for s in self.shapes if s["id"] in self.selected_ids]
         index_of = {s["id"]: i for i, s in enumerate(copied_shapes)}
@@ -2349,8 +2698,12 @@ class InteractiveBuilderApp:
         cascades diagonally outward instead of stacking every copy
         exactly on top of the last one. The new shapes (not the new
         connections) are left selected afterward (replacing whatever was
-        selected before), same as a fresh drop."""
-        if not self._clipboard:
+        selected before), same as a fresh drop. Also a no-op outside
+        Move mode (see on_copy_key) -- otherwise the clipboard from an
+        EARLIER Move-mode copy would still be pasteable after switching
+        to Join mode, where a pasted shape couldn't be selected, moved,
+        or connected to anything anyway."""
+        if self.tool_mode != "move" or not self._clipboard:
             return
         self._push_undo()
         new_ids = []
@@ -2516,55 +2869,57 @@ class InteractiveBuilderApp:
                     *self._shape_edge_midpoints(from_shape)[self._connection_pending["from_edge"]])
                 self._draw_connection_line(anchor, self._pending_cursor_screen, selected=True)
 
-        # EVERY placed shape's EVERY edge gets a handle, always -- not
-        # just the selected one -- so a connection can be started with a
-        # single click straight onto any handle, with no "select the
-        # shape first" step (see module docstring). A handle lights up
-        # red if its own shape is SELECTED (every one of that shape's
-        # edges, so any of them can be picked to start a connection
-        # from), or it's the pending connection's own origin point
-        # (`pending_point`, which needs to stay lit even though clicking
-        # it just DESELECTED that shape -- see _on_canvas_press: the
-        # POINT is the selected thing now, not the shape it belongs to)
-        # or its CURRENT hover target (`hover_point`) -- deliberately
-        # just that one edge, not every edge of the shape it's on: an
-        # earlier version lit the whole target shape (mirroring how a
-        # real selection looks), and the user asked for it to stop doing
-        # that -- only the specific edge a second click would actually
-        # complete onto lights up now, leaving the rest of that shape
-        # (including its outline, in the shape-drawing loop above) at
-        # its normal, unselected look. Otherwise a handle is filled
-        # white if some connection already uses it, or an unfilled ring
-        # if not (see _draw_handle_circle).
-        pending_point = (None if self._connection_pending is None else
-                          (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
-        hover_point = (None if self._hover_shape_id is None else
-                        (self._hover_shape_id, self._hover_edge_index))
-        joined_points = self._joined_points()
+        # EVERY placed shape's EVERY edge gets a handle -- but ONLY in
+        # Join mode, since that's the only mode a handle is actually
+        # selectable in at all (see module docstring's "Tool modes"
+        # section) -- not just the selected one, so a connection can be
+        # started with a single click straight onto any handle, with no
+        # "select the shape first" step. A handle lights up red if its
+        # own shape is SELECTED (every one of that shape's edges, so any
+        # of them can be picked to start a connection from), or it's the
+        # pending connection's own origin point (`pending_point`, which
+        # needs to stay lit even though clicking it just DESELECTED that
+        # shape -- see _on_canvas_press: the POINT is the selected thing
+        # now, not the shape it belongs to) or its CURRENT hover target
+        # (`hover_point`) -- deliberately just that one edge, not every
+        # edge of the shape it's on: an earlier version lit the whole
+        # target shape (mirroring how a real selection looks), and the
+        # user asked for it to stop doing that -- only the specific edge
+        # a second click would actually complete onto lights up now,
+        # leaving the rest of that shape (including its outline, in the
+        # shape-drawing loop above) at its normal, unselected look.
+        # Otherwise a handle is filled white if some connection already
+        # uses it, or an unfilled ring if not (see _draw_handle_circle).
+        if self.tool_mode == "join":
+            pending_point = (None if self._connection_pending is None else
+                              (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
+            hover_point = (None if self._hover_shape_id is None else
+                            (self._hover_shape_id, self._hover_edge_index))
+            joined_points = self._joined_points()
 
-        for shape in self.shapes:
-            mids = self._shape_edge_midpoints(shape)
-            for edge_index, (mx, my) in enumerate(mids):
-                point = (shape["id"], edge_index)
-                lit = shape["id"] in self.selected_ids or point in (pending_point, hover_point)
-                joined = point in joined_points
-                if not lit and not joined:
-                    # An unjoined, not-currently-active handle only
-                    # reveals itself once the cursor is genuinely close
-                    # -- HANDLE_HIT_RADIUS again, same as what actually
-                    # clicking it requires, so "visible" and "clickable"
-                    # never disagree (same principle as the pending-
-                    # connection hover check above). Showing every free
-                    # handle on every shape all the time was tried first
-                    # and read as visual noise across a canvas with more
-                    # than a couple of shapes.
-                    if self._cursor_screen is None:
-                        continue
-                    sx, sy = self._world_to_screen(mx, my)
-                    cx, cy = self._cursor_screen
-                    if math.hypot(cx - sx, cy - sy) > HANDLE_HIT_RADIUS:
-                        continue
-                self._draw_handle_circle(shape, edge_index, lit=lit, joined=joined)
+            for shape in self.shapes:
+                mids = self._shape_edge_midpoints(shape)
+                for edge_index, (mx, my) in enumerate(mids):
+                    point = (shape["id"], edge_index)
+                    lit = shape["id"] in self.selected_ids or point in (pending_point, hover_point)
+                    joined = point in joined_points
+                    if not lit and not joined:
+                        # An unjoined, not-currently-active handle only
+                        # reveals itself once the cursor is genuinely close
+                        # -- HANDLE_HIT_RADIUS again, same as what actually
+                        # clicking it requires, so "visible" and "clickable"
+                        # never disagree (same principle as the pending-
+                        # connection hover check above). Showing every free
+                        # handle on every shape all the time was tried first
+                        # and read as visual noise across a canvas with more
+                        # than a couple of shapes.
+                        if self._cursor_screen is None:
+                            continue
+                        sx, sy = self._world_to_screen(mx, my)
+                        cx, cy = self._cursor_screen
+                        if math.hypot(cx - sx, cy - sy) > HANDLE_HIT_RADIUS:
+                            continue
+                    self._draw_handle_circle(shape, edge_index, lit=lit, joined=joined)
 
         if self.armed_n is not None and self._ghost_world_xy is not None:
             # Drawn exactly like a real, selected shape (solid fill, white
