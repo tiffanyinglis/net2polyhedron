@@ -2,9 +2,11 @@
 solving/folding anything: pick a regular polygon from a left-side
 palette (triangle through 8-gon, each a fixed color), click to drop
 instances of it into a pan/zoomable drawing area on the right, then
-select/drag/rotate/delete them. File > Load/Save round-trips the
-whole canvas to/from a stretchy-mesh-format .json (see the "net JSON
-import/export" section below, near _layout_faces_with_gap).
+select/drag/rotate/delete them. File > New/Load/Save/Save As round-trips
+the whole canvas to/from a stretchy-mesh-format .json (see the "net JSON
+import/export" section below, near _layout_faces_with_gap) -- the
+associated file, once there is one, shows in the window title and is
+what Ctrl+S saves straight to.
 
     python src/apps/interactive_builder_app/app.py
 
@@ -86,7 +88,7 @@ Interaction model:
   `on_redo_key`) -- restores the whole canvas as it was one action ago,
   not a field-by-field diff. One entry per WHOLE action: dropping a
   shape, deleting shape(s)/a connection, making a connection, copy/
-  paste, Clear, and Load each push one snapshot right before they
+  paste, New, and Load each push one snapshot right before they
   mutate anything, same as any instantaneous action would. A drag (move)
   or right-drag (rotate) gesture is a SINGLE undo step for the whole
   gesture, not one per intermediate mouse-move update --
@@ -200,12 +202,26 @@ Interaction model:
   the CURSOR position (the world point under the cursor is solved for at
   the OLD scale and pinned there again at the new one, so zooming doesn't
   drift the shape under the mouse away from it).
-- **File > Load/Save**: Save writes every shape/connection currently on
-  the canvas out as a stretchy-mesh-format `.json` (see "net JSON
-  import/export" below), defaulting to `data/input/stretchy_nets/`,
-  plus a "view" section (`{"scale": self.view_scale}`, this app's own
-  extension) so re-Loading it restores the same zoom level instead of
-  resetting to the default. Load reads one back -- a file this app
+- **File > New/Load/Save/Save As...**: "Save As..." (`on_save_as_clicked`)
+  always asks where to write the current shapes/connections out as a
+  stretchy-mesh-format `.json` (see "net JSON import/export" below),
+  defaulting to `data/input/stretchy_nets/`, plus a "view" section
+  (`{"scale": self.view_scale}`, this app's own extension) so
+  re-Loading it restores the same zoom level instead of resetting to
+  the default -- and, on success, associates that file with the canvas
+  going forward: its basename appears in the window title in brackets
+  (`_update_title`, e.g. "Interactive Builder [turtle.json]"), and it
+  becomes what plain "Save" (Ctrl+S, `on_save_clicked`) writes straight
+  to with no dialog (falling back to Save As if nothing's associated
+  yet -- nowhere to save "directly" to). "New" (`on_new_clicked`)
+  clears the canvas back to empty and forgets that association;
+  closing the window goes through the exact same check. Both are
+  guarded by `_confirm_discard_unsaved`: if anything's changed since the
+  last Load/Save/New (`self._dirty`, set by every real edit -- see
+  `_record_undo_snapshot`), a dialog asks whether to save first, and a
+  "yes" there opens the Save As dialog -- cancelling either that dialog
+  or the confirmation itself aborts New/closing rather than silently
+  discarding unsaved work. Load reads a file back -- a file this app
   itself saved reproduces the EXACT on-screen layout (positions/
   rotations round-trip via its own "net_layout" section) and zoom
   level; a hand-authored net with no such section
@@ -1172,6 +1188,17 @@ class InteractiveBuilderApp:
         # obvious reason (see _draw_debug_vertex_label).
         self.debug_mode = False
 
+        # File currently associated with the canvas (a successful Load
+        # or Save/Save As sets this; File > New clears it back to None)
+        # -- shown in the window title (_update_title) and what Ctrl+S
+        # saves straight to without asking, see on_save_clicked. `_dirty`
+        # tracks whether anything's changed since the last Load/Save/New
+        # -- see _push_undo/_commit_undoable_change/on_undo_key/
+        # on_redo_key for where it's set, and _confirm_discard_unsaved
+        # for what actually reads it (File > New, closing the window).
+        self.current_save_path = None
+        self._dirty = False
+
         # View transform: screen = world * view_scale + (offset_x, offset_y).
         # offset starts at (0, 0) and is recentred once, on the canvas's
         # first real <Configure>, once its actual size is known.
@@ -1182,6 +1209,7 @@ class InteractiveBuilderApp:
 
         self._palette_canvases = {}
         self._build_ui()
+        self._update_title()
 
     def _scale_ui_fonts(self):
         """Scales every named Tk/ttk font by UI_FONT_SCALE, once at
@@ -1206,9 +1234,6 @@ class InteractiveBuilderApp:
 
         for n in POLYGON_NS:
             self._build_palette_entry(left, n)
-
-        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
-        ttk.Button(left, text="Clear", command=self.on_clear_clicked).pack(fill=tk.X)
 
         # highlightthickness/-background give the drawing area a visible
         # border, so it reads as a distinct, clearly-boxed region rather
@@ -1241,13 +1266,21 @@ class InteractiveBuilderApp:
         self.root.bind_all("<Control-v>", self.on_paste_key)
         self.root.bind_all("<Control-z>", self.on_undo_key)
         self.root.bind_all("<Control-y>", self.on_redo_key)
+        self.root.bind_all("<Control-s>", lambda _e: self.on_save_clicked())
         self.root.bind_all("<Escape>", self._on_escape_key)
+
+        # Closing the window goes through the same unsaved-work check as
+        # File > New (see _confirm_discard_unsaved) rather than just
+        # discarding silently.
+        self.root.protocol("WM_DELETE_WINDOW", self._on_quit_request)
 
     def _build_menu(self):
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="New", command=self.on_new_clicked)
         file_menu.add_command(label="Load...", command=self.on_load_clicked)
-        file_menu.add_command(label="Save...", command=self.on_save_clicked)
+        file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.on_save_clicked)
+        file_menu.add_command(label="Save As...", command=self.on_save_as_clicked)
         menubar.add_cascade(label="File", menu=file_menu)
         self.root.config(menu=menubar)
 
@@ -1407,7 +1440,15 @@ class InteractiveBuilderApp:
                 "white" if other_n == self.armed_n else PLOT_THEME["bg"]))
         self._redraw()
 
-    def on_clear_clicked(self):
+    def on_new_clicked(self):
+        """File > New -- clears the canvas back to empty (what the old
+        "Clear" button used to do) and forgets whatever file was
+        associated with it (window title, Ctrl+S's own direct-save
+        target -- see current_save_path), after first checking there's
+        nothing unsaved that this would silently throw away (see
+        _confirm_discard_unsaved)."""
+        if not self._confirm_discard_unsaved():
+            return
         if self.shapes or self.connections:
             self._push_undo()
         self.shapes.clear()
@@ -1415,37 +1456,82 @@ class InteractiveBuilderApp:
         self.selected_ids = set()
         self.selected_connection_id = None
         self._drag_state = None
+        self.current_save_path = None
+        self._dirty = False
+        self._update_title()
         self._redraw()
 
-    # ---- File menu: load/save ----
+    def _on_quit_request(self):
+        """WM_DELETE_WINDOW (the window's own close button, Alt+F4,
+        etc.) -- same unsaved-work check as File > New before actually
+        closing (see _confirm_discard_unsaved)."""
+        if self._confirm_discard_unsaved():
+            self.root.destroy()
 
-    def on_save_clicked(self):
-        """Writes the current shapes/connections out as a stretchy-mesh
-        "faces" vertex-loop spec, plus a "net_layout" section (this
-        app's own extension, see module docstring) so re-Loading it
-        reproduces the exact on-screen layout rather than falling back
-        to a fresh BFS one, and a "view" section with the current zoom
-        level so re-Loading it doesn't reset back to the default zoom.
-        A self-loop failure (NetValidationError) also rings every
-        implicated corner in SELF_LOOP_HIGHLIGHT_COLOR (_redraw), so the
-        problem is visible on the canvas itself, not just named in the
-        messagebox text -- cleared again by the next edit (see
-        self._self_loop_highlight's own comment in __init__)."""
-        path = filedialog.asksaveasfilename(
-            title="Save net", initialdir=str(STRETCHY_NETS_DIR), defaultextension=".json",
-            filetypes=[("Net JSON", "*.json"), ("All files", "*.*")])
-        if not path:
-            return
+    def _confirm_discard_unsaved(self):
+        """Returns True if it's safe to proceed with something that
+        would discard the current canvas (File > New, or closing the
+        window) -- either nothing's unsaved (self._dirty is False), the
+        user said to discard it anyway, or they asked to save first and
+        the save dialog that opened for it actually went through.
+        Returns False if the caller should abort instead (the user
+        cancelled outright, or cancelled/failed the save dialog after
+        saying "yes" -- either way, nothing has actually been saved, so
+        proceeding would still lose it)."""
+        if not self._dirty:
+            return True
+        answer = messagebox.askyesnocancel(
+            "Unsaved changes", "Save your changes before continuing?")
+        if answer is None:  # Cancel
+            return False
+        if not answer:  # No -- discard
+            return True
+        return self.on_save_as_clicked()  # Yes -- must actually succeed
+
+    def _update_title(self):
+        """Single source of truth for the window title: the base name,
+        plus the associated file's own basename in brackets if there is
+        one (current_save_path, set by a successful Load/Save/Save As
+        and cleared by New), plus the debug-mode suffix if that's on.
+        Called wherever any of those change."""
+        title = "Interactive Builder"
+        if self.current_save_path is not None:
+            title += f" [{os.path.basename(self.current_save_path)}]"
+        if self.debug_mode:
+            title += " (debug mode)"
+        self.root.title(title)
+
+    # ---- File menu: new/load/save ----
+
+    def _save_to_path(self, path):
+        """The actual save logic shared by "Save" (direct, straight to
+        whatever file's already associated with the canvas) and
+        "Save As..." (always asks first) -- writes shapes/connections
+        out as a stretchy-mesh "faces" vertex-loop spec, plus a
+        "net_layout" section (this app's own extension, see module
+        docstring) so re-Loading it reproduces the exact on-screen
+        layout rather than falling back to a fresh BFS one, and a "view"
+        section with the current zoom level so re-Loading it doesn't
+        reset back to the default zoom. A self-loop failure
+        (NetValidationError) also rings every implicated corner in
+        SELF_LOOP_HIGHLIGHT_COLOR (_redraw), so the problem is visible on
+        the canvas itself, not just named in the messagebox text --
+        cleared again by the next edit (see self._self_loop_highlight's
+        own comment in __init__). Returns True on success, False on a
+        validation or I/O failure (already reported via messagebox) --
+        callers that need to know whether the save actually happened
+        (_confirm_discard_unsaved, before letting New/quitting throw
+        away unsaved work) check this."""
         try:
             faces, net_layout = self._export_faces_and_layout()
         except NetValidationError as e:
             self._self_loop_highlight = e.self_loop_slots
             self._redraw()
             messagebox.showerror("Save failed", str(e))
-            return
+            return False
         except ValueError as e:
             messagebox.showerror("Save failed", str(e))
-            return
+            return False
         spec = {"name": os.path.splitext(os.path.basename(path))[0], "faces": faces,
                 "net_layout": net_layout, "view": {"scale": self.view_scale}}
         try:
@@ -1453,6 +1539,37 @@ class InteractiveBuilderApp:
                 json.dump(spec, f, indent=2)
         except OSError as e:
             messagebox.showerror("Save failed", str(e))
+            return False
+        self.current_save_path = path
+        self._dirty = False
+        self._update_title()
+        return True
+
+    def on_save_as_clicked(self):
+        """File > Save As... -- always asks where to save (unlike
+        File > Save/Ctrl+S, which reuses current_save_path if there is
+        one), then associates that file with the canvas going forward.
+        Returns True on a successful save, False if the dialog was
+        cancelled or the save itself failed (see _save_to_path) --
+        _confirm_discard_unsaved relies on this to know whether it's
+        actually safe to then discard/replace the canvas."""
+        path = filedialog.asksaveasfilename(
+            title="Save net as", initialdir=str(STRETCHY_NETS_DIR), defaultextension=".json",
+            filetypes=[("Net JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return False
+        return self._save_to_path(path)
+
+    def on_save_clicked(self):
+        """File > Save (Ctrl+S) -- saves straight to whatever file is
+        already associated with the canvas (current_save_path, set by a
+        prior Load or Save As), with no dialog; falls back to Save As if
+        nothing's associated with it yet (nowhere to save "directly" to,
+        same as any other app's Save the first time). Returns True/False
+        like on_save_as_clicked, for the same reason."""
+        if self.current_save_path is None:
+            return self.on_save_as_clicked()
+        return self._save_to_path(self.current_save_path)
 
     def _export_faces_and_layout(self):
         """Returns (faces, net_layout): `faces` is the vertex-loop list
@@ -1499,6 +1616,9 @@ class InteractiveBuilderApp:
             self_loops = _self_loop_faces(faces)
             view_scale = spec.get("view", {}).get("scale")
             self._load_faces(faces, spec.get("net_layout"), view_scale)
+            self.current_save_path = path
+            self._dirty = False
+            self._update_title()
             if self_loops:
                 # A malformed file (from an earlier, buggy Save -- see
                 # _self_loop_faces' own docstring) still loads, but
@@ -1846,7 +1966,7 @@ class InteractiveBuilderApp:
 
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
-        self.root.title(f"Interactive Builder{' (debug mode)' if self.debug_mode else ''}")
+        self._update_title()
         self._redraw()
 
     # ---- undo/redo (Ctrl+Z / Ctrl+Y) ----
@@ -1880,15 +2000,21 @@ class InteractiveBuilderApp:
         full) and clears the redo stack -- a fresh action, like any
         ordinary undo system, discards whatever redo history existed
         before it, since it's no longer the alternate future that
-        history led to."""
+        history led to. This is also the single place that marks the
+        canvas dirty (see self._dirty's own comment in __init__) -- both
+        _push_undo and _commit_undoable_change funnel through here, so
+        every REAL change (as opposed to a plain click that moved
+        nothing) is covered without needing to set it separately at each
+        call site."""
         self._undo_stack.append(snap)
         if len(self._undo_stack) > UNDO_STACK_LIMIT:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
+        self._dirty = True
 
     def _push_undo(self):
         """Call BEFORE an instantaneous action (drop, delete, make a
-        connection, copy/paste, Clear, Load) that's about to change
+        connection, copy/paste, New, Load) that's about to change
         shapes/connections -- captures and records the state right
         before it. A drag/rotate GESTURE uses _begin_undoable_change/
         _commit_undoable_change instead (see their own docstrings for
@@ -1941,6 +2067,7 @@ class InteractiveBuilderApp:
         self._rotate_state = None
         self._connection_pending = None
         self._self_loop_highlight = set()
+        self._dirty = True
         self._redraw()
 
     def on_redo_key(self, _event=None):
@@ -1959,6 +2086,7 @@ class InteractiveBuilderApp:
         self._rotate_state = None
         self._connection_pending = None
         self._self_loop_highlight = set()
+        self._dirty = True
         self._redraw()
 
     def on_copy_key(self, _event=None):
