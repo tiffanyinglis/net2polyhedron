@@ -279,3 +279,111 @@ class TestGenuinelyImpossibleNet:
             trial_shapes = [dict(self.SHAPES[0], flipped=flip1), dict(self.SHAPES[1], flipped=flip2)]
             with pytest.raises(NetValidationError):
                 builder_app._validate_shapes_connections(trial_shapes, self.CONNECTIONS)
+
+
+# ---- vertex labelling (debug mode's always-on dedup vertex display,
+# ---- _draw_dedup_vertex_labels) -- pinned down as a regression
+# ---- baseline before further work touches any of this ----
+
+def dedup_groups(shapes, connections):
+    """The CURRENT vertex-labelling PARTITION -- a frozenset of
+    frozensets of (shape_id, corner_index) slots that _vertex_roots (and
+    therefore _draw_dedup_vertex_labels, see interactive_builder_app.app's
+    own module docstring under "Debug mode") currently consider to be
+    the SAME vertex. Deliberately label-independent:
+    _draw_dedup_vertex_labels assigns its displayed NUMBERS fresh, in
+    shape/corner visiting order, on every redraw -- a pure display
+    convenience that can shift across calls or future versions with no
+    real behavior change (see its own docstring). Comparing this
+    partition instead of any assigned number means a test only fails if
+    two corners that used to be the same deduped vertex stop being (or
+    vice versa), not just because a number happened to shift."""
+    roots = builder_app._vertex_roots(shapes, connections)
+    groups = {}
+    for slot, root in roots.items():
+        groups.setdefault(root, set()).add(slot)
+    return frozenset(frozenset(g) for g in groups.values())
+
+
+class TestDedupVertexGrouping:
+    """Ground truth below was read directly off dedup_groups' own output
+    (not re-derived by hand) for each case, so these pin down CURRENT,
+    verified behavior as a regression baseline -- not a claim that this
+    is the only correct grouping imaginable, just that it's what this
+    code does right now and shouldn't change without a test noticing."""
+
+    def test_no_connections_every_corner_is_its_own_group(self):
+        shapes = [shape(1, 3), shape(2, 4)]
+        groups = dedup_groups(shapes, [])
+        assert groups == frozenset(
+            frozenset([(sid, c)]) for sid, n in [(1, 3), (2, 4)] for c in range(n))
+
+    def test_one_connection_merges_exactly_its_two_shared_corners(self):
+        shapes = [shape(1, 3), shape(2, 3)]
+        connections = [conn(1, 1, 0, 2, 0)]
+        groups = dedup_groups(shapes, connections)
+        assert groups == frozenset({
+            frozenset({(1, 0), (2, 1)}),
+            frozenset({(1, 1), (2, 0)}),
+            frozenset({(1, 2)}),
+            frozenset({(2, 2)}),
+        })
+
+    def test_consistently_oriented_tetrahedron_has_4_groups_of_3(self):
+        """TestVertexMergeErrorOnFlip's own net, unflipped -- a real
+        vertex of a tetrahedron touches exactly 3 faces, so each of the
+        4 groups should have exactly 3 corners in it."""
+        groups = dedup_groups(TestVertexMergeErrorOnFlip.SHAPES, TestVertexMergeErrorOnFlip.CONNECTIONS)
+        assert groups == frozenset({
+            frozenset({(1, 0), (2, 0), (4, 0)}),
+            frozenset({(1, 1), (2, 2), (3, 0)}),
+            frozenset({(1, 2), (3, 2), (4, 1)}),
+            frozenset({(2, 1), (3, 1), (4, 2)}),
+        })
+
+    def test_flipping_one_face_collapses_two_of_the_four_groups_together(self):
+        """The same net with shape 4 flipped (a genuine vertex merge
+        error, see TestVertexMergeErrorOnFlip) -- 3 of its 4 real
+        vertices collapse into ONE 9-corner group, leaving only the
+        vertex shape 4 doesn't touch (B) still on its own; the grouping
+        itself changes shape, not just which numbers get assigned."""
+        trial_shapes = [dict(s, flipped=(s["id"] == 4)) for s in TestVertexMergeErrorOnFlip.SHAPES]
+        groups = dedup_groups(trial_shapes, TestVertexMergeErrorOnFlip.CONNECTIONS)
+        assert groups == frozenset({
+            frozenset({(1, 0), (1, 2), (2, 0), (2, 1), (3, 1), (3, 2), (4, 0), (4, 1), (4, 2)}),
+            frozenset({(1, 1), (2, 2), (3, 0)}),
+        })
+
+    def test_tetrahedron_flip_net_has_4_groups_of_3_once_the_base_is_flipped(self):
+        """TestTetrahedronFlip's own net -- the mirror image of the
+        above: needs the base (shape 4) flipped to validate at all."""
+        trial_shapes = [dict(s, flipped=(s["id"] == 4)) for s in TestTetrahedronFlip.SHAPES]
+        groups = dedup_groups(trial_shapes, TestTetrahedronFlip.CONNECTIONS)
+        assert groups == frozenset({
+            frozenset({(1, 0), (2, 0), (3, 0)}),
+            frozenset({(1, 1), (2, 2), (4, 1)}),
+            frozenset({(1, 2), (3, 1), (4, 2)}),
+            frozenset({(2, 1), (3, 2), (4, 0)}),
+        })
+
+    def test_tetrahedron_flip_net_collapses_to_2_groups_left_unflipped(self):
+        trial_shapes = TestTetrahedronFlip.SHAPES  # every shape unflipped
+        groups = dedup_groups(trial_shapes, TestTetrahedronFlip.CONNECTIONS)
+        assert groups == frozenset({
+            frozenset({(1, 0), (2, 0), (3, 0)}),
+            frozenset({(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (4, 0), (4, 1), (4, 2)}),
+        })
+
+    def test_two_shape_bend_has_3_shared_pairs_once_one_hexagon_is_flipped(self):
+        """TestTwoShapeBend's own net -- two hexagons sharing 2 edges (3
+        vertices' worth), each of those 3 vertices its own 2-corner
+        group; the other 6 corners (3 per hexagon) stay singletons."""
+        trial_shapes = [dict(s, flipped=(s["id"] == 6)) for s in TestTwoShapeBend.SHAPES]
+        groups = dedup_groups(trial_shapes, TestTwoShapeBend.CONNECTIONS)
+        assert groups == frozenset({
+            frozenset({(1, 0), (6, 3)}),
+            frozenset({(1, 1), (6, 4)}),
+            frozenset({(1, 5), (6, 2)}),
+            frozenset({(1, 2)}), frozenset({(1, 3)}), frozenset({(1, 4)}),
+            frozenset({(6, 0)}), frozenset({(6, 1)}), frozenset({(6, 5)}),
+        })
