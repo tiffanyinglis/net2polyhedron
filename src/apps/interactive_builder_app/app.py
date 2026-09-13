@@ -49,10 +49,11 @@ Interaction model:
   text-entry widget for it to collide with) removes every selected
   shape.
 - **Copy/paste (Ctrl+C / Ctrl+V)**: copies every SELECTED shape's own
-  type, rotation, and position, PLUS every connection between two
-  selected shapes (one connecting a selected shape to one that ISN'T
-  copied along with it has no other end to reproduce, so it's simply
-  dropped) (on_copy_key/on_paste_key) -- a no-op with nothing selected;
+  type, rotation, position, and "flipped" bit (see Flip below), PLUS
+  every connection between two selected shapes (one connecting a
+  selected shape to one that ISN'T copied along with it has no other
+  end to reproduce, so it's simply dropped) (on_copy_key/on_paste_key)
+  -- a no-op with nothing selected;
   pasting drops a fresh instance of each shape, all offset together by
   PASTE_OFFSET so they never land exactly on top of the originals -- a
   multi-shape copy reproduces the exact same relative arrangement AND
@@ -79,6 +80,30 @@ Interaction model:
   docstring), so there's no special-casing between the two cases. With
   nothing selected, right-drag instead pans the view (see below) -- the
   two never conflict, since one or the other is always the case.
+- **Flip (F key, `_on_flip_key`)**: toggles "flipped" on every
+  currently-selected shape -- a no-op with nothing selected. A
+  FRONT-facing (unflipped) shape renders exactly as ever, a solid fill
+  in its own POLYGON_COLORS color; a BACK-facing (flipped) one renders
+  as diagonal hatching instead, in that SAME color (`_rasterize_polygon`),
+  so which side of a shape is meant to face outward is always visible
+  at a glance rather than being an invisible internal bit. Flipping
+  never touches `self.connections` at all -- a shape's existing
+  connections stay exactly where they were made; only which of its
+  two sides counts as CCW-from-outside for that shape (_true_edge_slots)
+  changes, which is exactly the ambiguity a real connection has (edge
+  v1-v2 meeting edge w1-w2 could pair v1~w1/v2~w2 or v1~w2/v2~w1, and
+  either is a perfectly legitimate physical gluing -- see _true_edge_
+  slots' own docstring) -- flipping one of the two shapes involved is
+  what switches between them. This REPLACED an earlier automatic
+  search (`_infer_shape_flips`, since removed) that tried to find some
+  working combination of flips on its own at Save time: for any mesh
+  with a real cycle in its connections (most non-trivial ones), MORE
+  THAN ONE combination often validates -- e.g. flipping either of two
+  halves joined by a single connection is equally valid in isolation
+  -- so an automatic search could only ever produce "a species of
+  valid," not necessarily the specific arrangement the user actually
+  intends to crochet. Making the choice explicit and visible, one keypress
+  at a time, removes that ambiguity instead of trying to guess through it.
 - **Esc** cancels a connection that's been armed from one handle (the
   first click of the click-click gesture below) but not yet completed
   onto a second one -- the line following the cursor just disappears,
@@ -87,9 +112,10 @@ Interaction model:
   `self.shapes`/`self.connections` (`_push_undo`/`on_undo_key`/
   `on_redo_key`) -- restores the whole canvas as it was one action ago,
   not a field-by-field diff. One entry per WHOLE action: dropping a
-  shape, deleting shape(s)/a connection, making a connection, copy/
-  paste, New, and Load each push one snapshot right before they
-  mutate anything, same as any instantaneous action would. A drag (move)
+  shape, deleting shape(s)/a connection, making a connection, flipping
+  shape(s), copy/paste, New, and Load each push one snapshot right
+  before they mutate anything, same as any instantaneous action would.
+  A drag (move)
   or right-drag (rotate) gesture is a SINGLE undo step for the whole
   gesture, not one per intermediate mouse-move update --
   `_begin_undoable_change`/`_commit_undoable_change` snapshot at the
@@ -223,22 +249,29 @@ Interaction model:
   or the confirmation itself aborts New/closing rather than silently
   discarding unsaved work. Load reads a file back -- a file this app
   itself saved reproduces the EXACT on-screen layout (positions/
-  rotations round-trip via its own "net_layout" section) and zoom
-  level; a hand-authored net with no such section
-  (e.g. any existing file under `data/input/stretchy_nets/`) instead
-  gets laid out fresh via a BFS spanning tree over shared edges, each
-  face pushed one edge-length away from its parent so the result reads
-  as a connected but visibly DISJOINT net rather than a seamlessly
-  glued paper one. A LOADED file's own vertex-id NUMBERS are used only
-  TRANSIENTLY, purely to work out which edges were connected
-  (`_infer_connections`) -- they never become any kind of ongoing
-  identity inside this app. Every corner is immediately addressed as
-  `(shape_id, edge_index)` from that point on (fresh shape ids, per-
-  shape-local edge indices), the exact same way a freshly-drawn shape
-  is -- so the loaded file's own labelling and whatever gets exported on
-  the next Save are never required or expected to match; only the LIVE
-  `self.connections` at Save time decides that, computed once, from
-  scratch (`_faces_from_shapes`). A self-loop edge in the source file
+  rotations round-trip via its own "net_layout" section, now also
+  carrying each shape's "flipped" bit) and zoom level, AND the exact
+  shapes/connections themselves (its "builder_connections" section --
+  see module docstring's "net JSON import/export" section for why
+  "flipped" specifically can only be restored this way, never by
+  re-deriving connections from the plain vertex loops alone). A
+  hand-authored net with no such sections (e.g. any existing file under
+  `data/input/stretchy_nets/`, or one saved before this app tracked
+  "flipped" at all) instead gets laid out fresh via a BFS spanning tree
+  over shared edges, each face pushed one edge-length away from its
+  parent so the result reads as a connected but visibly DISJOINT net
+  rather than a seamlessly glued paper one, with every shape starting
+  unflipped. In THAT fallback case, a LOADED file's own vertex-id
+  NUMBERS are used only TRANSIENTLY, purely to work out which edges were
+  connected (`_infer_connections`) -- they never become any kind of
+  ongoing identity inside this app. Every corner is immediately
+  addressed as `(shape_id, edge_index)` from that point on (fresh shape
+  ids, per-shape-local edge indices), the exact same way a freshly-drawn
+  shape is -- so the loaded file's own labelling and whatever gets
+  exported on the next Save are never required or expected to match;
+  only the LIVE `self.connections` at Save time decides that, computed
+  once, from scratch (`_faces_from_shapes`). A self-loop edge in the
+  source file
   (two adjacent corners of one face sharing a vertex id -- only
   possible from a file an earlier, buggy version of this app saved) is
   never treated as a connection to itself; it's simply left unconnected,
@@ -289,7 +322,6 @@ exactly as it did before this module used Pillow at all.
 """
 import colorsys
 import copy
-import itertools
 import json
 import math
 import os
@@ -431,15 +463,12 @@ CONNECTION_SELECTED_WIDTH = 2.5
 MARQUEE_OUTLINE_COLOR = "white"
 MARQUEE_DASH = (4, 2)
 
-# _infer_shape_flips' own combinatorial search: how large a single
-# "suspect set" (the shapes implicated in one self-loop's own traced
-# chain) it will brute-force over before giving up on auto-fixing that
-# one and falling through to the plain, unflipped validation error --
-# 2**MAX_FLIP_SEARCH_SHAPES trial validations in the worst case, so this
-# stays small enough to always be fast even though each trial re-walks
-# every connection.
-MAX_FLIP_SEARCH_SHAPES = 16
-MAX_FLIP_SEARCH_OUTER_ITERATIONS = 30
+# A flipped shape (see "flipped" in the module docstring's Flip section)
+# renders as diagonal hatching instead of a solid fill, in the same
+# per-type color -- constant SCREEN pixels, not scaled by view_scale,
+# same rationale as SELECTION_OUTLINE_WIDTH etc.
+HATCH_LINE_SPACING = 10.0
+HATCH_LINE_WIDTH = 2.0
 
 # Supersampling factor for _rasterize_polygon's anti-aliasing -- render
 # at this many times final size, then LANCZOS-downsample. Higher looks
@@ -532,12 +561,15 @@ def _rgba(hex_color, alpha=255):
     return r, g, b, alpha
 
 
-def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_width=0):
+def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_width=0, hatched=False):
     """screen_vertices: [(x, y), ...] in CANVAS pixel space. Renders just
     this polygon's own (padded) bounding box, supersampled by
     SUPERSAMPLE and LANCZOS-downsampled for anti-aliased edges -- see
     module docstring's Rendering section for why this exists instead of
-    a plain tk.Canvas polygon item. Returns (PhotoImage, (left, top)) --
+    a plain tk.Canvas polygon item. `hatched` (see module docstring's
+    "Flip" section) draws diagonal lines in `fill_hex` instead of a solid
+    fill -- how a flipped shape reads as "the other side" at a glance,
+    still in its own per-type color. Returns (PhotoImage, (left, top)) --
     the caller places it with `canvas.create_image(left, top, anchor="nw",
     image=photo)` and must keep a reference to the PhotoImage itself
     (Tk drops a garbage-collected one)."""
@@ -551,7 +583,26 @@ def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_widt
     big = Image.new("RGBA", (width * SUPERSAMPLE, height * SUPERSAMPLE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(big)
     local = [((x - left) * SUPERSAMPLE, (y - top) * SUPERSAMPLE) for x, y in screen_vertices]
-    draw.polygon(local, fill=_rgba(fill_hex))
+    if hatched:
+        # PIL has no direct "hatched fill" primitive: draw the lines
+        # across the WHOLE image, then clip them to the polygon via a
+        # mask (big itself starts fully transparent, so compositing
+        # straight onto it -- rather than drawing the lines first and
+        # masking afterward -- needs no separate "erase outside the
+        # polygon" step).
+        mask = Image.new("L", big.size, 0)
+        ImageDraw.Draw(mask).polygon(local, fill=255)
+        hatch = Image.new("RGBA", big.size, (0, 0, 0, 0))
+        hatch_draw = ImageDraw.Draw(hatch)
+        spacing = max(1, round(HATCH_LINE_SPACING * SUPERSAMPLE))
+        line_width = max(1, round(HATCH_LINE_WIDTH * SUPERSAMPLE))
+        w, h = big.size
+        for x0 in range(-h, w, spacing):
+            hatch_draw.line([(x0, 0), (x0 + h, h)], fill=_rgba(fill_hex), width=line_width)
+        big = Image.composite(hatch, big, mask)
+        draw = ImageDraw.Draw(big)
+    else:
+        draw.polygon(local, fill=_rgba(fill_hex))
     if outline_hex and outline_width > 0:
         draw.line(local + [local[0]], fill=_rgba(outline_hex),
                    width=max(1, round(outline_width * SUPERSAMPLE)), joint="curve")
@@ -563,16 +614,29 @@ def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_widt
 #
 # Written in the same "faces" vertex-loop format stretchy_mesh.py reads
 # (shared vertex ids ARE the adjacency -- see its own module docstring
-# for the full convention), plus an extra top-level "net_layout" this
-# app alone understands: a list, parallel to "faces", of each face's own
-# {"cx", "cy", "rotation"} -- exactly the fields a shape already carries
-# -- as it looked on screen when saved. Any OTHER program reading this
-# file (the actual stretchy-mesh solver included) only ever looks at
-# "faces"/"name" and has no reason to know "net_layout" exists, so it's
-# free to ignore an unrecognized top-level key.
+# for the full convention), plus two extra top-level keys this app alone
+# understands: "net_layout", a list parallel to "faces" of each face's
+# own {"cx", "cy", "rotation", "flipped"} -- exactly the fields a shape
+# already carries -- as it looked on screen when saved; and
+# "builder_connections", self.connections translated from shape id to
+# FACE INDEX (a fresh shape has no id yet at load time). Any OTHER
+# program reading this file (the actual stretchy-mesh solver included)
+# only ever looks at "faces"/"name" and has no reason to know either
+# key exists, so it's free to ignore an unrecognized top-level key.
+#
+# "flipped" can ONLY be correctly restored together with
+# "builder_connections" -- never by re-deriving connections from "faces"
+# alone (_infer_connections) and setting "flipped" on top of THAT, which
+# corrupts the mesh (see _load_faces' own docstring for exactly why:
+# _faces_from_shapes already bakes each shape's true winding into its
+# exported loop, so a freshly re-derived connection set already assumes
+# every shape is unflipped, and flipping one afterward reverses all of
+# its edges relative to what those connections expect). So both keys are
+# always written and read together.
 #
 # Loading a file with no "net_layout" (any hand-authored net under
-# data/input/stretchy_nets/, for instance) instead falls back to
+# data/input/stretchy_nets/, for instance, or one saved before this app
+# tracked "flipped"/"builder_connections" at all) instead falls back to
 # _layout_faces_with_gap -- the same BFS-spanning-tree-over-shared-edges
 # idea build_stretchy_net_layout (utils/inflate_polyhedron/
 # stretchy_net_layout.py) already implements, reusing its own
@@ -706,16 +770,15 @@ def _true_edge_slots(shape, edge_index):
     """The (v_slot, w_slot) corner-slot pair edge `edge_index` of `shape`
     represents in TRUE (CCW-from-outside) direction: (corner i, corner
     i+1) normally, or REVERSED -- (corner i+1, corner i) -- when `shape`
-    is flipped (see _infer_shape_flips' module-level Design notes). A
-    regular polygon placed in this app can only be rotated, never
-    mirrored, so its DRAWN corner order always has the same fixed
-    handedness; "flipped" is a per-shape bit saying that shape's face is
-    meant to be viewed from the OTHER side of the solid, which reverses
-    every one of its edges' TRUE direction relative to how they're drawn
-    -- this is the one place that fact gets applied, so every caller
-    (_connection_pairs, _faces_from_shapes, _validate_shapes_connections)
-    agrees. Set automatically by _infer_shape_flips at Save time -- never
-    user-editable."""
+    is flipped (see "Flip" in the module docstring). A regular polygon
+    placed in this app can only be rotated, never mirrored, so its DRAWN
+    corner order always has the same fixed handedness; "flipped" is a
+    per-shape bit, set directly by the user (select shapes, press F),
+    saying that shape's face is meant to be viewed from the OTHER side
+    of the solid, which reverses every one of its edges' TRUE direction
+    relative to how they're drawn -- this is the one place that fact
+    gets applied, so every caller (_connection_pairs, _faces_from_shapes,
+    _validate_shapes_connections) agrees."""
     sid, n = shape["id"], shape["n"]
     a, b = (sid, edge_index), (sid, (edge_index + 1) % n)
     return (b, a) if shape.get("flipped", False) else (a, b)
@@ -726,8 +789,7 @@ def _shape_face_corner_order(shape):
     read a shape's OWN face loop in, matching _true_edge_slots: forward
     (0, 1, ..., n-1) normally, or reversed (n-1, ..., 1, 0) when flipped
     -- a flipped shape's consecutive TRUE edges only chain into a valid
-    cyclic loop when its corners are visited in reverse (see
-    _infer_shape_flips' module-level Design notes)."""
+    cyclic loop when its corners are visited in reverse."""
     n = shape["n"]
     return range(n - 1, -1, -1) if shape.get("flipped", False) else range(n)
 
@@ -791,8 +853,7 @@ def _faces_from_shapes(shapes, connections):
     gets one fresh sequential integer id (assigned in shape/corner
     visiting order), and each shape's own face is just its corners' ids
     in _shape_face_corner_order (forward normally, reversed if flipped --
-    see _infer_shape_flips' module-level Design notes for why a flipped
-    shape's own face loop must be read backward to come out
+    a flipped shape's own face loop must be read backward to come out
     CCW-from-outside like every other face's). This sequential numbering
     only ever happens HERE, inside
     _export_faces_and_layout (Save) -- never live while editing (see
@@ -974,10 +1035,10 @@ def _validate_shapes_connections(shapes, connections):
         n, sid = shape["n"], shape["id"]
         for i in range(n):
             # _true_edge_slots, not the raw (sid, i)/(sid, (i+1)%n) pair --
-            # a flipped shape's edge i has its TRUE v/w corners reversed
-            # (see _infer_shape_flips' Design notes), and this check has
-            # to agree with _connection_pairs/_faces_from_shapes about
-            # what each shape's own edges actually connect to.
+            # a flipped shape's edge i has its TRUE v/w corners reversed,
+            # and this check has to agree with _connection_pairs/
+            # _faces_from_shapes about what each shape's own edges
+            # actually connect to.
             slot_v, slot_w = _true_edge_slots(shape, i)
             v, w = roots[slot_v], roots[slot_w]
             if v == w:
@@ -998,95 +1059,6 @@ def _validate_shapes_connections(shapes, connections):
     if problems:
         raise NetValidationError(
             "Not a valid net, refusing to save:\n  " + "\n  ".join(problems), self_loop_slots)
-
-
-def _infer_shape_flips(shapes, connections):
-    """Automatically finds a set of shape ids to mark "flipped" (see
-    _true_edge_slots) so _validate_shapes_connections passes -- WITHOUT
-    the user ever choosing anything -- or returns None if no such set
-    was found (the caller then just validates unflipped, exactly as if
-    this function didn't exist, so the reported error is unaffected).
-
-    Design notes -- why this can't be a simple, always-correct rule:
-    every shape's own drawn corner order has a single, fixed handedness
-    (only rotation, never mirroring, is available when placing it), and
-    _connection_pairs' default (REVERSED, "viewed from outside") pairing
-    handles most nets built this way with no help. But some valid nets
-    genuinely need a face read the OTHER way relative to its neighbors
-    -- e.g. 3 triangles connected pairwise around a shared apex, plus a
-    4th "base" face closing all 3 of their remaining edges, needs that
-    4th face's connections to use the OPPOSITE pairing, since gluing it
-    the default way makes two of its own corners collide into one
-    vertex (a self-loop) no matter which of its edges are chosen for
-    which connection. A user hit exactly this building a tetrahedron
-    this way and reported it as a bug.
-
-    Critically, a single connection's own (a_edge, b_edge) never says by
-    itself whether it needs the default or opposite pairing -- either
-    is equally valid in isolation (it only fixes WHICH physical edges
-    are glued, not their relative orientation) -- so this can only be
-    determined by REQUIRING GLOBAL CONSISTENCY across every connection
-    at once, exactly like determining whether a surface built by gluing
-    polygons along edges (with no pre-existing shared vertex labels) is
-    orientable at all. That's solvable, but not by a single linear
-    pass with a fixed per-edge rule (verified directly: brute-forcing a
-    small worked example found relative orientation constraints that
-    only became visible once enough of the mesh existed to create a
-    cycle, and satisfying one cycle's constraint could just as well have
-    required UNDOING an earlier, individually-harmless choice made
-    elsewhere). Instead: start from the default (nothing flipped, i.e.
-    today's original behavior, unchanged for every net that never needed
-    this at all) and only search when that fails -- a failed check's own
-    self-loop already NAMES the specific corners involved and, via
-    _connection_chain, the specific chain of connections responsible
-    (see _validate_shapes_connections), so the "suspect set" of shapes
-    that might need flipping is exactly those named, not the whole net.
-    Brute-forcing increasing-size subsets of just that (small, for any
-    reasonably localized problem) set, retrying validation after each,
-    finds a fix quickly in practice (confirmed on the tetrahedron
-    example above and on every net already shipped under
-    data/input/stretchy_nets/, which validate instantly with an empty
-    flip set -- i.e. this changes nothing for a net that already worked).
-    MAX_FLIP_SEARCH_SHAPES/MAX_FLIP_SEARCH_OUTER_ITERATIONS cap the
-    search so a genuinely non-orientable net (no flip assignment can
-    ever fix it) or an unusually large tangle fails fast rather than
-    hanging, falling back to the plain validation error."""
-    flip_set = set()
-    for _ in range(MAX_FLIP_SEARCH_OUTER_ITERATIONS):
-        trial = [dict(s, flipped=(s["id"] in flip_set)) for s in shapes]
-        try:
-            _validate_shapes_connections(trial, connections)
-            return flip_set
-        except NetValidationError as e:
-            if not e.self_loop_slots:
-                return None  # a pure duplicate-edge conflict -- no self-loop to localize from
-            suspects = {slot[0] for slot in e.self_loop_slots}
-            slots = list(e.self_loop_slots)
-            chain = _connection_chain(shapes, connections, slots[0], slots[1]) if len(slots) >= 2 else None
-            if chain:
-                for c in chain:
-                    suspects.add(c["a_shape"])
-                    suspects.add(c["b_shape"])
-        if len(suspects) > MAX_FLIP_SEARCH_SHAPES:
-            return None
-        candidates = sorted(suspects)
-        found = None
-        for size in range(1, len(candidates) + 1):
-            for combo in itertools.combinations(candidates, size):
-                trial_flips = flip_set.symmetric_difference(combo)
-                trial = [dict(s, flipped=(s["id"] in trial_flips)) for s in shapes]
-                try:
-                    _validate_shapes_connections(trial, connections)
-                    found = trial_flips
-                    break
-                except NetValidationError:
-                    continue
-            if found is not None:
-                break
-        if found is None:
-            return None
-        flip_set = found
-    return None
 
 
 class InteractiveBuilderApp:
@@ -1262,6 +1234,7 @@ class InteractiveBuilderApp:
         # always hold keyboard focus.
         self.root.bind_all("<Delete>", self._on_delete_key)
         self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
+        self.root.bind_all("<KeyPress-f>", self._on_flip_key)
         self.root.bind_all("<Control-c>", self.on_copy_key)
         self.root.bind_all("<Control-v>", self.on_paste_key)
         self.root.bind_all("<Control-z>", self.on_undo_key)
@@ -1508,11 +1481,14 @@ class InteractiveBuilderApp:
         whatever file's already associated with the canvas) and
         "Save As..." (always asks first) -- writes shapes/connections
         out as a stretchy-mesh "faces" vertex-loop spec, plus a
-        "net_layout" section (this app's own extension, see module
-        docstring) so re-Loading it reproduces the exact on-screen
-        layout rather than falling back to a fresh BFS one, and a "view"
-        section with the current zoom level so re-Loading it doesn't
-        reset back to the default zoom. A self-loop failure
+        "net_layout" section (each shape's "cx"/"cy"/"rotation"/
+        "flipped") and a "builder_connections" section (this app's own
+        extensions, see module docstring) so re-Loading it reproduces
+        the exact on-screen layout AND the exact shapes/connections/flip
+        state, rather than falling back to a fresh BFS layout plus
+        re-derived (always-unflipped) connections, and a "view" section
+        with the current zoom level so re-Loading it doesn't reset back
+        to the default zoom. A self-loop failure
         (NetValidationError) also rings every implicated corner in
         SELF_LOOP_HIGHLIGHT_COLOR (_redraw), so the problem is visible on
         the canvas itself, not just named in the messagebox text --
@@ -1523,7 +1499,7 @@ class InteractiveBuilderApp:
         (_confirm_discard_unsaved, before letting New/quitting throw
         away unsaved work) check this."""
         try:
-            faces, net_layout = self._export_faces_and_layout()
+            faces, net_layout, builder_connections = self._export_faces_and_layout()
         except NetValidationError as e:
             self._self_loop_highlight = e.self_loop_slots
             self._redraw()
@@ -1533,7 +1509,8 @@ class InteractiveBuilderApp:
             messagebox.showerror("Save failed", str(e))
             return False
         spec = {"name": os.path.splitext(os.path.basename(path))[0], "faces": faces,
-                "net_layout": net_layout, "view": {"scale": self.view_scale}}
+                "net_layout": net_layout, "builder_connections": builder_connections,
+                "view": {"scale": self.view_scale}}
         try:
             with open(path, "w") as f:
                 json.dump(spec, f, indent=2)
@@ -1572,34 +1549,45 @@ class InteractiveBuilderApp:
         return self._save_to_path(self.current_save_path)
 
     def _export_faces_and_layout(self):
-        """Returns (faces, net_layout): `faces` is the vertex-loop list
-        derived from self.shapes/self.connections via _faces_from_shapes;
-        `net_layout` is each shape's own {"cx", "cy", "rotation"}, in the
-        same order as `faces`. Raises NetValidationError (a ValueError
-        subclass, from _validate_shapes_connections) if the current
-        connections would produce an invalid mesh even after
-        _infer_shape_flips' own automatic search for a working
-        "flipped" assignment (see its own Design notes for why some
-        valid nets need one at all) -- the ONLY place either of these
-        ever run (see module docstring: every corner is deliberately
+        """Returns (faces, net_layout, builder_connections): `faces` is
+        the vertex-loop list derived from self.shapes/self.connections
+        via _faces_from_shapes; `net_layout` is each shape's own {"cx",
+        "cy", "rotation", "flipped"}, in the same order as `faces`;
+        `builder_connections` is self.connections translated from shape
+        id to FACE INDEX (position in self.shapes, matching position in
+        `faces`) -- both this app's own extensions, see module
+        docstring's "net JSON import/export" section for why Load
+        reconstructs shapes/connections directly from these two
+        (when present) rather than re-deriving them from the plain
+        vertex-loop `faces` alone: re-deriving can only ever recover
+        SOME valid flip/connection assignment for the exported mesh, not
+        necessarily the exact one the user built (see _load_faces' own
+        docstring for why "flipped" specifically can't just be read back
+        onto a re-derived connection). Raises NetValidationError (a
+        ValueError subclass, from _validate_shapes_connections) if
+        self.shapes' CURRENT "flipped" bits (see module docstring's
+        "Flip" section -- set directly by the user, never inferred)
+        don't produce a valid mesh -- the ONLY place this ever gets
+        checked (see module docstring: every corner is deliberately
         treated as its own, separate vertex while editing, no matter
         what any OTHER connection's own merge already implies about it;
         only Save actually computes the full picture and validates it,
-        once, as a whole). Validated on self.shapes/self.connections
-        directly (in "vSHAPE.CORNER" terms, the same live identity debug
-        mode shows), before _faces_from_shapes ever renumbers anything
-        for export, so a failed Save's error names corners the user can
-        actually go find on screen -- and reflects the SAME (unflipped)
-        assignment shown there if no working flip was found, so the
-        error is never phrased in terms of a flip the user never asked
-        for and can't see."""
-        flip_set = _infer_shape_flips(self.shapes, self.connections)
-        shapes = ([dict(s, flipped=(s["id"] in flip_set)) for s in self.shapes]
-                   if flip_set is not None else self.shapes)
-        _validate_shapes_connections(shapes, self.connections)
-        faces = _faces_from_shapes(shapes, self.connections)
-        net_layout = [{"cx": s["cx"], "cy": s["cy"], "rotation": s["rotation"]} for s in self.shapes]
-        return faces, net_layout
+        once, as a whole). Validated in "vSHAPE.CORNER" terms, the same
+        live identity debug mode shows, before _faces_from_shapes ever
+        renumbers anything for export, so a failed Save's error names
+        corners the user can actually go find (and un-flip, if that's
+        the fix) on screen."""
+        _validate_shapes_connections(self.shapes, self.connections)
+        faces = _faces_from_shapes(self.shapes, self.connections)
+        net_layout = [{"cx": s["cx"], "cy": s["cy"], "rotation": s["rotation"],
+                       "flipped": s["flipped"]} for s in self.shapes]
+        face_index = {s["id"]: i for i, s in enumerate(self.shapes)}
+        builder_connections = [
+            {"a_face": face_index[c["a_shape"]], "a_edge": c["a_edge"],
+             "b_face": face_index[c["b_shape"]], "b_edge": c["b_edge"]}
+            for c in self.connections
+        ]
+        return faces, net_layout, builder_connections
 
     def on_load_clicked(self):
         path = filedialog.askopenfilename(
@@ -1615,7 +1603,8 @@ class InteractiveBuilderApp:
                 raise ValueError("no faces declared")
             self_loops = _self_loop_faces(faces)
             view_scale = spec.get("view", {}).get("scale")
-            self._load_faces(faces, spec.get("net_layout"), view_scale)
+            self._load_faces(faces, spec.get("net_layout"), view_scale,
+                              spec.get("builder_connections"))
             self.current_save_path = path
             self._dirty = False
             self._update_title()
@@ -1635,15 +1624,42 @@ class InteractiveBuilderApp:
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             messagebox.showerror("Load failed", str(e))
 
-    def _load_faces(self, faces, net_layout, view_scale=None):
+    def _load_faces(self, faces, net_layout, view_scale=None, builder_connections=None):
         """Replaces the whole canvas with `faces` (vertex-id loops).
-        `net_layout` (this app's own saved {"cx", "cy", "rotation"} per
-        face, see module docstring), when present and the right length,
-        positions shapes exactly as they were when saved; otherwise
-        falls back to _layout_faces_with_gap, rooted at face 0.
+        `net_layout` (this app's own saved {"cx", "cy", "rotation",
+        "flipped"} per face, see module docstring), when present and the
+        right length, positions shapes exactly as they were when saved;
+        otherwise falls back to _layout_faces_with_gap, rooted at face 0.
         `view_scale` (this app's own saved "view"."scale", see module
         docstring), when present, restores the zoom level the net was
-        saved at instead of resetting to the default 1.0."""
+        saved at instead of resetting to the default 1.0.
+
+        `builder_connections` (this app's own saved
+        {"a_face","a_edge","b_face","b_edge"} list, face-INDEXED rather
+        than shape-id-keyed since ids don't exist yet at load time -- see
+        module docstring), when present ALONGSIDE a `net_layout` of the
+        right length, reconstructs self.connections DIRECTLY from it
+        (and each shape's "flipped" from that SAME net_layout entry)
+        instead of falling back to _infer_connections(faces) -- this is
+        the ONLY way to correctly restore a shape's "flipped" bit at all:
+        _faces_from_shapes already bakes each shape's TRUE (flip-
+        adjusted) winding directly into its exported loop, so
+        _infer_connections always derives a fully self-consistent set of
+        connections treating EVERY shape as unflipped (this is exactly
+        why a hand-authored net, or an app-saved one from before
+        "flipped" was tracked, always loads with every shape unflipped
+        and still validates instantly). Naively marking a shape
+        "flipped" again afterward, on top of those re-derived
+        connections, corrupts the mesh -- flipping any single already-
+        fully-integrated shape reverses EVERY one of its edges' true
+        direction at once, which the freshly re-derived connections
+        don't expect (confirmed directly: re-flipping one shape this way
+        after a round-trip produces exactly the self-loop/duplicate-edge
+        errors _validate_shapes_connections exists to catch). Restoring
+        "flipped" is only safe together with the EXACT connections it
+        was originally paired with, which is what `builder_connections`
+        supplies -- there is no way to derive a correct substitute from
+        `faces` alone."""
         if self.shapes or self.connections:
             self._push_undo()
         self.shapes = []
@@ -1659,20 +1675,19 @@ class InteractiveBuilderApp:
         self._marquee_current = None
         self._self_loop_highlight = set()
 
+        layout_ok = net_layout is not None and len(net_layout) == len(faces)
+        exact_connections_ok = layout_ok and builder_connections is not None
+
         shape_ids = []
-        for face in faces:
+        for i, face in enumerate(faces):
             shape_id = self._next_shape_id
             self._next_shape_id += 1
             shape_ids.append(shape_id)
-            # "flipped" always starts False for a LOADED shape -- never
-            # needed here even for a face that a builder session had
-            # flipped originally, since _infer_connections derives
-            # connections straight from the file's own already-consistent
-            # winding (see its own docstring), not via _connection_pairs.
+            flipped = net_layout[i].get("flipped", False) if exact_connections_ok else False
             self.shapes.append({"id": shape_id, "n": len(face), "cx": 0.0, "cy": 0.0,
-                                 "rotation": 0.0, "flipped": False})
+                                 "rotation": 0.0, "flipped": flipped})
 
-        if net_layout is not None and len(net_layout) == len(faces):
+        if layout_ok:
             for shape, layout in zip(self.shapes, net_layout):
                 shape["cx"], shape["cy"], shape["rotation"] = (
                     layout["cx"], layout["cy"], layout["rotation"])
@@ -1688,13 +1703,22 @@ class InteractiveBuilderApp:
                     # side rather than leaving it stacked on the origin.
                     shape["cx"] = (i + 1) * DEFAULT_SHAPE_EDGE_LENGTH * 3
 
-        for conn in _infer_connections(faces):
-            self.connections.append({
-                "id": self._next_connection_id,
-                "a_shape": shape_ids[conn["a_face"]], "a_edge": conn["a_edge"],
-                "b_shape": shape_ids[conn["b_face"]], "b_edge": conn["b_edge"],
-            })
-            self._next_connection_id += 1
+        if exact_connections_ok:
+            for c in builder_connections:
+                self.connections.append({
+                    "id": self._next_connection_id,
+                    "a_shape": shape_ids[c["a_face"]], "a_edge": c["a_edge"],
+                    "b_shape": shape_ids[c["b_face"]], "b_edge": c["b_edge"],
+                })
+                self._next_connection_id += 1
+        else:
+            for conn in _infer_connections(faces):
+                self.connections.append({
+                    "id": self._next_connection_id,
+                    "a_shape": shape_ids[conn["a_face"]], "a_edge": conn["a_edge"],
+                    "b_shape": shape_ids[conn["b_face"]], "b_edge": conn["b_edge"],
+                })
+                self._next_connection_id += 1
 
         self._center_view_on_shapes(scale=view_scale if view_scale is not None else 1.0)
         self._redraw()
@@ -1948,6 +1972,27 @@ class InteractiveBuilderApp:
             self._self_loop_highlight = set()
             self._redraw()
 
+    def _on_flip_key(self, _event=None):
+        """F: toggles "flipped" (see module docstring's "Flip" section)
+        on every currently-selected shape -- a no-op with nothing
+        selected. Purely a per-shape bit: none of self.connections
+        change at all, so an already-made connection stays exactly where
+        it was clicked; only which side of the flipped shape(s) reads as
+        "outside" (solid fill vs. hatching -- see _draw_shape/
+        _rasterize_polygon) and how their edges' TRUE direction is
+        interpreted at Save (_true_edge_slots) changes. Clears
+        self._self_loop_highlight like any other edit -- a highlight
+        from a previous failed Save no longer reflects the current
+        (about to change) flip state."""
+        if not self.selected_ids:
+            return
+        self._push_undo()
+        for shape in self.shapes:
+            if shape["id"] in self.selected_ids:
+                shape["flipped"] = not shape["flipped"]
+        self._self_loop_highlight = set()
+        self._redraw()
+
     def _on_escape_key(self, _event=None):
         """Esc: cancels a connection that's been armed from one handle
         (the first click of the click-click gesture -- see module
@@ -2091,23 +2136,25 @@ class InteractiveBuilderApp:
 
     def on_copy_key(self, _event=None):
         """Ctrl+C: remembers every SELECTED shape's own type, rotation,
-        and ABSOLUTE position, PLUS every connection with BOTH endpoints
-        among the selected shapes -- one connecting a selected shape to
-        one that ISN'T copied along with it has nothing on the other end
-        to reproduce, so it's simply dropped, same as _remove_shape
-        already does for a shape that's actually deleted. No-op if
-        nothing's selected. Storing each shape's own absolute position,
-        not an offset relative to the others, is what lets a
-        multi-shape paste reproduce the exact same relative arrangement,
-        just moved as a whole -- see on_paste_key. Connections reference
-        their two shapes by INDEX into this same list (not by id, which
-        won't exist yet until paste time creates fresh ones)."""
+        ABSOLUTE position, and "flipped" bit, PLUS every connection with
+        BOTH endpoints among the selected shapes -- one connecting a
+        selected shape to one that ISN'T copied along with it has
+        nothing on the other end to reproduce, so it's simply dropped,
+        same as _remove_shape already does for a shape that's actually
+        deleted. No-op if nothing's selected. Storing each shape's own
+        absolute position, not an offset relative to the others, is what
+        lets a multi-shape paste reproduce the exact same relative
+        arrangement, just moved as a whole -- see on_paste_key.
+        Connections reference their two shapes by INDEX into this same
+        list (not by id, which won't exist yet until paste time creates
+        fresh ones)."""
         if not self.selected_ids:
             return
         copied_shapes = [s for s in self.shapes if s["id"] in self.selected_ids]
         index_of = {s["id"]: i for i, s in enumerate(copied_shapes)}
         self._clipboard = {
-            "shapes": [{"n": s["n"], "rotation": s["rotation"], "cx": s["cx"], "cy": s["cy"]}
+            "shapes": [{"n": s["n"], "rotation": s["rotation"], "cx": s["cx"], "cy": s["cy"],
+                        "flipped": s["flipped"]}
                        for s in copied_shapes],
             "connections": [
                 {"a_index": index_of[c["a_shape"]], "a_edge": c["a_edge"],
@@ -2119,18 +2166,18 @@ class InteractiveBuilderApp:
 
     def on_paste_key(self, _event=None):
         """Ctrl+V: drops a fresh instance of every copied shape, each at
-        its own remembered rotation, ALL offset together by PASTE_OFFSET
-        from their remembered positions -- so a multi-shape copy pastes
-        back in the same relative arrangement it was copied in, just
-        shifted as a group -- PLUS a fresh connection for every one
-        copied alongside them (see on_copy_key), between the
-        corresponding NEW shapes. No-op if nothing's been copied yet.
-        Advances the clipboard's OWN stored positions by that same
-        offset every paste, so repeated Ctrl+V cascades diagonally
-        outward instead of stacking every copy exactly on top of the
-        last one. The new shapes (not the new connections) are left
-        selected afterward (replacing whatever was selected before),
-        same as a fresh drop."""
+        its own remembered rotation and "flipped" bit, ALL offset
+        together by PASTE_OFFSET from their remembered positions -- so a
+        multi-shape copy pastes back in the same relative arrangement
+        (hatching included) it was copied in, just shifted as a group --
+        PLUS a fresh connection for every one copied alongside them (see
+        on_copy_key), between the corresponding NEW shapes. No-op if
+        nothing's been copied yet. Advances the clipboard's OWN stored
+        positions by that same offset every paste, so repeated Ctrl+V
+        cascades diagonally outward instead of stacking every copy
+        exactly on top of the last one. The new shapes (not the new
+        connections) are left selected afterward (replacing whatever was
+        selected before), same as a fresh drop."""
         if not self._clipboard:
             return
         self._push_undo()
@@ -2140,7 +2187,7 @@ class InteractiveBuilderApp:
             entry["cy"] += PASTE_OFFSET
             shape = {"id": self._next_shape_id, "n": entry["n"],
                      "cx": entry["cx"], "cy": entry["cy"],
-                     "rotation": entry["rotation"], "flipped": False}
+                     "rotation": entry["rotation"], "flipped": entry["flipped"]}
             self._next_shape_id += 1
             self.shapes.append(shape)
             new_ids.append(shape["id"])
@@ -2233,11 +2280,12 @@ class InteractiveBuilderApp:
 
     # ---- drawing ----
 
-    def _draw_shape(self, screen_vertices, fill_hex, selected):
+    def _draw_shape(self, screen_vertices, fill_hex, selected, hatched=False):
         photo, (left, top) = _rasterize_polygon(
             screen_vertices, fill_hex,
             outline_hex=SELECTION_OUTLINE_COLOR if selected else None,
-            outline_width=SELECTION_OUTLINE_WIDTH if selected else 0)
+            outline_width=SELECTION_OUTLINE_WIDTH if selected else 0,
+            hatched=hatched)
         self._shape_photos.append(photo)  # keep alive -- Tk drops a GC'd PhotoImage
         self.canvas.create_image(left, top, anchor="nw", image=photo)
 
@@ -2272,7 +2320,8 @@ class InteractiveBuilderApp:
         self._shape_photos = []
         for shape in self.shapes:
             screen_vertices = [self._world_to_screen(*wv) for wv in self._shape_world_vertices(shape)]
-            self._draw_shape(screen_vertices, POLYGON_COLORS[shape["n"]], selected=shape["id"] in self.selected_ids)
+            self._draw_shape(screen_vertices, POLYGON_COLORS[shape["n"]],
+                              selected=shape["id"] in self.selected_ids, hatched=shape["flipped"])
 
         for conn in self.connections:
             endpoints = self._connection_endpoints(conn)

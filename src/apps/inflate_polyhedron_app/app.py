@@ -63,7 +63,7 @@ work for anyone who wants one.
    the CURRENT level's OWN "Target RMS stretch" spinner value (% of rest
    edge length) -- there are three separate spinners, one each for Level
    1/2/3 (self.target_rms_vars), defaulting to LEVEL_DEFAULT_TARGET_RMS_PCT
-   (30/20/10% respectively, tapered down as resolution increases since a
+   (200/100/10% respectively, tapered down as resolution increases since a
    finer mesh needs LESS relative stretch per edge to trace the SAME
    overall curvature) but independently user-editable at any time, and
    used identically by a manual Inflate click and by "Auto" (both just
@@ -448,8 +448,9 @@ DEFAULT_TOLERANCE = 1e-3
 # No entry for Level 0 -- it has no target RMS stretch at all
 # (relax_initial_configuration is pure springs, not calibrated toward
 # any target). Was {1: 60.0, 2: 30.0, 3: 15.0}, then {1: 30.0, 2: 20.0,
-# 3: 10.0}; raised back per explicit later user request.
-LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 60.0, 2: 40.0, 3: 20.0}
+# 3: 10.0}, then {1: 60.0, 2: 40.0, 3: 20.0}; raised again per explicit
+# later user request.
+LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 200.0, 2: 100.0, 3: 10.0}
 
 # Debug mode's "Show normals" toggle (_draw_level_panel) draws each
 # triangle's own outward normal as a line segment in this color, from

@@ -1,0 +1,52 @@
+{
+  "name": "two_hex",
+  "faces": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    [
+      1,
+      0,
+      6,
+      4,
+      3,
+      7
+    ]
+  ],
+  "net_layout": [
+    {
+      "cx": -344.0064427210528,
+      "cy": 124.45988340526313,
+      "rotation": 0.0,
+      "flipped": false
+    },
+    {
+      "cx": -342.0577256210528,
+      "cy": 325.1777447052632,
+      "rotation": 0.0,
+      "flipped": false
+    }
+  ],
+  "builder_connections": [
+    {
+      "a_face": 0,
+      "a_edge": 3,
+      "b_face": 1,
+      "b_edge": 3
+    },
+    {
+      "a_face": 1,
+      "a_edge": 0,
+      "b_face": 0,
+      "b_edge": 0
+    }
+  ],
+  "view": {
+    "scale": 0.5131581182307067
+  }
+}

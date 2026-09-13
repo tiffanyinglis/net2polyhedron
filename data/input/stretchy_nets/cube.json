@@ -1,41 +1,156 @@
 {
-  "name": "Cube",
+  "name": "cube",
   "faces": [
     [
-      4,
       0,
+      1,
       2,
-      6
+      3
     ],
     [
+      4,
       1,
       0,
-      4,
       5
     ],
     [
       5,
-      4,
-      6,
-      7
-    ],
-    [
-      2,
       0,
-      1,
-      3
+      3,
+      6
     ],
     [
-      6,
       2,
-      3,
+      1,
+      4,
       7
     ],
     [
       3,
-      1,
+      2,
+      7,
+      6
+    ],
+    [
+      7,
+      4,
       5,
-      7
+      6
     ]
-  ]
+  ],
+  "net_layout": [
+    {
+      "cx": 3.552713678800501e-15,
+      "cy": 0.0,
+      "rotation": 0.0,
+      "flipped": false
+    },
+    {
+      "cx": 0.0,
+      "cy": -140.0,
+      "rotation": 1.5707963267948966,
+      "flipped": false
+    },
+    {
+      "cx": -140.0,
+      "cy": 0.0,
+      "rotation": 0.0,
+      "flipped": false
+    },
+    {
+      "cx": 140.0,
+      "cy": 3.552713678800501e-15,
+      "rotation": 4.71238898038469,
+      "flipped": false
+    },
+    {
+      "cx": 3.552713678800501e-15,
+      "cy": 140.0,
+      "rotation": 0.0,
+      "flipped": false
+    },
+    {
+      "cx": 0.0,
+      "cy": -280.0,
+      "rotation": 1.5707963267948966,
+      "flipped": false
+    }
+  ],
+  "builder_connections": [
+    {
+      "a_face": 0,
+      "a_edge": 0,
+      "b_face": 1,
+      "b_edge": 1
+    },
+    {
+      "a_face": 0,
+      "a_edge": 1,
+      "b_face": 3,
+      "b_edge": 0
+    },
+    {
+      "a_face": 0,
+      "a_edge": 2,
+      "b_face": 4,
+      "b_edge": 0
+    },
+    {
+      "a_face": 0,
+      "a_edge": 3,
+      "b_face": 2,
+      "b_edge": 1
+    },
+    {
+      "a_face": 1,
+      "a_edge": 0,
+      "b_face": 3,
+      "b_edge": 1
+    },
+    {
+      "a_face": 1,
+      "a_edge": 2,
+      "b_face": 2,
+      "b_edge": 0
+    },
+    {
+      "a_face": 1,
+      "a_edge": 3,
+      "b_face": 5,
+      "b_edge": 1
+    },
+    {
+      "a_face": 2,
+      "a_edge": 2,
+      "b_face": 4,
+      "b_edge": 3
+    },
+    {
+      "a_face": 2,
+      "a_edge": 3,
+      "b_face": 5,
+      "b_edge": 2
+    },
+    {
+      "a_face": 3,
+      "a_edge": 2,
+      "b_face": 5,
+      "b_edge": 0
+    },
+    {
+      "a_face": 3,
+      "a_edge": 3,
+      "b_face": 4,
+      "b_edge": 1
+    },
+    {
+      "a_face": 4,
+      "a_edge": 2,
+      "b_face": 5,
+      "b_edge": 3
+    }
+  ],
+  "view": {
+    "scale": 1.0
+  }
 }

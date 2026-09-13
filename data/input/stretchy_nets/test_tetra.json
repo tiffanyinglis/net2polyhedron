@@ -1,0 +1,92 @@
+{
+  "name": "test_tetra",
+  "faces": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      0,
+      2,
+      3
+    ],
+    [
+      2,
+      1,
+      3
+    ],
+    [
+      3,
+      1,
+      0
+    ]
+  ],
+  "net_layout": [
+    {
+      "cx": -445.6381410865171,
+      "cy": -919.1870051985369,
+      "rotation": 0.0,
+      "flipped": false
+    },
+    {
+      "cx": -497.4563229046989,
+      "cy": -839.187005198537,
+      "rotation": 0.0,
+      "flipped": false
+    },
+    {
+      "cx": -399.27450472288086,
+      "cy": -838.277914289446,
+      "rotation": 0.0,
+      "flipped": false
+    },
+    {
+      "cx": -439.2745047228808,
+      "cy": -1022.8233688349003,
+      "rotation": 1.0723730991236855,
+      "flipped": false
+    }
+  ],
+  "builder_connections": [
+    {
+      "a_face": 0,
+      "a_edge": 1,
+      "b_face": 2,
+      "b_edge": 0
+    },
+    {
+      "a_face": 0,
+      "a_edge": 2,
+      "b_face": 1,
+      "b_edge": 0
+    },
+    {
+      "a_face": 1,
+      "a_edge": 1,
+      "b_face": 2,
+      "b_edge": 2
+    },
+    {
+      "a_face": 2,
+      "a_edge": 1,
+      "b_face": 3,
+      "b_edge": 0
+    },
+    {
+      "a_face": 1,
+      "a_edge": 2,
+      "b_face": 3,
+      "b_edge": 2
+    },
+    {
+      "a_face": 3,
+      "a_edge": 1,
+      "b_face": 0,
+      "b_edge": 0
+    }
+  ],
+  "view": {
+    "scale": 1.1000000000000014
+  }
+}
