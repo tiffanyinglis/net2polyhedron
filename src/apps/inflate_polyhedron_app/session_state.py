@@ -34,36 +34,51 @@ def edge_length_from_json(value):
     return value
 
 
+FoldChainJson = Tuple[List[int], List[int]]
+
+
 class LevelStateModel(BaseModel):
     """One subdivision level's own mesh: faces/positions/face_of_fine --
     exactly what draw()/_draw_level_panel need to redisplay it -- plus
-    edge_length, only meaningful for the CURRENT frontier level (where
-    relax_once/subdivide_once need it to continue; an already-left,
-    frozen level has no use for it, matching self.level_snapshots' own
-    faces/positions/face_of_fine-only shape)."""
+    edge_length and fold_chains, only meaningful for the CURRENT frontier
+    level (where relax_once/subdivide_once need them to continue; an
+    already-left, frozen level has no use for either, matching self.
+    level_snapshots' own faces/positions/face_of_fine-only shape)."""
     faces: List[List[int]]
     positions: Dict[int, Tuple[float, float, float]]
     face_of_fine: List[int]
     edge_length: Optional[Union[float, List[Tuple[int, int, float]]]] = None
+    # stretchy_mesh.load_stretchy_mesh's own fold-coupling chains (see its
+    # "Edge folds" note and mesh_levels._grow_fold_chains) -- [] for a net
+    # with no edge folds, and for every OLD session file saved before this
+    # field existed (Optional with a [] default keeps those loadable).
+    fold_chains: Optional[List[FoldChainJson]] = None
 
     @classmethod
-    def from_mesh(cls, faces, positions, face_of_fine, edge_length=None):
+    def from_mesh(cls, faces, positions, face_of_fine, edge_length=None, fold_chains=None):
         return cls(
             faces=[list(face) for face in faces],
             positions={int(v): (float(p[0]), float(p[1]), float(p[2]))
                        for v, p in positions.items()},
             face_of_fine=list(face_of_fine),
             edge_length=edge_length_to_json(edge_length) if edge_length is not None else None,
+            fold_chains=([[list(chain_a), list(chain_b)] for chain_a, chain_b in fold_chains]
+                         if fold_chains is not None else None),
         )
 
     def to_mesh(self):
-        """Returns (faces, positions, face_of_fine, edge_length), the
-        inverse of from_mesh -- positions as {vertex_id: np.ndarray(3,)},
-        matching stretchy_mesh's own representation."""
+        """Returns (faces, positions, face_of_fine, edge_length,
+        fold_chains), the inverse of from_mesh -- positions as
+        {vertex_id: np.ndarray(3,)}, matching stretchy_mesh's own
+        representation. fold_chains is [] rather than None for an OLD
+        session file with no such field, matching a net with no folds."""
         positions = {v: np.array(p, dtype=float) for v, p in self.positions.items()}
         edge_length = (edge_length_from_json(self.edge_length)
                         if self.edge_length is not None else None)
-        return [list(face) for face in self.faces], positions, list(self.face_of_fine), edge_length
+        fold_chains = ([(list(chain_a), list(chain_b)) for chain_a, chain_b in self.fold_chains]
+                        if self.fold_chains is not None else [])
+        return ([list(face) for face in self.faces], positions, list(self.face_of_fine),
+                edge_length, fold_chains)
 
 
 class LevelHistoryRecordModel(BaseModel):

@@ -11,6 +11,7 @@ from utils.inflate_polyhedron.stretchy_mesh import (
     _orientation_signs, _is_orientation_consistent,
     relax_once, relax_initial_configuration, random_initial_positions,
     EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
+    fold_pairs_from_chains,
 )
 from utils.geometry.polyhedron import Polyhedron
 from utils.inflate_polyhedron.mesh_levels import subdivide_once
@@ -68,14 +69,14 @@ def _relaxed_positions(faces, edge_length=EDGE_LENGTH, seed=0, max_nfev=None):
 
 
 def test_load_pentagons_and_square_example():
-    faces, name = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
+    faces, name, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
     assert len(faces) == 3
     assert [len(f) for f in faces] == [5, 5, 4]
     assert name == "Two Pentagons and a Square"
 
 
 def test_load_three_squares_example():
-    faces, name = load_stretchy_mesh(THREE_SQUARES)
+    faces, name, _ = load_stretchy_mesh(THREE_SQUARES)
     assert len(faces) == 3
     assert all(len(f) == 4 for f in faces)
     assert name == "Three Squares"
@@ -91,7 +92,7 @@ def test_load_stretchy_mesh_allows_unmatched_directed_edge(tmp_path):
     # OPEN net is valid (no closedness requirement), so this loads fine.
     path = tmp_path / "open.json"
     path.write_text(json.dumps({"faces": [[0, 1, 2]]}))
-    faces, _ = load_stretchy_mesh(str(path))
+    faces, _, _ = load_stretchy_mesh(str(path))
     assert faces == [[0, 1, 2]]
 
 
@@ -103,8 +104,31 @@ def test_load_stretchy_mesh_rejects_duplicate_directed_edge(tmp_path):
         load_stretchy_mesh(str(path))
 
 
+def test_load_stretchy_mesh_applies_an_edge_fold(tmp_path):
+    # A hexagon with edge 0 (corners 0-1) folded onto its OPPOSITE edge,
+    # edge 3 (corners 3-4) -- interactive_builder_app's own tuple format,
+    # [v1, v2, v3, v4] = edge_a's corners in natural order, edge_b's
+    # REVERSED (see this module's own docstring): couples 0~4, 1~3.
+    # Unlike an ordinary shared vertex, a fold does NOT merge ids (see
+    # module docstring's "Edge folds are a real spring, not a vertex
+    # merge") -- faces keeps every id exactly as authored, and the
+    # coupling comes back separately as fold_pairs/fold_chains.
+    path = tmp_path / "pinched_hex.json"
+    path.write_text(json.dumps({"faces": [[0, 1, 2, 3, 4, 5]], "edge_folds": [[0, 1, 4, 3]]}))
+    faces, _, fold_chains = load_stretchy_mesh(str(path))
+    assert faces == [[0, 1, 2, 3, 4, 5]], "a fold never touches faces' own ids"
+    assert stretchy_mesh.fold_pairs_from_chains(fold_chains) == [(0, 4), (1, 3)]
+
+
+def test_load_stretchy_mesh_edge_fold_references_unknown_vertex(tmp_path):
+    path = tmp_path / "bad_fold.json"
+    path.write_text(json.dumps({"faces": [[0, 1, 2, 3, 4, 5]], "edge_folds": [[0, 1, 4, 9]]}))
+    with pytest.raises(ValueError, match="no face uses"):
+        load_stretchy_mesh(str(path))
+
+
 def test_mesh_edges_deduplicates_and_sorts():
-    faces, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
+    faces, _, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
     edges = mesh_edges(faces)
     assert edges == sorted(set(edges))
     assert all(a < b for a, b in edges)
@@ -165,13 +189,65 @@ def test_planarity_groups_batches_multiple_face_sizes_independently():
 
 
 def test_relax_once_pressure_still_inflates_a_subdivided_mesh():
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
+    faces, _, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
     positions = _relaxed_positions(faces)
-    faces1, positions1, edge_length1, _ = subdivide_once(
+    faces1, positions1, edge_length1, _, _ = subdivide_once(
         faces, positions, EDGE_LENGTH, list(range(len(faces))), level=0)
     _, _, low_stretch, _, _, _ = relax_once(positions1, faces1, edge_length1, pressure=0.1)
     _, _, high_stretch, _, _, _ = relax_once(positions1, faces1, edge_length1, pressure=1.0)
     assert high_stretch > low_stretch + 1.0  # meaningfully more, not stuck near zero
+
+
+# ---- edge-fold coupling (module docstring's "Edge folds are a real spring, not a vertex merge") ----
+
+def test_edge_fold_coupling_pulls_a_folded_pair_together_without_merging_ids():
+    # pinched_hex.json's hexagon, edge 0 folded onto its opposite edge 3.
+    # Relaxing with the resulting fold_pairs must pull corners 0~4 and
+    # 1~3 close together (the fold "holding"), while every id in faces
+    # stays distinct throughout -- no accidental collapse.
+    faces, _, fold_chains = load_stretchy_mesh("data/input/stretchy_nets/pinched_hex.json")
+    fold_pairs = fold_pairs_from_chains(fold_chains)
+    face1, positions1, edge_length1, _, fold_chains1 = subdivide_once(
+        faces, random_initial_positions(faces, seed=1), EDGE_LENGTH,
+        list(range(len(faces))), level=0, fold_chains=fold_chains)
+    fold_pairs1 = fold_pairs_from_chains(fold_chains1)
+
+    positions1, *_ = relax_initial_configuration(
+        positions1, face1, edge_length1, max_nfev=8000, gtol=1e-4,
+        rng=np.random.default_rng(1), fold_pairs=fold_pairs1)
+
+    assert len({v for face in face1 for v in face}) == len(positions1), \
+        "a fold must never merge vertex ids"
+    for a, b in fold_pairs1:
+        gap = np.linalg.norm(positions1[a] - positions1[b])
+        assert gap < 0.1, f"fold pair ({a}, {b}) should have closed, gap={gap}"
+
+
+def test_edge_fold_coupling_does_not_oscillate():
+    # The coupling spring is far stiffer than an ordinary edge spring
+    # (FOLD_COUPLING_STIFFNESS); without _damp_coupling_overshoot's own
+    # damping, a folded pair's gap oscillates indefinitely rather than
+    # closing (verified directly during development). Once damped, the
+    # gap in the SECOND half of a long run must be no bigger than in the
+    # first half -- a genuinely converging (or already-converged) system,
+    # not one still bouncing around a fixed range.
+    faces, _, fold_chains = load_stretchy_mesh("data/input/stretchy_nets/pinched_hex.json")
+    face1, positions1, edge_length1, _, fold_chains1 = subdivide_once(
+        faces, random_initial_positions(faces, seed=2), EDGE_LENGTH,
+        list(range(len(faces))), level=0, fold_chains=fold_chains)
+    fold_pairs1 = fold_pairs_from_chains(fold_chains1)
+    a, b = fold_pairs1[0]
+
+    gaps = []
+    for _ in range(20):
+        positions1, *_ = relax_initial_configuration(
+            positions1, face1, edge_length1, max_nfev=500, gtol=1e-4,
+            rng=np.random.default_rng(2), fold_pairs=fold_pairs1)
+        gaps.append(np.linalg.norm(positions1[a] - positions1[b]))
+
+    first_half_max = max(gaps[:10])
+    second_half_max = max(gaps[10:])
+    assert second_half_max <= first_half_max + 1e-6
 
 
 # name -> (num_faces, num_vertices, num_edges, sides_per_face) -- these
@@ -189,7 +265,7 @@ PLATONIC_STRETCHY_NETS = {
 @pytest.mark.parametrize("name,expected", PLATONIC_STRETCHY_NETS.items())
 def test_platonic_solid_stretchy_nets_load_with_correct_combinatorics(name, expected):
     n_faces, n_verts, n_edges, sides = expected
-    faces, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
+    faces, _, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
     assert len(faces) == n_faces
     assert all(len(f) == sides for f in faces)
     assert len({v for face in faces for v in face}) == n_verts
@@ -301,13 +377,47 @@ def test_relax_once_pressure_increases_stretch_over_a_normal_working_range():
     # range comfortably below the pressure where a plain cube stops
     # having any equilibrium at all (see the Design notes on why there's
     # no runaway guard) -- past that, more pressure isn't meaningful.
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
+    faces, _, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
     positions = _relaxed_positions(faces)
     stretches = []
     for pressure in (0.1, 0.3, 0.8):
         _, _, max_stretch, _, _, _ = relax_once(positions, faces, EDGE_LENGTH, pressure=pressure)
         stretches.append(max_stretch)
     assert stretches[0] < stretches[1] < stretches[2]
+
+
+# ---- estimate_pressure_for_target_stretch: stop mid-calibration ----
+
+def test_estimate_pressure_stopped_mid_calibration_reports_current_trial(monkeypatch):
+    # Stopping mid-calibration must report wherever the CURRENTLY
+    # running trial left off, not an earlier trial that happened to
+    # score closer to the target: an app watching this update the
+    # screen live would otherwise see it silently jump backwards to a
+    # different, stale shape the instant the user clicks Stop.
+    calls = []
+
+    def fake_relax_once(positions, faces, edge_length, pressure, planarity_weight,
+                         max_nfev=None, stop_event=None, gtol=stretchy_mesh.CONVERGENCE_GTOL,
+                         rng=None, fold_pairs=()):
+        calls.append(pressure)
+        if len(calls) == 1:
+            # Closer to the 10% target (error 2) -- would be "best" by
+            # score alone, but isn't the trial that gets interrupted.
+            return ({0: np.zeros(3)}, 5, 1.0, 8.0, 0.5, False)
+        # Second trial: further from target (error 15) AND the one
+        # that's actually stopped mid-run.
+        stop_event.set()
+        return ({0: np.ones(3)}, 3, 5.0, 25.0, 0.5, False)
+
+    monkeypatch.setattr(stretchy_mesh, "relax_once", fake_relax_once)
+    stop_event = threading.Event()
+    result = stretchy_mesh.estimate_pressure_for_target_stretch(
+        {0: np.zeros(3)}, [[0, 1, 2]], EDGE_LENGTH, target_rms_pct=10.0,
+        max_iterations=2, stop_event=stop_event)
+    _, new_positions, _, _, rms_stretch, _, _ = result
+    assert len(calls) == 2, "the test must actually reach a second, interrupted trial"
+    assert rms_stretch == 25.0
+    assert np.array_equal(new_positions[0], np.ones(3))
 
 
 # ---- mesh_volume / per_face_volumes / is_orientation_consistent (public wrappers) ----
@@ -359,10 +469,10 @@ def test_relax_once_per_face_pressure_stays_orientation_consistent_on_a_fine_mes
     # mesh visibly inflates (positive, growing stretch) -- no
     # self-intersecting fold.
     dummy0 = {v: np.zeros(3) for face in TETRAHEDRON_FACES for v in face}
-    faces1, _, edge_length1, face_of_fine1 = subdivide_once(
+    faces1, _, edge_length1, face_of_fine1, _ = subdivide_once(
         TETRAHEDRON_FACES, dummy0, EDGE_LENGTH, list(range(len(TETRAHEDRON_FACES))), 0)
     dummy1 = {v: np.zeros(3) for face in faces1 for v in face}
-    fine_faces, _, edge_length, _ = subdivide_once(faces1, dummy1, edge_length1, face_of_fine1, 1)
+    fine_faces, _, edge_length, _, _ = subdivide_once(faces1, dummy1, edge_length1, face_of_fine1, 1)
 
     pos = _relaxed_positions(fine_faces, edge_length=edge_length, seed=0)
     assert is_orientation_consistent(pos, fine_faces)

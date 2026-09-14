@@ -1,0 +1,33 @@
+{
+  "name": "pinched_hex",
+  "faces": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ]
+  ],
+  "net_layout": [
+    {
+      "cx": -153.0,
+      "cy": -138.0,
+      "rotation": 0.0,
+      "flipped": false
+    }
+  ],
+  "builder_connections": [],
+  "edge_folds": [
+    [
+      0,
+      1,
+      4,
+      3
+    ]
+  ],
+  "view": {
+    "scale": 1.0
+  }
+}

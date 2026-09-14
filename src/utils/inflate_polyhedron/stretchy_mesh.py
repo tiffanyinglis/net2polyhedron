@@ -21,8 +21,22 @@ derive at all. JSON shape:
         [0, 1, 2, 3, 4],
         [3, 2, 1, 0, 5],
         [0, 4, 3, 5]
-      ]
+      ],
+      "edge_folds": [[0, 1, 4, 3]]
     }
+
+An optional top-level "edge_folds" list (interactive_builder_app's "Edge
+Fold" tool) names pairs of edges of ONE face folded onto each other --
+`[v1, v2, v3, v4]` means edge `v1-v2` is folded onto edge `v3-v4`,
+coupling `v1` with `v3` and `v2` with `v4` as the same physical point
+(see interactive_builder_app's own docstring for the mod-`n` reflection
+rule that picks `v3, v4`'s order). Unlike an ordinary shared vertex,
+this does NOT merge `v1`/`v3` or `v2`/`v4` into one id -- see "Edge
+folds are a real spring, not a vertex merge" below for why -- so a
+reader that ignores this key sees an ordinary, un-folded net; every id
+in "faces" stays exactly as authored. `load_stretchy_mesh` returns the
+coupling as `fold_pairs`: `[(v1, v3), (v2, v4), ...]`. [] (or the key
+absent) for a net with none.
 
 WINDING CONVENTION: each face is a loop of vertex ids (ints, 0..N-1,
 referenced -- not separately declared; N is inferred as 1 + the largest
@@ -107,6 +121,67 @@ touches them, per this project's docstring convention in
   correctly-calibrated pressure never gets near the critical value this
   would have guarded against. See .claude/skills/net-fold-project/SKILL.md
   for this project's general stance on adding a term like that.
+
+- **Edge folds are a real spring, not a vertex merge.** An EARLIER
+  version of this feature merged a fold's two corner pairs into one
+  shared id (a plain union-find remap on `faces`, applied once at load
+  time) -- appealingly simple, since a folded pair then needed no
+  special-casing anywhere else, exactly like any other ordinarily-shared
+  vertex. It broke on a SELF-fold (one face's own edge glued to another
+  edge of the SAME face, e.g. pinched_hex.json: a hexagon folded onto
+  its own opposite edge): merging id-wise doesn't just identify the
+  fold's own two declared corner pairs, it can ALSO silently collide an
+  UN-declared pair right next to them (pinched_hex.json's corners 2 and
+  5, each touched by two DIFFERENT original edges that only coincide
+  because their OTHER endpoints got merged) -- and since every boundary/
+  interior check in this module is vertex-id based (mesh_edges, rest
+  lengths, subdivision's own edge dedup), that incidental collision gets
+  silently treated as a second, unwanted SEAL, closing off an edge the
+  fold never actually declared shared. The visible result: a self-folded
+  net that should open into a hollow, tube-like pocket (only the ONE
+  declared edge sealed, everything else free) instead came out as a
+  fully sealed, closed pillow with no opening at all.
+
+  So a fold now keeps `v1`/`v2`/`v3`/`v4` fully distinct in `faces` --
+  every face fan-subdivides exactly like an ordinary one, no special-
+  casing -- and instead pulls `v1` to `v3` and `v2` to `v4` with a real,
+  very stiff (`FOLD_COUPLING_STIFFNESS`), zero-rest-length spring during
+  relaxation (`fold_pairs`, both in relax_once and
+  relax_initial_configuration). This is exactly the design an even
+  EARLIER version of this feature tried and reverted, over concern that
+  a spring that stiff would break the explicit integrator's own step-
+  size assumptions and oscillate -- re-tried at the user's own explicit
+  request, and that concern turned out to be exactly right: fed through
+  the SAME shared force/step machinery as every other spring (whose own
+  step size assumes unit stiffness), the coupling pair's gap oscillated
+  indefinitely rather than closing, and even a first attempt at damping
+  it (repeatedly yanking the pair a fixed fraction of their own gap
+  closed, each step, on top of that unstable force) kept re-injecting
+  enough uncontrolled motion into the pair's immediate neighbourhood to
+  drive a persistent, low-frequency bending oscillation through an
+  inflated tube net -- like flexing a piece of macaroni, never settling.
+
+  The actual fix (_advance_fold_coupling) is to stop treating this as
+  part of the shared force/step system at all: a zero-rest-length linear
+  spring's overdamped relaxation (this module's own model everywhere
+  else -- no velocity/inertia term, a step here IS the position update)
+  has an EXACT closed-form solution, `gap(t) = gap(0) * exp(-k*t)`, and
+  advancing by that formula -- rather than an Euler-style `gap - k*gap*dt`
+  approximation, unstable once `k*dt` is this large -- is unconditionally
+  stable for any stiffness or step size: |gap| only ever shrinks,
+  smoothly, never overshooting or reversing sign, using the SAME `dt`
+  the step already computed for everything else, no separate damping
+  constant of its own needed. Converges within a handful of steps
+  (k=100, dt~0.2 gives decay~2e-9), so it stops perturbing its
+  neighbourhood almost immediately rather than every step for as long as
+  the mesh keeps relaxing -- verified directly on pinched_hex.json (see
+  test_stretchy_mesh.py).
+
+  mesh_levels.subdivide_once has to track this too: a folded edge's own
+  two coupled corners multiply into more coupled pairs every time that
+  edge gets a new midpoint under subdivision (see its own
+  `fold_chains`/_grow_fold_chains), so the WHOLE folded edge stays
+  pulled shut at every level, not just its original two corners.
 """
 import collections
 import json
@@ -117,6 +192,15 @@ from ..geometry.polyhedron import Polyhedron
 
 EDGE_LENGTH = 1.0
 
+# An edge fold's coupling spring (module docstring's "Edge folds are a
+# real spring, not a vertex merge"): zero rest length, pulling a folded
+# pair together this many times as fast (per unit of remaining gap, in
+# EDGE_LENGTH units) as an ordinary edge spring relaxes a unit stretch --
+# see _advance_fold_coupling for how this rate is actually integrated
+# (exactly, not through the shared explicit force step -- a term this
+# stiff breaks that step's own stability margin outright).
+FOLD_COUPLING_STIFFNESS = 100.0
+
 
 def _face_edges(face):
     """The directed edges (v, w) of one CCW face loop."""
@@ -124,12 +208,70 @@ def _face_edges(face):
     return [(face[i], face[(i + 1) % k]) for i in range(k)]
 
 
+def _check_winding(faces, path, when):
+    """Raises ValueError naming every directed edge that appears more
+    than once, or is a self-loop (v == w -- degenerate, only possible
+    from a bad edge fold). Shared by load_stretchy_mesh's two winding
+    checks, run before folding (malformed file) and after (a fold that
+    collapses an edge or creates a duplicate directed pair). `when` names
+    which half of the process produced a given failure."""
+    directed = [e for face in faces for e in _face_edges(face)]
+    counts = {}
+    for e in directed:
+        counts[e] = counts.get(e, 0) + 1
+    problems = [f"edge {v}->{w} is a self-loop (a fold collapsed it to a point)"
+                for (v, w), c in counts.items() if v == w]
+    problems += [f"edge {v}->{w} appears {c} times (need exactly once)"
+                 for (v, w), c in counts.items() if v != w and c > 1]
+    if problems:
+        raise ValueError(f"{path}: not a consistently-oriented mesh {when}:\n  " +
+                          "\n  ".join(problems))
+
+
+def _fold_coupling_chains(faces, edge_folds, path):
+    """faces: vertex-id loops, already confirmed consistently-wound;
+    edge_folds: [(v1, v2, v3, v4), ...] from the file's own "edge_folds"
+    list. Does NOT merge any ids (see module docstring's "Edge folds are
+    a real spring, not a vertex merge" note for why) -- just validates
+    every named vertex is real and packages each fold as its own
+    level-0 coupling chain, `([v1, v2], [v3, v4])`: chain_a[i] must
+    coincide with chain_b[i] (relax_once/relax_initial_configuration's
+    `fold_pairs`, via fold_pairs_from_chains), and mesh_levels.
+    subdivide_once grows each chain as the folded edge subdivides.
+    Raises ValueError if a fold references a vertex id no face uses.
+    Returns a list of chain pairs, [] for a net with no folds."""
+    vertex_ids = {v for face in faces for v in face}
+    chains = []
+    for v1, v2, v3, v4 in edge_folds:
+        for v in (v1, v2, v3, v4):
+            if v not in vertex_ids:
+                raise ValueError(f"{path}: edge fold {[v1, v2, v3, v4]} references "
+                                  f"a vertex no face uses: {v}")
+        chains.append(([v1, v2], [v3, v4]))
+    return chains
+
+
+def fold_pairs_from_chains(fold_chains):
+    """fold_chains: [(chain_a, chain_b), ...] as returned by
+    _fold_coupling_chains/mesh_levels.subdivide_once -- same-length
+    vertex-id lists, chain_a[i] paired with chain_b[i]. Flattens to the
+    (a, b) vertex-id pairs relax_once/relax_initial_configuration's
+    `fold_pairs` argument expects; [] for a net with no folds."""
+    return [(a, b) for chain_a, chain_b in fold_chains for a, b in zip(chain_a, chain_b)]
+
+
 def load_stretchy_mesh(path):
     """path: a vertex-loop stretchy-mesh .json (see module docstring).
-    Returns (faces, name), faces a list of vertex-id lists. Raises
-    ValueError if any directed edge appears more than once -- the mesh
-    need NOT be closed: an edge with no reverse partner at all is a
-    valid, free boundary edge, not an error."""
+    Returns (faces, name, fold_chains): faces a list of vertex-id lists
+    exactly as authored (an "edge_folds" entry never merges ids -- see
+    module docstring's "Edge folds are a real spring, not a vertex
+    merge" note); fold_chains, _fold_coupling_chains' result ([] for a
+    net with none), the level-0 seed for mesh_levels.subdivide_once's
+    own fold-chain growth and for fold_pairs_from_chains. Raises
+    ValueError if any directed edge appears more than once (a genuinely
+    malformed file) -- the mesh need NOT be closed: an edge with no
+    reverse partner at all is a valid, free boundary edge, not an
+    error."""
     with open(path) as f:
         spec = json.load(f)
 
@@ -140,18 +282,11 @@ def load_stretchy_mesh(path):
         if len(face) < 3:
             raise ValueError(f"{path}: a face needs at least 3 vertices, got {face}")
 
-    directed = [e for face in faces for e in _face_edges(face)]
-    counts = {}
-    for e in directed:
-        counts[e] = counts.get(e, 0) + 1
-    problems = [f"edge {v}->{w} appears {c} times (need exactly once)"
-                for (v, w), c in counts.items() if c > 1]
-    if problems:
-        raise ValueError(f"{path}: not a consistently-oriented mesh:\n  " +
-                          "\n  ".join(problems))
+    _check_winding(faces, path, "before folding")
+    fold_chains = _fold_coupling_chains(faces, spec.get("edge_folds") or [], path)
 
     name = spec.get("name") or path
-    return faces, name
+    return faces, name, fold_chains
 
 
 def mesh_edges(faces):
@@ -314,10 +449,12 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_
     cross(p_i, p_{i+1})` (Newell's method) -- split evenly across its own
     vertices; each 4+-gon face also pulls its own vertices a little
     towards its own best-fit plane (SVD normal, used here as a restoring
-    direction). Returns the (N,3) net force on every vertex -- relax_once
-    walks a small step along it (see module docstring's Design notes for
-    why edge directions need _safe_unit_vectors rather than a naive
-    division)."""
+    direction). An edge fold's own coupled corners are handled entirely
+    separately (_advance_fold_coupling, called from _explicit_relax_loop)
+    -- NOT part of this force, see that function's own docstring for why.
+    Returns the (N,3) net force on every vertex -- relax_once walks a
+    small step along it (see module docstring's Design notes for why edge
+    directions need _safe_unit_vectors rather than a naive division)."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
 
@@ -386,14 +523,21 @@ def _is_orientation_consistent(pts, faces, idx):
 PLANARITY_WEIGHT = 0.1
 
 
-def _edge_setup(faces, edge_length):
+def _edge_setup(faces, edge_length, fold_pairs=()):
     """faces: vertex-id loops (see module docstring for the winding
     convention); edge_length: scalar rest length, or a {(a,b): length}
-    dict for a non-uniform (e.g. subdivided) mesh. Shared setup for
-    relax_once/relax_initial_configuration: vertex/edge index arrays plus
-    the precomputed structures _relax_force needs (built once here, not
-    per call). Returns (vertex_ids, idx, edges, edge_ai, edge_bi,
-    all_face_groups, planarity_groups, length_arr, scale)."""
+    dict for a non-uniform (e.g. subdivided) mesh; fold_pairs: [(a, b),
+    ...] vertex-id pairs an edge fold couples together (module
+    docstring's "Edge folds are a real spring, not a vertex merge" --
+    typically stretchy_mesh.fold_pairs_from_chains' result). Shared setup
+    for relax_once/relax_initial_configuration: vertex/edge index arrays
+    plus the precomputed structures _relax_force/_spring_only_force need
+    (built once here, not per call). Coupling pairs are kept OUT of
+    `edges`/`length_arr` -- rest-length-based stretch stats would be
+    meaningless at rest length 0 -- and returned as their own index
+    arrays instead. Returns (vertex_ids, idx, edges, edge_ai, edge_bi,
+    all_face_groups, planarity_groups, length_arr, scale, coupling_ai,
+    coupling_bi)."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(faces)
@@ -406,8 +550,9 @@ def _edge_setup(faces, edge_length):
     else:
         length_arr = edge_length
         scale = float(edge_length)
+    coupling_ai, coupling_bi = _pair_index_arrays(list(fold_pairs), idx)
     return (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups,
-            length_arr, scale)
+            length_arr, scale, coupling_ai, coupling_bi)
 
 
 def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
@@ -646,8 +791,53 @@ def _remove_rigid_motion(pts_before, pts_after):
     return (r @ b.T).T + c_before
 
 
+def _advance_fold_coupling(pts, coupling_ai, coupling_bi, dt):
+    """Advances a fold's coupling pairs (module docstring's "Edge folds
+    are a real spring, not a vertex merge") over one step of size `dt`,
+    kept entirely SEPARATE from the ordinary force/step machinery (not
+    part of `force_fn`'s return, no interaction with `max_force`/dt
+    sizing) -- deliberately, not for simplicity's sake: a term this stiff
+    (FOLD_COUPLING_STIFFNESS, ~100x an ordinary spring's own) genuinely
+    cannot share the rest of the mesh's step size. Fed through the SAME
+    explicit force-then-step scheme as everything else, it either
+    oscillates outright (verified directly: a folded pair's gap bouncing
+    5-30% of an edge length, never closing) or, damped by brute
+    workarounds, kept re-injecting a large, physically ungrounded
+    correction into the couple's IMMEDIATE mesh neighbourhood every
+    single step -- exactly what was found driving a real, unwanted, long-
+    lived low-frequency bending oscillation through an inflated tube net
+    (pinched_hex.json's own use case), like flexing a piece of macaroni,
+    that never settled.
+
+    The actual fix: for a LINEAR spring (force strictly proportional to
+    displacement, zero rest length -- exactly what this is), the
+    overdamped relaxation this whole module already assumes everywhere
+    else (a step here IS the position update, no separate velocity/
+    inertia term -- see module docstring's Design notes) has a closed-
+    form EXACT solution: `gap(t) = gap(0) * exp(-k*t)`. Advancing by that
+    formula, rather than forward-Euler-style `gap - k*gap*dt` (unstable
+    for `k*dt` this large), is unconditionally stable for ANY stiffness
+    or step size -- |gap| only ever shrinks, smoothly, never overshoots
+    or reverses sign -- and needs no extra magic-number damping constant
+    of its own: the SAME `dt` the rest of the step already computed
+    (from the ordinary, non-coupling force) is all this needs. Since it
+    converges within a handful of steps regardless (k=100 means even a
+    generous dt=0.2 gives decay=exp(-20)~2e-9), it stops perturbing its
+    neighbourhood almost immediately, rather than every step for as long
+    as the mesh keeps relaxing. Mutates and returns `pts`; a no-op with
+    no coupling pairs."""
+    if coupling_ai is None or len(coupling_ai) == 0:
+        return pts
+    gap = pts[coupling_bi] - pts[coupling_ai]
+    correction = 0.5 * (1.0 - np.exp(-FOLD_COUPLING_STIFFNESS * dt)) * gap
+    pts[coupling_ai] = pts[coupling_ai] + correction
+    pts[coupling_bi] = pts[coupling_bi] - correction
+    return pts
+
+
 def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
-                          max_nfev, stop_event, gtol, rng=None):
+                          max_nfev, stop_event, gtol, rng=None,
+                          coupling_ai=None, coupling_bi=None):
     """Shared explicit-relaxation driver for relax_once and
     relax_initial_configuration -- the only thing that varies between
     them is the force itself (`force_fn(pts) -> (N,3)`); the walking
@@ -659,14 +849,19 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
     worst vertex's force has been OSCILLATING rather than genuinely
     dropping (see KICK_WINDOW's own comment), nudges every vertex by a
     small random perturbation weighted toward whichever one is actually
-    stuck; either way then removes whatever rigid rotation/translation
-    the step (plus any kick) introduced (_remove_rigid_motion, see its
-    own docstring for why a free-floating system needs this) -- until
-    EITHER every vertex's force drops below `gtol`, or max_stretch_pct
-    stops moving for STALL_WINDOW steps (see STALL_WINDOW's own comment
-    for why both exist), or `max_nfev`/`stop_event` cuts it off first.
-    Returns (pts, steps_taken, max_force, converged) -- callers each
-    compute their own final positions/stretch stats from `pts`."""
+    stuck; an edge fold's own coupling pairs (coupling_ai/coupling_bi)
+    then advance over the SAME step's `dt`, but via their own exact,
+    unconditionally-stable update (_advance_fold_coupling -- see its own
+    docstring for why this is kept OUT of force_fn entirely rather than
+    folded into the shared force/step); either way then removes whatever
+    rigid rotation/translation the step (plus any kick/coupling advance)
+    introduced (_remove_rigid_motion, see its own docstring for why a
+    free-floating system needs this) -- until EITHER every vertex's
+    force drops below `gtol`, or max_stretch_pct stops moving for
+    STALL_WINDOW steps (see STALL_WINDOW's own comment for why both
+    exist), or `max_nfev`/`stop_event` cuts it off first. Returns (pts,
+    steps_taken, max_force, converged) -- callers each compute their own
+    final positions/stretch stats from `pts`."""
     step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
     steps_taken = 0
     converged = False
@@ -699,13 +894,14 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
                 kick = rng.normal(scale=KICK_MAGNITUDE_FRACTION * scale, size=pts.shape)
                 new_pts = new_pts + kick * weight
                 recent_max_force.clear()  # give the kick a fresh window to show its effect
+        new_pts = _advance_fold_coupling(new_pts, coupling_ai, coupling_bi, dt)
         pts = _remove_rigid_motion(pts, new_pts)
     return pts, steps_taken, max_force, converged
 
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL, rng=None):
+                gtol=CONVERGENCE_GTOL, rng=None, fold_pairs=()):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
     as _edge_setup. Runs ONE relaxation pass at a fixed `pressure` -- no
     automatic ramp; call again with the result to keep steering it. Each
@@ -714,7 +910,12 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     (see module docstring's Design notes for why this walks explicitly
     rather than handing the force balance to a Newton-style solver) --
     `pressure` is a real per-face outward force, with no volume or
-    remembered state anywhere in it.
+    remembered state anywhere in it. `fold_pairs`: [(a, b), ...] an edge
+    fold's own coupled corners (module docstring's "Edge folds are a
+    real spring, not a vertex merge" -- typically
+    stretchy_mesh.fold_pairs_from_chains' result), pulled together with
+    their own much stiffer zero-rest-length spring; () for a net with no
+    folds.
 
     `max_nfev` caps the number of steps; None runs until convergence
     (capped at MAX_UNBOUNDED_STEPS as a runaway guard), via EITHER of two
@@ -735,8 +936,8 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     before a single step ran. `converged` is True only if one of the two
     criteria above (not the step cap or a stop request) is what stopped
     it."""
-    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
-        _edge_setup(faces, edge_length)
+    (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr,
+     scale, coupling_ai, coupling_bi) = _edge_setup(faces, edge_length, fold_pairs)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
 
     def force_fn(pts):
@@ -744,7 +945,8 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
                              length_arr, pressure, planarity_weight)
 
     pts, steps_taken, max_force, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng)
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
+        coupling_ai, coupling_bi)
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
     return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
 
@@ -770,11 +972,12 @@ def random_initial_positions(faces, spread=INITIAL_RANDOM_SPREAD, seed=0):
 def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
     """Pure Hooke's-law spring force for relax_initial_configuration --
     the same per-edge term as _relax_force, with no pressure and no
-    planarity. Faces aren't expected to be flat or even
-    non-self-intersecting at this stage (see relax_initial_configuration's
-    docstring); the only goal is a well-separated, edge-length-plausible
-    starting point to hand off to the real per-face pressure model
-    afterward."""
+    planarity. An edge fold's own coupled corners are handled entirely
+    separately (_advance_fold_coupling), same as _relax_force. Faces
+    aren't expected to be flat or even non-self-intersecting at this
+    stage (see relax_initial_configuration's docstring); the only goal is
+    a well-separated, edge-length-plausible starting point to hand off to
+    the real per-face pressure model afterward."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
     diff = pts[edge_bi] - pts[edge_ai]
@@ -788,14 +991,16 @@ def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
 
 
 def relax_initial_configuration(positions, faces, edge_length,
-                                 max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None):
+                                 max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None,
+                                 fold_pairs=()):
     """positions/faces/edge_length: as relax_once, but `positions` is
     typically random_initial_positions' output here, not a meaningful
     embedding -- this is what turns it into one, WITHOUT ever touching
-    pressure: pure Hooke's-law springs only (_spring_only_force). Nothing
-    here constrains vertices that don't share an edge, or fixes overall
-    position/scale, so the result can end up anywhere in space, at any
-    scale, and self-intersecting -- fine, since the only goal is a
+    pressure: pure Hooke's-law springs only (_spring_only_force), plus an
+    edge fold's own coupling springs (`fold_pairs`, as relax_once).
+    Nothing here constrains vertices that don't share an edge, or fixes
+    overall position/scale, so the result can end up anywhere in space,
+    at any scale, and self-intersecting -- fine, since the only goal is a
     well-separated, edge-length-plausible starting point for relax_once's
     real per-face pressure model afterward. Any view of this result must
     re-derive its own camera
@@ -816,15 +1021,16 @@ def relax_initial_configuration(positions, faces, edge_length,
     oscillating (`None` -- the default -- is fully deterministic).
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     max_force, converged) -- exactly relax_once's own return shape."""
-    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
-        _edge_setup(faces, edge_length)
+    (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr,
+     scale, coupling_ai, coupling_bi) = _edge_setup(faces, edge_length, fold_pairs)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
 
     def force_fn(pts):
         return _spring_only_force(pts, edge_ai, edge_bi, length_arr)
 
     pts, steps_taken, max_force, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng)
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
+        coupling_ai, coupling_bi)
 
     # A pure-spring relax has no notion of "outward" at all -- nothing in
     # the force cares which way a face's normal points, so it lands
@@ -882,13 +1088,12 @@ DEFAULT_TARGET_RMS_STRETCH_PCT = 10.0
 _INSANE_STRETCH_FLOOR_PCT = 500.0
 _INSANE_STRETCH_TARGET_MULTIPLE = 5.0
 
-
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
                                           planarity_weight=PLANARITY_WEIGHT, max_iterations=8,
                                           tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None,
-                                          gtol=CONVERGENCE_GTOL, rng=None):
-    """positions/faces/edge_length: as relax_once. Finds a pressure whose
+                                          gtol=CONVERGENCE_GTOL, rng=None, fold_pairs=()):
+    """positions/faces/edge_length/fold_pairs: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
     unevenly, and RMS is what the "Target RMS stretch" spinner asks for).
@@ -899,34 +1104,47 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     setting) calibrates pressure against the SAME settings it'll
     actually inflate with, rather than silently recalibrating against
     different ones. Every trial starts fresh from the given `positions`
-    (not chained from the previous trial's result), since different
-    pressures can have very different equilibria and this is searching
-    for the pressure, not steering a shape.
+    (not chained from the previous trial's result -- a chained version,
+    and a version with a much smaller `max_nfev_per_trial` to keep that
+    fast, were both tried and reverted, see git history: chaining sped up
+    the common case, but its own chained trials could read a pressure as
+    "insane" purely because the SPECIFIC shape they happened to be
+    chained from couldn't relax to that pressure's equilibrium in one
+    trial's own budget, not because the pressure itself was unsustainable
+    -- a hysteresis artifact, verified directly on data/input/
+    stretchy_nets/hippo.json, that corrupted the whole search; a smaller
+    per-trial step budget on its own then overinflated on the SAME net,
+    a user reported directly, rather than settling near the requested
+    target). Different pressures can have very different equilibria and
+    this is searching for the pressure, not steering a shape -- back to
+    this function's very first design, restarting fresh and giving every
+    trial the full `max_nfev_per_trial=20000` budget to reach a genuine
+    equilibrium reading, at the cost of being slow on a mesh that's slow
+    to converge (verified directly: 44 seconds on hippo.json at Level 1)
+    until a faster approach is found that doesn't reintroduce either of
+    those two regressions.
 
-    Starts from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess, same
-    as before, but the search itself is now BRACKET-then-BISECT rather
-    than a single multiplicative rescale repeated blindly: as long as
-    every trial so far has landed on the SAME side of the target (all
-    under it, or all "insane" -- see _INSANE_STRETCH_FLOOR_PCT/
-    _INSANE_STRETCH_TARGET_MULTIPLE, a mesh that's blown up rather than
-    settled), it keeps rescaling by (target / achieved), clamped by
-    _PRESSURE_RATIO_CLAMP, exactly as the original single-rescale version
-    did. The MOMENT a trial lands on the OPPOSITE side from the best one
-    seen so far (a sane, under-target trial and an over-target-or-insane
-    one now both exist), pressure is bracketed between them and every
-    remaining trial simply bisects the bracket -- the only way to
-    actually CONVERGE on an intermediate pressure once the mesh's own
-    response to pressure turns out highly nonlinear near some critical
-    value, rather than the old rescale-only approach's real failure
-    mode: a large target whose naive rescale ratio overshoots straight
-    past the mesh's own stable range and into catastrophic divergence,
-    then rescales right back down from THAT diverged reading to
-    approximately the ORIGINAL too-low pressure, forever alternating
-    between the same two pressures without ever trying anything in
-    between (verified directly: data/input/stretchy_nets/hippo.json at
-    Level 1, target 60% RMS stretch, oscillated exactly this way under
-    the old algorithm -- 0.165 giving 9.55%, rescaled up to 0.827 giving
-    a diverged 70,185%, rescaled back down to 0.165, repeating
+    Starts from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess, then
+    BRACKET-then-BISECTS: as long as every trial so far has landed on the
+    SAME side of the target (all under it, or all "insane" -- see
+    _INSANE_STRETCH_FLOOR_PCT/_INSANE_STRETCH_TARGET_MULTIPLE, a mesh
+    that's blown up rather than settled), it keeps rescaling by (target /
+    achieved), clamped by _PRESSURE_RATIO_CLAMP. The MOMENT a trial lands
+    on the OPPOSITE side from the best one seen so far (a sane, under-
+    target trial and an over-target-or-insane one now both exist),
+    pressure is bracketed between them and every remaining trial simply
+    bisects the bracket -- the only way to actually CONVERGE on an
+    intermediate pressure once the mesh's own response to pressure turns
+    out highly nonlinear near some critical value, rather than a naive
+    rescale-only approach's real failure mode: a large target whose ratio
+    overshoots straight past the mesh's own stable range and into
+    catastrophic divergence, then rescales right back down from THAT
+    diverged reading to approximately the ORIGINAL too-low pressure,
+    forever alternating between the same two pressures without ever
+    trying anything in between (verified directly: hippo.json at Level 1,
+    target 60% RMS stretch, oscillated exactly this way under a
+    rescale-only search -- 0.165 giving 9.55%, rescaled up to 0.827
+    giving a diverged 70,185%, rescaled back down to 0.165, repeating
     indefinitely, never landing anywhere near 60%).
 
     Keeps whichever SANE trial got CLOSEST to the target rather than
@@ -939,13 +1157,15 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     as pressure rises -- a genuine property of that topology, not a bug
     here) -- without keeping the best-so-far, a net where that
     assumption is wrong would escalate pressure every iteration chasing
-    a target it's moving away from; this is unchanged from the original
-    algorithm, and this net's own existing test coverage still passes
-    with the bracket/bisect logic added. Returns (pressure, new_positions,
+    a target it's moving away from. Returns (pressure, new_positions,
     steps_taken, max_stretch_pct, rms_stretch_pct, max_force, converged)
     -- the last five exactly as relax_once's own return, from whichever
     trial this settled on (if every single trial was insane, the LAST
-    one anyway, so this never raises for an irrecoverably bad target)."""
+    one anyway, so this never raises for an irrecoverably bad target).
+    If `stop_event` fires mid-search, that's always the CURRENT trial --
+    the one actually interrupted -- never an earlier, better-scoring but
+    otherwise unrelated one, so a caller stopping this can rely on the
+    result reflecting wherever it actually left off."""
     total_area = _total_rest_area(faces, edge_length)
     pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
     insane_ceiling = max(_INSANE_STRETCH_FLOOR_PCT, target_rms_pct * _INSANE_STRETCH_TARGET_MULTIPLE)
@@ -956,10 +1176,11 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     # either insane or over target.
     lo_pressure = hi_pressure = None
     result = None
+    stopped = False
     for _ in range(max_iterations):
         result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
                              max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
-                             rng=rng)
+                             rng=rng, fold_pairs=fold_pairs)
         _, _, _, rms_stretch, _, _ = result
         sane = rms_stretch < insane_ceiling
         if sane:
@@ -986,7 +1207,17 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
             pressure *= ratio
         else:
             break  # degenerate reading (zero stretch) with nothing to bracket against yet
-    if best_result is None:
+    if stopped:
+        # Interrupted mid-calibration (a caller's stop_event, e.g. a
+        # user's Stop click) -- report exactly where THIS trial, the one
+        # actually running when it was stopped, left off, not
+        # best_result: an earlier, different-pressure trial might score
+        # closer to the target on paper, but jumping to it would
+        # silently discard the positions the caller was just watching
+        # update, rather than the "return/render the last configuration"
+        # a stop is supposed to give.
+        best_pressure, best_result = pressure, result
+    elif best_result is None:
         # Every trial was insane -- no sane candidate exists at all
         # within max_iterations; report the last attempt anyway rather
         # than raising, same as the original algorithm's own contract

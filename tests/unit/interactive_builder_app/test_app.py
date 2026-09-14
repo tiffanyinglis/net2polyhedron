@@ -26,11 +26,13 @@ itself checks (a vertex merge error -- two different corners of one face
 resolving to the same vertex -- AND a duplicate directed edge). See each
 test's own docstring for what was actually checked.
 
-Connecting a shape to one of its OWN (different) edges is not supported
-yet (planned for later -- _hit_test_any_edge_handle refuses a handle on
-the pending connection's own origin SHAPE, not just its origin edge), so
-there is deliberately no test coverage here for a_shape == b_shape --
-_connection_pairs is never called with one."""
+Connecting a shape to one of its OWN (different) edges via an ORDINARY
+connection is not supported yet (planned for later --
+_hit_test_any_edge_handle refuses a handle on the pending connection's
+own origin SHAPE, not just its origin edge), so there is deliberately no
+test coverage here for a plain `conn(...)` with a_shape == b_shape.
+Edge Fold IS a same-shape link (see the module docstring's "Edge folds"
+section) and is covered separately, in TestEdgeFoldNeighbourCollapse."""
 import glob
 import itertools
 import json
@@ -51,6 +53,10 @@ def shape(shape_id, n, flipped=False):
 
 def conn(conn_id, a_shape, a_edge, b_shape, b_edge):
     return {"id": conn_id, "a_shape": a_shape, "a_edge": a_edge, "b_shape": b_shape, "b_edge": b_edge}
+
+
+def edge_fold(fold_id, shape_id, edge_a, edge_b):
+    return {"id": fold_id, "shape_id": shape_id, "edge_a": edge_a, "edge_b": edge_b}
 
 
 def shapes_and_connections_from_faces(faces):
@@ -279,6 +285,84 @@ class TestGenuinelyImpossibleNet:
             trial_shapes = [dict(self.SHAPES[0], flipped=flip1), dict(self.SHAPES[1], flipped=flip2)]
             with pytest.raises(NetValidationError):
                 builder_app._validate_shapes_connections(trial_shapes, self.CONNECTIONS)
+
+
+# ---- edge folds: folding a polygon edge onto its OPPOSITE edge is fine
+# ---- (no neighbouring corners collapse); folding it onto the edge only
+# ---- TWO steps away is not (see the module docstring's "Edge folds"
+# ---- section for the offset-±2 rule this pins down) ----
+
+class TestEdgeFoldNeighbourCollapse:
+    """A single hexagon (n=6), each case with exactly one Edge Fold and
+    no ordinary connections. Ground truth per the module docstring's
+    offset rule: a fold's own pairing collapses two NEIGHBOURING corners
+    of the polygon (a real vertex merge error) iff the two folded edges
+    are exactly 2 apart, either direction (offset 2 or n-2 -- the same
+    physical fold either way). This was tried as an exemption once
+    (folding shut the edge directly between the two folded edges was
+    treated as an intentional "pinch") and explicitly reverted: two
+    neighbouring corners of one polygon must never be allowed to merge,
+    because that always means folding that shared edge onto itself."""
+
+    def test_folding_an_edge_two_steps_from_another_is_a_vertex_merge_error(self):
+        """edge 0 onto edge 2 -- pinched_hex2.json's own case."""
+        shapes = [shape(1, 6)]
+        fold = edge_fold(1, 1, 0, 2)
+        connections = [builder_app._edge_fold_as_connection(fold)]
+        with pytest.raises(NetValidationError) as excinfo:
+            builder_app._validate_shapes_connections(shapes, connections)
+        assert excinfo.value.vertex_merge_error_slots
+
+    def test_folding_an_edge_onto_its_opposite_edge_is_not_an_error(self):
+        """edge 0 onto edge 3 (offset 3, clear of +-2) --
+        pinched_hex.json's own case: the two fixed corners on the fold's
+        own axis of symmetry stay their own, separate vertices."""
+        shapes = [shape(1, 6)]
+        fold = edge_fold(1, 1, 0, 3)
+        connections = [builder_app._edge_fold_as_connection(fold)]
+        builder_app._validate_shapes_connections(shapes, connections)  # must not raise
+
+    def test_folding_an_edge_onto_its_immediate_neighbour_is_not_an_error(self):
+        """edge 0 onto edge 1 (offset 1) -- adjacent edges sharing a
+        corner (that shared corner just unions with itself, a no-op);
+        offset 1 is clear of +-2 on a hexagon."""
+        shapes = [shape(1, 6)]
+        fold = edge_fold(1, 1, 0, 1)
+        connections = [builder_app._edge_fold_as_connection(fold)]
+        builder_app._validate_shapes_connections(shapes, connections)  # must not raise
+
+    def test_a_triangle_cannot_be_folded_onto_a_different_edge_at_all(self):
+        """n=3: the only two other edges sit at offset 1 and 2, and 1 is
+        congruent to -2 mod 3 -- so both of a triangle's only two
+        possible folds hit the +-2 rule; there is no safe fold for it
+        besides itself."""
+        shapes = [shape(1, 3)]
+        for edge_a, edge_b in [(0, 1), (0, 2)]:
+            fold = edge_fold(1, 1, edge_a, edge_b)
+            connections = [builder_app._edge_fold_as_connection(fold)]
+            with pytest.raises(NetValidationError) as excinfo:
+                builder_app._validate_shapes_connections(shapes, connections)
+            assert excinfo.value.vertex_merge_error_slots
+
+    def test_pinch_style_fold_combined_with_an_unrelated_real_vme_still_raises(self):
+        """An offset-2 fold on an isolated hexagon (shape id 5,
+        disconnected from everything else) combined with
+        TestVertexMergeErrorOnFlip's own genuine, unrelated VME (shapes
+        1-4, one face flipped) -- both must be caught; this just
+        confirms the two don't interfere with each other now that
+        there's no exemption to accidentally swallow either one."""
+        shapes = [dict(s, flipped=(s["id"] == 4)) for s in TestVertexMergeErrorOnFlip.SHAPES]
+        shapes = shapes + [shape(5, 6)]
+        connections = TestVertexMergeErrorOnFlip.CONNECTIONS
+        fold = edge_fold(1, 5, 0, 2)
+        with pytest.raises(NetValidationError) as excinfo:
+            builder_app._validate_shapes_connections(
+                shapes, connections + [builder_app._edge_fold_as_connection(fold)])
+        assert excinfo.value.vertex_merge_error_slots
+        assert any(slot[0] == 5 for slot in excinfo.value.vertex_merge_error_slots), \
+            "the hexagon's own offset-2 fold pinch must still be reported"
+        assert any(slot[0] != 5 for slot in excinfo.value.vertex_merge_error_slots), \
+            "the tetrahedron's unrelated, genuine VME must still be reported too"
 
 
 # ---- vertex labelling (debug mode's always-on dedup vertex display,

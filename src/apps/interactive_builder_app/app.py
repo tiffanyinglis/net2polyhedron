@@ -42,11 +42,28 @@ Interaction model:
     otherwise a clipboard from an EARLIER Move-mode copy would still be
     pasteable here, landing a shape nothing could then select, move, or
     connect to anything).
-  - **Polygon Fold [P]**: a reserved THIRD mode with no behavior
-    implemented yet -- its toolbar button is drawn dim
-    (`TOOLBAR_ICON_DISABLED_COLOR`) and never bound to a click at all,
-    so `self.tool_mode` can never actually become `"polygon_fold"` right
-    now.
+  - **Edge Fold [E]**: a THIRD mode for folding two of one polygon's OWN
+    edges onto each other -- physically, bringing one edge of a flat
+    polygon around to meet another edge of that SAME polygon (like
+    folding a paper hexagon in half), rather than joining two DIFFERENT
+    shapes' edges the way Join does. Same not-selectable-shapes trade-off
+    as Join. Every shape's every edge gets a handle, always visible in
+    this mode (not proximity-revealed like Join's -- an n-gon has at most
+    8, no clutter risk). Click-DRAG (unlike Join's click-click): press a
+    handle, drag onto another of the SAME shape's unfolded edges (the
+    valid ones light up red, "highlight and completion must agree" same
+    as Join), release to make the fold or cancel elsewhere; Esc cancels
+    mid-drag. A finished fold draws as a two-tone BLUE/ORANGE line
+    between the two edges' midpoints and can be selected/deleted like a
+    connection.
+
+    An edge fold is STRUCTURALLY nothing more than an ordinary connection
+    whose two shapes happen to be the SAME shape (`self.edge_folds`,
+    `[{"id", "shape_id", "edge_a", "edge_b"}, ...]` -- kept as its own
+    list only for UI/selection/undo bookkeeping, not because the math
+    differs): `_connection_pairs`/`_true_edge_slots` already give exactly
+    the right vertex correspondence for any two edges, same-shape or not
+    -- see "Edge folds" below.
   - **Flip Horizontal [H]** / **Flip Vertical [V]**: plain immediate
     ACTIONS on the current selection (`_flip_selected_shapes`), not
     modes -- clicking either never touches `self.tool_mode`. Mirrors the
@@ -277,6 +294,57 @@ Interaction model:
   debug mode (below) already shows a user live -- never in terms of the
   fresh integers `_faces_from_shapes` would only assign at export time,
   which a user watching the live app has no reason to recognize.
+- **Edge folds**: `self.edge_folds`, `[{"id", "shape_id", "edge_a",
+  "edge_b"}, ...]`, made/deleted only in Edge Fold mode. Not a new kind
+  of link: fed to `_vertex_roots`/`_validate_shapes_connections` as a
+  plain synthetic connection with `a_shape == b_shape`, since
+  `_connection_pairs`' existing reversed-pairing rule (needed for two
+  DIFFERENT shapes' shared edge) turns out to be exactly the mod-`n`
+  reflection a same-shape fold needs too -- verified against both
+  examples the feature was specified with. So a fold dedupes in debug
+  mode exactly like a cross-shape join, and `_validate_shapes_
+  connections` needs no special-casing at all: a bad fold (self-loop, or
+  duplicate directed edge) is caught by the exact same checks as an
+  ordinary connection, no exemption. (An earlier "Vertex Merge" design
+  DID need a same-shape exemption, back when it dragged raw
+  vertex-to-vertex bonds with no geometric constraint -- an arbitrary
+  pairing really could conflict with what some other connection implied.
+  A fold's mod-`n` pairing has no such freedom, so that exemption was
+  removed along with that design -- see git history if it's ever wanted
+  again.)
+
+  A vertex merge error is always two NEIGHBOURING corners of one polygon
+  -- the two corners of one of its own edges -- resolving to the same
+  vertex, i.e. that edge folded/connected down to zero length. Whether a
+  fold between edge `a` and edge `b` (offset `k = b - a`, mod `n`) hits
+  this comes straight out of `_connection_pairs`' pairing, (`a`, `b+1`)
+  and (`a+1`, `b`): those two corners are adjacent (differ by 1 mod `n`)
+  exactly when `k` is 2 or `n-2` -- the SAME physical fold, just named
+  from whichever edge is called `a`. So folding an edge onto the edge
+  exactly 2 steps away (skipping over one edge in between -- e.g. a
+  hexagon's edge 0 onto edge 2, `pinched_hex2.json`) pairs one folded
+  edge's corner with its OWN polygon-neighbour, which is exactly this,
+  so it's correctly rejected -- a user asked for this explicitly, after
+  briefly trying (and reverting) an exemption for it: "I don't want two
+  neighbouring vertices on the same polygon to merge because then it
+  requires folding that edge onto itself." Any other offset -- notably a
+  polygon's edge folded onto its OPPOSITE edge where one exists, e.g. a
+  hexagon's edge 0 onto edge 3, offset 3 (`pinched_hex.json`) -- is
+  comfortably clear of `±2` and never triggers this, with no
+  special-casing needed either way. (A triangle is the degenerate case
+  where this rule bites regardless of which other edge you pick -- its
+  only two other edges sit at offset 1 and 2, and 1 `≡ -2 (mod 3)`, so
+  neither offset is ever safe; a triangle simply can't be edge-folded
+  onto a different edge of itself without collapsing a neighbour.)
+
+  Saving keeps a folded pair's ids SEPARATE in "faces" (like an ordinary
+  connection does NOT) -- `_export_faces_and_layout` computes those ids
+  from `self.connections` alone, no edge-fold-derived connection fed in.
+  The fold is recorded as its own "edge_folds" 4-tuple instead, `[v1, v2,
+  v3, v4]` = edge_a's two corners in natural order, edge_b's REVERSED --
+  the exact ordering stretchy_mesh.py's loader expects. `_infer_edge_
+  folds` reconstructs `(shape, edge_a, edge_b)` on load: a fold never
+  crosses shapes, so the one face containing all four ids is its shape.
 - **Pan/zoom**: with no shape selected, right-click-drag pans -- dragging
   the background moves the whole view WITH the drag, the same direction
   as the cursor, like grabbing and sliding the canvas itself under a
@@ -508,9 +576,9 @@ _ICON_VERTICES = {n: _vertices_with_radius(n, ICON_RADIUS) for n in POLYGON_NS}
 
 
 def _draw_move_tool_icon(canvas, size, color):
-    """An arrow cursor on top of a small pentagon outline -- "Move"."""
+    """An arrow cursor on top of a small hexagon outline -- "Move"."""
     cx, cy = size / 2, size / 2
-    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(5, size * 0.34)]
+    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(6, size * 0.34)]
     canvas.create_polygon(verts, outline=color, fill="", width=1.5)
     # A plain arrow/cursor silhouette, tip at the pentagon's own upper
     # right, pointing down and to the right -- small enough it reads as
@@ -534,13 +602,30 @@ def _draw_join_tool_icon(canvas, size, color):
     canvas.create_oval(x2 - r, y - r, x2 + r, y + r, fill=color, outline="")
 
 
-def _draw_polygon_fold_tool_icon(canvas, size, color):
-    """A pentagon with one vertex joined to a non-adjacent one by a
-    diagonal line -- "Polygon Fold" (disabled, see module docstring)."""
+def _draw_edge_fold_tool_icon(canvas, size, color):
+    """A hexagon outline with two of its own OPPOSITE edges drawn thicker
+    (highlighted, like a made edge handle) and joined by a line between
+    their own midpoints -- "Edge Fold": unlike the old "Vertex Merge"
+    icon this replaced (two highlighted VERTICES -- see git history for
+    that version), this mode folds two of a polygon's own EDGES onto
+    each other, so the icon highlights edges, not corners. Specifically
+    OPPOSITE edges (offset 3 apart on a hexagon), not just any two
+    non-adjacent ones (an earlier version of this icon highlighted edges
+    only 2 apart, which -- per _validate_shapes_connections' own offset
+    rule, see the module docstring's "Edge folds" section -- is actually
+    the one fold offset that's NEVER allowed, since it collapses two
+    neighbouring corners of the hexagon together; this icon should
+    depict a fold a user can actually make, not the one specific kind
+    that's always rejected)."""
     cx, cy = size / 2, size / 2
-    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(5, size * 0.34)]
+    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(6, size * 0.34)]
     canvas.create_polygon(verts, outline=color, fill="", width=1.5)
-    canvas.create_line(*verts[1], *verts[3], fill=color, width=1.5)
+    edge_a, edge_b = (0, 1), (3, 4)
+    for i, j in (edge_a, edge_b):
+        canvas.create_line(*verts[i], *verts[j], fill=color, width=3)
+    mid_a = ((verts[edge_a[0]][0] + verts[edge_a[1]][0]) / 2, (verts[edge_a[0]][1] + verts[edge_a[1]][1]) / 2)
+    mid_b = ((verts[edge_b[0]][0] + verts[edge_b[1]][0]) / 2, (verts[edge_b[0]][1] + verts[edge_b[1]][1]) / 2)
+    canvas.create_line(*mid_a, *mid_b, fill=color, width=1.5)
 
 
 def _draw_flip_horizontal_tool_icon(canvas, size, color):
@@ -593,6 +678,20 @@ CONNECTION_COLOR = "#b0b0b0"
 CONNECTION_WIDTH = 1.5
 CONNECTION_SELECTED_WIDTH = 2.5
 
+# Edge Fold mode -- see module docstring's "Tool modes" section. Reuses
+# EDGE_HANDLE_RADIUS/HANDLE_HIT_RADIUS (below) for the handle itself --
+# same element Join mode uses, just always-visible here instead of
+# proximity-revealed. A made fold draws as a two-tone line, thicker BLUE
+# outer stroke with a thinner ORANGE inner stroke on top, per the user's
+# own request -- reads as visually distinct from an ordinary grey
+# connection at more than a glance.
+EDGE_FOLD_HIT_RADIUS = 6.0
+EDGE_FOLD_COLOR = "#4da6ff"
+EDGE_FOLD_INNER_COLOR = "#ff9800"
+EDGE_FOLD_WIDTH = 3.5
+EDGE_FOLD_INNER_WIDTH = 1.5
+EDGE_FOLD_SELECTED_WIDTH = 2.5
+
 # File menu colors (_build_menu) -- a plain tk.Menu on Windows otherwise
 # falls back to the OS's own native menu chrome, which draws a DISABLED
 # entry (e.g. Save while self._vme_active or not self._dirty -- see
@@ -611,11 +710,6 @@ MENU_DISABLED_FG = "#6e6e6e"
 # modes" section for what each button actually does.
 TOOLBAR_ICON_SIZE = 40
 TOOLBAR_ICON_COLOR = PLOT_THEME["fg"]
-# "Polygon Fold" has no behavior yet (see module docstring) -- its icon
-# is drawn in this dim color instead of TOOLBAR_ICON_COLOR, the same
-# "greyed out" idea as MENU_DISABLED_FG for a disabled File menu entry,
-# so it visibly reads as unavailable rather than identically clickable.
-TOOLBAR_ICON_DISABLED_COLOR = MENU_DISABLED_FG
 # The current tool's own icon gets this border (mirrors the palette's
 # own "armed" white border, _on_palette_clicked) -- plain PLOT_THEME["bg"]
 # (i.e. no visible border) otherwise.
@@ -986,25 +1080,37 @@ def _connection_pairs(shapes_by_id, conn):
     return ((a_v, b_w), (a_w, b_v))
 
 
+def _edge_fold_as_connection(fold):
+    """An Edge Fold IS a connection, structurally -- just one whose two
+    shapes happen to be the same shape (see module docstring's "Edge
+    folds" section) -- so this is how every caller feeds self.edge_folds
+    into _vertex_roots/_validate_shapes_connections/_connection_chain."""
+    return {"a_shape": fold["shape_id"], "a_edge": fold["edge_a"],
+            "b_shape": fold["shape_id"], "b_edge": fold["edge_b"]}
+
+
 def _vertex_roots(shapes, connections):
     """shapes: [{"id", "n", "flipped", ...}, ...]; connections:
-    [{"a_shape", "a_edge", "b_shape", "b_edge"}, ...]. Returns
-    {(shape_id, corner_index): root_slot} -- a UNION-FIND over each
-    shape's own corner slots (`corner i` is the vertex where edge `i-1`
-    meets edge `i`, i.e. edge `i` runs corner `i` -> corner `(i+1) % n`,
-    the same indexing _shape_edge_midpoints uses), merged pairwise per
-    _connection_pairs for every connection. The root itself is a
-    `(shape_id, corner_index)` slot -- deliberately NOT a freshly-assigned
-    sequential integer (that numbering is _faces_from_shapes' own job,
-    layered on top of this, only for the exported JSON's vertex-id
-    integers) -- since a slot's root is STABLE across any edit that
-    doesn't touch its own group, unlike a from-scratch sequential
-    renumbering, which can shift for every corner processed after
-    wherever the edit happened to land (adding one connection anywhere
-    merges two groups into one, which shifts every id assigned afterward
-    down by one). This is what _draw_debug_vertex_label displays instead,
-    precisely so a corner's shown identity doesn't change just because
-    some UNRELATED connection was added or removed elsewhere."""
+    [{"a_shape", "a_edge", "b_shape", "b_edge"}, ...] -- an Edge Fold is
+    just one of these with `a_shape == b_shape` (module docstring's
+    "Edge folds" section), so a caller wanting folds included just adds
+    their own synthetic connection dicts to this list. Returns
+    {(shape_id, corner_index): root_slot} -- a UNION-FIND over each shape's own corner slots
+    (`corner i` is the vertex where edge `i-1` meets edge `i`, i.e. edge
+    `i` runs corner `i` -> corner `(i+1) % n`, the same indexing
+    _shape_edge_midpoints uses), merged pairwise per _connection_pairs
+    for every connection. The root itself is a `(shape_id, corner_index)`
+    slot -- deliberately NOT a freshly-assigned sequential integer (that
+    numbering is _faces_from_shapes' own job, layered on top of this,
+    only for the exported JSON's vertex-id integers) -- since a slot's
+    root is STABLE across any edit that doesn't touch its own group,
+    unlike a from-scratch sequential renumbering, which can shift for
+    every corner processed after wherever the edit happened to land
+    (adding one connection anywhere merges two groups into one, which
+    shifts every id assigned afterward down by one). This is what
+    _draw_debug_vertex_label displays instead, precisely so a corner's
+    shown identity doesn't change just because some UNRELATED connection
+    was added or removed elsewhere."""
     parent = {(s["id"], corner): (s["id"], corner) for s in shapes for corner in range(s["n"])}
 
     def find(slot):
@@ -1025,15 +1131,26 @@ def _vertex_roots(shapes, connections):
     return {slot: find(slot) for slot in parent}
 
 
-def _faces_from_shapes(shapes, connections):
-    """shapes/connections: as _vertex_roots. Returns the vertex-loop
-    "faces" list for exporting: each distinct root from _vertex_roots
-    gets one fresh sequential integer id (assigned in shape/corner
-    visiting order), and each shape's own face is just its corners' ids
-    in _shape_face_corner_order (forward normally, reversed if flipped --
-    a flipped shape's own face loop must be read backward to come out
-    CCW-from-outside like every other face's). This sequential numbering
-    only ever happens HERE, inside
+def _faces_and_vertex_ids_from_shapes(shapes, connections):
+    """shapes/connections: as _vertex_roots -- `connections` here is
+    ALWAYS self.connections alone, never an edge-fold-derived synthetic
+    connection (module docstring's "Edge folds" section): a folded pair
+    keeps its own separate exported index, recorded as its own
+    "edge_folds" list instead (_export_faces_and_layout) -- feeding a
+    fold into THIS union-find would dedupe it down to one shared id,
+    which is exactly what "Saving" says not to do here. Returns (faces,
+    vertex_ids): `faces` is the
+    vertex-loop list for exporting, `vertex_ids` is the {(shape_id,
+    corner_index): exported_id} mapping used to build it -- exposed
+    separately (rather than just returning `faces`) so
+    _export_faces_and_layout can also look up the exported id of a
+    FOLDED corner without recomputing this from scratch. Each distinct
+    root from _vertex_roots gets one fresh sequential integer id
+    (assigned in shape/corner visiting order), and each shape's own face
+    is just its corners' ids in _shape_face_corner_order (forward
+    normally, reversed if flipped -- a flipped shape's own face loop must
+    be read backward to come out CCW-from-outside like every other
+    face's). This sequential numbering only ever happens HERE, inside
     _export_faces_and_layout (Save) -- never live while editing (see
     module docstring's Edge connections section for why treating a live
     version of this as a gate on new connections turned out to be the
@@ -1050,7 +1167,39 @@ def _faces_from_shapes(shapes, connections):
                 vertex_ids[root] = len(vertex_ids)
             face.append(vertex_ids[root])
         faces.append(face)
+    return faces, vertex_ids
+
+
+def _faces_from_shapes(shapes, connections):
+    """Thin wrapper over _faces_and_vertex_ids_from_shapes for callers
+    (debug mode's dedup display aside, everything else) that only need
+    the "faces" list itself, not the vertex-id mapping behind it."""
+    faces, _vertex_ids = _faces_and_vertex_ids_from_shapes(shapes, connections)
     return faces
+
+
+def _infer_edge_folds(faces, edge_fold_tuples):
+    """faces: vertex-id loops. edge_fold_tuples: [[v1, v2, v3, v4], ...]
+    (see module docstring's "Edge folds" section) -- `v1, v2` are one
+    edge's corners in natural order, `v3, v4` the other edge's REVERSED
+    (see _export_faces_and_layout for why). Returns [(face_index,
+    edge_a, edge_b), ...]: the one face containing all four ids, with
+    edge_a/edge_b the EDGE indices those pairs occupy in it. A tuple
+    that doesn't resolve (e.g. a hand-edited file) is skipped, not
+    raised -- same lenient spirit as _infer_connections."""
+    results = []
+    for v1, v2, v3, v4 in edge_fold_tuples:
+        for fi, face in enumerate(faces):
+            ids = set(face)
+            if not {v1, v2, v3, v4} <= ids:
+                continue
+            n = len(face)
+            edge_a = next((k for k in range(n) if face[k] == v1 and face[(k + 1) % n] == v2), None)
+            edge_b = next((k for k in range(n) if face[k] == v4 and face[(k + 1) % n] == v3), None)
+            if edge_a is not None and edge_b is not None:
+                results.append((fi, edge_a, edge_b))
+                break
+    return results
 
 
 def _degenerate_edge_faces(faces):
@@ -1076,21 +1225,23 @@ def _degenerate_edge_faces(faces):
 
 def _connection_chain(shapes, connections, slot_a, slot_b):
     """Returns the shortest list of connections (as {"a_shape", "a_edge",
-    "b_shape", "b_edge"} dicts, in traversal order) whose unions link
-    slot_a to slot_b -- i.e. the actual reason _vertex_roots gave them
-    the same root, spelled out as the specific chain of edge-to-edge
-    connections responsible, rather than just the shared root itself.
-    A vertex merge error (a corner collapsing onto itself, or a duplicate
-    directed edge) is never caused by one
-    connection in isolation (see _validate_shapes_connections) -- it's
-    always this transitive chain, possibly running through many other
-    shapes, that the two ends of some offending edge got swept into.
-    BFS over the same slot-to-slot links _vertex_roots' own union calls
-    make (each connection contributes the same two pairs _connection_pairs
-    gives it), so the path found here traces the exact unions that
-    produced the shared root. Returns None if slot_a/slot_b
-    aren't actually linked (shouldn't happen for two slots already
-    confirmed to share a root, but guards against it regardless)."""
+    "b_shape", "b_edge"} dicts, in traversal order -- an Edge Fold's own
+    synthetic connection looks like any other here, `a_shape == b_shape`
+    and nothing else distinguishing it) whose unions link slot_a to
+    slot_b -- i.e. the actual reason _vertex_roots gave them the same
+    root, spelled out as the specific chain of connections responsible,
+    rather than just the shared root itself. A vertex merge error (a
+    corner collapsing onto itself, or a duplicate directed edge) is never
+    caused by one connection in isolation (see
+    _validate_shapes_connections) -- it's always this transitive chain,
+    possibly running through many other shapes, that the two ends of
+    some offending edge got swept into. BFS over the same slot-to-slot
+    links _vertex_roots' own union calls make (each connection
+    contributes the same two pairs _connection_pairs gives it), so the
+    path found here traces the exact unions that produced the shared
+    root. Returns None if slot_a/slot_b aren't actually linked (shouldn't
+    happen for two slots already confirmed to share a root, but guards
+    against it regardless)."""
     shapes_by_id = {s["id"]: s for s in shapes}
     adjacency = {}
     for conn in connections:
@@ -1136,24 +1287,48 @@ class NetValidationError(ValueError):
 
 
 def _validate_shapes_connections(shapes, connections):
-    """shapes/connections: as _vertex_roots. As _vertex_roots unions
+    """shapes/connections: as _vertex_roots -- `connections` here is
+    whatever combined list the caller wants validated, normally both
+    self.connections AND an Edge Fold's own synthetic same-shape
+    connections (module docstring's "Edge folds" section): a fold needs
+    no separate validation path, since a genuinely bad one is exactly as
+    real an error as a bad cross-shape connection. As _vertex_roots unions
     connected corners together, two checks can fail: a face's own two
     (different) corners ending up merged into the same vertex (a VERTEX
     MERGE ERROR), or two different edges both resolving to the same
     directed vertex pair (a duplicate-directed-edge conflict -- the same
-    rule load_stretchy_mesh itself enforces on load). Raises
-    a NetValidationError (see its own docstring) phrased in terms of the
-    LIVE "vSHAPE.CORNER" vertex identity _draw_debug_vertex_label
-    already shows a user while editing (the root slot from
-    _vertex_roots), never in terms of the fresh sequential integers
-    _faces_from_shapes would assign these same vertices at export time.
-    A user who's never opened the exported JSON has no reason to know
-    what "vertex 37" in a save-failure message even refers to; "v9.4" is
-    the same label they can go hover with debug mode to find and fix.
-    Called on self.shapes/self.connections directly, BEFORE
+    rule load_stretchy_mesh itself enforces on load). Raises a
+    NetValidationError (see its own docstring) phrased in terms of the
+    LIVE "vSHAPE.CORNER" vertex identity _draw_debug_vertex_label already
+    shows a user while editing (the root slot from _vertex_roots), never
+    in terms of the fresh sequential integers _faces_from_shapes would
+    assign these same vertices at export time. A user who's never opened
+    the exported JSON has no reason to know what "vertex 37" in a
+    save-failure message even refers to; "v9.4" is the same label they
+    can go hover with debug mode to find and fix. Called on
+    self.shapes/self.connections (plus edge folds) directly, BEFORE
     _faces_from_shapes ever runs, so the error a failed Save shows is
     always phrased in terms of the corners the user actually placed and
     connected.
+
+    A VERTEX MERGE ERROR is, by construction, always a case of two
+    NEIGHBOURING corners of one polygon -- the two corners of one of its
+    own edges -- resolving to the same vertex: that means the edge
+    between them has been folded/connected down to zero length, which
+    isn't a real edge any more. There is deliberately no exemption for
+    this, fold-caused or otherwise (an earlier version of this function
+    tried exempting a same-shape Edge Fold's own direct pairing --
+    reverted at the user's explicit request: "I don't want two
+    neighbouring vertices on the same polygon to merge because then it
+    requires folding that edge onto itself" -- so an Edge Fold between
+    two edges an ODD number of edges apart, e.g. a hexagon's edge 0
+    folded onto edge 2, is still correctly rejected). An ordinary,
+    physically sensible fold -- one polygon edge onto its OPPOSITE edge,
+    e.g. edge 0 onto edge 3 of a hexagon -- was never affected either
+    way: `_connection_pairs`' mod-n reflection pairs each folded edge's
+    corners with the OTHER folded edge's corners, never with its own
+    neighbour, so it was already, always allowed by this same check with
+    no special-casing needed (see `pinched_hex.json`, still valid).
 
     Neither conflict is ever caused by a single connection considered on
     its own -- see _connection_chain's own docstring -- so every problem
@@ -1313,6 +1488,22 @@ class InteractiveBuilderApp:
         # made onto something that was visibly highlighted first.
         self._hover_shape_id = None
         self._hover_edge_index = None
+
+        # Edge Fold mode's own folds -- [{"id", "shape_id", "edge_a",
+        # "edge_b"}, ...] (module docstring's "Edge folds" section) --
+        # kept as its own list, separate from self.connections, purely
+        # for UI/selection/undo bookkeeping (structurally a fold IS just
+        # a same-shape connection -- _edge_fold_as_connection). self.
+        # _edge_fold_pending is the {"shape_id", "edge"} a drag started
+        # from (mirrors self._connection_pending); self._hover_edge_fold_
+        # edge is the OTHER edge currently under the cursor, same
+        # "highlight and completion must agree" idea connections use.
+        self.edge_folds = []
+        self._next_edge_fold_id = 1
+        self.selected_edge_fold_id = None
+        self._edge_fold_pending = None
+        self._pending_edge_fold_cursor_screen = None
+        self._hover_edge_fold_edge = None
         # Live mouse position over the canvas (None once it leaves) --
         # tracked unconditionally, not just while armed/pending, purely
         # so an unjoined handle can reveal itself only once the cursor
@@ -1448,6 +1639,7 @@ class InteractiveBuilderApp:
         self.root.bind_all("<KeyPress-f>", self._on_flip_key)
         self.root.bind_all("<KeyPress-m>", lambda _e: self._set_tool_mode("move"))
         self.root.bind_all("<KeyPress-j>", lambda _e: self._set_tool_mode("join"))
+        self.root.bind_all("<KeyPress-e>", lambda _e: self._set_tool_mode("edge_fold"))
         self.root.bind_all("<KeyPress-h>", lambda _e: self._flip_selected_shapes("horizontal"))
         self.root.bind_all("<KeyPress-v>", lambda _e: self._flip_selected_shapes("vertical"))
         self.root.bind_all("<Control-c>", self.on_copy_key)
@@ -1503,17 +1695,15 @@ class InteractiveBuilderApp:
 
     def _build_toolbar(self, parent):
         """The right-side tool strip: one column of icon buttons,
-        Photoshop/Illustrator-style. "Move" and "Join" SELECT a tool
-        MODE (self.tool_mode, see _set_tool_mode) that gates what
-        clicking on the canvas does; "Polygon Fold" is a reserved third
-        mode with no behavior yet, so its button is drawn dim and never
-        bound to a click at all. "Flip Horizontal"/"Flip Vertical" are
-        plain immediate ACTIONS on the current selection
-        (_flip_selected_shapes) -- clicking either never changes
-        self.tool_mode."""
+        Photoshop/Illustrator-style. "Move", "Join", and "Edge Fold"
+        SELECT a tool MODE (self.tool_mode, see _set_tool_mode) that
+        gates what clicking on the canvas does. "Flip Horizontal"/
+        "Flip Vertical" are plain immediate ACTIONS on the current
+        selection (_flip_selected_shapes) -- clicking either never
+        changes self.tool_mode."""
         self._add_toolbar_mode_button(parent, "move", "Move [M]", _draw_move_tool_icon)
         self._add_toolbar_mode_button(parent, "join", "Join [J]", _draw_join_tool_icon)
-        self._add_toolbar_disabled_button(parent, "Polygon Fold [P]", _draw_polygon_fold_tool_icon)
+        self._add_toolbar_mode_button(parent, "edge_fold", "Edge Fold [E]", _draw_edge_fold_tool_icon)
         self._add_toolbar_action_button(parent, "Flip Horizontal [H]", _draw_flip_horizontal_tool_icon,
                                          lambda: self._flip_selected_shapes("horizontal"))
         self._add_toolbar_action_button(parent, "Flip Vertical [V]", _draw_flip_vertical_tool_icon,
@@ -1538,10 +1728,6 @@ class InteractiveBuilderApp:
         icon = self._new_toolbar_icon(parent, draw_icon, TOOLBAR_ICON_COLOR)
         icon.bind("<Button-1>", lambda _e: action())
         Tooltip(icon, tooltip_text)
-
-    def _add_toolbar_disabled_button(self, parent, tooltip_text, draw_icon):
-        icon = self._new_toolbar_icon(parent, draw_icon, TOOLBAR_ICON_DISABLED_COLOR)
-        Tooltip(icon, f"{tooltip_text} (not implemented yet)")
 
     def _update_toolbar_highlight(self):
         """Rings whichever MODE button matches self.tool_mode in
@@ -1573,6 +1759,10 @@ class InteractiveBuilderApp:
         self._pending_cursor_screen = None
         self._hover_shape_id = None
         self._hover_edge_index = None
+        self.selected_edge_fold_id = None
+        self._edge_fold_pending = None
+        self._pending_edge_fold_cursor_screen = None
+        self._hover_edge_fold_edge = None
         self._marquee_start = None
         self._marquee_current = None
         for icon in self._palette_canvases.values():
@@ -1621,18 +1811,21 @@ class InteractiveBuilderApp:
 
     def _joined_points(self):
         """Set of (shape_id, edge_index) already the endpoint of a real
-        connection -- an edge can only ever be joined ONCE, so this is
-        what _hit_test_any_edge_handle excludes from being clickable a
-        second time (see its own docstring for why: connecting the same
-        edge twice is what corrupted data/input/stretchy_nets/hippo.json
-        -- a single edge unioned with two different partners transitively
-        merged unrelated vertices together, producing vertex-merge and
-        duplicate-directed-edge errors far from where the mistake was
-        actually made)."""
+        connection OR an Edge Fold -- an edge can only ever be joined
+        ONCE, so this is what _hit_test_any_edge_handle (Join mode) AND
+        _hit_test_any_fold_edge (Edge Fold mode) both exclude from being
+        clickable a second time (see _hit_test_any_edge_handle's own
+        docstring for why: connecting the same edge twice is what
+        corrupted data/input/stretchy_nets/hippo.json). A fold occupies
+        its two edges the same way a connection does -- an edge already
+        glued to something has nothing left to fold onto or connect to."""
         joined = set()
         for conn in self.connections:
             joined.add((conn["a_shape"], conn["a_edge"]))
             joined.add((conn["b_shape"], conn["b_edge"]))
+        for fold in self.edge_folds:
+            joined.add((fold["shape_id"], fold["edge_a"]))
+            joined.add((fold["shape_id"], fold["edge_b"]))
         return joined
 
     def _hit_test_any_edge_handle(self, screen_x, screen_y, exclude_shape_id=None):
@@ -1692,15 +1885,71 @@ class InteractiveBuilderApp:
                 best, best_dist = conn["id"], dist
         return best
 
+    # ---- Edge Fold: same-shape edge hit-testing / fold lines ----
+
+    def _hit_test_any_fold_edge(self, screen_x, screen_y, shape_id=None, exclude_edge=None):
+        """Nearest edge handle within HANDLE_HIT_RADIUS screen pixels of
+        the given point, or None -- the same handle geometry Join mode's
+        own _hit_test_any_edge_handle uses (_shape_edge_midpoints), and
+        the same _joined_points() exclusion (an edge already part of a
+        connection OR a fold can't be picked again). With `shape_id`
+        given (dragging a fold out from one edge, see _on_canvas_drag),
+        only THAT shape's own OTHER edges are considered -- a fold only
+        ever links two edges of the SAME polygon (module docstring) --
+        additionally excluding `exclude_edge` itself (the drag's own
+        origin). With `shape_id=None` (choosing where to start a drag
+        from), every shape's every unjoined/unfolded edge is a
+        candidate."""
+        joined = self._joined_points()
+        best, best_dist = None, HANDLE_HIT_RADIUS
+        for shape in self.shapes:
+            if shape_id is not None and shape["id"] != shape_id:
+                continue
+            for edge_index, (mx, my) in enumerate(self._shape_edge_midpoints(shape)):
+                if edge_index == exclude_edge:
+                    continue
+                if (shape["id"], edge_index) in joined:
+                    continue
+                sx, sy = self._world_to_screen(mx, my)
+                dist = math.hypot(screen_x - sx, screen_y - sy)
+                if dist <= best_dist:
+                    best, best_dist = {"shape_id": shape["id"], "edge_index": edge_index}, dist
+        return best
+
+    def _edge_fold_endpoints(self, fold):
+        """Screen-space (a, b) edge-midpoint positions for a fold, or
+        None if its shape no longer exists -- mirrors
+        _connection_endpoints."""
+        shape = self._shape_by_id(fold["shape_id"])
+        if shape is None:
+            return None
+        mids = self._shape_edge_midpoints(shape)
+        return self._world_to_screen(*mids[fold["edge_a"]]), self._world_to_screen(*mids[fold["edge_b"]])
+
+    def _hit_test_edge_fold(self, screen_x, screen_y):
+        """Id of the fold whose line passes within EDGE_FOLD_HIT_RADIUS
+        screen pixels of the given point, or None -- mirrors
+        _hit_test_connection."""
+        best, best_dist = None, EDGE_FOLD_HIT_RADIUS
+        for fold in self.edge_folds:
+            endpoints = self._edge_fold_endpoints(fold)
+            if endpoints is None:
+                continue
+            dist = _point_segment_distance((screen_x, screen_y), *endpoints)
+            if dist < best_dist:
+                best, best_dist = fold["id"], dist
+        return best
+
     def _remove_shape(self, shape_id):
-        """Deletes the shape and every connection touching it -- a
-        connection with a missing endpoint has nothing left to draw a
-        line between, so it can't be left dangling. Doesn't itself
+        """Deletes the shape and every connection AND edge fold touching
+        it -- both have nothing left to draw a line between once their
+        shape is gone, so neither can be left dangling. Doesn't itself
         refresh the vertex-merge-error state -- callers that delete
         several shapes in a loop (_on_delete_key) do that once,
         afterward, rather than re-validating after every single one."""
         self.connections = [c for c in self.connections
                              if c["a_shape"] != shape_id and c["b_shape"] != shape_id]
+        self.edge_folds = [f for f in self.edge_folds if f["shape_id"] != shape_id]
         self.shapes = [s for s in self.shapes if s["id"] != shape_id]
 
     # ---- palette ----
@@ -1736,12 +1985,14 @@ class InteractiveBuilderApp:
         an unsaved-changes prompt."""
         if not self._confirm_discard_unsaved():
             return
-        if self.shapes or self.connections:
+        if self.shapes or self.connections or self.edge_folds:
             self._push_undo()
         self.shapes.clear()
         self.connections.clear()
+        self.edge_folds.clear()
         self.selected_ids = set()
         self.selected_connection_id = None
+        self.selected_edge_fold_id = None
         self._drag_state = None
         self.current_save_path = None
         self._saved_revision = self._revision
@@ -1822,20 +2073,34 @@ class InteractiveBuilderApp:
         self.file_menu.entryconfig(
             self._save_as_menu_index, state=tk.DISABLED if self._vme_active else tk.NORMAL)
 
+    def _connections_with_edge_folds(self):
+        """self.connections PLUS one synthetic same-shape connection per
+        self.edge_folds entry (_edge_fold_as_connection) -- the combined
+        list every LIVE dedup/validation call (_refresh_vme_state,
+        _draw_dedup_vertex_labels) feeds to _vertex_roots/
+        _validate_shapes_connections, since a fold is structurally just a
+        connection (see module docstring's "Edge folds" section).
+        _export_faces_and_layout deliberately does NOT use this for its
+        own exported vertex-id numbering (see _faces_and_vertex_ids_
+        from_shapes' own docstring) -- only for the validation call
+        alongside it."""
+        return self.connections + [_edge_fold_as_connection(f) for f in self.edge_folds]
+
     def _refresh_vme_state(self):
-        """Re-validates the CURRENT self.shapes/self.connections and
-        updates self._vme_active, the status bar, and Save/Save As's
-        enabled state accordingly -- call this after any edit that could
-        change whether the net has a vertex merge error (VME): making or
-        deleting a connection, deleting a shape, flipping a shape,
-        undo/redo, paste, New, Load. Only ever the plain yes/no answer --
-        WHICH corners are actually conflicting is debug mode's own
-        concern (_draw_dedup_vertex_labels re-validates independently,
-        live, on every redraw, to ring the specific ones red), not
-        something this needs to compute or store for release mode,
-        which shows nothing more specific than the status bar text."""
+        """Re-validates the CURRENT self.shapes/self.connections (plus
+        edge folds) and updates self._vme_active, the status bar, and
+        Save/Save As's enabled state accordingly -- call this after any
+        edit that could change whether the net has a vertex merge error
+        (VME): making or deleting a connection or edge fold, deleting a
+        shape, flipping a shape, undo/redo, paste, New, Load. Only ever
+        the plain yes/no answer -- WHICH corners are actually conflicting
+        is debug mode's own concern (_draw_dedup_vertex_labels
+        re-validates independently, live, on every redraw, to ring the
+        specific ones red), not something this needs to compute or store
+        for release mode, which shows nothing more specific than the
+        status bar text."""
         try:
-            _validate_shapes_connections(self.shapes, self.connections)
+            _validate_shapes_connections(self.shapes, self._connections_with_edge_folds())
         except NetValidationError:
             self._vme_active = True
         else:
@@ -1851,11 +2116,15 @@ class InteractiveBuilderApp:
         "Save As..." (always asks first) -- writes shapes/connections
         out as a stretchy-mesh "faces" vertex-loop spec, plus a
         "net_layout" section (each shape's "cx"/"cy"/"rotation"/
-        "flipped") and a "builder_connections" section (this app's own
-        extensions, see module docstring) so re-Loading it reproduces
-        the exact on-screen layout AND the exact shapes/connections/flip
-        state, rather than falling back to a fresh BFS layout plus
-        re-derived (always-unflipped) connections, and a "view" section
+        "flipped"), a "builder_connections" section (this app's own
+        extensions, see module docstring), and a generic "edge_folds"
+        section (Edge Fold's intra-polygon links, as vertex-id 4-tuples
+        -- any reader of this net format can act on it, not just this
+        app -- stretchy_mesh.py's own loader is what actually does) so
+        re-Loading it reproduces the exact on-screen layout AND the exact
+        shapes/connections/flip/fold state, rather than falling back to a
+        fresh BFS layout plus re-derived (always-unflipped) connections,
+        and a "view" section
         with the current zoom level so re-Loading it doesn't reset back
         to the default zoom. The NetValidationError branch below should
         be unreachable in normal use -- on_save_clicked/on_save_as_clicked
@@ -1867,13 +2136,13 @@ class InteractiveBuilderApp:
         before letting New/quitting throw away unsaved work) check
         this."""
         try:
-            faces, net_layout, builder_connections = self._export_faces_and_layout()
+            faces, net_layout, builder_connections, edge_folds = self._export_faces_and_layout()
         except (NetValidationError, ValueError) as e:
             messagebox.showerror("Save failed", str(e))
             return False
         spec = {"name": os.path.splitext(os.path.basename(path))[0], "faces": faces,
                 "net_layout": net_layout, "builder_connections": builder_connections,
-                "view": {"scale": self.view_scale}}
+                "edge_folds": edge_folds, "view": {"scale": self.view_scale}}
         try:
             with open(path, "w") as f:
                 json.dump(spec, f, indent=2)
@@ -1932,36 +2201,23 @@ class InteractiveBuilderApp:
         return self._save_to_path(self.current_save_path)
 
     def _export_faces_and_layout(self):
-        """Returns (faces, net_layout, builder_connections): `faces` is
-        the vertex-loop list derived from self.shapes/self.connections
-        via _faces_from_shapes; `net_layout` is each shape's own {"cx",
-        "cy", "rotation", "flipped"}, in the same order as `faces`;
-        `builder_connections` is self.connections translated from shape
-        id to FACE INDEX (position in self.shapes, matching position in
-        `faces`) -- both this app's own extensions, see module
-        docstring's "net JSON import/export" section for why Load
-        reconstructs shapes/connections directly from these two
-        (when present) rather than re-deriving them from the plain
-        vertex-loop `faces` alone: re-deriving can only ever recover
-        SOME valid flip/connection assignment for the exported mesh, not
-        necessarily the exact one the user built (see _load_faces' own
-        docstring for why "flipped" specifically can't just be read back
-        onto a re-derived connection). Raises NetValidationError (a
-        ValueError subclass, from _validate_shapes_connections) if
-        self.shapes' CURRENT "flipped" bits (see module docstring's
-        "Flip" section -- set directly by the user, never inferred)
-        don't produce a valid mesh -- should be unreachable in normal
-        use, since Save/Save As already refuse to call this while
-        self._vme_active (_refresh_vme_state re-runs the same check
-        live after every edit -- see module docstring's "Edge
-        connections" section), but kept here as the defensive,
-        authoritative check right before a file is actually written.
-        Validated in "vSHAPE.CORNER" terms, the same live identity debug
-        mode shows, before _faces_from_shapes ever renumbers anything
-        for export, so a failed check's error names corners the user can
-        actually go find (and un-flip, if that's the fix) on screen."""
-        _validate_shapes_connections(self.shapes, self.connections)
-        faces = _faces_from_shapes(self.shapes, self.connections)
+        """Returns (faces, net_layout, builder_connections, edge_folds)
+        -- see module docstring's "net JSON import/export"/"Edge folds"
+        sections for the format. `faces`/`vertex_ids` come from
+        _faces_and_vertex_ids_from_shapes(self.shapes, self.connections)
+        -- edge folds excluded, so a folded pair keeps separate ids;
+        `net_layout` is each shape's {"cx", "cy", "rotation", "flipped"};
+        `builder_connections` is self.connections by FACE INDEX;
+        `edge_folds` is self.edge_folds as 4-tuples, `[id(corner_i),
+        id(corner_i+1), id(corner_j+1), id(corner_j)]` per fold (edge_b's
+        corners reversed -- the ordering stretchy_mesh.py's loader
+        expects). Raises NetValidationError if self.shapes/connections
+        (plus folds, as synthetic connections -- _connections_with_
+        edge_folds) don't validate -- should be unreachable since Save
+        already refuses while self._vme_active, kept as the defensive
+        check right before a file is written."""
+        _validate_shapes_connections(self.shapes, self._connections_with_edge_folds())
+        faces, vertex_ids = _faces_and_vertex_ids_from_shapes(self.shapes, self.connections)
         net_layout = [{"cx": s["cx"], "cy": s["cy"], "rotation": s["rotation"],
                        "flipped": s["flipped"]} for s in self.shapes]
         face_index = {s["id"]: i for i, s in enumerate(self.shapes)}
@@ -1970,7 +2226,17 @@ class InteractiveBuilderApp:
              "b_face": face_index[c["b_shape"]], "b_edge": c["b_edge"]}
             for c in self.connections
         ]
-        return faces, net_layout, builder_connections
+        # No edge folds fed in -- matches vertex_ids' own keys (both come
+        # from a plain self.connections-only union-find).
+        bare_roots = _vertex_roots(self.shapes, self.connections)
+        edge_folds = []
+        for f in self.edge_folds:
+            shape = self._shape_by_id(f["shape_id"])
+            n = shape["n"]
+            i, j = f["edge_a"], f["edge_b"]
+            corners = (i, (i + 1) % n, (j + 1) % n, j)
+            edge_folds.append([vertex_ids[bare_roots[(f["shape_id"], c)]] for c in corners])
+        return faces, net_layout, builder_connections, edge_folds
 
     def on_load_clicked(self):
         path = filedialog.askopenfilename(
@@ -1987,7 +2253,7 @@ class InteractiveBuilderApp:
             degenerate_edges = _degenerate_edge_faces(faces)
             view_scale = spec.get("view", {}).get("scale")
             self._load_faces(faces, spec.get("net_layout"), view_scale,
-                              spec.get("builder_connections"))
+                              spec.get("builder_connections"), spec.get("edge_folds"))
             self.current_save_path = path
             self._saved_revision = self._revision
             self._update_title()
@@ -2008,7 +2274,7 @@ class InteractiveBuilderApp:
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             messagebox.showerror("Load failed", str(e))
 
-    def _load_faces(self, faces, net_layout, view_scale=None, builder_connections=None):
+    def _load_faces(self, faces, net_layout, view_scale=None, builder_connections=None, edge_folds=None):
         """Replaces the whole canvas with `faces` (vertex-id loops).
         `net_layout` (this app's own saved {"cx", "cy", "rotation",
         "flipped"} per face, see module docstring), when present and the
@@ -2043,17 +2309,28 @@ class InteractiveBuilderApp:
         "flipped" is only safe together with the EXACT connections it
         was originally paired with, which is what `builder_connections`
         supplies -- there is no way to derive a correct substitute from
-        `faces` alone."""
-        if self.shapes or self.connections:
+        `faces` alone.
+
+        `edge_folds` (see module docstring's "Edge folds"/"Saving"
+        sections) is reconstructed via _infer_edge_folds regardless of
+        whether `net_layout`/`builder_connections` round-trip exactly --
+        unlike "flipped", a fold has no ambiguity to resolve (just two
+        edge indices of one shape), so the plain vertex-id lookup is
+        exactly as good for a hand-authored file as one this app saved."""
+        if self.shapes or self.connections or self.edge_folds:
             self._push_undo()
         self.shapes = []
         self.connections = []
+        self.edge_folds = []
         self.selected_ids = set()
         self.selected_connection_id = None
+        self.selected_edge_fold_id = None
         self.armed_n = None
         self._connection_pending = None
         self._hover_shape_id = None
         self._hover_edge_index = None
+        self._edge_fold_pending = None
+        self._hover_edge_fold_edge = None
         self._drag_state = None
         self._marquee_start = None
         self._marquee_current = None
@@ -2102,6 +2379,11 @@ class InteractiveBuilderApp:
                     "b_shape": shape_ids[conn["b_face"]], "b_edge": conn["b_edge"],
                 })
                 self._next_connection_id += 1
+
+        for fi, edge_a, edge_b in _infer_edge_folds(faces, edge_folds or []):
+            self.edge_folds.append({"id": self._next_edge_fold_id, "shape_id": shape_ids[fi],
+                                     "edge_a": edge_a, "edge_b": edge_b})
+            self._next_edge_fold_id += 1
 
         self._center_view_on_shapes(scale=view_scale if view_scale is not None else 1.0)
         self._redraw()
@@ -2159,13 +2441,16 @@ class InteractiveBuilderApp:
     def _on_canvas_press(self, event):
         """Dispatches to whichever tool mode is current (see module
         docstring's "Tool modes" section) -- Move (drag/select/marquee
-        shapes; connections aren't editable at all) or Join (add/delete
+        shapes; connections aren't editable at all), Join (add/delete
         connections; shapes aren't selectable, so a click can never
-        start a drag)."""
+        start a drag), or Edge Fold (drag a fold between two of one
+        shape's own edges; same non-selectable-shapes rule as Join)."""
         if self.tool_mode == "move":
             self._on_canvas_press_move(event)
         elif self.tool_mode == "join":
             self._on_canvas_press_join(event)
+        elif self.tool_mode == "edge_fold":
+            self._on_canvas_press_edge_fold(event)
 
     def _on_canvas_press_move(self, event):
         if self.armed_n is not None:
@@ -2288,6 +2573,57 @@ class InteractiveBuilderApp:
         self._hover_edge_index = None
         return made
 
+    def _on_canvas_press_edge_fold(self, event):
+        """Shapes aren't selectable/draggable at all in Edge Fold mode
+        (same rule as Join) -- a click here either grabs an edge handle
+        to start dragging a fold out from it (see _on_canvas_drag/
+        _on_canvas_release, which finish the gesture -- this is
+        click-DRAG, unlike Join's click-click, per the user's own
+        request: a fold's two edges are picked by literally dragging one
+        onto the other) or, missing every handle, selects/deselects an
+        existing fold line (for Delete). Clicking a shape's body away
+        from any handle or fold line simply deselects, same as clicking
+        empty space."""
+        hit = self._hit_test_any_fold_edge(event.x, event.y)
+        if hit is not None:
+            self._edge_fold_pending = hit
+            self._pending_edge_fold_cursor_screen = (event.x, event.y)
+            self.selected_edge_fold_id = None
+            self._redraw()
+            return
+
+        fold_hit = self._hit_test_edge_fold(event.x, event.y)
+        self.selected_edge_fold_id = fold_hit  # None if the click missed everything
+        self._redraw()
+
+    def _complete_or_cancel_pending_edge_fold(self):
+        """The RELEASE that ends an edge-drag started by
+        _on_canvas_press_edge_fold. Returns True and makes the fold if
+        self._hover_edge_fold_edge is currently set (i.e. the cursor is
+        CURRENTLY over a valid drop target on the same shape -- read
+        rather than re-hit-tested here, same "highlight and completion
+        must agree" rule _complete_or_cancel_pending_connection already
+        follows for edge connections); returns False (no fold) if the
+        drag was released somewhere that isn't currently a valid target
+        (empty space, back on the origin edge, a different shape, or an
+        edge already joined/folded). Either way,
+        self._edge_fold_pending/_hover_edge_fold_edge are cleared before
+        returning."""
+        made = self._hover_edge_fold_edge is not None
+        if made:
+            self._push_undo()
+            self.edge_folds.append({
+                "id": self._next_edge_fold_id, "shape_id": self._edge_fold_pending["shape_id"],
+                "edge_a": self._edge_fold_pending["edge_index"], "edge_b": self._hover_edge_fold_edge,
+            })
+            self._next_edge_fold_id += 1
+            self._refresh_vme_state()
+            self.selected_edge_fold_id = None
+        self._edge_fold_pending = None
+        self._pending_edge_fold_cursor_screen = None
+        self._hover_edge_fold_edge = None
+        return made
+
     def _drop_shape(self, n, wx, wy):
         shape = {"id": self._next_shape_id, "n": n, "cx": wx, "cy": wy, "rotation": 0.0,
                  "flipped": False}
@@ -2312,6 +2648,20 @@ class InteractiveBuilderApp:
                 if shape is not None:
                     shape["cx"] = start_cx + dx
                     shape["cy"] = start_cy + dy
+            self._redraw()
+            return
+        if self._edge_fold_pending is not None:
+            self._pending_edge_fold_cursor_screen = (event.x, event.y)
+            # Same shape as the drag's own origin only (a fold never
+            # crosses shapes), excluding the origin edge itself and any
+            # edge already joined/folded (see _hit_test_any_fold_edge) --
+            # so a completing release can only ever land on something
+            # that's genuinely still a valid, currently-highlighted
+            # target.
+            target = self._hit_test_any_fold_edge(
+                event.x, event.y, shape_id=self._edge_fold_pending["shape_id"],
+                exclude_edge=self._edge_fold_pending["edge_index"])
+            self._hover_edge_fold_edge = None if target is None else target["edge_index"]
             self._redraw()
             return
         if self._marquee_start is not None:
@@ -2345,6 +2695,9 @@ class InteractiveBuilderApp:
     def _on_canvas_release(self, _event):
         self._drag_state = None
         self._commit_undoable_change()
+        if self._edge_fold_pending is not None:
+            self._complete_or_cancel_pending_edge_fold()
+            self._redraw()
         if self._marquee_start is not None:
             self._finish_marquee_select()
             self._marquee_start = None
@@ -2363,6 +2716,12 @@ class InteractiveBuilderApp:
             self._push_undo()
             self.connections = [c for c in self.connections if c["id"] != self.selected_connection_id]
             self.selected_connection_id = None
+            self._refresh_vme_state()
+            self._redraw()
+        elif self.selected_edge_fold_id is not None:
+            self._push_undo()
+            self.edge_folds = [f for f in self.edge_folds if f["id"] != self.selected_edge_fold_id]
+            self.selected_edge_fold_id = None
             self._refresh_vme_state()
             self._redraw()
 
@@ -2487,6 +2846,16 @@ class InteractiveBuilderApp:
                 conn["a_edge"] = edge_maps[conn["a_shape"]][conn["a_edge"]]
             if conn["b_shape"] in edge_maps:
                 conn["b_edge"] = edge_maps[conn["b_shape"]][conn["b_edge"]]
+        # An Edge Fold anchors to two EDGE indices of its own shape, the
+        # exact same kind of index a connection does -- so it needs the
+        # same remap, and can just reuse edge_maps directly rather than
+        # needing a separate corner-index map the way the old "Vertex
+        # Merge" bonds (removed -- see git history) once did.
+        for fold in self.edge_folds:
+            if fold["shape_id"] in edge_maps:
+                em = edge_maps[fold["shape_id"]]
+                fold["edge_a"] = em[fold["edge_a"]]
+                fold["edge_b"] = em[fold["edge_b"]]
 
         self._redraw()
 
@@ -2495,15 +2864,22 @@ class InteractiveBuilderApp:
         (the first click of the click-click gesture -- see module
         docstring's Edge connections section) but not yet completed onto
         a second one -- the dragging-behind red line just disappears,
-        with no connection made. A no-op at any other time (no
-        in-progress gesture to cancel -- a marquee-drag is abandoned by
-        releasing the mouse button outside any shape instead, which
-        already just re-selects whatever it happens to enclose)."""
+        with no connection made -- OR, the same idea for Edge Fold, an
+        edge-fold drag that's been started from one edge but not yet
+        released onto another. A no-op at any other time (no in-progress
+        gesture to cancel -- a marquee-drag is abandoned by releasing the
+        mouse button outside any shape instead, which already just
+        re-selects whatever it happens to enclose)."""
         if self._connection_pending is not None:
             self._connection_pending = None
             self._pending_cursor_screen = None
             self._hover_shape_id = None
             self._hover_edge_index = None
+            self._redraw()
+        elif self._edge_fold_pending is not None:
+            self._edge_fold_pending = None
+            self._pending_edge_fold_cursor_screen = None
+            self._hover_edge_fold_edge = None
             self._redraw()
 
     def _on_toggle_debug_mode(self, _event=None):
@@ -2514,20 +2890,21 @@ class InteractiveBuilderApp:
     # ---- undo/redo (Ctrl+Z / Ctrl+Y) ----
 
     def _snapshot_state(self):
-        """A deep-copied {"shapes", "connections", "_next_shape_id",
-        "_next_connection_id", "_rev"} -- everything Ctrl+Z/Ctrl+Y need
-        to restore the canvas exactly, deep-copied so neither the
-        snapshot nor later live edits can ever mutate the other's data
-        (every value here is a plain int/float/bool/dict/list, so this
-        is cheap and never needs anything smarter than copy.deepcopy).
-        "_rev" is the live canvas's OWN revision number at the moment of
-        capture (self._revision -- see its own comment in __init__) --
-        restoring it, rather than assigning a fresh one, is what lets
-        undoing back to a previously-saved state read as no-longer-dirty
-        again."""
+        """A deep-copied {"shapes", "connections", "edge_folds",
+        "_next_shape_id", "_next_connection_id", "_next_edge_fold_id",
+        "_rev"} -- everything Ctrl+Z/Ctrl+Y need to restore the canvas
+        exactly, deep-copied so neither the snapshot nor later live edits
+        can ever mutate the other's data (every value here is a plain
+        int/float/bool/dict/list, so this is cheap and never needs
+        anything smarter than copy.deepcopy). "_rev" is the live
+        canvas's OWN revision number at the moment of capture
+        (self._revision -- see its own comment in __init__) -- restoring
+        it, rather than assigning a fresh one, is what lets undoing back
+        to a previously-saved state read as no-longer-dirty again."""
         return {"shapes": copy.deepcopy(self.shapes), "connections": copy.deepcopy(self.connections),
+                "edge_folds": copy.deepcopy(self.edge_folds),
                 "_next_shape_id": self._next_shape_id, "_next_connection_id": self._next_connection_id,
-                "_rev": self._revision}
+                "_next_edge_fold_id": self._next_edge_fold_id, "_rev": self._revision}
 
     def _restore_snapshot(self, snap):
         """The inverse of _snapshot_state -- also deep-copies OUT of the
@@ -2539,8 +2916,10 @@ class InteractiveBuilderApp:
         whatever used to be selected."""
         self.shapes = copy.deepcopy(snap["shapes"])
         self.connections = copy.deepcopy(snap["connections"])
+        self.edge_folds = copy.deepcopy(snap["edge_folds"])
         self._next_shape_id = snap["_next_shape_id"]
         self._next_connection_id = snap["_next_connection_id"]
+        self._next_edge_fold_id = snap["_next_edge_fold_id"]
         self._revision = snap["_rev"]
 
     def _record_undo_snapshot(self, snap):
@@ -2625,9 +3004,11 @@ class InteractiveBuilderApp:
         self._restore_snapshot(self._undo_stack.pop())
         self.selected_ids = set()
         self.selected_connection_id = None
+        self.selected_edge_fold_id = None
         self._drag_state = None
         self._rotate_state = None
         self._connection_pending = None
+        self._edge_fold_pending = None
         self._update_title()
         self._refresh_vme_state()
         self._redraw()
@@ -2644,9 +3025,11 @@ class InteractiveBuilderApp:
         self._restore_snapshot(self._redo_stack.pop())
         self.selected_ids = set()
         self.selected_connection_id = None
+        self.selected_edge_fold_id = None
         self._drag_state = None
         self._rotate_state = None
         self._connection_pending = None
+        self._edge_fold_pending = None
         self._update_title()
         self._refresh_vme_state()
         self._redraw()
@@ -2658,17 +3041,19 @@ class InteractiveBuilderApp:
         selected shape to one that ISN'T copied along with it has
         nothing on the other end to reproduce, so it's simply dropped,
         same as _remove_shape already does for a shape that's actually
-        deleted. No-op if nothing's selected. Storing each shape's own
-        absolute position, not an offset relative to the others, is what
-        lets a multi-shape paste reproduce the exact same relative
-        arrangement, just moved as a whole -- see on_paste_key.
-        Connections reference their two shapes by INDEX into this same
-        list (not by id, which won't exist yet until paste time creates
-        fresh ones). Also a no-op outside Move mode -- shapes aren't
-        selectable in Join mode at all (see module docstring's "Tool
-        modes" section), so self.selected_ids is already always empty
-        there, but this makes the restriction explicit rather than
-        incidental."""
+        deleted -- PLUS every edge fold on a selected shape (a fold only
+        ever has one shape, so there's no "other end" question for it the
+        way there is for a connection). No-op if nothing's selected.
+        Storing each shape's own absolute position, not an offset
+        relative to the others, is what lets a multi-shape paste
+        reproduce the exact same relative arrangement, just moved as a
+        whole -- see on_paste_key. Connections/edge folds reference their
+        shape(s) by INDEX into this same list (not by id, which won't
+        exist yet until paste time creates fresh ones). Also a no-op
+        outside Move mode -- shapes aren't selectable in Join or Edge
+        Fold mode at all (see module docstring's "Tool modes" section),
+        so self.selected_ids is already always empty there, but this
+        makes the restriction explicit rather than incidental."""
         if self.tool_mode != "move" or not self.selected_ids:
             return
         copied_shapes = [s for s in self.shapes if s["id"] in self.selected_ids]
@@ -2682,6 +3067,10 @@ class InteractiveBuilderApp:
                  "b_index": index_of[c["b_shape"]], "b_edge": c["b_edge"]}
                 for c in self.connections
                 if c["a_shape"] in index_of and c["b_shape"] in index_of
+            ],
+            "edge_folds": [
+                {"index": index_of[f["shape_id"]], "edge_a": f["edge_a"], "edge_b": f["edge_b"]}
+                for f in self.edge_folds if f["shape_id"] in index_of
             ],
         }
 
@@ -2723,8 +3112,15 @@ class InteractiveBuilderApp:
                 "b_shape": new_ids[conn["b_index"]], "b_edge": conn["b_edge"],
             })
             self._next_connection_id += 1
+        for fold in self._clipboard.get("edge_folds", []):
+            self.edge_folds.append({
+                "id": self._next_edge_fold_id, "shape_id": new_ids[fold["index"]],
+                "edge_a": fold["edge_a"], "edge_b": fold["edge_b"],
+            })
+            self._next_edge_fold_id += 1
         self.selected_ids = set(new_ids)
         self.selected_connection_id = None
+        self.selected_edge_fold_id = None
         self._redraw()
 
     # ---- canvas: right button -- rotate selected shape(s), else pan ----
@@ -2840,6 +3236,22 @@ class InteractiveBuilderApp:
                                  sx + EDGE_HANDLE_RADIUS, sy + EDGE_HANDLE_RADIUS,
                                  fill=fill, outline=outline, width=EDGE_HANDLE_OUTLINE_WIDTH)
 
+    def _draw_edge_fold_line(self, a, b, selected):
+        """An Edge Fold -- two concentric strokes, a thicker BLUE one
+        (EDGE_FOLD_COLOR/EDGE_FOLD_WIDTH) with a thinner ORANGE one
+        (EDGE_FOLD_INNER_COLOR/EDGE_FOLD_INNER_WIDTH) drawn on top of it
+        along the exact same segment, so it reads as "orange inside of
+        blue" rather than CONNECTION_COLOR's flat grey -- visually
+        distinct from an ordinary edge-to-edge connection at a glance.
+        Selected still just goes solid red (SELECTION_OUTLINE_COLOR),
+        same as a selected connection -- the two-tone look is reserved
+        for a fold's normal, unselected state."""
+        if selected:
+            self.canvas.create_line(*a, *b, fill=SELECTION_OUTLINE_COLOR, width=EDGE_FOLD_SELECTED_WIDTH)
+            return
+        self.canvas.create_line(*a, *b, fill=EDGE_FOLD_COLOR, width=EDGE_FOLD_WIDTH)
+        self.canvas.create_line(*a, *b, fill=EDGE_FOLD_INNER_COLOR, width=EDGE_FOLD_INNER_WIDTH)
+
     def _redraw(self):
         self.canvas.delete("all")
         self._shape_photos = []
@@ -2920,6 +3332,45 @@ class InteractiveBuilderApp:
                         if math.hypot(cx - sx, cy - sy) > HANDLE_HIT_RADIUS:
                             continue
                     self._draw_handle_circle(shape, edge_index, lit=lit, joined=joined)
+
+        # Edge folds draw as thin two-tone BLUE/ORANGE lines regardless of
+        # mode -- same reasoning as an ordinary connection line drawing
+        # even outside Join mode (module docstring: "so the net's current
+        # shape stays visible while rearranging it") -- but they're only
+        # SELECTABLE, and every handle only visible/clickable, in Edge
+        # Fold mode itself.
+        for fold in self.edge_folds:
+            endpoints = self._edge_fold_endpoints(fold)
+            if endpoints is not None:
+                self._draw_edge_fold_line(*endpoints, selected=fold["id"] == self.selected_edge_fold_id)
+
+        if self._edge_fold_pending is not None:
+            origin_shape = self._shape_by_id(self._edge_fold_pending["shape_id"])
+            if origin_shape is not None:
+                anchor = self._world_to_screen(
+                    *self._shape_edge_midpoints(origin_shape)[self._edge_fold_pending["edge_index"]])
+                self._draw_edge_fold_line(anchor, self._pending_edge_fold_cursor_screen, selected=True)
+
+        # EVERY placed shape's EVERY edge gets a handle -- but ONLY in
+        # Edge Fold mode, mirroring Join mode's own edge handles above --
+        # always visible rather than proximity-revealed (an n-gon has at
+        # most 8 edges, no real clutter risk). Lit red for the drag's own
+        # origin edge and its current hover target, same "highlight and
+        # completion must agree" idea as Join's own pending/hover points;
+        # filled (vs. an unfilled ring) for an edge already used by a
+        # connection OR another fold -- reuses _draw_handle_circle
+        # unchanged, since it's the same handle Join mode draws.
+        if self.tool_mode == "edge_fold":
+            pending_point = (None if self._edge_fold_pending is None else
+                              (self._edge_fold_pending["shape_id"], self._edge_fold_pending["edge_index"]))
+            hover_point = (None if self._edge_fold_pending is None or self._hover_edge_fold_edge is None else
+                           (self._edge_fold_pending["shape_id"], self._hover_edge_fold_edge))
+            joined_points = self._joined_points()
+            for shape in self.shapes:
+                for edge_index in range(shape["n"]):
+                    point = (shape["id"], edge_index)
+                    lit = point in (pending_point, hover_point)
+                    self._draw_handle_circle(shape, edge_index, lit=lit, joined=point in joined_points)
 
         if self.armed_n is not None and self._ghost_world_xy is not None:
             # Drawn exactly like a real, selected shape (solid fill, white
@@ -3011,9 +3462,10 @@ class InteractiveBuilderApp:
         time, not a stored id, so a connection made/deleted or a shape
         flipped is reflected the next redraw with no separate
         invalidation step needed."""
-        roots = _vertex_roots(self.shapes, self.connections)
+        connections = self._connections_with_edge_folds()
+        roots = _vertex_roots(self.shapes, connections)
         try:
-            _validate_shapes_connections(self.shapes, self.connections)
+            _validate_shapes_connections(self.shapes, connections)
             conflicting_slots = frozenset()
         except NetValidationError as e:
             conflicting_slots = e.vertex_merge_error_slots

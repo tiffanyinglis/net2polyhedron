@@ -23,6 +23,15 @@ from the current (possibly already-stretched) 3D positions -- so the
 as resolution increases, letting successive levels converge toward one
 consistent answer rather than each level chasing whatever stretch
 happened to exist at the moment it was created.
+
+Faces never carry a repeated vertex id, even for an edge-folded net
+(stretchy_mesh.load_stretchy_mesh's "Edge folds" note): a fold couples
+two corners with a real, very stiff spring instead of merging their ids,
+so every face here fan-subdivides exactly like an ordinary one, no
+special-casing. What DOES need tracking here is `fold_chains` -- see
+_grow_fold_chains -- since a folded edge's own two coupled corners
+multiply into more coupled pairs every time that edge gets a new
+midpoint.
 """
 import math
 
@@ -46,6 +55,30 @@ def _spoke_rest_length(n, edge_length):
     """Exact distance from a regular n-gon's own vertex to its centroid
     (circumradius), at the given edge length."""
     return edge_length / (2 * math.sin(math.pi / n))
+
+
+def _grow_fold_chains(fold_chains, midpoint_of):
+    """fold_chains: [(chain_a, chain_b), ...] -- each a same-length list
+    of vertex ids; chain_a[i] must coincide with chain_b[i] (a
+    stretchy_mesh fold coupling spring -- see load_stretchy_mesh's "Edge
+    folds" note and stretchy_mesh.fold_pairs_from_chains). At level 0
+    each chain is just [v1, v2] / [v3, v4], the fold's own declared
+    corners. midpoint_of: {(u, v) sorted: mid} from THIS SAME
+    _quarter_triangles call -- every original chain segment (u, v) is a
+    real mesh edge, so it always has a midpoint here. Splices that
+    midpoint into every chain segment, so chain_a[i] still coincides with
+    chain_b[i] at the new, finer resolution: a fold's coupling springs
+    grow to match every subdivision level, not just level 0, keeping the
+    WHOLE folded edge pulled shut rather than just its original two
+    corners. Returns the refined fold_chains, same shape as the input."""
+    def refine(chain):
+        refined = [chain[0]]
+        for u, v in zip(chain, chain[1:]):
+            mid = midpoint_of[tuple(sorted((u, v)))]
+            refined.append(mid)
+            refined.append(v)
+        return refined
+    return [(refine(chain_a), refine(chain_b)) for chain_a, chain_b in fold_chains]
 
 
 def _fan_level_0_to_1(faces, positions, rest_lengths, face_of_fine, edge_length):
@@ -90,15 +123,16 @@ def _fan_level_0_to_1(faces, positions, rest_lengths, face_of_fine, edge_length)
     return new_faces, new_positions, new_rest_lengths, new_face_of_fine
 
 
-def _quarter_triangles(faces, positions, rest_lengths, face_of_fine):
+def _quarter_triangles(faces, positions, rest_lengths, face_of_fine, fold_chains):
     """faces: an ALL-TRIANGLE vertex-loop mesh (level >= 1); positions/
-    rest_lengths/face_of_fine: that level's own state. Splits every
-    triangle into 4 via edge midpoints, deduplicated so a shared edge's
-    two triangles reuse the same new midpoint id. A midpoint's position
-    is its edge's endpoint average; a split edge's rest length is half
-    its parent's, and a quartering's 3 new internal edges are half the
-    OPPOSITE original edge's rest length (midsegment theorem). Returns
-    (new_faces, new_positions, new_rest_lengths, new_face_of_fine)."""
+    rest_lengths/face_of_fine: that level's own state; fold_chains: as
+    _grow_fold_chains. Splits every triangle into 4 via edge midpoints,
+    deduplicated so a shared edge's two triangles reuse the same new
+    midpoint id. A midpoint's position is its edge's endpoint average; a
+    split edge's rest length is half its parent's, and a quartering's 3
+    new internal edges are half the OPPOSITE original edge's rest length
+    (midsegment theorem). Returns (new_faces, new_positions,
+    new_rest_lengths, new_face_of_fine, new_fold_chains)."""
     next_id = 1 + max(positions)
     new_positions = dict(positions)
     new_rest_lengths = dict(rest_lengths)
@@ -134,21 +168,30 @@ def _quarter_triangles(faces, positions, rest_lengths, face_of_fine):
         new_rest_lengths[tuple(sorted((mca, mab)))] = rest_bc / 2
         new_faces += [(a, mab, mca), (mab, b, mbc), (mca, mbc, c), (mab, mbc, mca)]
         new_face_of_fine += [face_of_fine[face_idx]] * 4
-    return new_faces, new_positions, new_rest_lengths, new_face_of_fine
+    new_fold_chains = _grow_fold_chains(fold_chains, midpoint_of)
+    return new_faces, new_positions, new_rest_lengths, new_face_of_fine, new_fold_chains
 
 
-def subdivide_once(faces, positions, edge_length, face_of_fine, level):
+def subdivide_once(faces, positions, edge_length, face_of_fine, level, fold_chains=()):
     """faces/positions: the CURRENT level's mesh; edge_length: scalar
     (level 0) or {(a,b): length} dict (level >= 1) -- same dual form
     stretchy_mesh.relax_once/solve_wireframe accept; face_of_fine: each
     face's own base-face index (identity list at level 0); level: the
-    CURRENT level (0..MAX_LEVEL-1). Returns (new_faces, new_positions,
-    new_edge_length, new_face_of_fine) one level up -- new_edge_length is
-    always a dict from here on. Raises ValueError if level is already at
-    MAX_LEVEL."""
+    CURRENT level (0..MAX_LEVEL-1); fold_chains: this level's own fold-
+    coupling chains (empty for a net with no edge folds -- see
+    stretchy_mesh.load_stretchy_mesh's "Edge folds" note and
+    _grow_fold_chains). Returns (new_faces, new_positions,
+    new_edge_length, new_face_of_fine, new_fold_chains) one level up --
+    new_edge_length is always a dict from here on. Raises ValueError if
+    level is already at MAX_LEVEL."""
     if level >= MAX_LEVEL:
         raise ValueError(f"already at the maximum level ({MAX_LEVEL})")
     if level == 0:
         rest_lengths = base_rest_lengths(faces, edge_length)
-        return _fan_level_0_to_1(faces, positions, rest_lengths, face_of_fine, edge_length)
-    return _quarter_triangles(faces, positions, edge_length, face_of_fine)
+        new_faces, new_positions, new_rest_lengths, new_face_of_fine = _fan_level_0_to_1(
+            faces, positions, rest_lengths, face_of_fine, edge_length)
+        # Rim edges (including any folded ones) are untouched by the
+        # level 0->1 fan -- see _fan_level_0_to_1's own docstring -- so
+        # the fold chains carry over exactly as they were.
+        return new_faces, new_positions, new_rest_lengths, new_face_of_fine, list(fold_chains)
+    return _quarter_triangles(faces, positions, edge_length, face_of_fine, fold_chains)

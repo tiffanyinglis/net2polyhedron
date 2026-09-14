@@ -10,7 +10,7 @@ NETS = ["tetrahedron", "cube", "octahedron", "icosahedron", "dodecahedron",
 
 @pytest.mark.parametrize("name", NETS)
 def test_every_face_gets_placed(name):
-    faces, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
+    faces, _, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
     placed = build_stretchy_net_layout(faces)
     assert set(placed) == set(range(len(faces)))
     for fi, pts in placed.items():
@@ -22,7 +22,7 @@ def test_every_placed_face_keeps_unit_edge_length(name):
     # attach_polygon must preserve each face's own regular-polygon shape
     # (rotation + translation only, no distortion) regardless of where in
     # the BFS tree it landed.
-    faces, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
+    faces, _, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
     placed = build_stretchy_net_layout(faces)
     for fi, face in enumerate(faces):
         pts = placed[fi]
@@ -42,7 +42,7 @@ def test_a_tree_edge_lands_shared_faces_on_the_same_two_points():
     from collections import deque
     from utils.inflate_polyhedron.stretchy_net_layout import _shared_edge_faces
 
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
+    faces, _, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
     placed = build_stretchy_net_layout(faces)
     shared = _shared_edge_faces(faces)
     visited = {0}
@@ -69,7 +69,7 @@ def test_a_tree_edge_lands_shared_faces_on_the_same_two_points():
 
 
 def test_root_face_is_the_canonical_regular_polygon():
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/dodecahedron.json")
+    faces, _, _ = load_stretchy_mesh("data/input/stretchy_nets/dodecahedron.json")
     placed = build_stretchy_net_layout(faces, root=0)
     from utils.geometry.polygon_geom import regular_polygon_vertices
     expected = regular_polygon_vertices(len(faces[0]))

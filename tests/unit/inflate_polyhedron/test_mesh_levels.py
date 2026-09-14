@@ -45,18 +45,19 @@ def _assert_closed_consistent_mesh(faces):
 
 def test_level_0_triangle_face_is_unchanged():
     positions = _rng_positions(TETRAHEDRON_FACES)
-    faces, new_positions, edge_length, face_of_fine = subdivide_once(
+    faces, new_positions, edge_length, face_of_fine, fold_chains = subdivide_once(
         TETRAHEDRON_FACES, positions, EDGE_LENGTH, list(range(len(TETRAHEDRON_FACES))), level=0)
     assert [tuple(f) for f in faces] == [tuple(f) for f in TETRAHEDRON_FACES]
     assert set(new_positions) == set(positions)
     assert face_of_fine == [0, 1, 2, 3]
+    assert fold_chains == []
 
 
 def test_level_0_to_1_square_face_adds_centroid_with_exact_spoke_length():
     square = [(0, 1, 2, 3)]
     positions = {0: np.array([0.0, 0, 0]), 1: np.array([1.0, 0, 0]),
                  2: np.array([1.0, 1, 0]), 3: np.array([0.0, 1, 0])}
-    faces, new_positions, edge_length, face_of_fine = subdivide_once(
+    faces, new_positions, edge_length, face_of_fine, _ = subdivide_once(
         square, positions, EDGE_LENGTH, [0], level=0)
 
     assert len(faces) == 4  # centroid fan: one triangle per side
@@ -76,6 +77,55 @@ def test_level_0_to_1_square_face_adds_centroid_with_exact_spoke_length():
         assert edge_length[key] == pytest.approx(expected_spoke)
 
 
+def test_fold_chains_pass_through_level_0_to_1_unchanged():
+    # pinched_hex.json's hexagon, edge 0 folded onto its opposite edge 3
+    # (stretchy_mesh.load_stretchy_mesh's "Edge folds" note: a fold never
+    # merges ids, faces stays an ordinary 6-gon). The level 0->1 fan only
+    # adds a centroid + spokes -- rim edges (including the folded one)
+    # are untouched, so the fold's own coupling chain must come back
+    # exactly as it went in.
+    face = [0, 1, 2, 3, 4, 5]
+    positions = _rng_positions([face])
+    fold_chains = [([0, 1], [4, 3])]
+    faces, _, _, _, new_fold_chains = subdivide_once(
+        [face], positions, EDGE_LENGTH, [0], level=0, fold_chains=fold_chains)
+
+    assert len(faces) == 6  # ordinary hexagon fan, no special-casing
+    assert new_fold_chains == fold_chains
+
+
+def test_fold_chains_grow_a_midpoint_per_quartering():
+    # Two triangles sharing edge (0, 1) -- a stand-in for a folded edge
+    # already fan-triangulated (level 1). Quartering it (level 1->2) adds
+    # a midpoint to (0, 1); the fold's own coupling chain must grow to
+    # include it, so the WHOLE folded edge -- not just its original two
+    # corners -- stays pulled together at the finer resolution.
+    faces = [(0, 1, 2), (1, 0, 3), (10, 11, 2)]
+    positions = {0: np.array([0.0, 0, 0]), 1: np.array([1.0, 0, 0]),
+                 2: np.array([0.5, 1.0, 0]), 3: np.array([0.5, -1.0, 0]),
+                 # (10, 11) stands in for the fold's twin edge, seeded with
+                 # its own real position so get_or_make_midpoint can
+                 # subdivide it too, mirroring a real mesh where both sides
+                 # of a fold are real, independently-subdivided edges.
+                 10: np.array([0.0, 5, 0]), 11: np.array([1.0, 5, 0])}
+    edge_length = base_rest_lengths(faces, EDGE_LENGTH)
+    fold_chains = [([0, 1], [10, 11])]
+
+    new_faces, new_positions, _, _, new_fold_chains = subdivide_once(
+        faces, positions, edge_length, [0, 0, 0], level=1, fold_chains=fold_chains)
+
+    assert len(new_fold_chains) == 1
+    chain_a, chain_b = new_fold_chains[0]
+    assert len(chain_a) == 3 and len(chain_b) == 3
+    assert chain_a[0] == 0 and chain_a[2] == 1
+    assert chain_b[0] == 10 and chain_b[2] == 11
+    # the new midpoints are genuinely new vertices, at the edges' midpoints
+    assert chain_a[1] not in positions
+    assert np.allclose(new_positions[chain_a[1]], [0.5, 0, 0])
+    assert chain_b[1] not in positions
+    assert np.allclose(new_positions[chain_b[1]], [0.5, 5, 0])
+
+
 def test_subdivide_once_rejects_level_at_or_past_max():
     positions = _rng_positions(TETRAHEDRON_FACES)
     with pytest.raises(ValueError):
@@ -92,7 +142,7 @@ def test_face_count_and_rest_lengths_scale_correctly_through_every_level(faces):
     prev_face_count = len(faces)
 
     for level in range(MAX_LEVEL):
-        cur_faces, positions, edge_length, face_of_fine = subdivide_once(
+        cur_faces, positions, edge_length, face_of_fine, _ = subdivide_once(
             cur_faces, positions, edge_length, face_of_fine, level)
 
         # every mesh edge has a rest length, and vice versa
@@ -117,7 +167,7 @@ def test_positions_are_nested_subsets_across_levels():
 
     for level in range(MAX_LEVEL):
         prev_positions = positions
-        cur_faces, positions, edge_length, face_of_fine = subdivide_once(
+        cur_faces, positions, edge_length, face_of_fine, _ = subdivide_once(
             cur_faces, positions, edge_length, face_of_fine, level)
         # every previous vertex survives, at the EXACT same position
         for v, p in prev_positions.items():
@@ -131,7 +181,7 @@ def test_quartering_new_internal_edges_match_midsegment_theorem():
                  2: np.array([0.5, math.sqrt(3) / 2, 0])}
     faces = [(0, 1, 2)]
     edge_length = base_rest_lengths(faces, EDGE_LENGTH)
-    new_faces, new_positions, new_edge_length, _ = subdivide_once(
+    new_faces, new_positions, new_edge_length, _, _ = subdivide_once(
         faces, positions, edge_length, [0], level=1)
 
     assert len(new_faces) == 4

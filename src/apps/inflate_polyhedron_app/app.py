@@ -310,7 +310,7 @@ from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
     estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
-    PLANARITY_WEIGHT, CONVERGENCE_GTOL,
+    PLANARITY_WEIGHT, CONVERGENCE_GTOL, fold_pairs_from_chains,
 )
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
@@ -496,7 +496,7 @@ INFLATE_SAFETY_STEP_CAP = 20000
 AUTO_MAX_RETRIES_PER_LEVEL = 10
 
 
-def _build_level1_topology(base_faces):
+def _build_level1_topology(base_faces, fold_chains=()):
     """Level 0 and Level 1 share this exact fan-triangulated topology (see
     module docstring/mesh_levels' own docstring for why triangulating
     first matters for a spring-only relax) -- cheap enough (pure index
@@ -505,11 +505,16 @@ def _build_level1_topology(base_faces):
     get the resulting faces/edge_length/face_of_fine; the interpolated
     positions it also returns are meaningless (every input point is the
     same placeholder) and discarded -- random_initial_positions supplies
-    Level 0's real starting positions instead."""
+    Level 0's real starting positions instead. fold_chains: load_stretchy_
+    mesh's own level-0 fold-coupling chains (empty for a net with no edge
+    folds) -- rim edges are untouched by this step, so they pass through
+    unchanged; returned alongside the rest so the caller's self.fold_chains
+    starts in sync with self.faces."""
     dummy_positions = {v: np.zeros(3) for face in base_faces for v in face}
-    faces, _, edge_length, face_of_fine = subdivide_once(
-        base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
-    return faces, edge_length, face_of_fine
+    faces, _, edge_length, face_of_fine, new_fold_chains = subdivide_once(
+        base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0,
+        fold_chains=fold_chains)
+    return faces, edge_length, face_of_fine, new_fold_chains
 
 
 # interactive_builder_app/app.py's own DEFAULT_SHAPE_EDGE_LENGTH -- the
@@ -692,8 +697,15 @@ class InflatePolyhedronApp:
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
-        target_group = ttk.Frame(setup_row)
-        target_group.pack(side=tk.LEFT, padx=(24, 0))
+        # Second row -- just "Target RMS stretch" (one spinner per level)
+        # and "Tolerance": kept off the first row purely to stop it
+        # growing too wide/crowded alongside "Choose a net", the "Skip
+        # after" group, and "Auto".
+        setup_row2 = ttk.Frame(setup_frame)
+        setup_row2.pack(fill=tk.X, pady=(8, 0))
+
+        target_group = ttk.Frame(setup_row2)
+        target_group.pack(side=tk.LEFT)
         ttk.Label(target_group, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
         # One independent spinner per level (1-3), not a single spinner
         # reset to a new default every time the frontier level changes --
@@ -731,7 +743,7 @@ class InflatePolyhedronApp:
         # already logged per level in the Convergence History table.
         self.pressure_value = DEFAULT_PRESSURE
 
-        tolerance_group = ttk.Frame(setup_row)
+        tolerance_group = ttk.Frame(setup_row2)
         tolerance_group.pack(side=tk.LEFT, padx=(24, 0))
         ttk.Label(tolerance_group, text="Tolerance:").pack(side=tk.LEFT, padx=(0, 4))
         # The `gtol` every relax_once/relax_initial_configuration/
@@ -758,6 +770,28 @@ class InflatePolyhedronApp:
                                            increment=1e-7, width=10,
                                            textvariable=self.tolerance_var, format="%.0e")
         self.tolerance_spin.pack(side=tk.LEFT)
+
+        # Debugging aid, like the per-level "Skip" checkboxes (see their
+        # own comment) but triggered automatically by step count rather
+        # than a manual click: unchecked (the default), a level's own
+        # Relax/Inflate always just keeps trying to converge, exactly as
+        # before. Checked, self.iteration_count (the SAME counter the
+        # "...steps so far" status message already reports) reaching the
+        # spinner's value mid-run stops that run and immediately skips to
+        # the next level (_apply_relax_progress/_apply_inflate_progress
+        # set self._skip_after_steps_triggered; _finish_relax/_finish_
+        # inflate act on it) -- a bound on how long ANY level is allowed
+        # to keep trying, for isolating where a slow/non-converging solve
+        # first shows up without babysitting each level's own Skip box.
+        skip_after_group = ttk.Frame(setup_row)
+        skip_after_group.pack(side=tk.LEFT, padx=(24, 0))
+        self.skip_after_steps_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(skip_after_group, text="Skip after",
+                         variable=self.skip_after_steps_var).pack(side=tk.LEFT)
+        self.skip_after_steps_count_var = tk.IntVar(value=1000)
+        ttk.Spinbox(skip_after_group, from_=1, to=1_000_000, increment=100, width=8,
+                    textvariable=self.skip_after_steps_count_var).pack(side=tk.LEFT, padx=(4, 4))
+        ttk.Label(skip_after_group, text="steps").pack(side=tk.LEFT)
 
         # "Auto": visible/usable in BOTH modes (unlike the debug-only row
         # below), since it's just a scripted sequence of the SAME
@@ -956,6 +990,19 @@ class InflatePolyhedronApp:
         # subdivide to). Only the current frontier level's button is
         # ever enabled.
         self.level_action_buttons = {}
+        # One "Skip" checkbox per level that HAS a next level to skip to
+        # (0..MAX_LEVEL-1, never MAX_LEVEL itself) -- debugging aid, not
+        # part of the actual solve: checked, a click on THAT level's own
+        # Relax/Inflate button (_skip_current_level, called from
+        # on_relax_clicked/on_inflate_clicked instead of their normal
+        # streamed run) skips that level's numeric relaxation entirely
+        # and advances straight to the next level's mesh (subdivided from
+        # whatever positions are already there). Lets a user click
+        # through levels quickly to isolate WHICH level an instability
+        # (e.g. a non-converging wobble) first shows up at, instead of
+        # waiting for (or fighting) a slow/non-converging solve at every
+        # level along the way.
+        self.skip_level_vars = {}
         for level in range(0, MAX_LEVEL + 1):
             level_frame = ttk.Frame(panels_row)
             # No fill/expand -- see panels_row's own comment on why
@@ -970,6 +1017,14 @@ class InflatePolyhedronApp:
             # claimed the entire remaining cavity by the time it's
             # placed.
             button.pack(side=tk.BOTTOM, fill=tk.X, in_=level_frame)
+            if level < MAX_LEVEL:
+                skip_var = tk.BooleanVar(value=False)
+                self.skip_level_vars[level] = skip_var
+                # Packed at BOTTOM after the button -- stacks visually
+                # ABOVE it (bottom-packed widgets fill upward), so the
+                # panel image still sits on top.
+                ttk.Checkbutton(level_frame, text="Skip", variable=skip_var).pack(
+                    side=tk.BOTTOM, in_=level_frame)
             self._build_level_pv_panel(level, level_frame)
 
         # Per-level frozen snapshots of {faces, positions, face_of_fine,
@@ -981,6 +1036,10 @@ class InflatePolyhedronApp:
         self.faces = None
         self.base_faces = None
         self.face_of_fine = None
+        # Current frontier level's own edge-fold coupling chains (see
+        # stretchy_mesh.load_stretchy_mesh's "Edge folds" note and
+        # mesh_levels._grow_fold_chains) -- [] for a net with no folds.
+        self.fold_chains = []
         self.subdivision_level = 0
         self.edge_length = None
         self.target_layout = None
@@ -989,6 +1048,15 @@ class InflatePolyhedronApp:
         self.last_stats = {}
         self.level_history = {}
         self.stop_event = None
+        # Set True (by _apply_relax_progress/_apply_inflate_progress)
+        # the moment "Skip after N steps" (self.skip_after_steps_var/
+        # self.skip_after_steps_count_var, see their own comment) fires
+        # and stops the currently-streaming run -- _finish_relax/_finish_
+        # inflate check this once the run actually winds down, to skip
+        # to the next level (_skip_current_level) instead of just
+        # reporting "Stopped", the same as a genuine per-level "Skip"
+        # checkbox click would. Reset False again once consumed.
+        self._skip_after_steps_triggered = False
         # The gtol actually in effect for the run currently underway (or
         # the last one that ran) -- captured from self.tolerance_var at
         # the moment Relax/Inflate starts (_on_pressure_calibrated/
@@ -1446,10 +1514,11 @@ class InflatePolyhedronApp:
         self.current_label = chosen
         path = self.label_to_path[chosen]
         try:
-            faces, self.mesh_name = load_stretchy_mesh(path)
+            faces, self.mesh_name, fold_chains = load_stretchy_mesh(path)
         except ValueError as e:
             self._set_status(str(e), "error")
             self.faces = None
+            self.fold_chains = []
             return
 
         # A LEGACY fabric-subdivided net (one carrying baked-in
@@ -1495,7 +1564,8 @@ class InflatePolyhedronApp:
         # Level 0 and Level 1 share this exact fan-triangulated topology
         # (see module docstring) -- computed once here, up front, rather
         # than re-derived on promotion.
-        self.faces, self.edge_length, self.face_of_fine = _build_level1_topology(self.base_faces)
+        self.faces, self.edge_length, self.face_of_fine, self.fold_chains = \
+            _build_level1_topology(self.base_faces, fold_chains)
         self.current_path = path
         self.subdivision_level = 0
         self.positions = random_initial_positions(self.faces, seed=0)
@@ -1544,7 +1614,7 @@ class InflatePolyhedronApp:
                                                      snap["face_of_fine"])
                   for level, snap in self.level_snapshots.items()}
         levels[self.subdivision_level] = LevelStateModel.from_mesh(
-            self.faces, self.positions, self.face_of_fine, self.edge_length)
+            self.faces, self.positions, self.face_of_fine, self.edge_length, self.fold_chains)
         state = SessionStateModel(
             net_name=self.mesh_name,
             base_faces=[list(face) for face in self.base_faces],
@@ -1620,9 +1690,10 @@ class InflatePolyhedronApp:
 
         self.level_snapshots = {}
         for level, level_state in state.levels.items():
-            faces, positions, face_of_fine, edge_length = level_state.to_mesh()
+            faces, positions, face_of_fine, edge_length, fold_chains = level_state.to_mesh()
             if level == state.subdivision_level:
                 self.faces, self.positions, self.face_of_fine = faces, positions, face_of_fine
+                self.fold_chains = fold_chains
                 if edge_length is not None:
                     self.edge_length = edge_length
             else:
@@ -1693,9 +1764,9 @@ class InflatePolyhedronApp:
             "faces": self.faces, "positions": self.positions,
             "face_of_fine": self.face_of_fine,
         }
-        self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
-            self.faces, self.positions, self.edge_length, self.face_of_fine,
-            self.subdivision_level)
+        self.faces, self.positions, self.edge_length, self.face_of_fine, self.fold_chains = \
+            subdivide_once(self.faces, self.positions, self.edge_length, self.face_of_fine,
+                            self.subdivision_level, fold_chains=self.fold_chains)
         self.subdivision_level += 1
         # This new level's own "Target RMS stretch" spinner (its default,
         # or whatever the user already edited it to, independent of every
@@ -1883,8 +1954,23 @@ class InflatePolyhedronApp:
         currently is on every click, since the user can no longer set
         pressure directly. Calibrates against the CURRENT "Tolerance"
         spinner value too, so the pressure search settles at the same
-        threshold the actual inflate run right after it will use."""
+        threshold the actual inflate run right after it will use.
+
+        self.stop_event is created HERE, before calibration even starts
+        (an earlier version only created it in _on_pressure_calibrated,
+        AFTER calibration finished, and never passed one into
+        estimate_pressure_for_target_stretch at all -- meaning a Stop/
+        Stop Auto click during calibration had nothing to set, and
+        calibration could run for many thousands of steps, across up to
+        8 pressure trials, with no way to interrupt it early). The SAME
+        event is reused by the actual inflate run right after, so one
+        Stop click reliably interrupts whichever phase is currently
+        running."""
         if self.positions is None or self.last_stats.get("converged"):
+            return
+        skip_var = self.skip_level_vars.get(self.subdivision_level)
+        if skip_var is not None and skip_var.get():
+            self._skip_current_level()
             return
         faces, edge_length, positions = self.faces, self.edge_length, self.positions
         target_rms_pct = self.target_rms_vars[self.subdivision_level].get()
@@ -1892,28 +1978,41 @@ class InflatePolyhedronApp:
         # own comment in __init__), in case the user edited the spinner
         # away from that default before clicking Inflate.
         self._current_target_rms_pct = target_rms_pct
-        tolerance = self._get_tolerance()
+        self._current_gtol = self._get_tolerance()
         target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
+        self.stop_event = threading.Event()
+        self._set_level_action_button_running(True)
         self._set_status(f"Finding a pressure that settles around {target_rms_pct:.1f}% "
                           "RMS stretch...", "info")
+        fold_pairs = fold_pairs_from_chains(self.fold_chains)
         self._run_background(
             lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                                            target_rms_pct=target_rms_pct,
-                                                           gtol=tolerance,
-                                                           rng=np.random.default_rng()),
+                                                           gtol=self._current_gtol,
+                                                           rng=np.random.default_rng(),
+                                                           fold_pairs=fold_pairs,
+                                                           stop_event=self.stop_event),
             (), lambda result: self._on_pressure_calibrated(result, target_steps))
 
     def _on_pressure_calibrated(self, result, target_steps):
-        pressure = result[0]
+        pressure, new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged = result
         self.pressure_value = pressure
-        # Captured once here, not re-read live during the run -- the
-        # spinner is disabled for the duration anyway (_set_controls_
-        # enabled) -- and reused by _apply_inflate_progress so every
-        # progress update this run records the SAME threshold it's
-        # actually converging against, even if the spinner's value
-        # changes later (after the run finishes).
-        self._current_gtol = self._get_tolerance()
-        self.stop_event = threading.Event()
+        if self.stop_event is not None and self.stop_event.is_set():
+            # Stopped during calibration itself, before any actual
+            # inflate run started -- apply whatever position the
+            # interrupted trial reached (stretchy_mesh.estimate_pressure_
+            # for_target_stretch's own docstring covers why THIS trial,
+            # not necessarily the best-scoring one so far) and finish
+            # immediately via the exact same path a stop mid-Inflate
+            # takes, rather than silently discarding it and starting the
+            # real inflate run anyway.
+            self.positions = new_positions
+            self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
+                                "optimality": max_force, "converged": converged,
+                                "gtol": self._current_gtol,
+                                "target_rms_pct": self._current_target_rms_pct}
+            self._finish_inflate()
+            return
         self._set_controls_enabled(False)
         self._set_level_action_button_running(True)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
@@ -2148,6 +2247,7 @@ class InflatePolyhedronApp:
 
     def _run_inflate_stream(self, pressure, target_steps, stop_event):
         faces, edge_length = self.faces, self.edge_length
+        fold_pairs = fold_pairs_from_chains(self.fold_chains)
         gtol = self._current_gtol
         rng = np.random.default_rng()
         state = {"positions": self.positions}
@@ -2155,7 +2255,7 @@ class InflatePolyhedronApp:
         def step_fn(chunk, stop_event):
             result = relax_once(state["positions"], faces, edge_length, pressure,
                                  PLANARITY_WEIGHT, max_nfev=chunk, stop_event=stop_event,
-                                 gtol=gtol, rng=rng)
+                                 gtol=gtol, rng=rng, fold_pairs=fold_pairs)
             state["positions"] = result[0]
             return result
 
@@ -2175,6 +2275,23 @@ class InflatePolyhedronApp:
                           f"{self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
         self.draw()
+        self._maybe_trigger_skip_after_steps()
+
+    def _maybe_trigger_skip_after_steps(self):
+        """Checked from _apply_relax_progress/_apply_inflate_progress
+        after every chunk's progress update: if "Skip after N steps" is
+        checked (self.skip_after_steps_var/self.skip_after_steps_count_
+        var, see their own comment in __init__) and self.iteration_count
+        has reached the threshold, stops the currently-streaming run --
+        the SAME stop_event a manual Stop click sets, so it takes effect
+        just as promptly -- and flags self._skip_after_steps_triggered
+        so _finish_relax/_finish_inflate skip to the next level once the
+        run actually winds down, instead of just reporting "Stopped"."""
+        if (self.skip_after_steps_var.get() and self.stop_event is not None
+                and not self.stop_event.is_set()
+                and self.iteration_count >= self.skip_after_steps_count_var.get()):
+            self.stop_event.set()
+            self._skip_after_steps_triggered = True
 
     def _finish_inflate(self):
         self.progress.stop()
@@ -2186,6 +2303,14 @@ class InflatePolyhedronApp:
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
         self._record_level_history()
+        if self._skip_after_steps_triggered:
+            self._skip_after_steps_triggered = False
+            self._set_status(
+                f"Reached {self.iteration_count} steps at level {self.subdivision_level} "
+                "without converging (edges stretched up to "
+                f"{max_stretch:.2f}% from rest length) -- skipping to the next level.", "warn")
+            self._skip_current_level()
+            return
         if was_stopped:
             self._set_status(
                 f"Stopped ({self.iteration_count} steps at level {self.subdivision_level}): "
@@ -2216,6 +2341,9 @@ class InflatePolyhedronApp:
         initial-configuration algorithm, not to be steppable."""
         if self.positions is None or self.subdivision_level != 0 or self.last_stats.get("converged"):
             return
+        if self.skip_level_vars[0].get():
+            self._skip_current_level()
+            return
         # Same capture-once rationale as _on_pressure_calibrated -- see
         # self._current_gtol's own comment.
         self._current_gtol = self._get_tolerance()
@@ -2229,6 +2357,7 @@ class InflatePolyhedronApp:
 
     def _run_relax_stream(self, stop_event):
         faces, edge_length = self.faces, self.edge_length
+        fold_pairs = fold_pairs_from_chains(self.fold_chains)
         gtol = self._current_gtol
         rng = np.random.default_rng()
         state = {"positions": self.positions}
@@ -2236,7 +2365,7 @@ class InflatePolyhedronApp:
         def step_fn(chunk, stop_event):
             result = relax_initial_configuration(state["positions"], faces, edge_length,
                                                   max_nfev=chunk, stop_event=stop_event,
-                                                  gtol=gtol, rng=rng)
+                                                  gtol=gtol, rng=rng, fold_pairs=fold_pairs)
             state["positions"] = result[0]
             return result
 
@@ -2254,36 +2383,87 @@ class InflatePolyhedronApp:
         self._set_status(f"Relaxing... {self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
         self.draw()
+        self._maybe_trigger_skip_after_steps()
+
+    def _promote_level0_to_1(self):
+        """Level 0 and Level 1 share the exact fan-triangulated topology
+        (see module docstring) -- promoting Level 0's current positions
+        into Level 1's starting position is a pure relabeling, not a new
+        subdivide_once call. Shared by _finish_relax (a genuinely
+        converged Relax) and _skip_current_level (the per-level "Skip"
+        checkbox skipping Relax outright) -- identical either way, since
+        neither actually needs Level 0 to have converged first, just
+        SOME positions to promote."""
+        self.level_snapshots[0] = {"faces": self.faces, "positions": self.positions,
+                                    "face_of_fine": self.face_of_fine}
+        level0_button = self.level_action_buttons.get(0)
+        if level0_button is not None:
+            level0_button.config(text="Relax", command=self.on_relax_clicked)
+        self.subdivision_level = 1
+        self.iteration_count = 0
+        # Level 1's own "Target RMS stretch" spinner -- same as
+        # _subdivide_step's own (see its comment).
+        self._current_target_rms_pct = self.target_rms_vars[1].get()
+        self.last_stats = self._compute_stretch_stats()
+        self._record_level_history()
+
+    def _skip_current_level(self):
+        """A level's own "Skip" checkbox action (see its own comment in
+        __init__), called from on_relax_clicked/on_inflate_clicked
+        INSTEAD of their normal streamed run, only ever for a level that
+        HAS a next level (self.skip_level_vars only exists for
+        0..MAX_LEVEL-1): skips this level's numeric relaxation entirely
+        and advances straight to the next level -- subdivided from
+        whatever positions are already here (Level 0's own random start,
+        or wherever the previous level's Inflate happened to leave off)
+        -- purely a debugging shortcut to reach a deeper level quickly
+        without waiting for (or fighting) a slow/non-converging solve at
+        every level along the way, not a real solve step itself. Unlike
+        the normal streamed Relax/Inflate run (which reports back to
+        _auto_step from _finish_relax/_finish_inflate once it actually
+        finishes), this whole method runs synchronously -- so it calls
+        _auto_step itself at the end, same as _auto_step's own Subdivide
+        branch does, so Auto keeps advancing through however many
+        consecutive skip-checked levels there are instead of silently
+        stopping after just this one (a no-op unless Auto is what
+        actually drove this skip)."""
+        from_level = self.subdivision_level
+        if from_level == 0:
+            self._promote_level0_to_1()
+        else:
+            self._subdivide_step()
+        self._set_status(
+            f"Skipped Level {from_level} (no relaxation run) -- now at Level "
+            f"{self.subdivision_level}.", "info")
+        self._update_level_action_buttons()
+        self._update_auto_button()
+        self.draw()
+        self._auto_step()
 
     def _finish_relax(self):
         self.progress.stop()
         self.progress.pack_forget()
+        self._set_controls_enabled(True)
+        self._set_level_action_button_running(False)
         was_stopped = self.stop_event is not None and self.stop_event.is_set()
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
         self._record_level_history()
+        if self._skip_after_steps_triggered:
+            self._skip_after_steps_triggered = False
+            self._set_status(
+                f"Reached {self.iteration_count} relax steps without converging (edges "
+                f"stretched up to {max_stretch:.2f}% from rest length) -- skipping to the next "
+                "level.", "warn")
+            self._skip_current_level()
+            return
         if was_stopped:
             self._set_status(
                 f"Stopped ({self.iteration_count} relax steps): edges stretched up to "
                 f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "warn")
         elif converged:
-            # Level 0 and Level 1 share the exact fan-triangulated
-            # topology (see module docstring) -- promoting the
-            # just-relaxed result into Level 1's starting position is a
-            # pure relabeling, not a new subdivide_once call.
-            self.level_snapshots[0] = {"faces": self.faces, "positions": self.positions,
-                                        "face_of_fine": self.face_of_fine}
-            level0_button = self.level_action_buttons.get(0)
-            if level0_button is not None:
-                level0_button.config(text="Relax", command=self.on_relax_clicked)
-            self.subdivision_level = 1
-            self.iteration_count = 0
-            # Level 1's own "Target RMS stretch" spinner -- same as
-            # _subdivide_step's own (see its comment).
-            self._current_target_rms_pct = self.target_rms_vars[1].get()
-            self.last_stats = self._compute_stretch_stats()
-            self._record_level_history()
+            self._promote_level0_to_1()
             self._set_status(
                 f"Relaxed (edges stretched up to {max_stretch:.2f}% from rest length, RMS "
                 f"{rms_stretch:.2f}%). Promoted to Level 1 -- press Inflate to continue.", "info")
@@ -2292,8 +2472,6 @@ class InflatePolyhedronApp:
                 f"Relaxed ({self.iteration_count} steps, step cap reached): edges stretched up "
                 f"to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%). Press Relax "
                 "again to continue.", "info")
-        self._set_controls_enabled(True)
-        self._set_level_action_button_running(False)
         self.draw()
         self._auto_step()  # no-op unless Auto is what actually drove this run
 
