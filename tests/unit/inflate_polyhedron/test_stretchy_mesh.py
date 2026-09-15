@@ -235,7 +235,14 @@ def test_relax_once_continues_from_the_given_positions_not_from_scratch():
     # relax_once from THAT shape should pull the stretch back down close
     # to 0% -- proving it genuinely continued refining the given shape
     # rather than landing on some unrelated fresh embedding (which would
-    # have no reason to end up this well edge-length-fitted).
+    # have no reason to end up this well edge-length-fitted). The spring
+    # force is now a HARDENING one (stretch + stretch**3, see
+    # stretchy_mesh's own module docstring) rather than plain linear --
+    # near rest (small stretch) the linear term dominates and the cubic
+    # term is negligible, so convergence speed here is back to
+    # essentially the original linear spring's, unlike an intermediate
+    # pure-quartic version that was tried and replaced for exactly this
+    # reason (see git history / the module docstring's Design notes).
     positions = _relaxed_positions(TETRAHEDRON_FACES, max_nfev=5)
     _, nfev, max_stretch, rms_stretch, optimality, converged = relax_once(
         positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=0.0)

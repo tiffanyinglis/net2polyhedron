@@ -255,16 +255,19 @@ work for anyone who wants one.
    a user would otherwise click through by hand, one button click.
    _auto_step decides what "next" means each time it's called (once to
    start, then again from the tail of _finish_relax/_finish_inflate
-   every time a step it started actually finishes): (re)try Relax/
-   Inflate at the current level if it hasn't converged yet, Subdivide
-   once it has (immediately continuing to the newly-subdivided level's
-   own first Inflate attempt, since Subdivide itself is synchronous and
-   schedules no callback of its own), or stop once Level MAX_LEVEL
-   converges. "If inflation doesn't reach convergence, it keeps trying
-   at the same level" per an explicit user request -- bounded by
-   AUTO_MAX_RETRIES_PER_LEVEL (_auto_try) so a target that's genuinely
-   unreachable for some mesh doesn't retry forever with no way to
-   notice; Auto stops and reports this plainly rather than hanging.
+   every time a step it started actually finishes): try Relax/Inflate at
+   the current level if it hasn't converged yet, Subdivide once it has
+   (immediately continuing to the newly-subdivided level's own first
+   Inflate attempt, since Subdivide itself is synchronous and schedules
+   no callback of its own), or stop once Level MAX_LEVEL converges.
+   Exactly ONE attempt per level, no retries within it -- a non-converged
+   attempt just runs its own single relax_once/relax_initial_configuration
+   call up to its own large step budget (INFLATE_SAFETY_STEP_CAP) rather
+   than Auto cutting it short and starting a fresh one (which used to
+   mean recalibrating Inflate's pressure from scratch every time, for no
+   real benefit -- see INFLATE_SAFETY_STEP_CAP's own comment). If that
+   one attempt still hasn't converged, Auto stops and reports this
+   plainly rather than retrying or hanging.
    While running, the button itself becomes "Stop Auto" (the one
    control deliberately kept enabled through the run -- see
    _update_auto_button/_set_controls_enabled, the same "frontier button
@@ -448,9 +451,9 @@ DEFAULT_TOLERANCE = 1e-3
 # No entry for Level 0 -- it has no target RMS stretch at all
 # (relax_initial_configuration is pure springs, not calibrated toward
 # any target). Was {1: 60.0, 2: 30.0, 3: 15.0}, then {1: 30.0, 2: 20.0,
-# 3: 10.0}, then {1: 60.0, 2: 40.0, 3: 20.0}; raised again per explicit
-# later user request.
-LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 200.0, 2: 100.0, 3: 10.0}
+# 3: 10.0}, then {1: 60.0, 2: 40.0, 3: 20.0}, then {1: 200.0, 2: 100.0,
+# 3: 10.0}; changed again per explicit later user request.
+LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}
 
 # Debug mode's "Show normals" toggle (_draw_level_panel) draws each
 # triangle's own outward normal as a line segment in this color, from
@@ -482,18 +485,18 @@ INFLATE_CHUNK_MAX = 200
 # correcting slowly (e.g. a locally concave vertex popping out) needs
 # more real budget to actually reach gtol, not just a bigger number
 # before giving up on the SAME amount of real solving.
-INFLATE_SAFETY_STEP_CAP = 20000
-
-# "Auto" (on_auto_clicked/_auto_step): how many consecutive un-converged
-# Relax/Inflate clicks it will (re)try at the SAME level -- each one
-# already runs up to INFLATE_SAFETY_STEP_CAP steps on its own, so this
-# is a second, outer safety net specifically for "keeps trying at the
-# same level" per an explicit user request, not a substitute for that
-# per-click cap. Without SOME bound here, a mesh that can genuinely
-# never reach the current tolerance (e.g. an unreachable Target RMS
-# stretch) would make Auto retry that level forever with no way to
-# notice or report it short of the user clicking "Stop Auto" by hand.
-AUTO_MAX_RETRIES_PER_LEVEL = 10
+#
+# Raised again, 20000 -> 50000, per explicit user request, alongside
+# REMOVING _auto_step's own outer per-level retry loop (formerly
+# AUTO_MAX_RETRIES_PER_LEVEL/_auto_try): recalibrating Inflate's pressure
+# from scratch on every retry (on_inflate_clicked's own design -- pressure
+# is never reused across clicks) was wasted work when the mesh just
+# needed more plain relaxation time at the SAME pressure, not a fresh
+# search. Auto now makes exactly ONE Relax/Inflate attempt per level,
+# leaning on this single, larger step budget to actually reach gtol
+# rather than an outer loop of many smaller, pressure-recalibrating
+# attempts.
+INFLATE_SAFETY_STEP_CAP = 50000
 
 
 def _build_level1_topology(base_faces):
@@ -1010,16 +1013,16 @@ class InflatePolyhedronApp:
         # CURRENT level's target instead of its own).
         self._current_target_rms_pct = self.target_rms_vars[1].get()
         # Whether the "Auto" button's own scripted sequence is currently
-        # driving the app (see on_auto_clicked/_auto_step) -- _auto_retry_
-        # count/_auto_retry_level track how many consecutive Relax/Inflate
-        # retries have been spent on the level named by _auto_retry_level
-        # (reset to 0 the moment _auto_step notices the CURRENT level has
+        # driving the app (see on_auto_clicked/_auto_step) --
+        # _auto_attempted_level names the level Auto has already made its
+        # ONE Relax/Inflate attempt at (no retries within a level, per
+        # explicit user request -- see _auto_step's own docstring), reset
+        # to None the moment _auto_step notices the CURRENT level has
         # changed since the last time it ran, rather than at every
         # individual Subdivide/promotion call site, so there's exactly
         # ONE place this logic lives).
         self._auto_active = False
-        self._auto_retry_count = 0
-        self._auto_retry_level = None
+        self._auto_attempted_level = None
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
@@ -1510,8 +1513,7 @@ class InflatePolyhedronApp:
         # disabled during a run anyway, so this can only really happen
         # between runs, but reset defensively regardless).
         self._auto_active = False
-        self._auto_retry_count = 0
-        self._auto_retry_level = None
+        self._auto_attempted_level = None
         self._record_level_history()
         self._update_level_action_buttons()
         self._update_auto_button()
@@ -1632,8 +1634,7 @@ class InflatePolyhedronApp:
         self.history_tree.delete(*self.history_tree.get_children())
         self.stop_event = None
         self._auto_active = False
-        self._auto_retry_count = 0
-        self._auto_retry_level = None
+        self._auto_attempted_level = None
         self._apply_mode_visibility()
         self._refresh_history_table()
         self._update_level_action_buttons()
@@ -1883,7 +1884,17 @@ class InflatePolyhedronApp:
         currently is on every click, since the user can no longer set
         pressure directly. Calibrates against the CURRENT "Tolerance"
         spinner value too, so the pressure search settles at the same
-        threshold the actual inflate run right after it will use."""
+        threshold the actual inflate run right after it will use.
+
+        self.stop_event is created and the frontier button turned into
+        "Stop" HERE, before calibration even starts (not in
+        _on_pressure_calibrated, as an earlier version did) -- a user
+        reported Stop/"Stop Auto" appearing to "take forever": traced
+        directly to calibration never being given a stop_event at all, so
+        clicking Stop during it (which, for a slow mesh, can be most of
+        the wait -- calibration runs up to max_iterations *
+        max_nfev_per_trial steps of its own) had truly nothing to
+        interrupt."""
         if self.positions is None or self.last_stats.get("converged"):
             return
         faces, edge_length, positions = self.faces, self.edge_length, self.positions
@@ -1894,16 +1905,31 @@ class InflatePolyhedronApp:
         self._current_target_rms_pct = target_rms_pct
         tolerance = self._get_tolerance()
         target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
+        self.stop_event = threading.Event()
+        self._set_level_action_button_running(True)
         self._set_status(f"Finding a pressure that settles around {target_rms_pct:.1f}% "
                           "RMS stretch...", "info")
         self._run_background(
             lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                                            target_rms_pct=target_rms_pct,
                                                            gtol=tolerance,
-                                                           rng=np.random.default_rng()),
+                                                           rng=None,
+                                                           stop_event=self.stop_event),
             (), lambda result: self._on_pressure_calibrated(result, target_steps))
 
     def _on_pressure_calibrated(self, result, target_steps):
+        if self.stop_event is not None and self.stop_event.is_set():
+            # Stopped during calibration itself -- its own trial positions
+            # are discarded regardless of how it ends (see
+            # estimate_pressure_for_target_stretch's own docstring), so
+            # there's nothing from `result` to apply; just report it the
+            # same way a stopped streamed run would (_finish_inflate).
+            self._set_level_action_button_running(False)
+            self._set_status(
+                f"Stopped (during pressure calibration at level "
+                f"{self.subdivision_level}).", "warn")
+            self._auto_step()  # no-op unless Auto is what actually drove this run
+            return
         pressure = result[0]
         self.pressure_value = pressure
         # Captured once here, not re-read live during the run -- the
@@ -1913,8 +1939,14 @@ class InflatePolyhedronApp:
         # actually converging against, even if the spinner's value
         # changes later (after the run finishes).
         self._current_gtol = self._get_tolerance()
-        self.stop_event = threading.Event()
         self._set_controls_enabled(False)
+        # _run_background's own completion just re-synced every button,
+        # including the frontier one, back to its normal (non-Stop) state
+        # (_set_controls_enabled(True), called right before this callback
+        # runs) -- turn it back into "Stop" for the streamed inflate phase
+        # that's about to start; _set_controls_enabled(False) just above
+        # deliberately leaves the frontier button alone (see its own
+        # comment), expecting exactly this.
         self._set_level_action_button_running(True)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
@@ -1972,8 +2004,7 @@ class InflatePolyhedronApp:
         if self.positions is None or self._auto_active:
             return
         self._auto_active = True
-        self._auto_retry_count = 0
-        self._auto_retry_level = None
+        self._auto_attempted_level = None
         self._update_auto_button()
         self._auto_step()
 
@@ -2031,7 +2062,16 @@ class InflatePolyhedronApp:
         actually finishes -- a no-op whenever Auto isn't active, so a
         plain manual button click never triggers any of this.
 
-        - Level 0, not yet converged: (re)try Relax.
+        - Level 0, not yet converged: Relax -- exactly ONE attempt per
+          level, no retries (per explicit user request: a non-converged
+          attempt just runs its own single relax_once/
+          relax_initial_configuration call up to its own large step
+          budget -- see INFLATE_SAFETY_STEP_CAP -- rather than Auto
+          stopping that run short and starting a fresh one, which for
+          Inflate used to mean recalibinating pressure from scratch for
+          no real benefit). If _auto_attempted_level already names this
+          level, the attempt just finished IS the one attempt -- declare
+          failure and stop Auto rather than trying again.
         - Level 0, converged: _finish_relax has ALREADY promoted to
           Level 1 unconditionally by the time this runs (that promotion
           isn't Auto-specific), so there's nothing left to do here --
@@ -2043,22 +2083,14 @@ class InflatePolyhedronApp:
           Relax/Inflate).
         - Current level converged, AT MAX_LEVEL: done -- nothing further
           to subdivide to.
-        - Current level NOT converged (below or at MAX_LEVEL): (re)try
-          Inflate -- "if inflation doesn't reach convergence, it keeps
-          trying at the same level", per an explicit user request,
-          bounded by AUTO_MAX_RETRIES_PER_LEVEL (_auto_try) so a mesh
-          that can genuinely never converge doesn't retry forever with
-          no way to notice."""
+        - Current level NOT converged (below or at MAX_LEVEL): same
+          one-attempt-then-stop rule as Level 0, via Inflate."""
         if not self._auto_active:
             return
-        if self._auto_retry_level != self.subdivision_level:
-            self._auto_retry_level = self.subdivision_level
-            self._auto_retry_count = 0
-        if self.subdivision_level == 0:
-            if not self.last_stats.get("converged"):
-                self._auto_try(self.on_relax_clicked)
-            return
         if self.last_stats.get("converged"):
+            self._auto_attempted_level = None
+            if self.subdivision_level == 0:
+                return  # _finish_relax already promoted to Level 1
             if self.subdivision_level < MAX_LEVEL:
                 self.on_subdivide_clicked()
                 self._auto_step()
@@ -2066,24 +2098,20 @@ class InflatePolyhedronApp:
                 self._auto_active = False
                 self._update_auto_button()
                 self._set_status(f"Auto: reached Level {MAX_LEVEL} and converged.", "success")
-        else:
-            self._auto_try(self.on_inflate_clicked)
-
-    def _auto_try(self, action):
-        """Runs `action` (on_relax_clicked or on_inflate_clicked) as
-        Auto's next attempt at the CURRENT level, unless
-        AUTO_MAX_RETRIES_PER_LEVEL has already been spent there -- see
-        its own comment for why some bound has to exist."""
-        if self._auto_retry_count >= AUTO_MAX_RETRIES_PER_LEVEL:
+            return
+        if self._auto_attempted_level == self.subdivision_level:
             self._auto_active = False
             self._update_auto_button()
             self._set_status(
-                f"Auto: Level {self.subdivision_level} still hasn't converged after "
-                f"{AUTO_MAX_RETRIES_PER_LEVEL} attempts -- stopping the automatic sequence "
-                f"(Inflate is still available to keep trying by hand).", "warn")
+                f"Auto: Level {self.subdivision_level} still hasn't converged after one "
+                f"attempt (up to {INFLATE_SAFETY_STEP_CAP} steps) -- stopping the automatic "
+                f"sequence (Inflate/Relax are still available to keep trying by hand).", "warn")
             return
-        self._auto_retry_count += 1
-        action()
+        self._auto_attempted_level = self.subdivision_level
+        if self.subdivision_level == 0:
+            self.on_relax_clicked()
+        else:
+            self.on_inflate_clicked()
 
     def _run_chunked_relax_stream(self, step_fn, target_steps, stop_event, on_progress, on_finished):
         """Shared driver behind _run_inflate_stream and _run_relax_stream:
@@ -2149,7 +2177,13 @@ class InflatePolyhedronApp:
     def _run_inflate_stream(self, pressure, target_steps, stop_event):
         faces, edge_length = self.faces, self.edge_length
         gtol = self._current_gtol
-        rng = np.random.default_rng()
+        # KICK_WINDOW's random-perturbation mechanism (stretchy_mesh.py)
+        # disabled here for now, per explicit user request -- it was
+        # found to interact badly with a genuinely slow (not stuck)
+        # relaxation, re-disturbing the mesh right as it was converging.
+        # See LEVEL0_STEP_MAX_MULTIPLIER's own comment in stretchy_mesh.py
+        # for the specific failure this caused at Level 0 before that fix.
+        rng = None
         state = {"positions": self.positions}
 
         def step_fn(chunk, stop_event):
@@ -2230,7 +2264,9 @@ class InflatePolyhedronApp:
     def _run_relax_stream(self, stop_event):
         faces, edge_length = self.faces, self.edge_length
         gtol = self._current_gtol
-        rng = np.random.default_rng()
+        # Disabled for now, per explicit user request -- see the same
+        # note in _run_inflate_stream.
+        rng = None
         state = {"positions": self.positions}
 
         def step_fn(chunk, stop_event):

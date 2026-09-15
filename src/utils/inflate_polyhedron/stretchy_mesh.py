@@ -72,15 +72,16 @@ touches them, per this project's docstring convention in
 .claude/skills/net-fold-project/SKILL.md):
 
 - **relax_once is a genuine force balance, walked step by step -- no
-  volume anywhere** (_relax_force): each edge is a Hooke's-law spring;
-  each face applies a real outward force, `pressure * area * normal`,
-  split across its own vertices. Each call moves every vertex a small
-  step along its OWN net force (explicit relaxation), not a
-  least_squares solve: a Newton-style solver re-linearizes the whole
-  mesh and can jump straight past the physically-reachable equilibrium
-  to a distant, spurious one (verified directly -- a plain cube at
-  pressure=1 landed on a doubled-size, 99%-stretched "solution" in 5
-  solver evaluations; at pressure=3 on a subdivided cube it likewise
+  volume anywhere** (_relax_force): each edge is a HARDENING spring (a
+  `stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3` restoring force --
+  see the next note for why); each face applies a real outward force, `pressure * area * normal`, split across
+  its own vertices. Each call moves every vertex a small step along its
+  OWN net force (explicit relaxation), not a least_squares solve: a
+  Newton-style solver re-linearizes the whole mesh and can jump straight
+  past the physically-reachable equilibrium to a distant, spurious one
+  (verified directly, back when the spring was still linear -- a plain
+  cube at pressure=1 landed on a doubled-size, 99%-stretched "solution"
+  in 5 solver evaluations; at pressure=3 on a subdivided cube it likewise
   imploded to near-zero volume without any face ever flipping, since a
   uniform implosion never disagrees with itself -- both are real zeros
   of the same equations, just not the one a physical process starting
@@ -95,18 +96,65 @@ touches them, per this project's docstring convention in
   vanishes together) the relaxation could still land exactly on instead
   of the intended shape.
 
-- **No runaway guard on pressure, deliberately.** Plain Hooke's-law
-  springs can't hold arbitrarily high pressure -- past some critical
-  value there's no equilibrium at all, since pressure's push grows with
-  `area` (~edge_length^2) while a spring's pull only grows linearly. A
-  per-edge stretch limit was tried here to force an equilibrium to exist
-  at any pressure, and removed again: the actual fix for "what pressure
-  should I use" is estimate_pressure_for_target_stretch calibrating a
-  modest, appropriate pressure per net in the first place (see its own
-  docstring), not clamping a badly-chosen one after the fact -- a
-  correctly-calibrated pressure never gets near the critical value this
-  would have guarded against. See .claude/skills/net-fold-project/SKILL.md
-  for this project's general stance on adding a term like that.
+- **A hardening (linear + cubic) spring, not pure Hooke's-law linear --
+  a genuine strain-stiffening term, added at the user's own explicit
+  request.** A face's outward pressure force scales with its AREA
+  (~ edge_length^2, i.e. quadratic in stretch), so a plain LINEAR
+  spring's pull can't keep up past some critical pressure -- past it,
+  there's no equilibrium at all, and the mesh inflates without bound
+  (this is the same reason a real balloon's own idealized under-
+  stiffened material models -- e.g. a bare neo-Hookean membrane -- show
+  this exact "no equilibrium past a critical pressure" instability in
+  the nonlinear-elasticity literature). A REAL rubber balloon doesn't
+  blow up to an unbounded size the same way, because real rubber's
+  stress-strain curve stiffens sharply once its polymer chains run out
+  of slack at large stretch -- see the two-balloon experiment
+  (https://en.wikipedia.org/wiki/Two-balloon_experiment) for the same
+  underlying stiffening curve. A first version of this fix replaced the
+  linear spring with a PURE quartic one (`stretch**3` alone): this
+  worked -- pressure past the old critical value now settles at a large
+  but finite stretch instead of diverging -- but a cubic force is much
+  WEAKER than the linear one for a SMALL deviation (its own local
+  stiffness is `3*stretch**2`, which vanishes at stretch=0), so a mesh
+  near its rest length became far slower to settle: `dx/dt = -x**3` has
+  a POWER-LAW solution (`x(t) ~ 1/sqrt(t)`) rather than a linear spring's
+  EXPONENTIAL one, so each extra decimal of precision costs roughly an
+  order of magnitude more steps, not a fixed multiple. The fix, per the
+  user's own explicit request for a compromise: `stretch +
+  HARDENING_CUBIC_COEFFICIENT * stretch**3` (see that constant's own
+  comment for its current value and history) -- both terms are real,
+  literal spring-force contributions (`force = -dU/dx` for a smooth
+  potential, no clamp or bolted-on limit), so this is deliberately NOT
+  the same thing as the per-edge soft stretch limit tried and removed
+  earlier in this project's history (see .claude/skills/net-fold-
+  project/SKILL.md's "No hacky terms" section) -- that was added
+  specifically to paper over this exact instability without the user
+  asking for it, where this is a real physical term the user did ask
+  for. Near rest (stretch << 1) the linear term dominates (`stretch**3`
+  is negligible), recovering the original spring's fast, near-
+  exponential settling; past stretch ~= 1 the cubic term takes over and
+  grows faster than pressure's own quadratic area growth, so an
+  equilibrium still exists at any pressure, same as the pure-quartic
+  version. Every pressure/step-size constant tuned against either the
+  original linear spring or the intermediate pure-quartic one (see
+  CONVERGENCE_GTOL, STEP_MAX_MULTIPLIER, _PRESSURE_AREA_PRODUCT_ESTIMATE,
+  and estimate_pressure_for_target_stretch's own docstring) was
+  re-verified/re-tuned directly against this combined force -- see each
+  constant's own comment for what changed and why.
+
+- **relax_initial_configuration (Level 0's own "Relax" step) uses a
+  PLAIN LINEAR spring (_spring_only_force), not the hardening one
+  above.** With `pressure=0`, there's no outward force for the hardening
+  term to guard against in the first place -- the whole reason it exists
+  is to stop a plain linear spring's pull from losing to pressure's own
+  quadratic area growth, which simply doesn't apply here. A user
+  reported Level 0 visibly failing to settle at a normal tolerance
+  (1e-3) under the hardening spring, "jiggling" rather than converging;
+  switching this ONE function back to plain linear resolved it directly
+  (verified across cube/hippo/octahedron/dodecahedron/three_squares, all
+  converging cleanly at gtol=1e-3). relax_once's own force
+  (_relax_force), used for every level's actual pressure-driven
+  inflation, keeps the hardening term unchanged.
 """
 import collections
 import json
@@ -304,20 +352,34 @@ def _safe_unit_vectors(vecs):
     return unit
 
 
+# The cubic term's own coefficient in _relax_force's hardening spring
+# (`stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3`) -- was 1.0 (an
+# unweighted sum), lowered per explicit user request for a stronger
+# relative quadratic-energy (linear-force) component, i.e. more of the
+# original linear spring's behavior and less of the quartic term's, while
+# still keeping enough large-stretch stiffening to prevent the unbounded
+# pressure blow-up a plain linear spring alone allows (see module
+# docstring's Design notes). See STEP_MAX_MULTIPLIER's own comment for
+# the re-verification this prompted.
+HARDENING_CUBIC_COEFFICIENT = 0.5
+
+
 def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_length,
                   pressure=0.0, planarity_weight=0.0):
     """relax_once's per-step force: a genuine mechanical force balance.
-    Each edge is a Hooke's-law spring (relative stretch (dist-rest)/rest
-    along the edge direction); each face applies a real outward pressure
-    force, `pressure * area * outward_normal` -- area and normal computed
-    together straight from its own vertex loop via `0.5 * sum_i
-    cross(p_i, p_{i+1})` (Newell's method) -- split evenly across its own
-    vertices; each 4+-gon face also pulls its own vertices a little
-    towards its own best-fit plane (SVD normal, used here as a restoring
-    direction). Returns the (N,3) net force on every vertex -- relax_once
-    walks a small step along it (see module docstring's Design notes for
-    why edge directions need _safe_unit_vectors rather than a naive
-    division)."""
+    Each edge is a HARDENING spring (a `stretch +
+    HARDENING_CUBIC_COEFFICIENT * stretch**3` restoring force -- see
+    module docstring's Design notes for why, in place of either a plain
+    linear or a plain quartic spring alone); each face applies a real
+    outward pressure force, `pressure * area * outward_normal` -- area
+    and normal computed together straight from its own vertex loop via
+    `0.5 * sum_i cross(p_i, p_{i+1})` (Newell's method) -- split evenly
+    across its own vertices; each 4+-gon face also pulls its own vertices
+    a little towards its own best-fit plane (SVD normal, used here as a
+    restoring direction). Returns the (N,3) net force on every vertex --
+    relax_once walks a small step along it (see module docstring's
+    Design notes for why edge directions need _safe_unit_vectors rather
+    than a naive division)."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
 
@@ -325,7 +387,7 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_
     dist = np.linalg.norm(diff, axis=1)
     direction = _safe_unit_vectors(diff)
     stretch = (dist - edge_length) / edge_length
-    spring_on_a = stretch[:, None] * direction
+    spring_on_a = (stretch + HARDENING_CUBIC_COEFFICIENT * stretch ** 3)[:, None] * direction
     np.add.at(force, edge_ai, spring_on_a)
     np.add.at(force, edge_bi, -spring_on_a)
 
@@ -477,7 +539,55 @@ STEP_MAX_FRACTION = 0.2
 # concave vertex, network otherwise looking right) is what prompted
 # re-deriving this from scratch with the missing `scale` factor
 # included, rather than just nudging the old unscaled constant.
-STEP_MAX_MULTIPLIER = 0.2
+#
+# Re-tuned again (0.2 -> 0.05) after the spring force itself changed from
+# Hooke's-law LINEAR to QUARTIC (stretch**3, see module docstring's
+# Design notes -- added at the user's own request for genuine strain-
+# stiffening) -- a user reported a mesh (hippo.json Level 1, calibrated
+# for 80% target RMS stretch) that never converged, with the reported
+# force hovering around 1.5 indefinitely. Traced directly (not assumed):
+# one vertex was in an EXACT, undamped 2-cycle -- force alternating
+# 1.97/1.00 forever, position displacement identical every step, never
+# decaying -- the same failure mode 0.2 was originally tuned to avoid,
+# now reappearing because a cubic force's local stiffness near a
+# sharply-stretched edge is much higher than the linear spring's was,
+# so the same step size that was safe before can overshoot past the new
+# force law's equilibrium and land exactly on the opposite side, forever.
+# Bisected directly on that reproducing case: stable from 0.12 down,
+# still oscillating at 0.14+. Verified 0.05 stays stable across cube/
+# octahedron/dodecahedron/three_squares/hippo at target RMS stretch
+# 10/40/80% (a low-target, near-rest reading can still take many steps
+# to reach gtol, but that's the expected slow POWER-LAW tail a cubic
+# force has near equilibrium -- see estimate_pressure_for_target_
+# stretch's own docstring -- not a repeat of this oscillation: its own
+# force trace dips and slowly wanders rather than cleanly alternating
+# between two fixed values forever).
+#
+# The spring force itself was changed again shortly after (pure QUARTIC
+# -> a HARDENING `stretch + stretch**3`, see module docstring's Design
+# notes) specifically to fix that slow power-law tail near rest, per the
+# user's own request for a compromise between convergence speed and
+# large-stretch stability. This value did NOT need to change again for
+# that: re-verified directly on the exact same hippo.json reproducing
+# case above -- 0.05 still converges cleanly (no oscillation) while 0.1+
+# still shows the same large, non-decaying force (checked via a single
+# 200-step chunk, matching inflate_polyhedron_app's own chunk size, to
+# rule out the stall detector papering over a real 2-cycle) -- and a
+# broader sweep (cube/hippo/octahedron/dodecahedron/three_squares at
+# 10/40/80% target RMS stretch) now converges cleanly and lands within
+# about a point of target everywhere, including the previously-stuck
+# hippo/80% case.
+#
+# Re-checked again after HARDENING_CUBIC_COEFFICIENT was lowered
+# (1.0 -> 0.5, see its own comment): a weaker cubic term could plausibly
+# tolerate a bigger step before overshooting, so re-ran the same
+# hippo.json boundary search rather than assuming 0.05 still applies
+# unexamined. The boundary barely moved (stable through 0.12, oscillating
+# at 0.13+ -- versus 0.12/0.14 at coefficient 1.0), so 0.05 was kept
+# rather than raised for marginal extra speed at a smaller safety margin;
+# re-verified the same 5-net/3-target sweep above still converges
+# cleanly at this value.
+STEP_MAX_MULTIPLIER = 0.05
 
 # Hard cap on iterations when max_nfev=None (run-to-convergence): explicit
 # steps have no scipy-style internal budget of their own, so this stands
@@ -647,15 +757,21 @@ def _remove_rigid_motion(pts_before, pts_after):
 
 
 def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
-                          max_nfev, stop_event, gtol, rng=None):
+                          max_nfev, stop_event, gtol, rng=None,
+                          step_max_multiplier=None):
     """Shared explicit-relaxation driver for relax_once and
-    relax_initial_configuration -- the only thing that varies between
-    them is the force itself (`force_fn(pts) -> (N,3)`); the walking
-    logic (step size, stopping criteria) is identical, so it lives here
+    relax_initial_configuration -- the only things that vary between
+    them are the force itself (`force_fn(pts) -> (N,3)`) and, since each
+    force law has its own safe step size (see STEP_MAX_MULTIPLIER's own
+    comment), `step_max_multiplier` (defaults to the module's own
+    STEP_MAX_MULTIPLIER, tuned for relax_once's hardening spring;
+    relax_initial_configuration passes LEVEL0_STEP_MAX_MULTIPLIER
+    instead, tuned for its own plain linear one) -- the walking logic
+    (stopping criteria) itself is otherwise identical, so it lives here
     once rather than being kept in sync by hand in two places.
 
     Repeatedly nudges `pts` a small step along `force_fn(pts)` (see
-    STEP_MAX_FRACTION/STEP_MAX_MULTIPLIER); if `rng` is given and the
+    STEP_MAX_FRACTION/`step_max_multiplier`); if `rng` is given and the
     worst vertex's force has been OSCILLATING rather than genuinely
     dropping (see KICK_WINDOW's own comment), nudges every vertex by a
     small random perturbation weighted toward whichever one is actually
@@ -667,6 +783,8 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
     for why both exist), or `max_nfev`/`stop_event` cuts it off first.
     Returns (pts, steps_taken, max_force, converged) -- callers each
     compute their own final positions/stretch stats from `pts`."""
+    if step_max_multiplier is None:
+        step_max_multiplier = STEP_MAX_MULTIPLIER
     step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
     steps_taken = 0
     converged = False
@@ -689,7 +807,7 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
                 and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
             converged = True
             break
-        dt = min(STEP_MAX_MULTIPLIER * scale, STEP_MAX_FRACTION * scale / max_force)
+        dt = min(step_max_multiplier * scale, STEP_MAX_FRACTION * scale / max_force)
         new_pts = pts + dt * force
         if rng is not None:
             recent_max_force.append(max_force)
@@ -744,7 +862,8 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
                              length_arr, pressure, planarity_weight)
 
     pts, steps_taken, max_force, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng)
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
+        step_max_multiplier=STEP_MAX_MULTIPLIER)
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
     return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
 
@@ -767,14 +886,56 @@ def random_initial_positions(faces, spread=INITIAL_RANDOM_SPREAD, seed=0):
     return {v: rng.uniform(-spread / 2, spread / 2, size=3) for v in vertex_ids}
 
 
+# relax_initial_configuration's OWN step-size cap, separate from
+# relax_once's STEP_MAX_MULTIPLIER -- since _spring_only_force is now a
+# plain LINEAR spring (see its own docstring), not the hardening one
+# STEP_MAX_MULTIPLIER=0.05 was re-tuned for, sharing that smaller value
+# here just needlessly throttles a force law that never needed it in the
+# first place. Restored to 0.2, the ORIGINAL value this project used for
+# a plain linear spring before the hardening term existed at all (see
+# STEP_MAX_MULTIPLIER's own history) -- verified stable in this project's
+# own past tuning history for a linear spring specifically.
+#
+# This mattered more than it looks: a user reported Level 0 ("Relax")
+# visibly failing to converge/settle at a normal tolerance (1e-3),
+# "jiggling" rather than finishing, on data/input/stretchy_nets/
+# hippo.json and dodecahedron.json specifically -- traced directly (not
+# assumed) to inflate_polyhedron_app's own chunked calling pattern
+# (_run_chunked_relax_stream, capped at INFLATE_CHUNK_MAX=200 steps per
+# call): STALL_WINDOW (2000) can never fill within one chunk (a known,
+# already-documented limitation), so convergence there can ONLY happen
+# via the strict gtol check -- and inflate_polyhedron_app also opts every
+# Relax/Inflate run into the KICK_WINDOW mechanism (`rng=np.random.
+# default_rng()`), which perturbs the WHOLE mesh whenever the worst
+# vertex's force hasn't dropped by half over the last 150 steps. At the
+# smaller, hardening-spring-tuned step size, a perfectly healthy but
+# slower-moving linear-spring relaxation can fail to clear that 50%-drop
+# bar purely because of the smaller step, triggering a kick that
+# re-disturbs the mesh right as it's genuinely converging -- a
+# self-defeating loop that can run forever without ever satisfying gtol.
+# Verified directly: reproducing inflate_polyhedron_app's own chunking on
+# hippo.json/dodecahedron.json, the OLD shared 0.05 hit the 20,000-step
+# safety cap without converging on both, while 0.1 and 0.2 converged
+# cleanly (0.2 fastest, in 3,301 and 2,196 steps respectively) -- and a
+# broader 5-net check (cube/hippo/octahedron/dodecahedron/three_squares)
+# at gtol=1e-3 with the kick enabled converges cleanly for every one of
+# them at this value.
+LEVEL0_STEP_MAX_MULTIPLIER = 0.2
+
+
 def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
-    """Pure Hooke's-law spring force for relax_initial_configuration --
-    the same per-edge term as _relax_force, with no pressure and no
-    planarity. Faces aren't expected to be flat or even
-    non-self-intersecting at this stage (see relax_initial_configuration's
-    docstring); the only goal is a well-separated, edge-length-plausible
-    starting point to hand off to the real per-face pressure model
-    afterward."""
+    """Pure Hooke's-law LINEAR spring force for relax_initial_configuration
+    -- deliberately NOT the same hardening term _relax_force uses (see
+    module docstring's Design notes): with pressure=0, there's no outward
+    force for a hardening term to guard against in the first place, and a
+    user reported Level 0 (relax_initial_configuration's own random-
+    start-then-relax step) visibly failing to settle at a normal
+    tolerance under the hardening spring -- switching back to plain
+    linear here resolved it directly. Faces aren't expected to be flat or
+    even non-self-intersecting at this stage (see
+    relax_initial_configuration's docstring); the only goal is a
+    well-separated, edge-length-plausible starting point to hand off to
+    the real per-face pressure model afterward."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
     diff = pts[edge_bi] - pts[edge_ai]
@@ -824,7 +985,8 @@ def relax_initial_configuration(positions, faces, edge_length,
         return _spring_only_force(pts, edge_ai, edge_bi, length_arr)
 
     pts, steps_taken, max_force, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng)
+        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
+        step_max_multiplier=LEVEL0_STEP_MAX_MULTIPLIER)
 
     # A pure-spring relax has no notion of "outward" at all -- nothing in
     # the force cares which way a face's normal points, so it lands
@@ -858,6 +1020,17 @@ def relax_initial_configuration(positions, faces, edge_length,
 # across those 5 solids (range was 19-32) -- a decent first guess, not
 # exact, which is why the function refines it against an actual
 # relax_once result rather than trusting it alone.
+#
+# Re-checked, not re-derived, after the spring force changed to a
+# hardening `stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3` (see
+# module docstring's Design notes): at this 10%-ish target the cubic
+# term is negligible (stretch**3 ~= 0.001 vs stretch ~= 0.1) regardless
+# of its own coefficient, so the combined spring behaves almost exactly
+# like the plain linear one this constant was originally derived
+# against. Re-running the same bisection at HARDENING_CUBIC_COEFFICIENT
+# = 0.5 gave a mean of 25.0 (range 18.75-34.5) -- again indistinguishable
+# from the original 25.0 within the same per-solid noise the original
+# derivation already had -- so this value was kept rather than nudged.
 _PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0
 
 # How far a single calibration step is allowed to rescale pressure --
