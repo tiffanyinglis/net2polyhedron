@@ -481,13 +481,6 @@ NORMAL_COLOR = "yellow"
 # against a dense/fine mesh per a user request; halved.
 NORMAL_LENGTH_FRACTION = 0.5
 
-# on_inflate_clicked runs relax_once in a growing sequence of chunks
-# (5, 10, 20, ...) instead of one big max_nfev call, so the iteration
-# counter/plot update incrementally instead of jumping straight from the
-# start count to the end one -- each chunk continues from the previous
-# one's own final positions, so nothing is lost by splitting the run up.
-INFLATE_CHUNK_START = 5
-INFLATE_CHUNK_MAX = 200
 # Hard stop for "iterate until convergence" mode in case a mesh/pressure
 # combination genuinely never reaches the current tolerance (e.g. a
 # topology that can't hold that much pressure) -- without this, a run
@@ -510,6 +503,15 @@ INFLATE_CHUNK_MAX = 200
 # leaning on this single, larger step budget to actually reach gtol
 # rather than an outer loop of many smaller, pressure-recalibrating
 # attempts.
+#
+# The old chunk-size constants this comment's history refers to
+# (INFLATE_CHUNK_START/INFLATE_CHUNK_MAX) no longer exist at all --
+# _run_chunked_relax_stream stopped chunking entirely once relax_once/
+# relax_initial_configuration gained their own on_progress callback (see
+# that function's own docstring), so there's no chunk size left to size
+# THIS constant relative to any more; it now purely bounds a single
+# uninterrupted relax_once/relax_initial_configuration call's own
+# max_nfev in "iterate until convergence" mode.
 INFLATE_SAFETY_STEP_CAP = 50000
 
 
@@ -2128,39 +2130,45 @@ class InflatePolyhedronApp:
         else:
             self.on_inflate_clicked()
 
-    def _run_chunked_relax_stream(self, step_fn, target_steps, stop_event, on_progress, on_finished):
+    def _run_chunked_relax_stream(self, relax_fn, target_steps, stop_event, on_progress, on_finished):
         """Shared driver behind _run_inflate_stream and _run_relax_stream:
-        calls `step_fn(chunk, stop_event) -> result` (result's own shape:
-        (positions, nfev, max_stretch_pct, rms_stretch_pct, optimality,
-        converged), same for relax_once and relax_initial_configuration)
-        in a growing sequence of chunks (5, 10, 20, ..., capped at
-        INFLATE_CHUNK_MAX) in a background thread, pushing a "progress"
-        message to the queue after every chunk so the main thread can
-        update the iteration counter/plot incrementally instead of
-        jumping straight from the start count to the end one. Tk isn't
-        thread-safe, so the worker only ever pushes to the queue; the
-        main thread (via the scheduled poll below) is the only one that
-        touches Tk widgets."""
+        calls `relax_fn(max_nfev, stop_event, queue_progress) -> result`
+        (result's own shape: (positions, nfev, max_stretch_pct,
+        rms_stretch_pct, optimality, converged), same for relax_once and
+        relax_initial_configuration) ONCE, in a background thread --
+        `max_nfev` is `target_steps` for "iterate for N steps" mode, or
+        INFLATE_SAFETY_STEP_CAP otherwise (a single call already runs to
+        real convergence or that cap on its own; there's no outer loop
+        left to enforce it).
+
+        No artificial chunking here any more -- an earlier version called
+        `relax_once`/`relax_initial_configuration` repeatedly in a growing
+        sequence of small chunks (5, 10, 20, ..., capped at 200) purely so
+        the UI had SOME point to redraw at, with no relationship to the
+        solver's own actual convergence-check cadence (a user traced this
+        directly: an app-reported "515 steps" convergence was an artifact
+        of that chunk schedule, not the mesh's real behavior -- see git
+        history). `relax_once`/`relax_initial_configuration` now accept
+        `on_progress` directly and call it themselves every
+        CONVERGENCE_CHECK_INTERVAL steps -- exactly the same cadence the
+        stopping condition is itself checked at (see
+        stretchy_mesh._explicit_relax_loop's own `on_check`) -- so the UI
+        now redraws in sync with real convergence checks instead of an
+        unrelated schedule. `queue_progress` bridges that callback (called
+        from the background thread) to this same queue/poll mechanism;
+        Tk isn't thread-safe, so the worker only ever pushes to the queue,
+        and the main thread (via the scheduled poll below) is the only
+        one that touches Tk widgets."""
         q = queue.Queue()
 
-        def worker():
-            completed = 0
-            chunk = INFLATE_CHUNK_START
-            try:
-                while True:
-                    this_chunk = max(1, chunk if target_steps is None
-                                      else min(chunk, target_steps - completed))
-                    result = step_fn(this_chunk, stop_event)
-                    nfev, converged = result[1], result[5]
-                    stopped = stop_event is not None and stop_event.is_set()
+        def queue_progress(*result):
+            q.put(("progress", result))
 
-                    completed += nfev
-                    q.put(("progress", result))
-                    reached_target = target_steps is not None and completed >= target_steps
-                    safety_cap_hit = target_steps is None and completed >= INFLATE_SAFETY_STEP_CAP
-                    if converged or stopped or reached_target or safety_cap_hit:
-                        break
-                    chunk = min(chunk * 2, INFLATE_CHUNK_MAX)
+        def worker():
+            try:
+                max_nfev = target_steps if target_steps is not None else INFLATE_SAFETY_STEP_CAP
+                result = relax_fn(max_nfev, stop_event, queue_progress)
+                q.put(("progress", result))
                 q.put(("final", None))
             except Exception as e:  # surface a solver crash instead of hanging forever
                 q.put(("error", str(e)))
@@ -2199,22 +2207,29 @@ class InflatePolyhedronApp:
         # See LEVEL0_STEP_MAX_MULTIPLIER's own comment in stretchy_mesh.py
         # for the specific failure this caused at Level 0 before that fix.
         rng = None
-        state = {"positions": self.positions}
+        # relax_once's own `nfev`/`steps_taken` -- both in each on_progress
+        # callback and in its final return -- is now the CUMULATIVE count
+        # for this one call (there's no more chunking to make it merely
+        # incremental, see _run_chunked_relax_stream's own docstring), but
+        # self.iteration_count needs to keep accumulating across SEPARATE
+        # Inflate clicks at the same level too (reset only on Subdivide/
+        # promotion -- see _record_level_history) -- so this call's own
+        # contribution is `base_iteration_count + nfev`, not nfev alone.
+        base_iteration_count = self.iteration_count
 
-        def step_fn(chunk, stop_event):
-            result = relax_once(state["positions"], faces, edge_length, pressure,
-                                 PLANARITY_WEIGHT, max_nfev=chunk, stop_event=stop_event,
-                                 gtol=gtol, rng=rng)
-            state["positions"] = result[0]
-            return result
+        def relax_fn(max_nfev, stop_event, on_progress):
+            return relax_once(self.positions, faces, edge_length, pressure,
+                               PLANARITY_WEIGHT, max_nfev=max_nfev, stop_event=stop_event,
+                               gtol=gtol, rng=rng, on_progress=on_progress)
 
-        self._run_chunked_relax_stream(step_fn, target_steps, stop_event,
-                                        self._apply_inflate_progress, self._finish_inflate)
+        self._run_chunked_relax_stream(relax_fn, target_steps, stop_event,
+                                        lambda result: self._apply_inflate_progress(result, base_iteration_count),
+                                        self._finish_inflate)
 
-    def _apply_inflate_progress(self, result):
+    def _apply_inflate_progress(self, result, base_iteration_count):
         positions, nfev, max_stretch, rms_stretch, optimality, converged = result
         self.positions = positions
-        self.iteration_count += nfev
+        self.iteration_count = base_iteration_count + nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged,
                             "gtol": self._current_gtol,
@@ -2282,22 +2297,23 @@ class InflatePolyhedronApp:
         # Disabled for now, per explicit user request -- see the same
         # note in _run_inflate_stream.
         rng = None
-        state = {"positions": self.positions}
+        # See _run_inflate_stream's own comment on why this base count is
+        # needed -- nfev is cumulative per call now, not per chunk.
+        base_iteration_count = self.iteration_count
 
-        def step_fn(chunk, stop_event):
-            result = relax_initial_configuration(state["positions"], faces, edge_length,
-                                                  max_nfev=chunk, stop_event=stop_event,
-                                                  gtol=gtol, rng=rng)
-            state["positions"] = result[0]
-            return result
+        def relax_fn(max_nfev, stop_event, on_progress):
+            return relax_initial_configuration(self.positions, faces, edge_length,
+                                                max_nfev=max_nfev, stop_event=stop_event,
+                                                gtol=gtol, rng=rng, on_progress=on_progress)
 
-        self._run_chunked_relax_stream(step_fn, None, stop_event,
-                                        self._apply_relax_progress, self._finish_relax)
+        self._run_chunked_relax_stream(relax_fn, None, stop_event,
+                                        lambda result: self._apply_relax_progress(result, base_iteration_count),
+                                        self._finish_relax)
 
-    def _apply_relax_progress(self, result):
+    def _apply_relax_progress(self, result, base_iteration_count):
         positions, nfev, max_stretch, rms_stretch, optimality, converged = result
         self.positions = positions
-        self.iteration_count += nfev
+        self.iteration_count = base_iteration_count + nfev
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged,
                             "gtol": self._current_gtol}

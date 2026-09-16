@@ -497,16 +497,14 @@ CONVERGENCE_GTOL = 1e-4
 # testing: rather than comparing displacement against `gtol` every single
 # step, check once every this-many steps instead, against `gtol` scaled
 # up by the same factor (see _explicit_relax_loop's own comment). Raised
-# 100 -> 200 per further explicit request -- now EQUAL to
-# inflate_polyhedron_app's own INFLATE_CHUNK_MAX (200), not just under
-# it: within the app, this check can now only ever land exactly at the
-# END of a chunk once the growing chunk sequence reaches its own max size
-# (5, 10, 20, ..., 200), the same "only fires at one specific chunk-size
-# coincidence" situation this project's own history already flagged once
-# for STALL_WINDOW landing exactly on INFLATE_CHUNK_MAX (see
-# STALL_WINDOW's own comment) -- kept as-is since that's what was asked
-# for, but worth knowing if this check seems to only ever fire on a
-# "round" step count through the app's own UI.
+# 100 -> 200 per further explicit request. (This USED to also matter for
+# inflate_polyhedron_app's own now-removed chunk schedule -- a user
+# traced an app-reported "515 steps" convergence directly to this check
+# only ever being reachable at a chunk's own boundary; that whole chunking
+# scheme is gone now, in favor of relax_once/relax_initial_configuration
+# calling this check's own `on_check` hook directly -- see
+# inflate_polyhedron_app's own git history for the chunk-schedule details
+# if useful context.)
 CONVERGENCE_CHECK_INTERVAL = 200
 
 # Explicit relaxation step size: the vertex with the largest net force
@@ -613,57 +611,26 @@ STEP_MAX_MULTIPLIER = 0.05
 # in for one.
 MAX_UNBOUNDED_STEPS = 200_000
 
-# Second convergence path, alongside gtol: some meshes settle into a
-# tiny persistent wobble or a very long, slow tail -- force stays above
-# gtol (sometimes indefinitely) while max_stretch_pct has effectively
-# stopped moving. Every vertex's force being individually near-zero is a
-# stricter demand than "the shape has stopped changing", the thing this
-# app and its user actually care about -- so relax_once also declares
-# convergence once max_stretch_pct's range over the last STALL_WINDOW
-# steps stays under STALL_TOL_PCT, mirroring scipy's own ftol/xtol (a
-# plateau check ALONGSIDE its gtol, not instead of it) that the old
-# least_squares-based relax_once used to get for free. STALL_TOL_PCT=1.0
-# (a full percentage point of stretch, not a fraction of one) is
-# deliberately generous -- verified across cube/tetrahedron/octahedron/
-# icosahedron/dodecahedron/three_squares/two_pentagons_and_a_square at
-# several pressures, plus a level-3-subdivided cube, that this still
-# lands within a point or two of what a strict gtol-only run reaches.
-#
-# Raised from 200 to 2000 after a user reported a single, locally
-# concave vertex sometimes getting stuck failing to "pop out" -- a real
-# but SLOW correction (max_stretch_pct barely moving over any given
-# couple hundred steps, even though the shape genuinely keeps improving
-# over a much longer span) could plateau-trigger this criterion well
-# before the vertex actually finishes correcting, mistaking "changing
-# very slowly" for "done changing" (STALL_TOL_PCT itself wasn't the
-# issue -- 200 steps just wasn't a long enough window to tell the two
-# apart). 2000 also comfortably exceeds inflate_polyhedron_app's own
-# INFLATE_CHUNK_MAX (200, the largest single relax_once call its
-# streamed Inflate/Relax ever makes) -- since this deque resets FRESH on
-# every relax_once/relax_initial_configuration call (no state carried
-# between chunks), no in-app chunk could ever have filled even the OLD
-# 200-length window on its own either; a real stall verdict from the app
-# only ever happened at the exact moment a chunk grew to 200 AND that
-# whole chunk was flat, so raising this mostly just means the app now
-# leans on the real gtol/INFLATE_SAFETY_STEP_CAP criteria instead of a
-# same-size coincidence, letting a genuinely slow correction (like the
-# reported stuck vertex) keep going rather than being cut off early.
-#
-# This alone turned out NOT to fix that reported stuck vertex, though --
-# investigated further (see KICK_WINDOW below): its own force wasn't
-# slowly shrinking at all, it was OSCILLATING indefinitely in a fixed
-# band (~0.04-0.07 over 30,000 steps, on data/input/stretchy_nets/
-# hippo_head.json), the signature of a genuine local-minimum "dimple"
-# rather than a merely-slow correction. Directly verified a bigger step
-# size does NOT help this case -- it gets WORSE (more overshoot, still
-# no escape) -- and that higher pressure just diverges outright past a
-# critical value (see module docstring's own "No runaway guard on
-# pressure" note); neither is a matter of degree here, this needed an
-# actual different mechanism (KICK_WINDOW below).
-STALL_WINDOW = 2000
-STALL_TOL_PCT = 1.0
+# The plateau/stall-window convergence shortcut (STALL_WINDOW/
+# STALL_TOL_PCT: converge once max_stretch_pct's range over many steps
+# stops moving, alongside the real gtol check) was REMOVED entirely per
+# explicit user request: it's a fixed, gtol-INDEPENDENT threshold, so at
+# a tighter gtol (e.g. 1e-5) than it was ever tuned against it declared
+# "converged" early -- reported stopping around 4600 steps at every
+# level, well before the mesh had actually reached the real, much
+# tighter target. Once disabled (an intermediate step, kept only long
+# enough to confirm this was the cause) it was removed outright rather
+# than kept as unused dead code -- inflate_polyhedron_app's own
+# INFLATE_SAFETY_STEP_CAP (a hard step-count cap per run) is judged
+# sufficient on its own as the non-gtol way a run can end. See git
+# history (STALL_WINDOW/STALL_TOL_PCT/STALL_DETECTION_ENABLED) for the
+# original reasoning if a plateau-style shortcut is ever wanted again --
+# it existed to keep a mesh with a tiny persistent wobble or a very long
+# slow tail from running to the step cap for no visible benefit, and (a
+# separate, later fix) to stop a locally concave vertex's own genuinely
+# slow-but-real correction from being mistaken for a plateau.
 
-# Escaping a genuine local-minimum "dimple" (see STALL_WINDOW's own
+# Escaping a genuine local-minimum "dimple" (see the removed STALL_WINDOW's own
 # comment for how this was diagnosed): a pure explicit gradient-style
 # walk has no momentum to coast through a shallow energy barrier with,
 # so once a vertex settles into one, smaller OR larger steps both just
@@ -680,18 +647,20 @@ STALL_TOL_PCT = 1.0
 # essentially undisturbed. `rng=None` (the default) skips all of this at
 # zero cost -- deliberately opt-in, not automatic, so every existing
 # caller (including this module's own tests, which expect exact,
-# reproducible results) keeps its current fully-deterministic behavior;
-# inflate_polyhedron_app opts in for its own Relax/Inflate runs.
+# reproducible results) keeps its current fully-deterministic behavior.
+# inflate_polyhedron_app currently passes rng=None (disabled) for its own
+# Relax/Inflate runs, per a later explicit user request -- see that
+# app's own comment in _run_inflate_stream/_run_relax_stream.
 #
-# UNLIKE STALL_WINDOW, this must stay <= inflate_polyhedron_app's own
-# INFLATE_CHUNK_MAX (200): `recent_max_force` resets FRESH on every
-# relax_once/relax_initial_configuration call, and the app's own
-# streamed Inflate/Relax (_run_chunked_relax_stream) never makes one
-# call longer than INFLATE_CHUNK_MAX steps -- a window bigger than that
-# could NEVER fill within a single chunk, so it would silently never
-# fire through the app's actual UI at all (verified directly: with
-# KICK_WINDOW=500 chunked at 200, zero kicks fired over 20,000 steps;
-# with 150, ~100 did). 150 leaves comfortable room under 200.
+# This value's own history predates two things that no longer apply as
+# literally as originally written: `recent_max_force` still resets FRESH
+# on every relax_once/relax_initial_configuration call, but the app's
+# streamed Inflate/Relax no longer chunks that call into short pieces at
+# all (see inflate_polyhedron_app's own git history) -- so a window this
+# size is no longer at risk of never fitting inside a single call. The
+# original verification (KICK_WINDOW=500 chunked at 200: zero kicks fired
+# over 20,000 steps; 150: ~100 did) is kept here as the empirical basis
+# for the value itself, not as a still-binding chunk-size constraint.
 KICK_WINDOW = 150
 KICK_STALL_RATIO = 0.5
 KICK_MAGNITUDE_FRACTION = 0.3
@@ -775,9 +744,9 @@ def _remove_rigid_motion(pts_before, pts_after):
     return (r @ b.T).T + c_before
 
 
-def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
+def _explicit_relax_loop(pts, scale, force_fn,
                           max_nfev, stop_event, gtol, rng=None,
-                          step_max_multiplier=None):
+                          step_max_multiplier=None, on_check=None):
     """Shared explicit-relaxation driver for relax_once and
     relax_initial_configuration -- the only things that vary between
     them are the force itself (`force_fn(pts) -> (N,3)`) and, since each
@@ -802,16 +771,24 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
     CONVERGENCE_CHECK_INTERVAL steps, not every step -- a TEMPORARY
     change, per explicit user request for testing, from comparing the
     worst vertex's net FORCE against `gtol` every step) drops below
-    `CONVERGENCE_CHECK_INTERVAL * gtol`, or max_stretch_pct stops moving
-    for STALL_WINDOW steps (see STALL_WINDOW's own comment for why both
-    exist, checked every step as before), or `max_nfev`/`stop_event` cuts
-    it off first. Returns (pts, steps_taken, optimality, converged) --
-    `optimality` is that same worst-vertex displacement from the last
-    completed check, divided back down by CONVERGENCE_CHECK_INTERVAL so
-    it's directly comparable to plain `gtol` (matching what it used to
-    report every step), `None` if stopped before a single check
-    completed. Callers each compute their own final positions/stretch
-    stats from `pts`."""
+    `CONVERGENCE_CHECK_INTERVAL * gtol`, or `max_nfev`/`stop_event` cuts
+    it off first (a former THIRD criterion, a max_stretch_pct plateau/
+    stall shortcut, was removed entirely per explicit user request -- see
+    git history around STALL_WINDOW/STALL_TOL_PCT if it's ever wanted
+    again). `on_check(pts, steps_taken, optimality, converged)`, if
+    given, is called every time this periodic check runs (whether or not
+    it ends the run) -- this is what lets a caller sync progress
+    reporting (e.g. inflate_polyhedron_app redrawing its 3D panels) to
+    the SAME cadence as the actual convergence check, in place of the
+    app's own previous artificial chunk-size schedule (which had no
+    relationship to this check's own period at all -- see
+    CONVERGENCE_CHECK_INTERVAL's own comment). Returns (pts, steps_taken,
+    optimality, converged) -- `optimality` is that same worst-vertex
+    displacement from the last completed check, divided back down by
+    CONVERGENCE_CHECK_INTERVAL so it's directly comparable to plain
+    `gtol` (matching what it used to report every step), `None` if
+    stopped before a single check completed. Callers each compute their
+    own final positions/stretch stats from `pts`."""
     if step_max_multiplier is None:
         step_max_multiplier = STEP_MAX_MULTIPLIER
     step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
@@ -819,7 +796,6 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
     converged = False
     optimality = None
     pts_at_last_check = pts.copy()
-    recent_max_stretch = collections.deque(maxlen=STALL_WINDOW)
     recent_max_force = collections.deque(maxlen=KICK_WINDOW) if rng is not None else None
     for steps_taken in range(1, step_cap + 1):
         if stop_event is not None and stop_event.is_set():
@@ -828,12 +804,6 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
         force = force_fn(pts)
         per_vertex_force = np.linalg.norm(force, axis=1)
         max_force = float(per_vertex_force.max())
-        dist = np.linalg.norm(pts[edge_bi] - pts[edge_ai], axis=1)
-        recent_max_stretch.append(float(np.max(np.abs(100 * (dist - length_arr) / length_arr))))
-        if (len(recent_max_stretch) == STALL_WINDOW
-                and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
-            converged = True
-            break
         # Adaptive term (STEP_MAX_FRACTION * scale / max_force) temporarily
         # removed per explicit user request, for testing -- dt is just the
         # flat step_max_multiplier * scale cap now, with no shrinking when
@@ -868,13 +838,16 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
             pts_at_last_check = pts.copy()
             if block_displacement < CONVERGENCE_CHECK_INTERVAL * gtol:
                 converged = True
+            if on_check is not None:
+                on_check(pts, steps_taken, optimality, converged)
+            if converged:
                 break
     return pts, steps_taken, optimality, converged
 
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL, rng=None):
+                gtol=CONVERGENCE_GTOL, rng=None, on_progress=None):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
     as _edge_setup. Runs ONE relaxation pass at a fixed `pressure` -- no
     automatic ramp; call again with the result to keep steering it. Each
@@ -886,12 +859,13 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     remembered state anywhere in it.
 
     `max_nfev` caps the number of steps; None runs until convergence
-    (capped at MAX_UNBOUNDED_STEPS as a runaway guard), via EITHER of two
-    criteria: the worst vertex's own displacement in its last step drops
-    below `gtol` (a TEMPORARY change from comparing its net FORCE, per
-    explicit user request for testing -- see _explicit_relax_loop's own
-    docstring), or max_stretch_pct stops moving for STALL_WINDOW steps
-    (see STALL_WINDOW's comment for why both exist). `stop_event` (a
+    (capped at MAX_UNBOUNDED_STEPS as a runaway guard), via the worst
+    vertex's own displacement in its last step dropping below `gtol` (a
+    TEMPORARY change from comparing its net FORCE, per explicit user
+    request for testing -- see _explicit_relax_loop's own docstring) --
+    the former max_stretch_pct/STALL_WINDOW plateau shortcut has been
+    removed entirely (see CONVERGENCE_GTOL's neighboring comment for why).
+    `stop_event` (a
     threading.Event), if given, is checked before each step and aborts
     at the next one, returning whatever position was last reached. `rng`
     (a numpy Generator, e.g. `np.random.default_rng()`), if given, opts
@@ -899,6 +873,15 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     oscillating rather than genuinely converging -- see KICK_WINDOW's
     own comment; `None` (the default) is fully deterministic, exactly
     this function's original behavior.
+
+    `on_progress(new_positions, steps_taken, max_stretch_pct,
+    rms_stretch_pct, optimality, converged)`, if given, is called every
+    CONVERGENCE_CHECK_INTERVAL steps (the same cadence the stopping
+    condition itself is checked at -- see _explicit_relax_loop's own
+    `on_check`) with exactly this function's own return shape, so a
+    caller can sync its own progress reporting (e.g.
+    inflate_polyhedron_app redrawing its 3D panels) to real convergence-
+    check points instead of an unrelated schedule of its own.
 
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     optimality, converged). `optimality` is exactly the quantity compared
@@ -914,9 +897,16 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
         return _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
                              length_arr, pressure, planarity_weight)
 
+    def on_check(check_pts, check_steps, check_optimality, check_converged):
+        check_positions, check_max_stretch, check_rms_stretch = _positions_and_stretch(
+            check_pts, vertex_ids, edges, length_arr)
+        on_progress(check_positions, check_steps, check_max_stretch, check_rms_stretch,
+                    check_optimality, check_converged)
+
     pts, steps_taken, optimality, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
-        step_max_multiplier=STEP_MAX_MULTIPLIER)
+        pts0, scale, force_fn, max_nfev, stop_event, gtol, rng,
+        step_max_multiplier=STEP_MAX_MULTIPLIER,
+        on_check=on_check if on_progress is not None else None)
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
     return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
 
@@ -1002,7 +992,8 @@ def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
 
 
 def relax_initial_configuration(positions, faces, edge_length,
-                                 max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None):
+                                 max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None,
+                                 on_progress=None):
     """positions/faces/edge_length: as relax_once, but `positions` is
     typically random_initial_positions' output here, not a meaningful
     embedding -- this is what turns it into one, WITHOUT ever touching
@@ -1025,11 +1016,16 @@ def relax_initial_configuration(positions, faces, edge_length,
 
     Same stopping rule as relax_once (see _explicit_relax_loop): `gtol`
     on the worst vertex's own last-step displacement (a TEMPORARY change
-    from its net force, per explicit user request for testing), OR
-    max_stretch_pct stalling for STALL_WINDOW steps, OR
-    `max_nfev`/`stop_event`. `rng`, as in relax_once, opts into an
+    from its net force, per explicit user request for testing) -- the
+    former STALL_WINDOW plateau shortcut has been removed entirely (see
+    CONVERGENCE_GTOL's neighboring comment) -- OR `max_nfev`/`stop_event`.
+    `rng`, as in relax_once, opts into an
     occasional random perturbation when stuck oscillating (`None` -- the
     default -- is fully deterministic).
+    `on_progress`, as in relax_once, is called every CONVERGENCE_CHECK_
+    INTERVAL steps with this function's own return shape (note: reflects
+    the PRE-reflection embedding described below, since that fix-up only
+    happens once, at the very end).
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     optimality, converged) -- exactly relax_once's own return shape."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
@@ -1039,9 +1035,16 @@ def relax_initial_configuration(positions, faces, edge_length,
     def force_fn(pts):
         return _spring_only_force(pts, edge_ai, edge_bi, length_arr)
 
+    def on_check(check_pts, check_steps, check_optimality, check_converged):
+        check_positions, check_max_stretch, check_rms_stretch = _positions_and_stretch(
+            check_pts, vertex_ids, edges, length_arr)
+        on_progress(check_positions, check_steps, check_max_stretch, check_rms_stretch,
+                    check_optimality, check_converged)
+
     pts, steps_taken, optimality, converged = _explicit_relax_loop(
-        pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
-        step_max_multiplier=LEVEL0_STEP_MAX_MULTIPLIER)
+        pts0, scale, force_fn, max_nfev, stop_event, gtol, rng,
+        step_max_multiplier=LEVEL0_STEP_MAX_MULTIPLIER,
+        on_check=on_check if on_progress is not None else None)
 
     # A pure-spring relax has no notion of "outward" at all -- nothing in
     # the force cares which way a face's normal points, so it lands
