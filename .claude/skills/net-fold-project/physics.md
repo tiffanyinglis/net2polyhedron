@@ -39,14 +39,17 @@ an edge with no reverse partner is a valid open boundary (mesh need not be close
   - **No hacky terms rule**: don't add a volume/target-volume term or a stretch clamp to this
     force model without the user explicitly asking. Both were tried before, both papered over
     a symptom (rejected — see git history). The hardening term above is allowed because the
-    user explicitly asked for exactly it.
+    user explicitly asked for exactly it. Same bar for the adaptive step-shrink term (see
+    Integration below) — offered again as a fix for calibration-step divergence, explicitly
+    declined (2026-09-16). **Don't reintroduce it without new explicit permission naming this
+    specific change.**
 - Each face: `pressure * area * outward_normal` (Newell's method), split across vertices.
   4+-gon faces get a weak SVD-best-fit-plane restoring pull (planarity regularizer).
 
 ## Integration
 `dt = step_max_multiplier * scale` (`scale` = mesh's own rest edge length). Originally
-`min(step_max_multiplier*scale, 0.2*scale/max_force)` (adaptive shrink when force large) — the
-adaptive half is CURRENTLY REMOVED as an active experiment (flat `dt` only). `STEP_MAX_FRACTION`
+`min(step_max_multiplier*scale, 0.2*scale/max_force)` (adaptive shrink when force large) — removed,
+and PERMANENTLY, not an "active experiment" (see No hacky terms rule above). `STEP_MAX_FRACTION`
 constant (the removed term's own numerator) was deleted as dead code once nothing referenced it.
 Explicit stepping (not Newton/least_squares) deliberately — a linearized solver can jump to a
 spurious equilibrium (doubled-size stretched "solution", near-zero-volume implosion) a real
@@ -96,6 +99,19 @@ stretch isn't always monotonic in pressure (`three_squares.json` stretches LESS 
 rises). `max_nfev_per_trial = 5000` (was 20000). `stop_event` now forwarded and actually
 interrupts calibration (see apps.md — this was a real bug: Stop used to do nothing during
 calibration since no `stop_event` existed yet at that point).
+
+Every trial uses a bigger integration step than a real Inflate run: `step_max_multiplier =
+STEP_MAX_MULTIPLIER * PRESSURE_CALC_STEP_MULTIPLIER` (`PRESSURE_CALC_STEP_MULTIPLIER = 2.0`,
+per explicit user request), with `max_nfev` correspondingly halved
+(`max_nfev_per_trial / PRESSURE_CALC_STEP_MULTIPLIER`) — calibration only needs an approximate
+stretch reading per pressure guess, not a fully-settled shape, and unlike the real run, a trial
+here that diverges numerically from the bigger step (`_remove_rigid_motion`'s SVD raising
+`LinAlgError` on NaN/Inf positions) is CAUGHT and treated as an ordinary insane/over-target trial
+(`_DIVERGED_SENTINEL_STRETCH_PCT`) rather than crashing — confirmed this is what actually happens
+on `hippo.json` at high targets (60-80% RMS) with a 2x step. Bigger `PRESSURE_CALC_STEP_MULTIPLIER`
+values are riskier the higher the target stretch (more trials land deep in the hardening spring's
+steep region, see Integration's adaptive-term note) — re-verify against `hippo.json` at a high
+target before raising it further.
 
 ## Defaults (current)
 - `LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}` (app, per-level spinner default)

@@ -801,11 +801,12 @@ def _explicit_relax_loop(pts, scale, force_fn,
         force = force_fn(pts)
         per_vertex_force = np.linalg.norm(force, axis=1)
         max_force = float(per_vertex_force.max())
-        # Adaptive term (STEP_MAX_FRACTION * scale / max_force) temporarily
-        # removed per explicit user request, for testing -- dt is just the
-        # flat step_max_multiplier * scale cap now, with no shrinking when
-        # max_force is large. Restore the min(...) with that term (see git
-        # history/this module's own earlier version) once testing is done.
+        # Adaptive term (STEP_MAX_FRACTION * scale / max_force, shrinking dt
+        # when max_force is large) removed per explicit user request -- NOT
+        # a temporary testing state: re-offered as a fix for calibration-
+        # step divergence (2026-09-16) and explicitly declined again. Don't
+        # reintroduce without new explicit permission naming this change
+        # (see physics.md's "No hacky terms rule").
         dt = step_max_multiplier * scale
         new_pts = pts + dt * force
         if rng is not None:
@@ -844,7 +845,7 @@ def _explicit_relax_loop(pts, scale, force_fn,
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL, rng=None, on_progress=None):
+                gtol=CONVERGENCE_GTOL, rng=None, on_progress=None, step_max_multiplier=None):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
     as _edge_setup. Runs ONE relaxation pass at a fixed `pressure` -- no
     automatic ramp; call again with the result to keep steering it. Each
@@ -869,7 +870,11 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     into an occasional random perturbation when a vertex is stuck
     oscillating rather than genuinely converging -- see KICK_WINDOW's
     own comment; `None` (the default) is fully deterministic, exactly
-    this function's original behavior.
+    this function's original behavior. `step_max_multiplier` (None uses
+    the module's own STEP_MAX_MULTIPLIER, same as _explicit_relax_loop's
+    own default) lets a caller use a bigger/smaller integration step than
+    the real Inflate run's -- see PRESSURE_CALC_STEP_MULTIPLIER for the
+    one caller (calibration) that currently does.
 
     `on_progress(new_positions, steps_taken, max_stretch_pct,
     rms_stretch_pct, optimality, converged)`, if given, is called every
@@ -902,7 +907,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
 
     pts, steps_taken, optimality, converged = _explicit_relax_loop(
         pts0, scale, force_fn, max_nfev, stop_event, gtol, rng,
-        step_max_multiplier=STEP_MAX_MULTIPLIER,
+        step_max_multiplier=step_max_multiplier,
         on_check=on_check if on_progress is not None else None)
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
     return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
@@ -1110,6 +1115,26 @@ DEFAULT_TARGET_RMS_STRETCH_PCT = 10.0
 _INSANE_STRETCH_FLOOR_PCT = 500.0
 _INSANE_STRETCH_TARGET_MULTIPLE = 5.0
 
+# How much bigger a calibration trial's own integration step is than the real
+# Inflate run's STEP_MAX_MULTIPLIER (and, correspondingly, how much smaller
+# its own step budget is -- see calibration_max_nfev below) -- calibration
+# only needs an approximate RMS stretch reading per pressure guess, not a
+# fully-settled shape, and a trial whose bigger step makes the explicit
+# integrator diverge is just treated as an ordinary insane/over-target trial
+# (see the try/except around relax_once below) rather than a crash, so a
+# looser, faster step is safe here in a way it wouldn't be for the real run.
+# Per explicit user request (2026-09-16): =2.0 for now.
+PRESSURE_CALC_STEP_MULTIPLIER = 2.0
+
+# Sentinel RMS/max stretch reading for a calibration trial whose bigger step
+# (see PRESSURE_CALC_STEP_MULTIPLIER) made the explicit integrator diverge
+# into NaN/Inf positions before relax_once could even compute real stretch
+# stats -- always >= _INSANE_STRETCH_FLOOR_PCT so it's treated exactly like
+# any other insane/blown-up trial by the bracket search. Never surfaced to a
+# user in practice (only used if EVERY trial in a calibration run diverged,
+# same already-degenerate fallback path as an ordinary all-insane run).
+_DIVERGED_SENTINEL_STRETCH_PCT = 1e6
+
 
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
@@ -1120,6 +1145,13 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
     unevenly, and RMS is what the "Target RMS stretch" spinner asks for).
+    Every trial runs at a bigger step (and correspondingly smaller step
+    budget) than a real Inflate run would use -- see
+    PRESSURE_CALC_STEP_MULTIPLIER -- since a calibration trial only needs
+    an approximate stretch reading, not a fully-settled shape; a trial
+    whose bigger step diverges numerically is caught and treated as an
+    ordinary insane/blown-up trial rather than raising (see
+    _DIVERGED_SENTINEL_STRETCH_PCT).
     `gtol` and `rng` are both forwarded to every trial's own relax_once
     call unchanged (defaults CONVERGENCE_GTOL/None, same as relax_once's
     own defaults) -- so a caller with its own convergence tolerance
@@ -1178,6 +1210,11 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
     insane_ceiling = max(_INSANE_STRETCH_FLOOR_PCT, target_rms_pct * _INSANE_STRETCH_TARGET_MULTIPLE)
     best_error, best_pressure, best_result = None, None, None
+    # See PRESSURE_CALC_STEP_MULTIPLIER's own comment -- every trial here
+    # uses a bigger step and a proportionally smaller step budget than the
+    # real Inflate run gets.
+    calibration_step_multiplier = STEP_MAX_MULTIPLIER * PRESSURE_CALC_STEP_MULTIPLIER
+    calibration_max_nfev = max(1, int(max_nfev_per_trial / PRESSURE_CALC_STEP_MULTIPLIER))
     # Once both are set, every remaining trial bisects between them:
     # lo_pressure is the LARGEST pressure so far confirmed sane and AT OR
     # UNDER target; hi_pressure is the SMALLEST pressure so far confirmed
@@ -1185,10 +1222,21 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     lo_pressure = hi_pressure = None
     result = None
     for _ in range(max_iterations):
-        result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
-                             max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
-                             rng=rng)
-        _, _, _, rms_stretch, _, _ = result
+        try:
+            result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
+                                 max_nfev=calibration_max_nfev, stop_event=stop_event, gtol=gtol,
+                                 rng=rng, step_max_multiplier=calibration_step_multiplier)
+            _, _, _, rms_stretch, _, _ = result
+        except np.linalg.LinAlgError:
+            # The bigger calibration step can blow the explicit integrator
+            # up into NaN/Inf positions -- _remove_rigid_motion's Kabsch
+            # SVD then can't converge on garbage input. Per explicit user
+            # request, not worth crashing calibration over: treated exactly
+            # like an ordinary insane/blown-up trial instead (see
+            # _DIVERGED_SENTINEL_STRETCH_PCT).
+            result = (positions, 0, _DIVERGED_SENTINEL_STRETCH_PCT,
+                      _DIVERGED_SENTINEL_STRETCH_PCT, None, False)
+            rms_stretch = _DIVERGED_SENTINEL_STRETCH_PCT
         sane = rms_stretch < insane_ceiling
         if sane:
             error = abs(rms_stretch - target_rms_pct)

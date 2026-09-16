@@ -24,9 +24,12 @@ description), that's a standing exception for that specific thing, not a general
 
 Exceptions granted so far (don't re-ask for these, but don't extend past what's listed):
 - `stretchy_mesh.py` + its test: open-net support (boundary edges ok); `gtol` param on
-  `estimate_pressure_for_target_stretch`; hardening spring + tuning; adaptive-step-term removal,
-  stall-check removal, chunking removal, displacement-based convergence check — all explicit,
-  all currently-active experiments (see `physics.md`).
+  `estimate_pressure_for_target_stretch`; hardening spring + tuning; adaptive-step-term removal
+  (now PERMANENT, re-declined 2026-09-16 — see physics.md), stall-check removal, chunking
+  removal, displacement-based convergence check — all explicit. `relax_once`'s new
+  `step_max_multiplier` param + `PRESSURE_CALC_STEP_MULTIPLIER`/diverged-trial handling in
+  `estimate_pressure_for_target_stretch` (2026-09-16, explicit — see physics.md's Pressure
+  calibration section).
 - `inflate_polyhedron_app/app.py`: repeatedly, each time one named feature — net-layout display
   from `interactive_builder_app` saves, setup-row horizontal layout, "(stalled)" label (since
   removed — see physics.md), debug-only Validate Mesh/Show normals, Auto retry-loop removal,
