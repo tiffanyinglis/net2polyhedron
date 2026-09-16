@@ -143,17 +143,24 @@ work for anyone who wants one.
    live from the spinner -- a user reported every row wrongly showing
    whichever level's default the spinner CURRENTLY happened to show), and
    a single combined
-   "Convergence" cell -- the relax's own `max_force` (the worst vertex's
-   net force) against the tolerance that run actually used (recorded per
-   row, not re-read live -- see point 4 above), with a check or cross
-   mark for whether it's below it -- updated live while Inflate/Relax
-   runs. A checkmark can appear next to a `max_force` that's still ABOVE
-   that threshold: relax_once/relax_initial_configuration also declare
-   convergence via a separate stall-window criterion (max_stretch_pct
-   unchanged for many steps -- see stretchy_mesh's own STALL_WINDOW
-   comment) when force alone never quite settles; the cell adds
-   "(stalled)" in that specific case so it's self-explanatory rather than
-   looking like a contradiction. STALL_WINDOW (200 -> 2000) and this
+   "Convergence" cell -- the relax's own `optimality` (whatever quantity
+   stretchy_mesh._explicit_relax_loop actually compares against `gtol` --
+   currently the worst vertex's own last-step displacement, a TEMPORARY
+   change from its net force per explicit user request for testing; see
+   that function's own docstring) against the tolerance that run
+   actually used (recorded per row, not re-read live -- see point 4
+   above), with a check or cross mark for whether it's below it --
+   updated live while Inflate/Relax runs. This cell is deliberately
+   generic about WHAT `optimality` measures, since it just displays
+   whatever stretchy_mesh reports and compares it to `gtol` the same way
+   regardless -- it stays correct across a change like the one above
+   without needing its own update. A checkmark can appear next to an
+   `optimality` that's still ABOVE that threshold: relax_once/
+   relax_initial_configuration also declare convergence via a separate
+   stall-window criterion (max_stretch_pct unchanged for many steps --
+   see stretchy_mesh's own STALL_WINDOW comment) when optimality alone
+   never quite settles; the cell adds "(stalled)" in that specific case
+   so it's self-explanatory rather than looking like a contradiction. STALL_WINDOW (200 -> 2000) and this
    app's own INFLATE_SAFETY_STEP_CAP (5000 -> 20000) were both raised
    together after a user reported a single, locally concave vertex
    sometimes getting stuck failing to "pop out" -- a genuinely slow but
@@ -434,7 +441,14 @@ DEFAULT_STEPS = 10
 # criterion alongside it (see _refresh_history_table's "(stalled)" note)
 # already catches a mesh that's visibly stopped changing well before
 # force alone would settle even this tighter a threshold anyway.
-DEFAULT_TOLERANCE = 1e-3
+#
+# Tightened again, 1e-3 -> 1e-4, per explicit user request, alongside
+# stretchy_mesh's own switch to checking the stopping condition only
+# once every CONVERGENCE_CHECK_INTERVAL steps rather than every step
+# (see that constant's own comment) -- a tighter per-step-equivalent
+# rate is more affordable now that far fewer checks are actually
+# performed per run.
+DEFAULT_TOLERANCE = 1e-4
 
 # Default value for each level's own "Target RMS stretch" spinner
 # (self.target_rms_vars[level] -- one independent tk.DoubleVar per
@@ -829,9 +843,10 @@ class InflatePolyhedronApp:
         # _record_level_history's callers, RMS shown against the CURRENT
         # "Target RMS stretch" spinner value -- see _refresh_history_table),
         # and a single combined "Convergence" cell -- the relax's own
-        # `optimality` (the worst vertex's net force) against the fixed
-        # CONVERGENCE_GTOL threshold, with a check/cross mark for whether
-        # it's below it (see _refresh_history_table). height=MAX_LEVEL+1
+        # `optimality` (whatever quantity stretchy_mesh._explicit_relax_loop
+        # actually compares against gtol -- see its own docstring) against
+        # the fixed CONVERGENCE_GTOL threshold, with a check/cross mark for
+        # whether it's below it (see _refresh_history_table). height=MAX_LEVEL+1
         # (0..MAX_LEVEL) since that's the most rows this table will ever
         # hold -- a taller fixed height would just reserve blank space
         # below whatever's actually populated. ----

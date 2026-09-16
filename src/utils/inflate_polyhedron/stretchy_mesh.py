@@ -487,8 +487,27 @@ def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
 # force computed by _relax_force -- unlike the old scipy `optimality`
 # measure, this is just "how far from equilibrium is the worst vertex",
 # so it's meaningful on its own rather than needing scipy's internals to
-# interpret.
+# interpret. (Currently compared against displacement, not force -- see
+# _explicit_relax_loop's own docstring -- a temporary change for testing;
+# this constant's own value/meaning as a per-step rate is unaffected.)
 CONVERGENCE_GTOL = 1e-4
+
+# How often _explicit_relax_loop actually checks the stopping condition
+# above, in steps -- a TEMPORARY change per explicit user request, for
+# testing: rather than comparing displacement against `gtol` every single
+# step, check once every this-many steps instead, against `gtol` scaled
+# up by the same factor (see _explicit_relax_loop's own comment). Raised
+# 100 -> 200 per further explicit request -- now EQUAL to
+# inflate_polyhedron_app's own INFLATE_CHUNK_MAX (200), not just under
+# it: within the app, this check can now only ever land exactly at the
+# END of a chunk once the growing chunk sequence reaches its own max size
+# (5, 10, 20, ..., 200), the same "only fires at one specific chunk-size
+# coincidence" situation this project's own history already flagged once
+# for STALL_WINDOW landing exactly on INFLATE_CHUNK_MAX (see
+# STALL_WINDOW's own comment) -- kept as-is since that's what was asked
+# for, but worth knowing if this check seems to only ever fire on a
+# "round" step count through the app's own UI.
+CONVERGENCE_CHECK_INTERVAL = 200
 
 # Explicit relaxation step size: the vertex with the largest net force
 # moves this fraction of the mesh's own rest edge length in one
@@ -778,17 +797,28 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
     stuck; either way then removes whatever rigid rotation/translation
     the step (plus any kick) introduced (_remove_rigid_motion, see its
     own docstring for why a free-floating system needs this) -- until
-    EITHER every vertex's force drops below `gtol`, or max_stretch_pct
-    stops moving for STALL_WINDOW steps (see STALL_WINDOW's own comment
-    for why both exist), or `max_nfev`/`stop_event` cuts it off first.
-    Returns (pts, steps_taken, max_force, converged) -- callers each
-    compute their own final positions/stretch stats from `pts`."""
+    EITHER the worst vertex's own displacement over the last
+    CONVERGENCE_CHECK_INTERVAL steps (checked only once every
+    CONVERGENCE_CHECK_INTERVAL steps, not every step -- a TEMPORARY
+    change, per explicit user request for testing, from comparing the
+    worst vertex's net FORCE against `gtol` every step) drops below
+    `CONVERGENCE_CHECK_INTERVAL * gtol`, or max_stretch_pct stops moving
+    for STALL_WINDOW steps (see STALL_WINDOW's own comment for why both
+    exist, checked every step as before), or `max_nfev`/`stop_event` cuts
+    it off first. Returns (pts, steps_taken, optimality, converged) --
+    `optimality` is that same worst-vertex displacement from the last
+    completed check, divided back down by CONVERGENCE_CHECK_INTERVAL so
+    it's directly comparable to plain `gtol` (matching what it used to
+    report every step), `None` if stopped before a single check
+    completed. Callers each compute their own final positions/stretch
+    stats from `pts`."""
     if step_max_multiplier is None:
         step_max_multiplier = STEP_MAX_MULTIPLIER
     step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
     steps_taken = 0
     converged = False
-    max_force = None
+    optimality = None
+    pts_at_last_check = pts.copy()
     recent_max_stretch = collections.deque(maxlen=STALL_WINDOW)
     recent_max_force = collections.deque(maxlen=KICK_WINDOW) if rng is not None else None
     for steps_taken in range(1, step_cap + 1):
@@ -798,16 +828,18 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
         force = force_fn(pts)
         per_vertex_force = np.linalg.norm(force, axis=1)
         max_force = float(per_vertex_force.max())
-        if max_force < gtol:
-            converged = True
-            break
         dist = np.linalg.norm(pts[edge_bi] - pts[edge_ai], axis=1)
         recent_max_stretch.append(float(np.max(np.abs(100 * (dist - length_arr) / length_arr))))
         if (len(recent_max_stretch) == STALL_WINDOW
                 and max(recent_max_stretch) - min(recent_max_stretch) < STALL_TOL_PCT):
             converged = True
             break
-        dt = min(step_max_multiplier * scale, STEP_MAX_FRACTION * scale / max_force)
+        # Adaptive term (STEP_MAX_FRACTION * scale / max_force) temporarily
+        # removed per explicit user request, for testing -- dt is just the
+        # flat step_max_multiplier * scale cap now, with no shrinking when
+        # max_force is large. Restore the min(...) with that term (see git
+        # history/this module's own earlier version) once testing is done.
+        dt = step_max_multiplier * scale
         new_pts = pts + dt * force
         if rng is not None:
             recent_max_force.append(max_force)
@@ -818,7 +850,26 @@ def _explicit_relax_loop(pts, edge_ai, edge_bi, length_arr, scale, force_fn,
                 new_pts = new_pts + kick * weight
                 recent_max_force.clear()  # give the kick a fresh window to show its effect
         pts = _remove_rigid_motion(pts, new_pts)
-    return pts, steps_taken, max_force, converged
+        # Stopping condition temporarily changed, per explicit user
+        # request, for testing: rather than comparing displacement (or,
+        # before that, force) against `gtol` EVERY step, only check once
+        # every CONVERGENCE_CHECK_INTERVAL steps -- comparing the worst
+        # vertex's own displacement ACCUMULATED over that whole interval
+        # (not per-step) against CONVERGENCE_CHECK_INTERVAL * gtol, the
+        # same effective per-step rate scaled up to the longer window.
+        # Measured against pts_at_last_check (the position at the START
+        # of this interval, itself already rigid-motion-removed each
+        # step along the way), so a genuine multi-step drift is caught
+        # even if no single step's own displacement would have tripped
+        # the old every-step check.
+        if steps_taken % CONVERGENCE_CHECK_INTERVAL == 0:
+            block_displacement = float(np.linalg.norm(pts - pts_at_last_check, axis=1).max())
+            optimality = block_displacement / CONVERGENCE_CHECK_INTERVAL
+            pts_at_last_check = pts.copy()
+            if block_displacement < CONVERGENCE_CHECK_INTERVAL * gtol:
+                converged = True
+                break
+    return pts, steps_taken, optimality, converged
 
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
@@ -836,23 +887,25 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
 
     `max_nfev` caps the number of steps; None runs until convergence
     (capped at MAX_UNBOUNDED_STEPS as a runaway guard), via EITHER of two
-    criteria: every vertex's force drops below `gtol`, or max_stretch_pct
-    stops moving for STALL_WINDOW steps (see STALL_WINDOW's comment for
-    why both exist). `stop_event` (a threading.Event), if given, is
-    checked before each step and aborts at the next one, returning
-    whatever position was last reached. `rng` (a numpy Generator, e.g.
-    `np.random.default_rng()`), if given, opts into an occasional random
-    perturbation when a vertex is stuck oscillating rather than
-    genuinely converging -- see KICK_WINDOW's own comment; `None`
-    (the default) is fully deterministic, exactly this function's
-    original behavior.
+    criteria: the worst vertex's own displacement in its last step drops
+    below `gtol` (a TEMPORARY change from comparing its net FORCE, per
+    explicit user request for testing -- see _explicit_relax_loop's own
+    docstring), or max_stretch_pct stops moving for STALL_WINDOW steps
+    (see STALL_WINDOW's comment for why both exist). `stop_event` (a
+    threading.Event), if given, is checked before each step and aborts
+    at the next one, returning whatever position was last reached. `rng`
+    (a numpy Generator, e.g. `np.random.default_rng()`), if given, opts
+    into an occasional random perturbation when a vertex is stuck
+    oscillating rather than genuinely converging -- see KICK_WINDOW's
+    own comment; `None` (the default) is fully deterministic, exactly
+    this function's original behavior.
 
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
-    max_force, converged). `max_force` is the worst vertex's net force at
-    the returned position (compare against `gtol`), None if stopped
-    before a single step ran. `converged` is True only if one of the two
-    criteria above (not the step cap or a stop request) is what stopped
-    it."""
+    optimality, converged). `optimality` is exactly the quantity compared
+    against `gtol` above (the worst vertex's own last-step displacement),
+    None if stopped before a single step ran. `converged` is True only if
+    one of the two criteria above (not the step cap or a stop request) is
+    what stopped it."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
@@ -861,11 +914,11 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
         return _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
                              length_arr, pressure, planarity_weight)
 
-    pts, steps_taken, max_force, converged = _explicit_relax_loop(
+    pts, steps_taken, optimality, converged = _explicit_relax_loop(
         pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
         step_max_multiplier=STEP_MAX_MULTIPLIER)
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
-    return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
+    return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
 
 
 # "5x5x5" per the user's own suggestion, in edge_length units -- big
@@ -971,12 +1024,14 @@ def relax_initial_configuration(positions, faces, edge_length,
     flexing arbitrarily.
 
     Same stopping rule as relax_once (see _explicit_relax_loop): `gtol`
-    on the worst vertex's force, OR max_stretch_pct stalling for
-    STALL_WINDOW steps, OR `max_nfev`/`stop_event`. `rng`, as in
-    relax_once, opts into an occasional random perturbation when stuck
-    oscillating (`None` -- the default -- is fully deterministic).
+    on the worst vertex's own last-step displacement (a TEMPORARY change
+    from its net force, per explicit user request for testing), OR
+    max_stretch_pct stalling for STALL_WINDOW steps, OR
+    `max_nfev`/`stop_event`. `rng`, as in relax_once, opts into an
+    occasional random perturbation when stuck oscillating (`None` -- the
+    default -- is fully deterministic).
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
-    max_force, converged) -- exactly relax_once's own return shape."""
+    optimality, converged) -- exactly relax_once's own return shape."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
@@ -984,7 +1039,7 @@ def relax_initial_configuration(positions, faces, edge_length,
     def force_fn(pts):
         return _spring_only_force(pts, edge_ai, edge_bi, length_arr)
 
-    pts, steps_taken, max_force, converged = _explicit_relax_loop(
+    pts, steps_taken, optimality, converged = _explicit_relax_loop(
         pts0, edge_ai, edge_bi, length_arr, scale, force_fn, max_nfev, stop_event, gtol, rng,
         step_max_multiplier=LEVEL0_STEP_MAX_MULTIPLIER)
 
@@ -1007,7 +1062,7 @@ def relax_initial_configuration(positions, faces, edge_length,
         pts = 2 * pts.mean(axis=0) - pts
 
     new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
-    return new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
+    return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
 
 
 # Empirical starting point for estimate_pressure_for_target_stretch: bisected
@@ -1059,7 +1114,7 @@ _INSANE_STRETCH_TARGET_MULTIPLE = 5.0
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
                                           planarity_weight=PLANARITY_WEIGHT, max_iterations=8,
-                                          tol_pct=1.0, max_nfev_per_trial=20000, stop_event=None,
+                                          tol_pct=1.0, max_nfev_per_trial=5000, stop_event=None,
                                           gtol=CONVERGENCE_GTOL, rng=None):
     """positions/faces/edge_length: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
@@ -1115,7 +1170,7 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     a target it's moving away from; this is unchanged from the original
     algorithm, and this net's own existing test coverage still passes
     with the bracket/bisect logic added. Returns (pressure, new_positions,
-    steps_taken, max_stretch_pct, rms_stretch_pct, max_force, converged)
+    steps_taken, max_stretch_pct, rms_stretch_pct, optimality, converged)
     -- the last five exactly as relax_once's own return, from whichever
     trial this settled on (if every single trial was insane, the LAST
     one anyway, so this never raises for an irrecoverably bad target)."""
@@ -1166,5 +1221,5 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
         # (always returns SOMETHING derived from an actual relax_once
         # call).
         best_pressure, best_result = pressure, result
-    new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged = best_result
-    return best_pressure, new_positions, steps_taken, max_stretch, rms_stretch, max_force, converged
+    new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = best_result
+    return best_pressure, new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
