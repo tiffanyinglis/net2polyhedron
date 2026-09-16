@@ -100,18 +100,39 @@ rises). `max_nfev_per_trial = 5000` (was 20000). `stop_event` now forwarded and 
 interrupts calibration (see apps.md — this was a real bug: Stop used to do nothing during
 calibration since no `stop_event` existed yet at that point).
 
-Every trial uses a bigger integration step than a real Inflate run: `step_max_multiplier =
-STEP_MAX_MULTIPLIER * PRESSURE_CALC_STEP_MULTIPLIER` (`PRESSURE_CALC_STEP_MULTIPLIER = 2.0`,
-per explicit user request), with `max_nfev` correspondingly halved
-(`max_nfev_per_trial / PRESSURE_CALC_STEP_MULTIPLIER`) — calibration only needs an approximate
-stretch reading per pressure guess, not a fully-settled shape, and unlike the real run, a trial
-here that diverges numerically from the bigger step (`_remove_rigid_motion`'s SVD raising
-`LinAlgError` on NaN/Inf positions) is CAUGHT and treated as an ordinary insane/over-target trial
-(`_DIVERGED_SENTINEL_STRETCH_PCT`) rather than crashing — confirmed this is what actually happens
-on `hippo.json` at high targets (60-80% RMS) with a 2x step. Bigger `PRESSURE_CALC_STEP_MULTIPLIER`
-values are riskier the higher the target stretch (more trials land deep in the hardening spring's
-steep region, see Integration's adaptive-term note) — re-verify against `hippo.json` at a high
-target before raising it further.
+Every trial uses `step_max_multiplier = STEP_MAX_MULTIPLIER * step_multiplier`
+(`PRESSURE_CALC_STEP_MULTIPLIER` module default; `estimate_pressure_for_target_stretch`'s own
+`step_multiplier` param can override it per call — `inflate_polyhedron_app`'s debug-mode
+"Pressure calc step ×" spinner is the one caller that does, via `_get_step_multiplier`), with
+`max_nfev` correspondingly divided by that same multiplier — calibration only needs an
+approximate stretch reading per pressure guess, not a fully-settled shape, and unlike the real
+run, a trial here that diverges numerically from a bigger step
+(`_remove_rigid_motion`'s SVD raising `LinAlgError` on NaN/Inf positions) is CAUGHT and treated as
+an ordinary insane/over-target trial (`_DIVERGED_SENTINEL_STRETCH_PCT`) rather than crashing.
+**`PRESSURE_CALC_STEP_MULTIPLIER = 1.0`** (matches a real Inflate run's own step exactly) — set
+back to this from 2.0 (2026-09-16, explicit user request) as the most stable choice: 3x/4x-led
+coarse-to-fine schedules were tried and found genuinely unsafe (diverged even at pressure=0 on a
+Level 2+ mesh's own pre-existing post-Subdivide stretch — a Subdivided level's rest lengths come
+from the pristine flat target geometry, not the current shape, so it typically starts already
+significantly stretched relative to them, well before Inflate or calibration ever runs). A bigger
+multiplier is riskier the higher the target stretch AND the more pre-existing stretch the
+starting mesh already has — re-verify against BOTH before raising it again.
+
+**Better initial guess from prior-level history** (2026-09-16, explicit user request, the
+current focus instead of a bigger calibration step): `estimate_pressure_for_target_stretch` now
+takes an `initial_pressure_guess` param that, when given, is used AS the trial-search's starting
+pressure instead of the generic `_PRESSURE_AREA_PRODUCT_ESTIMATE`-derived one (which only scales
+with `target_pct`, NOT with subdivision level, since `total_rest_area` is level-invariant by
+design — so on its own it under-guesses every level past the first). `inflate_polyhedron_app`'s
+`_guess_pressure_from_history` computes this from the nearest PRIOR level with a usable recorded
+`(pressure, rms_stretch_pct)` pair in `self.level_history`: `prior_pressure * (new_target /
+prior_achieved) * 2^(level difference)` — the `2^` term is the user's own empirical observation
+that each Subdivide level (quarters every triangle, ~halves edge length) needs roughly DOUBLE the
+pressure to reach the SAME target RMS stretch % there. Verified directly on `hippo.json`: Level 2
+(target 40%, from a converged Level 1 at pressure 0.725/81.46% RMS) took 8 relax_once calls to
+calibrate from the generic guess vs. 5 from the history-based one (`0.725 * (40/81.46) * 2 ≈
+0.712`), landing at essentially the same final pressure/accuracy either way (~0.87, ~40.5% RMS)
+— fewer trials for the same answer, not a different one.
 
 ## Defaults (current)
 - `LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}` (app, per-level spinner default)

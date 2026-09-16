@@ -29,11 +29,14 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   removal, displacement-based convergence check — all explicit. `relax_once`'s new
   `step_max_multiplier` param + `PRESSURE_CALC_STEP_MULTIPLIER`/diverged-trial handling in
   `estimate_pressure_for_target_stretch` (2026-09-16, explicit — see physics.md's Pressure
-  calibration section).
+  calibration section) — multiplier since set back to 1.0 (also explicit) after 2x/3x/4x
+  experiments. `estimate_pressure_for_target_stretch`'s new `initial_pressure_guess` param
+  (2026-09-16, explicit — history-based guess, see physics.md).
 - `inflate_polyhedron_app/app.py`: repeatedly, each time one named feature — net-layout display
   from `interactive_builder_app` saves, setup-row horizontal layout, "(stalled)" label (since
   removed — see physics.md), debug-only Validate Mesh/Show normals, Auto retry-loop removal,
-  tolerance default changes, stop-during-calibration fix. See `apps.md`.
+  tolerance default changes, stop-during-calibration fix, debug-only "Pressure calc step ×"
+  spinner (2026-09-16). See `apps.md`.
 
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.

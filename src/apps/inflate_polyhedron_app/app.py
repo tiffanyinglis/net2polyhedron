@@ -314,7 +314,7 @@ from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
     estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
-    PLANARITY_WEIGHT, CONVERGENCE_GTOL,
+    PLANARITY_WEIGHT, CONVERGENCE_GTOL, PRESSURE_CALC_STEP_MULTIPLIER,
 )
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
@@ -816,6 +816,24 @@ class InflatePolyhedronApp:
                                                     variable=self.show_normals_var,
                                                     command=self.draw)
         self.show_normals_check.pack(side=tk.LEFT)
+        ttk.Separator(self.mode_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=18)
+        # Debug-mode-only override for stretchy_mesh.PRESSURE_CALC_STEP_
+        # MULTIPLIER (how much bigger Inflate's own pressure-calibration
+        # trials step than the real run, see that constant's own
+        # docstring) -- per explicit user request, to let the value be
+        # tuned live against a real net instead of only by editing the
+        # module constant and restarting. Read fresh at the start of every
+        # Inflate click (_get_step_multiplier), same pattern as the
+        # Tolerance spinner (_get_tolerance) -- not saved/restored by
+        # session save/load, unlike Tolerance, since this is a debug-only
+        # dial, not a per-session setting.
+        ttk.Label(self.mode_row, text="Pressure calc step ×:").pack(side=tk.LEFT, padx=(0, 4))
+        self.step_multiplier_var = tk.DoubleVar(value=PRESSURE_CALC_STEP_MULTIPLIER)
+        self.step_multiplier_spin = ttk.Spinbox(self.mode_row, from_=0.1, to=10.0,
+                                                 increment=0.1, width=6,
+                                                 textvariable=self.step_multiplier_var,
+                                                 format="%.2f")
+        self.step_multiplier_spin.pack(side=tk.LEFT)
 
         # ---- Status/progress: shared by both modes, always visible,
         # positioned right after Setup. ----
@@ -1883,6 +1901,51 @@ class InflatePolyhedronApp:
         except ValueError:
             return DEFAULT_TOLERANCE
 
+    def _get_step_multiplier(self):
+        """Reads self.step_multiplier_var (the debug-mode "Pressure calc
+        step ×" spinner) -- a tk.DoubleVar, so unlike _get_tolerance this
+        can't hold unparseable text, but a Spinbox can still be left
+        momentarily empty mid-edit, which raises tk.TclError on .get();
+        falls back to the module default in that case, same
+        silent-fallback spirit as _get_tolerance."""
+        try:
+            return self.step_multiplier_var.get()
+        except tk.TclError:
+            return PRESSURE_CALC_STEP_MULTIPLIER
+
+    def _guess_pressure_from_history(self, target_rms_pct):
+        """Estimates the pressure to hand estimate_pressure_for_target_
+        stretch as its OWN starting guess (`initial_pressure_guess`),
+        extrapolating from an already-calibrated PRIOR level's own history
+        (self.level_history) instead of always falling back to that
+        function's generic per-solid-derived constant -- per explicit user
+        observation: each Subdivide level roughly DOUBLES resolution
+        (quarters every triangle, ~halving edge length), and empirically
+        needs roughly 2x the pressure to reach the SAME target RMS stretch
+        % there. Scales the nearest usable prior level's own (pressure,
+        achieved rms_stretch_pct) pair by the ratio to the NEW target
+        (assuming the same near-linear pressure-vs-stretch response
+        estimate_pressure_for_target_stretch's own generic guess already
+        assumes) and by 2 per level of resolution difference. Walks
+        backward from the level just below the current frontier so a
+        recently-Subdivided level (which hasn't been Inflated yet, so has
+        no usable row of its own) still finds the nearest level that DOES.
+
+        Returns None (falling back to the generic guess) if no prior level
+        has a usable recorded pressure/stretch pair yet -- e.g. still at
+        Level 1, with nothing calibrated before it."""
+        for level in range(self.subdivision_level - 1, 0, -1):
+            record = self.level_history.get(level)
+            if not record:
+                continue
+            prior_pressure = record.get("pressure")
+            prior_rms = record.get("rms_stretch_pct")
+            if not prior_pressure or not prior_rms:
+                continue
+            level_diff = self.subdivision_level - level
+            return prior_pressure * (target_rms_pct / prior_rms) * (2 ** level_diff)
+        return None
+
     def on_inflate_clicked(self):
         """Two phases: first calibrate a pressure for the current "Target
         RMS stretch" (stretchy_mesh.estimate_pressure_for_target_stretch,
@@ -1893,7 +1956,13 @@ class InflatePolyhedronApp:
         currently is on every click, since the user can no longer set
         pressure directly. Calibrates against the CURRENT "Tolerance"
         spinner value too, so the pressure search settles at the same
-        threshold the actual inflate run right after it will use.
+        threshold the actual inflate run right after it will use. The
+        search's own STARTING pressure comes from
+        _guess_pressure_from_history when a usable prior level exists
+        (falling back to estimate_pressure_for_target_stretch's own
+        generic guess otherwise) -- a better starting point than a
+        Level-1-vs-Level-3 target guess treated identically, per explicit
+        user request.
 
         self.stop_event is created and the frontier button turned into
         "Stop" HERE, before calibration even starts (not in
@@ -1913,6 +1982,8 @@ class InflatePolyhedronApp:
         # away from that default before clicking Inflate.
         self._current_target_rms_pct = target_rms_pct
         tolerance = self._get_tolerance()
+        step_multiplier = self._get_step_multiplier()
+        initial_pressure_guess = self._guess_pressure_from_history(target_rms_pct)
         target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
         self.stop_event = threading.Event()
         self._set_level_action_button_running(True)
@@ -1923,7 +1994,9 @@ class InflatePolyhedronApp:
                                                            target_rms_pct=target_rms_pct,
                                                            gtol=tolerance,
                                                            rng=None,
-                                                           stop_event=self.stop_event),
+                                                           stop_event=self.stop_event,
+                                                           step_multiplier=step_multiplier,
+                                                           initial_pressure_guess=initial_pressure_guess),
             (), lambda result: self._on_pressure_calibrated(result, target_steps))
 
     def _on_pressure_calibrated(self, result, target_steps):
@@ -2380,7 +2453,7 @@ class InflatePolyhedronApp:
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.tolerance_spin,
+        for widget in (self.combo, self.tolerance_spin, self.step_multiplier_spin,
                        self.steps_radio, self.convergence_radio,
                        self.validate_button, self.show_normals_check,
                        self.auto_button, *self.target_rms_spins.values()):

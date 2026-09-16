@@ -1123,8 +1123,16 @@ _INSANE_STRETCH_TARGET_MULTIPLE = 5.0
 # integrator diverge is just treated as an ordinary insane/over-target trial
 # (see the try/except around relax_once below) rather than a crash, so a
 # looser, faster step is safe here in a way it wouldn't be for the real run.
-# Per explicit user request (2026-09-16): =2.0 for now.
-PRESSURE_CALC_STEP_MULTIPLIER = 2.0
+# Per explicit user request (2026-09-16): tried 2.0 (safe), 3x/4x-led
+# coarse-to-fine schedules (both found genuinely unsafe -- diverged even at
+# pressure=0 on a Level 2+ mesh's own pre-existing post-Subdivide stretch,
+# see physics.md); set back to 1.0 (matching a real Inflate run's own step
+# size exactly) as the most stable choice while attention shifts to
+# improving the INITIAL pressure guess instead (see
+# _guess_pressure_from_history in inflate_polyhedron_app/app.py) -- a
+# better guess needs fewer calibration trials in the first place, which
+# matters more than a bigger step on any one trial.
+PRESSURE_CALC_STEP_MULTIPLIER = 1.0
 
 # Sentinel RMS/max stretch reading for a calibration trial whose bigger step
 # (see PRESSURE_CALC_STEP_MULTIPLIER) made the explicit integrator diverge
@@ -1140,17 +1148,21 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
                                           planarity_weight=PLANARITY_WEIGHT, max_iterations=8,
                                           tol_pct=1.0, max_nfev_per_trial=5000, stop_event=None,
-                                          gtol=CONVERGENCE_GTOL, rng=None):
+                                          gtol=CONVERGENCE_GTOL, rng=None, step_multiplier=None,
+                                          initial_pressure_guess=None):
     """positions/faces/edge_length: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
     unevenly, and RMS is what the "Target RMS stretch" spinner asks for).
     Every trial runs at a bigger step (and correspondingly smaller step
-    budget) than a real Inflate run would use -- see
-    PRESSURE_CALC_STEP_MULTIPLIER -- since a calibration trial only needs
-    an approximate stretch reading, not a fully-settled shape; a trial
-    whose bigger step diverges numerically is caught and treated as an
-    ordinary insane/blown-up trial rather than raising (see
+    budget) than a real Inflate run would use -- `step_multiplier` (None
+    uses the module's own PRESSURE_CALC_STEP_MULTIPLIER default) lets a
+    caller override it per call rather than only via that global -- see
+    inflate_polyhedron_app's debug-mode spinner, the one caller that
+    currently does -- since a calibration trial only needs an approximate
+    stretch reading, not a fully-settled shape; a trial whose bigger step
+    diverges numerically is caught and treated as an ordinary
+    insane/blown-up trial rather than raising (see
     _DIVERGED_SENTINEL_STRETCH_PCT).
     `gtol` and `rng` are both forwarded to every trial's own relax_once
     call unchanged (defaults CONVERGENCE_GTOL/None, same as relax_once's
@@ -1163,9 +1175,16 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     pressures can have very different equilibria and this is searching
     for the pressure, not steering a shape.
 
-    Starts from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess, same
-    as before, but the search itself is now BRACKET-then-BISECT rather
-    than a single multiplicative rescale repeated blindly: as long as
+    Starts from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess, unless
+    `initial_pressure_guess` is given -- a caller with a BETTER starting
+    point (e.g. inflate_polyhedron_app's `_guess_pressure_from_history`,
+    extrapolating from a previous level's own already-calibrated pressure
+    rather than this function's generic per-solid-derived constant) can
+    skip straight past the generic guess's own inaccuracy, landing the
+    bracket/rescale search closer on the FIRST trial and needing fewer of
+    the `max_iterations` budget to converge. The search itself is now
+    BRACKET-then-BISECT rather than a single multiplicative rescale
+    repeated blindly: as long as
     every trial so far has landed on the SAME side of the target (all
     under it, or all "insane" -- see _INSANE_STRETCH_FLOOR_PCT/
     _INSANE_STRETCH_TARGET_MULTIPLE, a mesh that's blown up rather than
@@ -1206,15 +1225,22 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     -- the last five exactly as relax_once's own return, from whichever
     trial this settled on (if every single trial was insane, the LAST
     one anyway, so this never raises for an irrecoverably bad target)."""
-    total_area = _total_rest_area(faces, edge_length)
-    pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
+    if initial_pressure_guess is not None:
+        pressure = initial_pressure_guess
+    else:
+        total_area = _total_rest_area(faces, edge_length)
+        pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
     insane_ceiling = max(_INSANE_STRETCH_FLOOR_PCT, target_rms_pct * _INSANE_STRETCH_TARGET_MULTIPLE)
     best_error, best_pressure, best_result = None, None, None
     # See PRESSURE_CALC_STEP_MULTIPLIER's own comment -- every trial here
     # uses a bigger step and a proportionally smaller step budget than the
-    # real Inflate run gets.
-    calibration_step_multiplier = STEP_MAX_MULTIPLIER * PRESSURE_CALC_STEP_MULTIPLIER
-    calibration_max_nfev = max(1, int(max_nfev_per_trial / PRESSURE_CALC_STEP_MULTIPLIER))
+    # real Inflate run gets. `step_multiplier=None` (the normal case)
+    # falls back to that module default; a caller can override per call
+    # (see this function's own docstring).
+    if step_multiplier is None:
+        step_multiplier = PRESSURE_CALC_STEP_MULTIPLIER
+    calibration_step_multiplier = STEP_MAX_MULTIPLIER * step_multiplier
+    calibration_max_nfev = max(1, int(max_nfev_per_trial / step_multiplier))
     # Once both are set, every remaining trial bisects between them:
     # lo_pressure is the LARGEST pressure so far confirmed sane and AT OR
     # UNDER target; hi_pressure is the SMALLEST pressure so far confirmed

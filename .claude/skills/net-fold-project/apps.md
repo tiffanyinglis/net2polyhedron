@@ -13,7 +13,11 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
 - **Net picker** → Level 0 (random start, fan-triangulated). **Relax** → `relax_initial_configuration`
   to convergence → auto-promotes to Level 1 (no re-subdivide, same topology). **Inflate**
   recalibrates pressure FRESH every click (`on_inflate_clicked`: calibrate via `_run_background`,
-  then stream via `_run_inflate_stream`) — pressure is never stored/reused across clicks.
+  then stream via `_run_inflate_stream`) — pressure is never stored/reused across clicks, but the
+  calibration search's own STARTING guess now is: `_guess_pressure_from_history` extrapolates
+  from the nearest prior level's own already-calibrated `(pressure, achieved rms_stretch_pct)` in
+  `self.level_history` when one exists, else falls back to `estimate_pressure_for_target_stretch`'s
+  own generic guess — see physics.md's Pressure calibration section.
   **Subdivide** up to `MAX_LEVEL=3`, carries forward current (stretched) shape.
 - **Stop**: `self.stop_event` now created and the frontier button turned into "Stop" BEFORE
   calibration starts (was: only after, in `_on_pressure_calibrated`) — fixed a real bug where
@@ -37,7 +41,13 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   fresh BFS spanning-tree layout.
 - **Debug mode** ("d" key): adds steps-vs-convergence radio, **Validate Mesh** (combinatorial
   winding check only — geometric inside/out check is informational, not gating), **Show
-  normals** (draws each face's outward normal, live equivalent of Validate Mesh's info note).
+  normals** (draws each face's outward normal, live equivalent of Validate Mesh's info note),
+  **Pressure calc step ×** spinner (`self.step_multiplier_var`/`_get_step_multiplier`, mirrors
+  the Tolerance spinner's own read-fresh-per-click pattern) — overrides
+  `stretchy_mesh.PRESSURE_CALC_STEP_MULTIPLIER` per Inflate click via
+  `estimate_pressure_for_target_stretch`'s new `step_multiplier` param, for tuning that value
+  live against a real net instead of only by editing the module constant. NOT saved/restored by
+  session save/load (unlike Tolerance) — a debug-only dial, not a per-session setting.
   Release mode and debug mode are otherwise IDENTICAL — don't add new differences w/o asking.
 - **No caching, no chunking**: solve starts fresh each session; UI progress synced to
   `on_progress` callback fired by the solver itself every `CONVERGENCE_CHECK_INTERVAL` steps
