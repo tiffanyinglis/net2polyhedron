@@ -100,23 +100,22 @@ rises). `max_nfev_per_trial = 5000` (was 20000). `stop_event` now forwarded and 
 interrupts calibration (see apps.md — this was a real bug: Stop used to do nothing during
 calibration since no `stop_event` existed yet at that point).
 
-Every trial uses `step_max_multiplier = STEP_MAX_MULTIPLIER * step_multiplier`
-(`PRESSURE_CALC_STEP_MULTIPLIER` module default; `estimate_pressure_for_target_stretch`'s own
-`step_multiplier` param can override it per call — `inflate_polyhedron_app`'s debug-mode
-"Pressure calc step ×" spinner is the one caller that does, via `_get_step_multiplier`), with
-`max_nfev` correspondingly divided by that same multiplier — calibration only needs an
-approximate stretch reading per pressure guess, not a fully-settled shape, and unlike the real
-run, a trial here that diverges numerically from a bigger step
-(`_remove_rigid_motion`'s SVD raising `LinAlgError` on NaN/Inf positions) is CAUGHT and treated as
-an ordinary insane/over-target trial (`_DIVERGED_SENTINEL_STRETCH_PCT`) rather than crashing.
-**`PRESSURE_CALC_STEP_MULTIPLIER = 1.0`** (matches a real Inflate run's own step exactly) — set
-back to this from 2.0 (2026-09-16, explicit user request) as the most stable choice: 3x/4x-led
-coarse-to-fine schedules were tried and found genuinely unsafe (diverged even at pressure=0 on a
-Level 2+ mesh's own pre-existing post-Subdivide stretch — a Subdivided level's rest lengths come
-from the pristine flat target geometry, not the current shape, so it typically starts already
-significantly stretched relative to them, well before Inflate or calibration ever runs). A bigger
-multiplier is riskier the higher the target stretch AND the more pre-existing stretch the
-starting mesh already has — re-verify against BOTH before raising it again.
+**No step-size multiplier anymore.** Every calibration trial now uses the EXACT same step size
+and step budget (`max_nfev_per_trial`) a real Inflate run would use — `relax_once`'s own
+`step_max_multiplier` param and the whole `PRESSURE_CALC_STEP_MULTIPLIER`/debug-mode "Pressure
+calc step ×" spinner mechanism were REMOVED entirely (2026-09-16, explicit user request — "don't
+use any multipliers, just 1x"), after a sequence of bigger-step experiments (flat 2x — safe; flat
+4x and several 3x/4x-led coarse-to-fine schedules — all found genuinely unsafe, diverging even at
+pressure=0 on a Level 2+ mesh's own pre-existing post-Subdivide stretch, since a Subdivided
+level's rest lengths come from the pristine flat target geometry rather than the current shape,
+so it typically starts already significantly stretched relative to them well before Inflate or
+calibration ever runs). Don't reintroduce a calibration-only step multiplier without new explicit
+permission naming this change — attention shifted instead to a better INITIAL guess (below),
+which needs fewer trials in the first place rather than making each trial cheaper/riskier. A
+trial that still diverges numerically (`_remove_rigid_motion`'s SVD raising `LinAlgError` on
+NaN/Inf positions) is CAUGHT and treated as an ordinary insane/over-target trial
+(`_DIVERGED_SENTINEL_STRETCH_PCT`) rather than crashing — kept as a generic safety net even
+though it's no longer expected to trigger at the real run's own step size.
 
 **Better initial guess from prior-level history** (2026-09-16, explicit user request, the
 current focus instead of a bigger calibration step): `estimate_pressure_for_target_stretch` now

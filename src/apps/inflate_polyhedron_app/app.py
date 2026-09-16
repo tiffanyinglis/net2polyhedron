@@ -292,6 +292,7 @@ import json
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import tkinter.font as tkfont
@@ -314,7 +315,7 @@ from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
     estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
-    PLANARITY_WEIGHT, CONVERGENCE_GTOL, PRESSURE_CALC_STEP_MULTIPLIER,
+    PLANARITY_WEIGHT, CONVERGENCE_GTOL,
 )
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
@@ -816,24 +817,6 @@ class InflatePolyhedronApp:
                                                     variable=self.show_normals_var,
                                                     command=self.draw)
         self.show_normals_check.pack(side=tk.LEFT)
-        ttk.Separator(self.mode_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=18)
-        # Debug-mode-only override for stretchy_mesh.PRESSURE_CALC_STEP_
-        # MULTIPLIER (how much bigger Inflate's own pressure-calibration
-        # trials step than the real run, see that constant's own
-        # docstring) -- per explicit user request, to let the value be
-        # tuned live against a real net instead of only by editing the
-        # module constant and restarting. Read fresh at the start of every
-        # Inflate click (_get_step_multiplier), same pattern as the
-        # Tolerance spinner (_get_tolerance) -- not saved/restored by
-        # session save/load, unlike Tolerance, since this is a debug-only
-        # dial, not a per-session setting.
-        ttk.Label(self.mode_row, text="Pressure calc step ×:").pack(side=tk.LEFT, padx=(0, 4))
-        self.step_multiplier_var = tk.DoubleVar(value=PRESSURE_CALC_STEP_MULTIPLIER)
-        self.step_multiplier_spin = ttk.Spinbox(self.mode_row, from_=0.1, to=10.0,
-                                                 increment=0.1, width=6,
-                                                 textvariable=self.step_multiplier_var,
-                                                 format="%.2f")
-        self.step_multiplier_spin.pack(side=tk.LEFT)
 
         # ---- Status/progress: shared by both modes, always visible,
         # positioned right after Setup. ----
@@ -866,16 +849,53 @@ class InflatePolyhedronApp:
         # below whatever's actually populated. ----
         self.history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
         self.history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+        # "elapsed_time" (Precomp + Sim time) and "cumulative_time" (running
+        # total of every row's own Elapsed Time so far, see
+        # _refresh_history_table) are debug-mode-only (see
+        # _apply_mode_visibility, which toggles Treeview's own
+        # `displaycolumns` -- always DEFINED here regardless of mode, just
+        # not shown in release mode, same "define once, show/hide" idea as
+        # self.mode_row's own widgets).
         history_columns = ("level", "pressure", "steps", "max_stretch", "rms_stretch",
-                            "convergence")
+                            "elapsed_time", "cumulative_time", "convergence")
         self.history_tree = ttk.Treeview(self.history_frame, columns=history_columns,
                                           show="headings", height=MAX_LEVEL + 1)
-        for col, heading, width in (
-                ("level", "Level", 50), ("pressure", "Pressure", 80), ("steps", "Steps", 70),
-                ("max_stretch", "Max Stretch %", 110), ("rms_stretch", "RMS Stretch %", 150),
-                ("convergence", "Convergence", 220)):
+        # Per-column "weight" -- proportions (NOT fixed pixel widths) each
+        # column's share of the table's total width should keep, tuned to
+        # roughly what each column's own header/content needs relative to
+        # the others (e.g. "RMS Stretch %" needs much more than "Level").
+        # _rescale_history_columns (bound below to the widget's own
+        # <Configure>, and called directly on every mode toggle) turns
+        # these into actual pixel widths that always sum to the widget's
+        # OWN current width, every column scaled by the SAME factor -- per
+        # explicit user request, ALL columns proportionally stretched to
+        # fill the app, not just fixed widths (an earlier attempt) or only
+        # the last column absorbing leftover space (the attempt before
+        # that). ttk.Treeview's own stretch=True doesn't do this -- it
+        # distributes leftover space evenly PER COLUMN regardless of each
+        # one's own configured width, which is what made an even earlier
+        # attempt balloon every column equally instead of proportionally.
+        self._history_column_weights = {
+            "level": 55, "pressure": 80, "steps": 65, "max_stretch": 115,
+            "rms_stretch": 155, "elapsed_time": 150, "cumulative_time": 140,
+            "convergence": 185,
+        }
+        for col, heading in (
+                ("level", "Level"), ("pressure", "Pressure"), ("steps", "Steps"),
+                ("max_stretch", "Max Stretch %"), ("rms_stretch", "RMS Stretch %"),
+                ("elapsed_time", "Elapsed Time"), ("cumulative_time", "Cumulative Time"),
+                ("convergence", "Convergence")):
             self.history_tree.heading(col, text=heading)
-            self.history_tree.column(col, width=width, anchor=tk.CENTER)
+            # stretch=False -- widths are set explicitly, proportionally,
+            # by _rescale_history_columns instead; Tk's own stretch would
+            # just fight that (see this block's own comment above).
+            self.history_tree.column(col, width=self._history_column_weights[col],
+                                      stretch=False, anchor=tk.CENTER)
+        self.history_tree.bind("<Configure>",
+                                lambda event: self._rescale_history_columns(event.width))
+        self._release_mode_history_columns = tuple(
+            col for col in history_columns if col not in ("elapsed_time", "cumulative_time"))
+        self.history_tree.config(displaycolumns=self._release_mode_history_columns)
         # ttk.Treeview can only color a whole ROW, not one cell -- so the
         # Convergence column's check/cross (see _refresh_history_table)
         # comes with its whole row tinted to match, rather than leaving
@@ -1021,6 +1041,26 @@ class InflatePolyhedronApp:
         self.last_stats = {}
         self.level_history = {}
         self.stop_event = None
+        # Debug-mode-only "Precomp time"/"Sim time" columns -- wall-clock
+        # time (wraps time.perf_counter(), not the solve's own step count)
+        # spent in the CURRENT level's own pressure-calibration phase
+        # (_on_pressure_calibrated, n/a for Level 0/Relax, which has no
+        # pressure to calibrate) and its own streamed relax/inflate phase
+        # (_run_inflate_stream/_run_relax_stream) respectively. The
+        # `_start_time` pair marks when each phase began (None between
+        # runs); the `_current_*_time_s` pair is what _record_level_history
+        # actually reads -- precomp is set ONCE, when calibration finishes
+        # (it has no progress callback of its own to update live); sim
+        # updates LIVE on every progress callback, same as iteration_count,
+        # then again at the phase's own finish. Reset to None (see
+        # on_select_net/_subdivide_step/_finish_relax's promotion branch)
+        # anywhere iteration_count itself resets, so a freshly-promoted or
+        # freshly-Subdivided level's row doesn't show the PREVIOUS level's
+        # own timing before anything has actually run at the new one.
+        self._precomp_start_time = None
+        self._sim_start_time = None
+        self._current_precomp_time_s = None
+        self._current_sim_time_s = None
         # The gtol actually in effect for the run currently underway (or
         # the last one that ran) -- captured from self.tolerance_var at
         # the moment Relax/Inflate starts (_on_pressure_calibrated/
@@ -1113,13 +1153,24 @@ class InflatePolyhedronApp:
         self._apply_mode_visibility()
 
     def _apply_mode_visibility(self):
-        """The only actual difference between the two modes: whether the
+        """The main differences between the two modes: whether the
         steps-vs-convergence radio row (plus Validate Mesh/Show normals)
-        is shown. Forces the steps choice back to "convergence" and Show
+        is shown, and whether the Convergence History table's "Precomp
+        time"/"Sim time" columns are shown (self.history_tree's own
+        `displaycolumns` -- both columns stay DEFINED in both modes, just
+        hidden in release mode, so no data is lost switching back and
+        forth). Forces the steps choice back to "convergence" and Show
         normals off when leaving debug mode, so release mode never runs a
         stray fixed-step request or shows a stale normals overlay left
         over from before."""
         self.root.title(f"Inflate Polyhedron{' (debug mode)' if self.debug_mode else ''}")
+        self.history_tree.config(
+            displaycolumns="#all" if self.debug_mode else self._release_mode_history_columns)
+        # Changing displaycolumns doesn't resize the WIDGET itself, so no
+        # <Configure> fires on its own -- re-run the same proportional
+        # rescale by hand (see _rescale_history_columns's own docstring),
+        # against the table's current own width.
+        self._rescale_history_columns(self.history_tree.winfo_width())
         if self.debug_mode:
             self.mode_row.pack(fill=tk.X, pady=(8, 0))
         else:
@@ -1532,6 +1583,8 @@ class InflatePolyhedronApp:
         self.subdivision_level = 0
         self.positions = random_initial_positions(self.faces, seed=0)
         self.iteration_count = 0
+        self._current_precomp_time_s = None
+        self._current_sim_time_s = None
         self.last_stats = self._compute_stretch_stats()
         self.level_history = {}
         self.level_snapshots = {}
@@ -1740,8 +1793,12 @@ class InflatePolyhedronApp:
         # Each level's own step count starts over at 0 -- a level's
         # "how many steps to converge" is only meaningful counted from
         # when that level's mesh was first created, not carried over from
-        # however many steps a coarser level happened to need.
+        # however many steps a coarser level happened to need. Same
+        # reasoning for the Precomp/Sim time pair -- see their own comment
+        # in __init__.
         self.iteration_count = 0
+        self._current_precomp_time_s = None
+        self._current_sim_time_s = None
         self._record_level_history()
 
     def on_subdivide_clicked(self):
@@ -1769,10 +1826,12 @@ class InflatePolyhedronApp:
         value -- the relax's own `optimality` (None before any
         Inflate/Relax at this level, or if a Stop request aborted before
         any step ran -- see relax_once's docstring) -- all from
-        self.last_stats. Called on every subdivide/promotion, every live
-        Inflate/Relax progress update, and when a run finishes, so the row
-        always reflects the level's latest state rather than only its
-        final converged one."""
+        self.last_stats, plus (debug mode only) the "Precomp time"/"Sim
+        time" columns from self._current_precomp_time_s/
+        _current_sim_time_s (see their own comment in __init__). Called on
+        every subdivide/promotion, every live Inflate/Relax progress
+        update, and when a run finishes, so the row always reflects the
+        level's latest state rather than only its final converged one."""
         self.level_history[self.subdivision_level] = {
             "pressure": None if self.subdivision_level == 0 else self.pressure_value,
             "steps": self.iteration_count,
@@ -1793,6 +1852,10 @@ class InflatePolyhedronApp:
             "target_rms_pct": (None if self.subdivision_level == 0
                                 else self.last_stats.get("target_rms_pct")
                                 or self._current_target_rms_pct),
+            # Debug-mode-only "Precomp time"/"Sim time" columns -- see
+            # their own comment in __init__ for when each is set/reset.
+            "precomp_time_s": self._current_precomp_time_s,
+            "sim_time_s": self._current_sim_time_s,
         }
         self._refresh_history_table()
 
@@ -1805,7 +1868,57 @@ class InflatePolyhedronApp:
         mantissa, exponent = f"{value:.{precision}e}".split("e")
         return f"{mantissa}e{int(exponent)}"
 
+    @staticmethod
+    def _format_mmss(seconds):
+        """None (n/a for this level -- see the Precomp/Sim time comment in
+        __init__) -> "n/a"; otherwise mm:ss, floored to the second (these
+        columns are wall-clock timings for a human to skim, not a
+        stopwatch reading) -- minutes NOT capped at 59, so an hour-plus
+        run still reads as one growing number ("75:03") instead of
+        wrapping back to "15:03"."""
+        if seconds is None:
+            return "n/a"
+        total_seconds = int(seconds)
+        return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}"
+
+    def _rescale_history_columns(self, available_width):
+        """Turns self._history_column_weights (proportions) into actual
+        pixel widths that sum to `available_width` -- the ONLY currently
+        DISPLAYED columns share out that width (release mode's 6 vs debug
+        mode's 8 have different total weight, so a column's own share
+        changes between modes too, not just the widget's overall width).
+        Bound to self.history_tree's own <Configure> (fires on every
+        resize) via a lambda passing event.width, and called directly
+        (with self.history_tree.winfo_width()) from _apply_mode_visibility
+        right after a displaycolumns change -- changing which columns are
+        shown doesn't itself resize the WIDGET, so no <Configure> would
+        otherwise fire for that case. `available_width` <= 1 (the
+        widget's own placeholder size before Tk has actually laid it out
+        yet) is skipped rather than dividing into that -- the real
+        <Configure> once layout finishes will call this again."""
+        if available_width <= 1:
+            return
+        # cget always returns a TUPLE (verified directly: setting
+        # displaycolumns="#all" reads back as the tuple ('#all',), not the
+        # bare string) -- checked against a tuple, not a string, for
+        # exactly that reason.
+        displayed = self.history_tree.cget("displaycolumns")
+        if displayed == ("#all",):
+            displayed = self.history_tree.cget("columns")
+        total_weight = sum(self._history_column_weights[col] for col in displayed)
+        if total_weight <= 0:
+            return
+        for col in displayed:
+            weight = self._history_column_weights[col]
+            self.history_tree.column(
+                col, width=max(1, round(available_width * weight / total_weight)))
+
     def _refresh_history_table(self):
+        # "Cumulative Time" (see below) is a running total across rows in
+        # LEVEL order -- levels are always visited 0, 1, 2, ... here (never
+        # out of order), so a single running total carried across loop
+        # iterations is exactly the right-to-left sum the column wants.
+        cumulative_seconds = 0.0
         for level in sorted(self.level_history):
             rec = self.level_history[level]
             optimality = rec["optimality"]
@@ -1840,8 +1953,30 @@ class InflatePolyhedronApp:
             rms_str = f"{rec['rms_stretch_pct']:.2f}"
             if level != 0 and rec.get("target_rms_pct") is not None:
                 rms_str += f" (target: {rec['target_rms_pct']:.1f})"
+            # "Elapsed Time": Precomp + Sim -- except Level 0, which has no
+            # precomputation at all (relax_initial_configuration is pure
+            # springs, no pressure to calibrate, see on_relax_clicked), so
+            # its row shows just the one (Sim) value, not "n/a + mm:ss".
+            # Levels 1+ show each phase independently "n/a" if it hasn't
+            # run yet at this level (see _format_mmss) -- e.g.
+            # "12:34 + n/a" once calibration finishes but Inflate's own
+            # streamed run hasn't started/updated yet.
+            precomp_s = rec.get("precomp_time_s")
+            sim_s = rec.get("sim_time_s")
+            if level == 0:
+                elapsed_str = self._format_mmss(sim_s)
+            else:
+                elapsed_str = f"{self._format_mmss(precomp_s)} + {self._format_mmss(sim_s)}"
+            # "Cumulative Time": running total of every row's own Elapsed
+            # Time SECONDS so far (both phases, level 0's single one
+            # included) -- a level that hasn't run at all yet contributes
+            # 0, not "n/a", since the running total up to and including an
+            # untouched row is still a real, known number (whatever the
+            # rows before it added up to).
+            cumulative_seconds += (precomp_s or 0.0) + (sim_s or 0.0)
+            cumulative_str = self._format_mmss(cumulative_seconds)
             values = (level, pressure_str, rec["steps"], f"{rec['max_stretch_pct']:.2f}",
-                      rms_str, convergence)
+                      rms_str, elapsed_str, cumulative_str, convergence)
             iid = str(level)
             if self.history_tree.exists(iid):
                 self.history_tree.item(iid, values=values, tags=tags)
@@ -1900,18 +2035,6 @@ class InflatePolyhedronApp:
             return float(self.tolerance_var.get())
         except ValueError:
             return DEFAULT_TOLERANCE
-
-    def _get_step_multiplier(self):
-        """Reads self.step_multiplier_var (the debug-mode "Pressure calc
-        step ×" spinner) -- a tk.DoubleVar, so unlike _get_tolerance this
-        can't hold unparseable text, but a Spinbox can still be left
-        momentarily empty mid-edit, which raises tk.TclError on .get();
-        falls back to the module default in that case, same
-        silent-fallback spirit as _get_tolerance."""
-        try:
-            return self.step_multiplier_var.get()
-        except tk.TclError:
-            return PRESSURE_CALC_STEP_MULTIPLIER
 
     def _guess_pressure_from_history(self, target_rms_pct):
         """Estimates the pressure to hand estimate_pressure_for_target_
@@ -1982,10 +2105,13 @@ class InflatePolyhedronApp:
         # away from that default before clicking Inflate.
         self._current_target_rms_pct = target_rms_pct
         tolerance = self._get_tolerance()
-        step_multiplier = self._get_step_multiplier()
         initial_pressure_guess = self._guess_pressure_from_history(target_rms_pct)
         target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
         self.stop_event = threading.Event()
+        # Marks the start of the "Precomp time" column's own phase -- see
+        # its own comment in __init__. Consumed (turned into
+        # self._current_precomp_time_s) in _on_pressure_calibrated.
+        self._precomp_start_time = time.perf_counter()
         self._set_level_action_button_running(True)
         self._set_status(f"Finding a pressure that settles around {target_rms_pct:.1f}% "
                           "RMS stretch...", "info")
@@ -1995,7 +2121,6 @@ class InflatePolyhedronApp:
                                                            gtol=tolerance,
                                                            rng=None,
                                                            stop_event=self.stop_event,
-                                                           step_multiplier=step_multiplier,
                                                            initial_pressure_guess=initial_pressure_guess),
             (), lambda result: self._on_pressure_calibrated(result, target_steps))
 
@@ -2014,6 +2139,10 @@ class InflatePolyhedronApp:
             return
         pressure = result[0]
         self.pressure_value = pressure
+        # "Precomp time" (see __init__): calibration has no progress
+        # callback of its own to update this live, so it's set ONCE here,
+        # the moment it actually finishes.
+        self._current_precomp_time_s = time.perf_counter() - self._precomp_start_time
         # Captured once here, not re-read live during the run -- the
         # spinner is disabled for the duration anyway (_set_controls_
         # enabled) -- and reused by _apply_inflate_progress so every
@@ -2036,6 +2165,10 @@ class InflatePolyhedronApp:
                    if target_steps is not None else
                    f"Inflating at pressure {pressure:.4g} until convergence...")
         self._set_status(status, "info")
+        # Marks the start of the "Sim time" column's own phase -- see its
+        # own comment in __init__. Updated live by _apply_inflate_progress,
+        # finalized by _finish_inflate.
+        self._sim_start_time = time.perf_counter()
         self._run_inflate_stream(pressure, target_steps, self.stop_event)
 
     def _set_level_action_button_running(self, running):
@@ -2299,6 +2432,9 @@ class InflatePolyhedronApp:
                             "optimality": optimality, "converged": converged,
                             "gtol": self._current_gtol,
                             "target_rms_pct": self._current_target_rms_pct}
+        # "Sim time" (see __init__): live-updated on every progress
+        # callback, same cadence as iteration_count.
+        self._current_sim_time_s = time.perf_counter() - self._sim_start_time
         self._record_level_history()
         self._set_status(f"Inflating at level {self.subdivision_level}... "
                           f"{self.iteration_count} steps so far "
@@ -2314,6 +2450,7 @@ class InflatePolyhedronApp:
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
+        self._current_sim_time_s = time.perf_counter() - self._sim_start_time
         self._record_level_history()
         if was_stopped:
             self._set_status(
@@ -2354,6 +2491,10 @@ class InflatePolyhedronApp:
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
         self._set_status("Relaxing random start into a well-separated shape...", "info")
+        # Level 0 has no pressure-calibration phase at all (see this
+        # method's own docstring) -- "Precomp time" stays n/a; only "Sim
+        # time" (see __init__) applies here, starting now.
+        self._sim_start_time = time.perf_counter()
         self._run_relax_stream(self.stop_event)
 
     def _run_relax_stream(self, stop_event):
@@ -2382,6 +2523,7 @@ class InflatePolyhedronApp:
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged,
                             "gtol": self._current_gtol}
+        self._current_sim_time_s = time.perf_counter() - self._sim_start_time
         self._record_level_history()
         self._set_status(f"Relaxing... {self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
@@ -2394,6 +2536,7 @@ class InflatePolyhedronApp:
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
+        self._current_sim_time_s = time.perf_counter() - self._sim_start_time
         self._record_level_history()
         if was_stopped:
             self._set_status(
@@ -2411,6 +2554,9 @@ class InflatePolyhedronApp:
                 level0_button.config(text="Relax", command=self.on_relax_clicked)
             self.subdivision_level = 1
             self.iteration_count = 0
+            # Same reset as _subdivide_step's own -- see its comment.
+            self._current_precomp_time_s = None
+            self._current_sim_time_s = None
             # Level 1's own "Target RMS stretch" spinner -- same as
             # _subdivide_step's own (see its comment).
             self._current_target_rms_pct = self.target_rms_vars[1].get()
@@ -2453,7 +2599,7 @@ class InflatePolyhedronApp:
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.tolerance_spin, self.step_multiplier_spin,
+        for widget in (self.combo, self.tolerance_spin,
                        self.steps_radio, self.convergence_radio,
                        self.validate_button, self.show_normals_check,
                        self.auto_button, *self.target_rms_spins.values()):
@@ -2492,7 +2638,19 @@ class InflatePolyhedronApp:
         is the only one that touches Tk widgets. (Inflate/Relax each have
         their own streaming variant, _run_inflate_stream/_run_relax_stream,
         since they report incremental progress rather than one final
-        result.)"""
+        result.)
+
+        Unlike those, calibration has no progress DATA of its own to
+        report mid-run (estimate_pressure_for_target_stretch takes no
+        on_progress callback) -- but the poll loop below still ticks the
+        "Precomp time"/"Cumulative Time" columns LIVE while it waits
+        (self._current_precomp_time_s from self._precomp_start_time,
+        which on_inflate_clicked sets right before calling this), same
+        wall-clock-not-progress idea "Sim time" already used, just driven
+        by this method's own 100ms poll interval instead of a real
+        progress callback -- per explicit user request. Couples this
+        generic-looking helper to calibration specifically, but so does
+        its docstring above already (it has exactly one caller)."""
         self._set_controls_enabled(False)
         self.progress.pack(side=tk.LEFT, padx=(10, 0))
         self.progress.start(12)
@@ -2510,6 +2668,8 @@ class InflatePolyhedronApp:
             try:
                 kind, payload = q.get_nowait()
             except queue.Empty:
+                self._current_precomp_time_s = time.perf_counter() - self._precomp_start_time
+                self._record_level_history()
                 self.root.after(100, poll)
                 return
             self.progress.stop()

@@ -42,13 +42,63 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
 - **Debug mode** ("d" key): adds steps-vs-convergence radio, **Validate Mesh** (combinatorial
   winding check only — geometric inside/out check is informational, not gating), **Show
   normals** (draws each face's outward normal, live equivalent of Validate Mesh's info note),
-  **Pressure calc step ×** spinner (`self.step_multiplier_var`/`_get_step_multiplier`, mirrors
-  the Tolerance spinner's own read-fresh-per-click pattern) — overrides
-  `stretchy_mesh.PRESSURE_CALC_STEP_MULTIPLIER` per Inflate click via
-  `estimate_pressure_for_target_stretch`'s new `step_multiplier` param, for tuning that value
-  live against a real net instead of only by editing the module constant. NOT saved/restored by
-  session save/load (unlike Tolerance) — a debug-only dial, not a per-session setting.
+  and the Convergence History table's own **"Elapsed Time"** column (below). A
+  **"Pressure calc step ×"** spinner briefly existed here too (overrode
+  `stretchy_mesh.PRESSURE_CALC_STEP_MULTIPLIER` per Inflate click) — REMOVED entirely (2026-09-16,
+  explicit user request, along with the multiplier mechanism itself — see physics.md's Pressure
+  calibration section); don't re-add without new explicit permission.
   Release mode and debug mode are otherwise IDENTICAL — don't add new differences w/o asking.
+- **Convergence History "Elapsed Time"/"Cumulative Time" columns** (debug mode only, 2026-09-16,
+  explicit user request): "Elapsed Time" shows `"{precomp} + {sim}"` (each independently
+  `_format_mmss`-formatted, "n/a" if that phase hasn't run at this level yet, e.g.
+  `"12:34 + n/a"` once calibration finishes but Inflate's own streamed run hasn't started/updated
+  yet) — EXCEPT Level 0, which has no precomputation phase at all (`relax_initial_configuration`
+  is pure springs, no pressure to calibrate), so its row shows just the one (Sim) value, not
+  `"n/a + mm:ss"`. "Cumulative Time" (added right after, same request) is a running total, in
+  level order, of every row's own Elapsed Time seconds so far (both phases, Level 0's single one
+  included) — a level that hasn't run yet contributes 0 to it, not "n/a" (the total UP TO that
+  row is still a real known number). Both wall-clock (`time.perf_counter()`) times are tracked
+  separately as `self._current_precomp_time_s`/`_current_sim_time_s` (see their own comment in
+  `__init__`) and only combined/summed at DISPLAY time in `_refresh_history_table` (a single
+  `cumulative_seconds` running total carried across that method's own level loop, which always
+  visits levels 0, 1, 2, ... in order). "Elapsed Time" was originally two separate columns
+  ("Precomp time"/"Sim time"), merged into one per explicit user request. Both stay DEFINED in
+  both modes (`self.history_tree`'s own `displaycolumns`, toggled in `_apply_mode_visibility`),
+  just hidden in release mode. Sim updates LIVE on every progress callback
+  (`_apply_inflate_progress`/`_apply_relax_progress`) then again at the phase's own finish, same
+  cadence as `iteration_count`. Precomp ALSO updates live (2026-09-16, explicit user request) even
+  though `estimate_pressure_for_target_stretch` has no progress callback of its own to drive
+  it — `_run_background`'s own 100ms poll loop (which already exists to check whether the
+  background calibration thread has finished) recomputes
+  `self._current_precomp_time_s = time.perf_counter() - self._precomp_start_time` and calls
+  `_record_level_history()` on every tick where the result queue is still empty, ticking the
+  clock forward even though there's no real progress data behind it — same wall-clock-not-solver-
+  progress idea "Sim time" already used, just driven by a poll interval instead of a genuine
+  on_progress callback. Cumulative Time updates live for free alongside it, since it's recomputed
+  fresh from `precomp_time_s`/`sim_time_s` every single `_refresh_history_table` call (including
+  the ones `_record_level_history` triggers from this poll tick), not cached separately. The
+  underlying `precomp_time_s`/`sim_time_s` reset to `None` anywhere
+  `iteration_count` itself resets (fresh net load, Subdivide, Level 0→1 promotion). NOT
+  saved/restored by session save/load (`LevelHistoryRecordModel` doesn't define these fields, so
+  they're silently dropped on save and read back as `None`/"n/a" on load) —
+  timing is a live-session diagnostic, not persistent state.
+- **Convergence History column widths — proportional, not fixed** (2026-09-16, explicit user
+  request, after two earlier attempts: plain fixed widths left blank space or overflowed; only
+  the last column stretching left the others un-resized): `self._history_column_weights` is a
+  per-column RATIO (not a pixel width); `_rescale_history_columns(available_width)` turns that
+  into actual pixel widths that always sum to exactly `available_width`, every column scaled by
+  the same factor, summed only over the columns CURRENTLY shown (release mode's 6 vs debug
+  mode's 8 have different total weight, so a column's own share of the width differs by mode
+  too). Bound to `self.history_tree`'s own `<Configure>` (fires on every resize) and called
+  directly from `_apply_mode_visibility` right after a `displaycolumns` change (switching modes
+  doesn't itself resize the widget, so no `<Configure>` would otherwise fire for that case).
+  `ttk.Treeview`'s own `stretch=True` does NOT do this — verified directly it distributes any
+  leftover space evenly PER COLUMN regardless of each one's own configured width, ballooning a
+  narrow column (e.g. "Level") exactly as much as a wide one (e.g. "RMS Stretch %") instead of
+  proportionally; every column here is `stretch=False`, widths set explicitly instead. Also
+  verified directly: `self.history_tree.cget("displaycolumns")` after setting `"#all"` reads
+  back as the TUPLE `('#all',)`, not the bare string `"#all"` — `_rescale_history_columns`
+  checks against the tuple form.
 - **No caching, no chunking**: solve starts fresh each session; UI progress synced to
   `on_progress` callback fired by the solver itself every `CONVERGENCE_CHECK_INTERVAL` steps
   (see physics.md) — not an app-side chunk schedule.
