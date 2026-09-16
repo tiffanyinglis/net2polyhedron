@@ -86,10 +86,13 @@ touches them, per this project's docstring convention in
   uniform implosion never disagrees with itself -- both are real zeros
   of the same equations, just not the one a physical process starting
   nearby would ever walk to). Explicit small steps can't teleport past
-  the reachable equilibrium the way a linearized jump can. Step size is
-  self-normalizing (STEP_MAX_FRACTION of the mesh's own rest edge
-  length, divided by the largest current force) so it adapts to
-  whatever pressure/mesh scale is in play without a fixed constant.
+  the reachable equilibrium the way a linearized jump can. Step size was
+  self-normalizing (a fraction of the mesh's own rest edge length,
+  divided by the largest current force) so it adapted to whatever
+  pressure/mesh scale was in play without a fixed constant; that adaptive
+  term is currently removed, per explicit user request for testing (see
+  STEP_MAX_MULTIPLIER's own comment) -- the step is presently just a flat
+  fraction of rest edge length, with no force-dependent shrinking.
   Direction vectors use _safe_unit_vectors (a fixed fallback at an exact
   zero vector) instead of a naive division: without it, "every vertex
   exactly coincident" is a real zero of the force (every edge and face
@@ -512,33 +515,27 @@ CONVERGENCE_CHECK_INTERVAL = 200
 # iteration; every other vertex moves proportionally less (force is
 # normalized by its own max each step). Keeps steps small and stable
 # (a real physical walk, not a linearized jump that can overshoot the
-# reachable equilibrium -- see module docstring's Design notes) while
-# adapting automatically to whatever pressure or mesh scale is in play.
-STEP_MAX_FRACTION = 0.2
-
-# The `.../max_force` half of STEP_MAX_FRACTION's step is only meant to
-# shrink the step when force is LARGE (about to overshoot); left alone it
-# also GROWS the step without bound as force shrinks near equilibrium,
-# which stalls convergence (verified: pressure=1 on a plain cube ran the
-# full MAX_UNBOUNDED_STEPS without ever settling below gtol, oscillating
-# rather than damping down). Capping the per-step multiplier keeps this
-# from an undamped-oscillator's back-and-forth. Multiplied by `scale`
-# (see _explicit_relax_loop) -- a FIXED, unscaled cap here would represent
-# a shrinking FRACTION of an edge length as the mesh subdivides finer
-# (rest lengths shrink -- see mesh_levels.subdivide_once) but a GROWING
-# one as it gets coarser, since `scale` is an ABSOLUTE length and this
-# cap is what limits an ABSOLUTE per-step displacement; multiplying by
-# `scale` keeps it a constant FRACTION of an edge length at every
-# resolution, matching STEP_MAX_FRACTION's own already-scaled term.
+# reachable equilibrium -- see module docstring's Design notes).
 #
-# This value (as a fraction of edge length, now that it's properly
-# scaled) was found via direct verification, not derivation: run the
-# same fixed-point relax on cube/tetrahedron/icosahedron at several
-# pressures (1, 3, 5) and step multipliers, at Level 3 (194+ vertices,
-# the finest/most failure-prone resolution this app reaches), watching
-# for an undamped 2-cycle in max_stretch_pct (the same failure mode
-# below). Stable through 0.3; a genuine 2-cycle reappears at 0.4+. 0.2
-# leaves a healthy margin and matches STEP_MAX_FRACTION's own value.
+# Originally paired with an ADAPTIVE term (`STEP_MAX_FRACTION * scale /
+# max_force`, shrinking the step when force is large, capped by this
+# constant so it doesn't also grow unbounded as force shrinks near
+# equilibrium) -- that adaptive term was temporarily removed per explicit
+# user request, for testing (see _explicit_relax_loop's own comment), so
+# this constant is currently the WHOLE step size, not just a cap on it.
+# STEP_MAX_FRACTION itself (was 0.2, the same value as this constant) was
+# removed as dead code once nothing referenced it any more.
+#
+# This value (as a fraction of edge length, properly scaled by `scale` --
+# a FIXED, unscaled cap would represent a shrinking FRACTION of an edge
+# length as the mesh subdivides finer but a GROWING one as it gets
+# coarser, since `scale` itself is an absolute length) was found via
+# direct verification, not derivation: run the same fixed-point relax on
+# cube/tetrahedron/icosahedron at several pressures (1, 3, 5) and step
+# multipliers, at Level 3 (194+ vertices, the finest/most failure-prone
+# resolution this app reaches), watching for an undamped 2-cycle in
+# max_stretch_pct (the same failure mode below). Stable through 0.3; a
+# genuine 2-cycle reappears at 0.4+. 0.2 leaves a healthy margin.
 #
 # An EARLIER version of this constant (0.05, UNSCALED) was found the
 # same way but without the `scale` factor: a level-3-subdivided cube at
@@ -759,7 +756,7 @@ def _explicit_relax_loop(pts, scale, force_fn,
     once rather than being kept in sync by hand in two places.
 
     Repeatedly nudges `pts` a small step along `force_fn(pts)` (see
-    STEP_MAX_FRACTION/`step_max_multiplier`); if `rng` is given and the
+    `step_max_multiplier`'s own comment); if `rng` is given and the
     worst vertex's force has been OSCILLATING rather than genuinely
     dropping (see KICK_WINDOW's own comment), nudges every vertex by a
     small random perturbation weighted toward whichever one is actually

@@ -154,21 +154,15 @@ work for anyone who wants one.
    generic about WHAT `optimality` measures, since it just displays
    whatever stretchy_mesh reports and compares it to `gtol` the same way
    regardless -- it stays correct across a change like the one above
-   without needing its own update. A checkmark can appear next to an
-   `optimality` that's still ABOVE that threshold: relax_once/
-   relax_initial_configuration also declare convergence via a separate
-   stall-window criterion (max_stretch_pct unchanged for many steps --
-   see stretchy_mesh's own STALL_WINDOW comment) when optimality alone
-   never quite settles; the cell adds "(stalled)" in that specific case
-   so it's self-explanatory rather than looking like a contradiction. STALL_WINDOW (200 -> 2000) and this
-   app's own INFLATE_SAFETY_STEP_CAP (5000 -> 20000) were both raised
-   together after a user reported a single, locally concave vertex
-   sometimes getting stuck failing to "pop out" -- a genuinely slow but
-   real correction could plateau-trigger the OLD, shorter stall window
-   well before actually finishing, mistaking "changing very slowly" for
-   "done changing" (see stretchy_mesh.STALL_WINDOW's own comment for why
-   this specifically mattered for THIS app's own chunked streaming, not
-   just a raw uncapped relax_once call).
+   without needing its own update. (A former max_stretch_pct/STALL_WINDOW
+   plateau shortcut could converge with optimality still numerically
+   above gtol, shown as "(stalled)" -- that mechanism has since been
+   removed entirely per explicit user request, so `converged` now always
+   agrees with the plain optimality-vs-gtol comparison; see
+   stretchy_mesh's own git history around STALL_WINDOW for why it existed
+   and was removed.) INFLATE_SAFETY_STEP_CAP (currently 50000) is this
+   app's own hard step-count cap per run, the only non-gtol way a run can
+   end besides Stop.
 6. The view below is "Net" (the flat, undeformed layout, matplotlib)
    plus one 3D panel per level, "Level 0".."Level N" (MAX_LEVEL total,
    plus Level 0). The Net panel supports its own mouse-wheel zoom
@@ -1801,23 +1795,21 @@ class InflatePolyhedronApp:
                 convergence, tags = "n/a", ()
             else:
                 # The checkmark tracks the algorithm's own `converged`
-                # flag, not a fresh optimality-vs-gtol comparison redone
-                # here -- convergence can also come from the stall-window
-                # criterion (see _explicit_relax_loop) with optimality
-                # still numerically above this row's own gtol, and the
-                # mark would otherwise wrongly call that a failure. When
-                # that's what actually happened -- converged is True but
-                # optimality is still >= gtol -- "(stalled)" says so
-                # explicitly, rather than leaving a checkmark next to a
-                # ">" comparison looking like a contradiction (a user
-                # asked about exactly this after seeing it unexplained).
+                # flag rather than redoing the optimality-vs-gtol
+                # comparison here -- historically these could disagree
+                # (a now-removed stall-window shortcut could converge
+                # with optimality still numerically above gtol, shown as
+                # "(stalled)"); with that shortcut gone, `converged` is
+                # True only when optimality < gtol, so this always
+                # agrees with the displayed comparison -- kept as the
+                # single source of truth anyway rather than assuming
+                # that'll always hold.
                 gtol = rec["gtol"]
                 converged = rec["converged"]
                 op = "<" if optimality < gtol else ">"
                 mark = "✔" if converged else "✘"  # colored via row tag, not the glyph itself
-                stalled_note = " (stalled)" if converged and optimality >= gtol else ""
                 convergence = (f"{self._format_sci(optimality)} {op} "
-                                f"{self._format_sci(gtol, precision=0)} {mark}{stalled_note}")
+                                f"{self._format_sci(gtol, precision=0)} {mark}")
                 tags = ("converged",) if converged else ("not_converged",)
             pressure_str = "n/a" if rec["pressure"] is None else f"{rec['pressure']:.4g}"
             # Level 0 has no target stretch to chase (relax_initial_configuration
