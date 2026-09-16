@@ -220,13 +220,33 @@ Interaction model:
   so a connection is never made onto something that wasn't visibly about
   to happen first. A cancel doesn't swallow the click either way -- it
   still gets to do its normal job otherwise (select a shape, deselect,
-  etc.). A made connection (drawn as a thin light-grey line between the
-  two edges' midpoints from then on, tracking both shapes if either
-  moves/rotates) deselects everything. A connection can itself be
-  clicked (selecting it turns it red and deselects any shape) and
-  deleted with Delete, exactly like a shape. Deleting either shape a
-  connection touches removes the connection too, since a connection
-  with a missing endpoint is meaningless.
+  etc.). A made connection (drawn as a light-grey CUBIC BEZIER curve
+  between the two edges' midpoints from then on, tracking both shapes if
+  either moves/rotates -- see "Bezier handles" below) deselects
+  everything. A connection can itself be clicked (selecting it turns it
+  red and deselects any shape) and deleted with Delete, exactly like a
+  shape. Deleting either shape a connection touches removes the
+  connection too, since a connection with a missing endpoint is
+  meaningless.
+- **Bezier handles**: every connection is a cubic bezier, not a straight
+  line -- freshly made, its two control points sit one third and two
+  thirds of the way along the straight line between its edges' own
+  midpoints (`_default_connection_handles`), which renders identically
+  to a plain line segment until a handle is actually moved. Each control
+  point is stored (`{"t", "n"}` on the connection, one pair per end) as a
+  world-length offset along its OWN end's edge -- tangent (`t`) and
+  outward normal (`n`), `_shape_edge_frame` -- not as an absolute point
+  or an offset from the other end, so it tracks that edge's own
+  move/rotation exactly like the curve's own endpoint already does, with
+  no separate update step anywhere a shape changes. Only ever drawn (as a
+  thin red line from the edge midpoint to a filled red dot at the control
+  point, `_draw_bezier_handles`) or clickable for the ONE connection
+  CURRENTLY selected (`self.selected_connection_id`) -- which, since a
+  connection can only be selected in Join mode, also means never in Move
+  mode. Dragging one (click-drag straight onto its dot, `_hit_test_
+  bezier_handle`) is a single undo step for the whole gesture (`_begin_
+  undoable_change`/`_commit_undoable_change`, same pattern a shape drag
+  uses) and leaves the connection selected throughout and after.
 
   **Every corner is its own, separate vertex while editing -- no matter
   what any connection implies about it -- and this is deliberate.**
@@ -592,6 +612,25 @@ HANDLE_COLOR = "white"
 CONNECTION_COLOR = "#b0b0b0"
 CONNECTION_WIDTH = 1.5
 CONNECTION_SELECTED_WIDTH = 2.5
+# How many straight segments a connection's cubic bezier is sampled into
+# for drawing/hit-testing -- high enough to read as a smooth curve at
+# this app's own line widths, not an actual Tk spline (see
+# _cubic_bezier_points).
+BEZIER_CURVE_STEPS = 24
+# A connection's two adjustable control-point handles (module docstring:
+# "Edge connections" -- new bezier section) -- only ever drawn/clickable
+# for the ONE connection currently selected (self.selected_connection_id),
+# never for one merely highlighted via an endpoint shape's own selection.
+# Same red as SELECTION_OUTLINE_COLOR (it IS the selected connection's own
+# UI), but its own thin line/small dot rather than reusing
+# SELECTION_OUTLINE_WIDTH/EDGE_HANDLE_RADIUS, since a control handle reads
+# as a lightweight annotation on top of the curve, not another primary
+# selectable thing at the same visual weight as a shape outline or a real
+# edge handle.
+BEZIER_HANDLE_COLOR = SELECTION_OUTLINE_COLOR
+BEZIER_HANDLE_LINE_WIDTH = 1.0
+BEZIER_HANDLE_RADIUS = 4.0
+BEZIER_HANDLE_HIT_RADIUS = 9.0
 
 # File menu colors (_build_menu) -- a plain tk.Menu on Windows otherwise
 # falls back to the OS's own native menu chrome, which draws a DISABLED
@@ -699,6 +738,22 @@ def _point_segment_distance(point, a, b):
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
+def _cubic_bezier_points(p0, p1, p2, p3, steps=BEZIER_CURVE_STEPS):
+    """Samples the cubic bezier curve p0->p1->p2->p3 (p0/p3 the curve's
+    own endpoints, p1/p2 its two control points) into `steps` straight
+    segments -- Tk has no true two-control-point bezier primitive, so a
+    connection's curve is drawn/hit-tested as a plain polyline through
+    these sampled points instead (see _draw_connection_curve)."""
+    points = []
+    for i in range(steps + 1):
+        t = i / steps
+        mt = 1.0 - t
+        x = (mt ** 3) * p0[0] + 3 * (mt ** 2) * t * p1[0] + 3 * mt * (t ** 2) * p2[0] + (t ** 3) * p3[0]
+        y = (mt ** 3) * p0[1] + 3 * (mt ** 2) * t * p1[1] + 3 * mt * (t ** 2) * p2[1] + (t ** 3) * p3[1]
+        points.append((x, y))
+    return points
+
+
 def _closest_point_index(point, points):
     """Index into `points` of whichever one is nearest `point` -- used
     by _flip_selected_shapes to work out which NEW edge index a
@@ -797,10 +852,14 @@ def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_widt
 # own {"cx", "cy", "rotation", "flipped"} -- exactly the fields a shape
 # already carries -- as it looked on screen when saved; and
 # "builder_connections", self.connections translated from shape id to
-# FACE INDEX (a fresh shape has no id yet at load time). Any OTHER
-# program reading this file (the actual stretchy-mesh solver included)
-# only ever looks at "faces"/"name" and has no reason to know either
-# key exists, so it's free to ignore an unrecognized top-level key.
+# FACE INDEX (a fresh shape has no id yet at load time), each entry now
+# also carrying its own "a_handle"/"b_handle" (the {"t", "n"} bezier
+# control-point offsets -- module docstring's "Bezier handles" section --
+# read back as-is, or defaulted via _default_connection_handles for an
+# older file's entry that predates them). Any OTHER program reading this
+# file (the actual stretchy-mesh solver included) only ever looks at
+# "faces"/"name" and has no reason to know either key exists, so it's
+# free to ignore an unrecognized top-level key.
 #
 # "flipped" can ONLY be correctly restored together with
 # "builder_connections" -- never by re-deriving connections from "faces"
@@ -1275,6 +1334,13 @@ class InteractiveBuilderApp:
         self._pending_undo_snapshot = None
         self._ghost_world_xy = None
         self._drag_state = None
+        # {"conn_id", "end"} ("a" or "b") while a bezier control-point
+        # handle is being dragged (_on_canvas_press_join/_on_canvas_drag),
+        # None otherwise -- same "begin/commit" undo gesture pattern as
+        # _drag_state, sharing _begin_undoable_change/_commit_undoable_change
+        # with it (both mutate self.connections/self.shapes, which is all
+        # that snapshot compares).
+        self._bezier_handle_drag = None
         self._pan_last_xy = None
         self._rotate_state = None
         self._shape_photos = []  # keeps this redraw's PhotoImages alive (Tk drops GC'd ones)
@@ -1289,10 +1355,16 @@ class InteractiveBuilderApp:
         # this flag is only ever the plain yes/no answer.
         self._vme_active = False
 
-        # [{"id", "a_shape", "a_edge", "b_shape", "b_edge"}, ...] -- edge
-        # indices are stable across a shape's own move/rotation (they
-        # just name a position in its local vertex loop), so a
-        # connection only ever stores ids/indices, never coordinates.
+        # [{"id", "a_shape", "a_edge", "b_shape", "b_edge", "a_handle",
+        # "b_handle"}, ...] -- edge indices are stable across a shape's
+        # own move/rotation (they just name a position in its local
+        # vertex loop), so a connection never stores an absolute
+        # coordinate for its two ENDPOINTS. Its two bezier control points
+        # (module docstring's "Bezier handles" section) are the one
+        # exception -- {"t", "n"} world-length offsets, but along their
+        # OWN end's edge frame (_shape_edge_frame), not an absolute point
+        # either, for the exact same reason: staying meaningful across
+        # that edge's own move/rotation with no separate update step.
         self.connections = []
         self._next_connection_id = 1
         self.selected_connection_id = None
@@ -1569,6 +1641,7 @@ class InteractiveBuilderApp:
         self.armed_n = None
         self._ghost_world_xy = None
         self._drag_state = None
+        self._bezier_handle_drag = None
         self._connection_pending = None
         self._pending_cursor_screen = None
         self._hover_shape_id = None
@@ -1618,6 +1691,73 @@ class InteractiveBuilderApp:
         n = len(verts)
         return [((verts[i][0] + verts[(i + 1) % n][0]) / 2,
                  (verts[i][1] + verts[(i + 1) % n][1]) / 2) for i in range(n)]
+
+    def _shape_edge_frame(self, shape, edge_index):
+        """(origin, tangent, normal) for one of `shape`'s own edges, all
+        in world space: `origin` is the edge's midpoint (same point
+        _shape_edge_midpoints returns), `tangent` the unit vector along
+        it (from corner `edge_index` to corner `edge_index + 1`), and
+        `normal` the unit vector perpendicular to it, pointing AWAY from
+        the shape's own centroid. A connection's bezier control points
+        are stored relative to THIS frame (see _bezier_handle_world) --
+        recomputed fresh from the shape's CURRENT rotation/position every
+        call, the same "never stored, always derived live" convention
+        _shape_edge_midpoints itself already uses, so a handle tracks its
+        own shape's move/rotate exactly like the curve's own endpoint
+        does, with no separate update step needed anywhere a shape
+        changes."""
+        verts = self._shape_world_vertices(shape)
+        n = len(verts)
+        v1, v2 = verts[edge_index], verts[(edge_index + 1) % n]
+        ox, oy = (v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2
+        tx, ty = v2[0] - v1[0], v2[1] - v1[1]
+        length = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / length, ty / length
+        nx, ny = -ty, tx
+        cx = sum(p[0] for p in verts) / n
+        cy = sum(p[1] for p in verts) / n
+        if (ox - cx) * nx + (oy - cy) * ny < 0:
+            nx, ny = -nx, -ny
+        return (ox, oy), (tx, ty), (nx, ny)
+
+    def _bezier_handle_world(self, shape, edge_index, handle):
+        """World-space position of one connection endpoint's control
+        point: `handle` is {"t", "n"}, world-length offsets along that
+        edge's own tangent/normal (_shape_edge_frame) from its midpoint
+        -- NOT a fraction and NOT a point relative to the OTHER end, so
+        it stays meaningful regardless of where the connection's far end
+        currently is."""
+        origin, (tx, ty), (nx, ny) = self._shape_edge_frame(shape, edge_index)
+        t, n = handle["t"], handle["n"]
+        return origin[0] + t * tx + n * nx, origin[1] + t * ty + n * ny
+
+    def _handle_from_world_point(self, shape, edge_index, world_point):
+        """Inverse of _bezier_handle_world -- the {"t", "n"} a control
+        point currently AT `world_point` would need, in `shape`'s edge
+        `edge_index` own frame. Used both to set a freshly-made
+        connection's default handles (a colinear third-of-the-way point,
+        see _complete_or_cancel_pending_connection) and to update a
+        handle live while it's being dragged (_on_canvas_drag)."""
+        (ox, oy), (tx, ty), (nx, ny) = self._shape_edge_frame(shape, edge_index)
+        dx, dy = world_point[0] - ox, world_point[1] - oy
+        return {"t": dx * tx + dy * ty, "n": dx * nx + dy * ny}
+
+    def _default_connection_handles(self, a_shape, a_edge, b_shape, b_edge):
+        """The {"a_handle", "b_handle"} a brand-new connection between
+        these two edges starts with -- two points, one third and two
+        thirds of the way along the straight line between the edges' own
+        midpoints, which makes the initial cubic bezier render as exactly
+        that straight line (the standard construction: a cubic through
+        colinear, evenly-spaced control points is itself a straight
+        line) -- so a fresh connection looks identical to the plain line
+        segment this feature replaces, until a handle is actually
+        dragged."""
+        a_mid = self._shape_edge_midpoints(a_shape)[a_edge]
+        b_mid = self._shape_edge_midpoints(b_shape)[b_edge]
+        third = (a_mid[0] + (b_mid[0] - a_mid[0]) / 3, a_mid[1] + (b_mid[1] - a_mid[1]) / 3)
+        two_thirds = (a_mid[0] + (b_mid[0] - a_mid[0]) * 2 / 3, a_mid[1] + (b_mid[1] - a_mid[1]) * 2 / 3)
+        return (self._handle_from_world_point(a_shape, a_edge, third),
+                self._handle_from_world_point(b_shape, b_edge, two_thirds))
 
     def _joined_points(self):
         """Set of (shape_id, edge_index) already the endpoint of a real
@@ -1669,28 +1809,70 @@ class InteractiveBuilderApp:
                     best, best_dist = {"shape_id": shape["id"], "edge_index": edge_index}, dist
         return best
 
-    def _connection_endpoints(self, conn):
-        """Screen-space (a, b) midpoints for a connection, or None if
-        either shape it references no longer exists."""
+    def _connection_geometry(self, conn):
+        """World-space (a_mid, a_ctrl, b_ctrl, b_mid) -- the four points
+        defining this connection's cubic bezier (endpoint, its own
+        control point, the other end's control point, other endpoint) --
+        or None if either shape it references no longer exists."""
         a_shape, b_shape = self._shape_by_id(conn["a_shape"]), self._shape_by_id(conn["b_shape"])
         if a_shape is None or b_shape is None:
             return None
-        a = self._world_to_screen(*self._shape_edge_midpoints(a_shape)[conn["a_edge"]])
-        b = self._world_to_screen(*self._shape_edge_midpoints(b_shape)[conn["b_edge"]])
-        return a, b
+        a_mid = self._shape_edge_midpoints(a_shape)[conn["a_edge"]]
+        b_mid = self._shape_edge_midpoints(b_shape)[conn["b_edge"]]
+        a_ctrl = self._bezier_handle_world(a_shape, conn["a_edge"], conn["a_handle"])
+        b_ctrl = self._bezier_handle_world(b_shape, conn["b_edge"], conn["b_handle"])
+        return a_mid, a_ctrl, b_ctrl, b_mid
+
+    def _connection_screen_curve(self, conn):
+        """This connection's bezier sampled into screen-space points
+        (_cubic_bezier_points), or None if either shape no longer exists.
+        World-to-screen (_world_to_screen) is a uniform scale + translate,
+        so converting the 4 control points first and sampling the curve
+        AFTER gives exactly the same polyline as sampling in world space
+        and converting every point -- cheaper, since it's only 4
+        conversions instead of BEZIER_CURVE_STEPS + 1."""
+        geometry = self._connection_geometry(conn)
+        if geometry is None:
+            return None
+        screen_points = [self._world_to_screen(*p) for p in geometry]
+        return _cubic_bezier_points(*screen_points)
 
     def _hit_test_connection(self, screen_x, screen_y):
-        """Id of the connection whose line passes within
+        """Id of the connection whose curve passes within
         CONNECTION_HIT_RADIUS screen pixels of the given point, or None."""
         best, best_dist = None, CONNECTION_HIT_RADIUS
         for conn in self.connections:
-            endpoints = self._connection_endpoints(conn)
-            if endpoints is None:
+            curve = self._connection_screen_curve(conn)
+            if curve is None:
                 continue
-            dist = _point_segment_distance((screen_x, screen_y), *endpoints)
+            dist = min(_point_segment_distance((screen_x, screen_y), curve[i], curve[i + 1])
+                       for i in range(len(curve) - 1))
             if dist < best_dist:
                 best, best_dist = conn["id"], dist
         return best
+
+    def _hit_test_bezier_handle(self, screen_x, screen_y):
+        """"a" or "b" if the given point is within BEZIER_HANDLE_HIT_RADIUS
+        of that end's control-point handle for the CURRENTLY selected
+        connection, else None -- there's nothing to hit-test at all with
+        no connection selected (self.selected_connection_id), since a
+        handle is only ever drawn/clickable for that one connection (see
+        module docstring's bezier section -- "only adjustable when
+        visible")."""
+        if self.selected_connection_id is None:
+            return None
+        conn = next((c for c in self.connections if c["id"] == self.selected_connection_id), None)
+        if conn is None:
+            return None
+        geometry = self._connection_geometry(conn)
+        if geometry is None:
+            return None
+        _, a_ctrl, b_ctrl, _ = geometry
+        for end, ctrl in (("a", a_ctrl), ("b", b_ctrl)):
+            sx, sy = self._world_to_screen(*ctrl)
+            if math.hypot(screen_x - sx, screen_y - sy) <= BEZIER_HANDLE_HIT_RADIUS:
+                return end
+        return None
 
     def _remove_shape(self, shape_id):
         """Deletes the shape and every connection touching it -- a
@@ -1967,7 +2149,8 @@ class InteractiveBuilderApp:
         face_index = {s["id"]: i for i, s in enumerate(self.shapes)}
         builder_connections = [
             {"a_face": face_index[c["a_shape"]], "a_edge": c["a_edge"],
-             "b_face": face_index[c["b_shape"]], "b_edge": c["b_edge"]}
+             "b_face": face_index[c["b_shape"]], "b_edge": c["b_edge"],
+             "a_handle": dict(c["a_handle"]), "b_handle": dict(c["b_handle"])}
             for c in self.connections
         ]
         return faces, net_layout, builder_connections
@@ -2055,6 +2238,7 @@ class InteractiveBuilderApp:
         self._hover_shape_id = None
         self._hover_edge_index = None
         self._drag_state = None
+        self._bezier_handle_drag = None
         self._marquee_start = None
         self._marquee_current = None
 
@@ -2088,18 +2272,38 @@ class InteractiveBuilderApp:
 
         if exact_connections_ok:
             for c in builder_connections:
+                a_shape_id, b_shape_id = shape_ids[c["a_face"]], shape_ids[c["b_face"]]
+                # "a_handle"/"b_handle" (this app's own bezier control
+                # points) are only present in a file saved by a version
+                # of this app that tracked them -- an older
+                # builder_connections entry (or a hand-authored one) has
+                # neither, so it gets the same straight-line default a
+                # freshly-made connection would (_default_connection_
+                # handles), rather than failing to load.
+                if "a_handle" in c and "b_handle" in c:
+                    a_handle, b_handle = c["a_handle"], c["b_handle"]
+                else:
+                    a_handle, b_handle = self._default_connection_handles(
+                        self._shape_by_id(a_shape_id), c["a_edge"],
+                        self._shape_by_id(b_shape_id), c["b_edge"])
                 self.connections.append({
                     "id": self._next_connection_id,
-                    "a_shape": shape_ids[c["a_face"]], "a_edge": c["a_edge"],
-                    "b_shape": shape_ids[c["b_face"]], "b_edge": c["b_edge"],
+                    "a_shape": a_shape_id, "a_edge": c["a_edge"],
+                    "b_shape": b_shape_id, "b_edge": c["b_edge"],
+                    "a_handle": a_handle, "b_handle": b_handle,
                 })
                 self._next_connection_id += 1
         else:
             for conn in _infer_connections(faces):
+                a_shape_id, b_shape_id = shape_ids[conn["a_face"]], shape_ids[conn["b_face"]]
+                a_handle, b_handle = self._default_connection_handles(
+                    self._shape_by_id(a_shape_id), conn["a_edge"],
+                    self._shape_by_id(b_shape_id), conn["b_edge"])
                 self.connections.append({
                     "id": self._next_connection_id,
-                    "a_shape": shape_ids[conn["a_face"]], "a_edge": conn["a_edge"],
-                    "b_shape": shape_ids[conn["b_face"]], "b_edge": conn["b_edge"],
+                    "a_shape": a_shape_id, "a_edge": conn["a_edge"],
+                    "b_shape": b_shape_id, "b_edge": conn["b_edge"],
+                    "a_handle": a_handle, "b_handle": b_handle,
                 })
                 self._next_connection_id += 1
 
@@ -2225,6 +2429,20 @@ class InteractiveBuilderApp:
         Delete). Clicking a shape's body away from any handle or
         connection line simply deselects, same as clicking empty
         space."""
+        if self._connection_pending is None:
+            # A bezier handle is only ever checked while nothing's
+            # pending (arming a pending connection already clears
+            # selected_connection_id -- see below -- so there's nothing
+            # to drag a handle OF at that point anyway). Starts a drag
+            # rather than falling through to the ordinary handle/
+            # connection hit-tests below -- the SAME click-click gesture
+            # target and a handle's own hit area can overlap right at a
+            # curve's own endpoint, and a handle drag should win there.
+            end = self._hit_test_bezier_handle(event.x, event.y)
+            if end is not None:
+                self._begin_undoable_change()
+                self._bezier_handle_drag = {"conn_id": self.selected_connection_id, "end": end}
+                return
         if self._connection_pending is not None:
             if self._complete_or_cancel_pending_connection():
                 # A completed connection deselects everything and stops
@@ -2269,11 +2487,15 @@ class InteractiveBuilderApp:
         made = self._hover_shape_id is not None
         if made:
             self._push_undo()
+            a_shape_id, a_edge = self._connection_pending["from_shape"], self._connection_pending["from_edge"]
+            b_shape_id, b_edge = self._hover_shape_id, self._hover_edge_index
+            a_handle, b_handle = self._default_connection_handles(
+                self._shape_by_id(a_shape_id), a_edge, self._shape_by_id(b_shape_id), b_edge)
             self.connections.append({
                 "id": self._next_connection_id,
-                "a_shape": self._connection_pending["from_shape"],
-                "a_edge": self._connection_pending["from_edge"],
-                "b_shape": self._hover_shape_id, "b_edge": self._hover_edge_index,
+                "a_shape": a_shape_id, "a_edge": a_edge,
+                "b_shape": b_shape_id, "b_edge": b_edge,
+                "a_handle": a_handle, "b_handle": b_handle,
             })
             self._next_connection_id += 1
             self._refresh_vme_state()
@@ -2303,6 +2525,18 @@ class InteractiveBuilderApp:
         self.selected_connection_id = None
 
     def _on_canvas_drag(self, event):
+        if self._bezier_handle_drag is not None:
+            conn = next((c for c in self.connections
+                         if c["id"] == self._bezier_handle_drag["conn_id"]), None)
+            if conn is not None:
+                end = self._bezier_handle_drag["end"]
+                shape = self._shape_by_id(conn[f"{end}_shape"])
+                if shape is not None:
+                    wx, wy = self._screen_to_world(event.x, event.y)
+                    conn[f"{end}_handle"] = self._handle_from_world_point(
+                        shape, conn[f"{end}_edge"], (wx, wy))
+                    self._redraw()
+            return
         if self._drag_state is not None:
             wx, wy = self._screen_to_world(event.x, event.y)
             start_wx, start_wy = self._drag_state["start_world"]
@@ -2344,6 +2578,7 @@ class InteractiveBuilderApp:
 
     def _on_canvas_release(self, _event):
         self._drag_state = None
+        self._bezier_handle_drag = None
         self._commit_undoable_change()
         if self._marquee_start is not None:
             self._finish_marquee_select()
@@ -2626,6 +2861,7 @@ class InteractiveBuilderApp:
         self.selected_ids = set()
         self.selected_connection_id = None
         self._drag_state = None
+        self._bezier_handle_drag = None
         self._rotate_state = None
         self._connection_pending = None
         self._update_title()
@@ -2645,6 +2881,7 @@ class InteractiveBuilderApp:
         self.selected_ids = set()
         self.selected_connection_id = None
         self._drag_state = None
+        self._bezier_handle_drag = None
         self._rotate_state = None
         self._connection_pending = None
         self._update_title()
@@ -2679,7 +2916,8 @@ class InteractiveBuilderApp:
                        for s in copied_shapes],
             "connections": [
                 {"a_index": index_of[c["a_shape"]], "a_edge": c["a_edge"],
-                 "b_index": index_of[c["b_shape"]], "b_edge": c["b_edge"]}
+                 "b_index": index_of[c["b_shape"]], "b_edge": c["b_edge"],
+                 "a_handle": dict(c["a_handle"]), "b_handle": dict(c["b_handle"])}
                 for c in self.connections
                 if c["a_shape"] in index_of and c["b_shape"] in index_of
             ],
@@ -2721,6 +2959,7 @@ class InteractiveBuilderApp:
                 "id": self._next_connection_id,
                 "a_shape": new_ids[conn["a_index"]], "a_edge": conn["a_edge"],
                 "b_shape": new_ids[conn["b_index"]], "b_edge": conn["b_edge"],
+                "a_handle": dict(conn["a_handle"]), "b_handle": dict(conn["b_handle"]),
             })
             self._next_connection_id += 1
         self.selected_ids = set(new_ids)
@@ -2815,9 +3054,48 @@ class InteractiveBuilderApp:
         self.canvas.create_image(left, top, anchor="nw", image=photo)
 
     def _draw_connection_line(self, a, b, selected):
+        """Plain straight segment -- used only for the pending connection's
+        own drag-preview line (_redraw), which has no second shape/edge
+        yet to define a real curve from. A MADE connection always draws
+        as a bezier instead (_draw_connection_curve)."""
         self.canvas.create_line(
             *a, *b, fill=SELECTION_OUTLINE_COLOR if selected else CONNECTION_COLOR,
             width=CONNECTION_SELECTED_WIDTH if selected else CONNECTION_WIDTH)
+
+    def _draw_connection_curve(self, conn, selected):
+        """A real connection's cubic bezier (module docstring's bezier
+        section), sampled into a many-segment polyline (_cubic_bezier_
+        points has no Tk equivalent with two independent control
+        points) -- same color/width convention _draw_connection_line
+        used for the plain-line version this replaced."""
+        curve = self._connection_screen_curve(conn)
+        if curve is None:
+            return
+        flat = [coord for point in curve for coord in point]
+        self.canvas.create_line(
+            *flat, fill=SELECTION_OUTLINE_COLOR if selected else CONNECTION_COLOR,
+            width=CONNECTION_SELECTED_WIDTH if selected else CONNECTION_WIDTH)
+
+    def _draw_bezier_handles(self, conn):
+        """The two adjustable control-point handles for `conn` -- a thin
+        red line from each endpoint (edge midpoint) to its own control
+        point, with a filled red dot at the point itself (BEZIER_HANDLE_
+        COLOR/_RADIUS/_LINE_WIDTH) -- ONLY ever called for the single
+        currently-selected connection (see _redraw and module docstring:
+        "only adjustable when visible")."""
+        geometry = self._connection_geometry(conn)
+        if geometry is None:
+            return
+        a_mid, a_ctrl, b_ctrl, b_mid = geometry
+        for mid, ctrl in ((a_mid, a_ctrl), (b_mid, b_ctrl)):
+            p0 = self._world_to_screen(*mid)
+            p1 = self._world_to_screen(*ctrl)
+            self.canvas.create_line(*p0, *p1, fill=BEZIER_HANDLE_COLOR,
+                                     width=BEZIER_HANDLE_LINE_WIDTH)
+            self.canvas.create_oval(
+                p1[0] - BEZIER_HANDLE_RADIUS, p1[1] - BEZIER_HANDLE_RADIUS,
+                p1[0] + BEZIER_HANDLE_RADIUS, p1[1] + BEZIER_HANDLE_RADIUS,
+                fill=BEZIER_HANDLE_COLOR, outline="")
 
     def _draw_handle_circle(self, shape, edge_index, lit, joined):
         """lit (selected/hovered/the pending point itself) always wins,
@@ -2849,18 +3127,16 @@ class InteractiveBuilderApp:
                               selected=shape["id"] in self.selected_ids, hatched=shape["flipped"])
 
         for conn in self.connections:
-            endpoints = self._connection_endpoints(conn)
-            if endpoints is not None:
-                # A connection highlights whenever it's explicitly
-                # selected OR it touches any currently-selected shape --
-                # the shape at its OTHER end stays its normal color (see
-                # the shape-drawing loop above, which only lights up
-                # self.selected_ids), so only the line itself, not its
-                # neighbour, reads as "part of this".
-                highlighted = (conn["id"] == self.selected_connection_id
-                               or conn["a_shape"] in self.selected_ids
-                               or conn["b_shape"] in self.selected_ids)
-                self._draw_connection_line(*endpoints, selected=highlighted)
+            # A connection highlights whenever it's explicitly selected
+            # OR it touches any currently-selected shape -- the shape at
+            # its OTHER end stays its normal color (see the shape-drawing
+            # loop above, which only lights up self.selected_ids), so
+            # only the curve itself, not its neighbour, reads as "part of
+            # this".
+            highlighted = (conn["id"] == self.selected_connection_id
+                           or conn["a_shape"] in self.selected_ids
+                           or conn["b_shape"] in self.selected_ids)
+            self._draw_connection_curve(conn, selected=highlighted)
 
         if self._connection_pending is not None:
             from_shape = self._shape_by_id(self._connection_pending["from_shape"])
@@ -2920,6 +3196,20 @@ class InteractiveBuilderApp:
                         if math.hypot(cx - sx, cy - sy) > HANDLE_HIT_RADIUS:
                             continue
                     self._draw_handle_circle(shape, edge_index, lit=lit, joined=joined)
+
+        # The selected connection's own two bezier control handles --
+        # ONLY that one connection (never one merely highlighted via an
+        # endpoint shape's selection, see module docstring's bezier
+        # section) and only in Join mode, the only mode a connection can
+        # even BE selected in (self.selected_connection_id is already
+        # always None otherwise -- see _set_tool_mode). Drawn last (on
+        # top of everything else drawn so far) so a handle is never
+        # occluded by a shape or another connection's own curve.
+        if self.tool_mode == "join" and self.selected_connection_id is not None:
+            selected_conn = next(
+                (c for c in self.connections if c["id"] == self.selected_connection_id), None)
+            if selected_conn is not None:
+                self._draw_bezier_handles(selected_conn)
 
         if self.armed_n is not None and self._ghost_world_xy is not None:
             # Drawn exactly like a real, selected shape (solid fill, white

@@ -289,6 +289,7 @@ if str(_APPS_DIR) not in sys.path:
 
 import glob
 import json
+import math
 import os
 import queue
 import threading
@@ -341,6 +342,19 @@ SESSION_OUTPUT_DIR = DATA_DIR / "output"
 # with the per-coarse-face coloring -- see load_fabric_spec.
 SUBDIVISION_EDGE_ALPHA = 0.35
 SUBDIVISION_EDGE_WIDTH = 0.5
+
+# The Net panel's own bezier connection curves (self.target_connections,
+# see _draw_target_faces) -- interactive_builder_app's own gluing between
+# two faces' edges, shown here purely for context (no handles: this
+# panel is read-only, see module-level _connection_curve_points' own
+# comment) -- solid white (explicit user request, for contrast against
+# every per-face color this panel uses -- none of them are anywhere near
+# white), drawn with a HIGHER zorder than every face patch/subdivision
+# overlay so it always reads on top of the faces themselves, never
+# tucked underneath one.
+CONNECTION_CURVE_COLOR = "white"
+CONNECTION_CURVE_WIDTH = 1.0
+CONNECTION_CURVE_ZORDER = 5
 
 # How much of each "Level N" panel's frame the shape's own bounding
 # box fills: axis half-range = shape's half-extent * this. 1.0 would
@@ -583,6 +597,89 @@ def _layout_from_net_layout(faces, net_layout):
         points = apply_rigid(regular_polygon_vertices(len(face)), R, t)
         placed[face_idx] = [np.array([p[0], -p[1]]) for p in points]
     return placed
+
+
+# interactive_builder_app's own bezier connection curves (module
+# docstring's "Bezier handles" section there) -- drawn here too, in the
+# Net panel, per explicit user request ("show the connection but don't
+# show the handles"): this panel is read-only, so only
+# _connection_curve_points/_draw_target_faces exist here, never the
+# handle hit-testing/dragging machinery that app owns.
+
+def _placed_edge_frame(points, edge_index):
+    """Same construction as interactive_builder_app's own
+    _shape_edge_frame -- (origin, tangent, normal) for one edge of an
+    already-placed 2D polygon (`points`, this app's own target_layout
+    entries) -- but over plain placed points rather than a live shape,
+    since this app has no "shape" object, just the final 2D positions.
+    The outward-normal test (perpendicular to the edge, flipped if it
+    doesn't point away from the polygon's own centroid) is chirality-
+    agnostic, so it comes out correct whether `points` is a plain
+    rotation of the original interactive_builder_app shape or (as here,
+    _layout_from_net_layout's own Y-flip) a mirror image of it -- no
+    separate case needed for the two."""
+    n = len(points)
+    v1, v2 = points[edge_index], points[(edge_index + 1) % n]
+    ox, oy = (v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2
+    tx, ty = v2[0] - v1[0], v2[1] - v1[1]
+    length = math.hypot(tx, ty) or 1.0
+    tx, ty = tx / length, ty / length
+    nx, ny = -ty, tx
+    cx = sum(p[0] for p in points) / n
+    cy = sum(p[1] for p in points) / n
+    if (ox - cx) * nx + (oy - cy) * ny < 0:
+        nx, ny = -nx, -ny
+    return np.array([ox, oy]), np.array([tx, ty]), np.array([nx, ny])
+
+
+def _cubic_bezier_points(p0, p1, p2, p3, steps=24):
+    """Same sampling idea as interactive_builder_app's own
+    _cubic_bezier_points (duplicated rather than imported -- these are
+    two separate, unrelated Tkinter apps, see this module's own docstring
+    on why _INTERACTIVE_BUILDER_EDGE_LENGTH is duplicated rather than
+    imported for the same reason), just over numpy points instead of
+    plain tuples since that's what this app's own target_layout already
+    uses."""
+    return [(1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1 + 3 * (1 - t) * t ** 2 * p2 + t ** 3 * p3
+            for t in np.linspace(0.0, 1.0, steps + 1)]
+
+
+def _connection_curve_points(target_layout, conn, steps=24):
+    """The screen/world-space (this app's own unit scale, same as
+    target_layout itself) points of one saved builder_connection's cubic
+    bezier -- None if either face it references isn't in `target_layout`
+    (e.g. a stale connection referencing a face index out of range,
+    which shouldn't happen from a file this app's own Save/
+    interactive_builder_app's Save ever produces, but isn't worth a
+    crash over). `conn["a_handle"]/["b_handle"]` are interactive_
+    builder_app's own {"t", "n"} PIXEL-scale (its DEFAULT_SHAPE_EDGE_
+    LENGTH-unit) offsets -- rescaled by _INTERACTIVE_BUILDER_EDGE_LENGTH
+    exactly like every cx/cy already is (_layout_from_net_layout), then
+    applied against the tangent/normal frame RECOMPUTED from this app's
+    own already-placed (rescaled + Y-flipped) points
+    (_placed_edge_frame) rather than transformed alongside the frame --
+    since that reflection is a linear map, applying an unchanged
+    coefficient to a frame recomputed after the transform lands on
+    exactly the same point as transforming the pre-image control point
+    would have."""
+    a_points, b_points = target_layout.get(conn["a_face"]), target_layout.get(conn["b_face"])
+    if a_points is None or b_points is None:
+        return None
+    a_mid, a_tan, a_norm = _placed_edge_frame(a_points, conn["a_edge"])
+    b_mid, b_tan, b_norm = _placed_edge_frame(b_points, conn["b_edge"])
+    scale = _INTERACTIVE_BUILDER_EDGE_LENGTH
+    # "a_handle"/"b_handle" are only present in a builder_connections
+    # entry saved by a version of interactive_builder_app that tracked
+    # them -- an older file's entry has neither, so it defaults to
+    # {"t": 0, "n": 0} (a control point sitting exactly on the edge
+    # midpoint), giving a curve close to -- though not bit-identical
+    # with -- the plain straight line that entry used to draw, rather
+    # than a KeyError.
+    a_handle = conn.get("a_handle", {"t": 0.0, "n": 0.0})
+    b_handle = conn.get("b_handle", {"t": 0.0, "n": 0.0})
+    a_ctrl = a_mid + (a_handle["t"] / scale) * a_tan + (a_handle["n"] / scale) * a_norm
+    b_ctrl = b_mid + (b_handle["t"] / scale) * b_tan + (b_handle["n"] / scale) * b_norm
+    return _cubic_bezier_points(a_mid, a_ctrl, b_ctrl, b_mid, steps)
 
 
 def _validate_mesh(faces):
@@ -1036,6 +1133,11 @@ class InflatePolyhedronApp:
         self.subdivision_level = 0
         self.edge_length = None
         self.target_layout = None
+        # interactive_builder_app's own saved "builder_connections" (its
+        # bezier control points included), or None -- see on_select_net's
+        # own comment for when this is/isn't populated alongside
+        # target_layout.
+        self.target_connections = None
         self.positions = None
         self.iteration_count = 0
         self.last_stats = {}
@@ -1572,8 +1674,16 @@ class InflatePolyhedronApp:
         net_layout = self._net_file_json.get("net_layout")
         if net_layout is not None and len(net_layout) == len(self.base_faces):
             self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
+            # Only meaningful (and only ever present) alongside the exact
+            # "net_layout" it was saved with -- see interactive_builder_
+            # app's own module docstring's "net JSON import/export"
+            # section on why the two are always written/read together;
+            # the BFS-fallback branch below has no matching connection
+            # geometry to show, so target_connections stays None there.
+            self.target_connections = self._net_file_json.get("builder_connections")
         else:
             self.target_layout = build_stretchy_net_layout(self.base_faces)
+            self.target_connections = None
 
         # Level 0 and Level 1 share this exact fan-triangulated topology
         # (see module docstring) -- computed once here, up front, rather
@@ -1688,8 +1798,10 @@ class InflatePolyhedronApp:
         net_layout = (self._net_file_json or {}).get("net_layout")
         if net_layout is not None and len(net_layout) == len(self.base_faces):
             self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
+            self.target_connections = (self._net_file_json or {}).get("builder_connections")
         else:
             self.target_layout = build_stretchy_net_layout(self.base_faces)
+            self.target_connections = None
 
         self.subdivision_level = state.subdivision_level
         self.pressure_value = state.pressure_value
@@ -2699,7 +2811,11 @@ class InflatePolyhedronApp:
         docstring: level L's overlay is subdivide_polygon's own
         resolution 2**(L-1), the absolute-resolution equivalent of this
         app's own incremental fan-then-quarter scheme), as a 2D preview of
-        the mesh actually being solved."""
+        the mesh actually being solved. When the loaded net carries
+        interactive_builder_app's own saved connections (self.target_
+        connections), each one's bezier curve is drawn too (module-level
+        _connection_curve_points) -- the curve only, never its two
+        adjustable handles, since this panel is read-only."""
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
         overlay_level = self.subdivision_level
@@ -2723,6 +2839,15 @@ class InflatePolyhedronApp:
                     segments, colors="k", linewidths=SUBDIVISION_EDGE_WIDTH,
                     alpha=SUBDIVISION_EDGE_ALPHA, zorder=3))
             all_pts.extend(placed)
+
+        if self.target_connections:
+            for conn in self.target_connections:
+                curve = _connection_curve_points(self.target_layout, conn)
+                if curve is not None:
+                    xs, ys = zip(*curve)
+                    self.ax2d.plot(xs, ys, color=CONNECTION_CURVE_COLOR,
+                                    linewidth=CONNECTION_CURVE_WIDTH,
+                                    zorder=CONNECTION_CURVE_ZORDER)
 
         all_pts = np.array(all_pts)
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)

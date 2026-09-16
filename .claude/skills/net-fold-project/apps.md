@@ -38,7 +38,11 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   (flat undeformed layout) is still matplotlib, own independent zoom.
   If the loaded net has `net_layout` (saved by `interactive_builder_app`), the Net panel shows
   that EXACT flat arrangement (with a Y-flip: Tk canvas Y-down vs matplotlib Y-up) instead of a
-  fresh BFS spanning-tree layout.
+  fresh BFS spanning-tree layout. When that same file also has `builder_connections`
+  (`self.target_connections`), each one's bezier curve (module-level `_connection_curve_points`/
+  `_placed_edge_frame`) is drawn on top of the faces too — same curve `interactive_builder_app`
+  shows, rescaled/Y-flipped like everything else in this panel — but never its two handles (this
+  panel is read-only).
 - **Debug mode** ("d" key): adds steps-vs-convergence radio, **Validate Mesh** (combinatorial
   winding check only — geometric inside/out check is informational, not gating), **Show
   normals** (draws each face's outward normal, live equivalent of Validate Mesh's info note),
@@ -111,6 +115,15 @@ not drag — a drag design was tried and reverted per explicit request). Every c
 `(shape_id, corner_index)`, not a shared vertex-id — that identity is only computed at Save
 (union-find over connections), never live, since live merging surprised the user once (a
 transitively-implied merge blocked an unrelated, individually-correct connection).
+
+Every connection is a cubic bezier, not a line segment (2026-09-16, explicit) — two adjustable
+control points, one per end, stored as `{"t","n"}` world-length offsets along that END'S OWN
+edge frame (tangent/outward-normal, `_shape_edge_frame`), not an absolute point or an offset from
+the other end, so a handle tracks its own shape's move/rotate for free, no update step needed.
+Fresh connection defaults to dead straight (`_default_connection_handles` — colinear thirds).
+Handles only ever drawn/clickable (thin red line + filled red dot, `_draw_bezier_handles`/
+`_hit_test_bezier_handle`) for the ONE currently-selected connection, which only happens in Join
+mode — dragging one is a single undo step, connection stays selected throughout.
 
 **File > Save** writes the stretchy vertex-loop JSON format + this app's own `net_layout`
 (`{cx,cy,rotation}` per face) and `view` (`{scale}`) extension fields — any other reader (incl.

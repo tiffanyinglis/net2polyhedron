@@ -39,7 +39,9 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   removed — see physics.md), debug-only Validate Mesh/Show normals, Auto retry-loop removal,
   tolerance default changes, stop-during-calibration fix, debug-only "Pressure calc step ×"
   spinner (2026-09-16, since REMOVED, also explicit), Convergence History's debug-only "Precomp
-  time"/"Sim time" columns (2026-09-16, explicit, still active). See `apps.md`.
+  time"/"Sim time" columns (2026-09-16, explicit, still active), Net panel drawing
+  `interactive_builder_app`'s saved bezier connection curves (self.target_connections, no
+  handles — read-only panel; 2026-09-16, explicit, still active). See `apps.md`.
 
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.
