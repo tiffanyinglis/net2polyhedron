@@ -3,8 +3,10 @@ Inflate Polyhedron -- interactive fabric relaxation for stretchy meshes.
 
     python src/apps/inflate_polyhedron_app/app.py
 
-Nets here (data/input/stretchy_nets/*.json, see utils/inflate_polyhedron/stretchy_mesh.py
-for the vertex-loop format) are specified directly as vertex loops --
+Nets here (data/input/stretchy_nets/*.json or *.poly -- interactive_builder_app's own current
+save extension, plain JSON content either way, see refresh_net_list -- see utils/
+inflate_polyhedron/stretchy_mesh.py for the vertex-loop format) are specified directly as
+vertex loops --
 shared vertex ids ARE the adjacency, so a face pair sharing several edges
 (which would force two RIGID flat faces into the same plane -- see
 utils/inflate_polyhedron/stretchy_mesh.py's module docstring) needs no special
@@ -343,12 +345,23 @@ from session_state import (
 
 DEFAULT_NET_BASENAME = "cube"
 
+# The app's own backronym (2026-09-16, explicit user request) -- used as
+# the window title (_apply_mode_visibility); ".hippo" (SESSION_FILE_
+# EXTENSION, below) was named first, this is what it stands for.
+APP_TITLE = "HIPPO — Hierarchical Inflatable Phabric Polyhedron Optimizer"
+
 # File > Save/Load's own default directory for a whole SESSION (see
 # on_save_session_clicked/on_load_session_clicked) -- deliberately NOT
 # STRETCHY_NETS_DIR (data/input/stretchy_nets/, the hand-authored nets
 # the "Choose a net" combo scans), since a saved session is a generated
 # artifact of using this app, not an input to it.
 SESSION_OUTPUT_DIR = DATA_DIR / "output"
+# File > Save/Load's own extension (2026-09-16, explicit user request) --
+# still plain JSON content (session_state.SessionStateModel's own
+# model_dump_json), just a distinct extension so a saved session reads
+# as this app's own file type at a glance, not an ordinary .json (e.g.
+# one of the hand-authored nets under data/input/stretchy_nets/).
+SESSION_FILE_EXTENSION = ".hippo"
 
 # A fabric-subdivided net's fine mesh edges (the "Level N" panels' own
 # PyVista wireframe overlay, NOT the Net panel -- see _draw_target_faces'
@@ -356,6 +369,17 @@ SESSION_OUTPUT_DIR = DATA_DIR / "output"
 # drawn thin so the subdivision reads as texture rather than a bold
 # wireframe competing with the per-coarse-face coloring.
 SUBDIVISION_EDGE_WIDTH = 0.5
+
+
+def _midpoint_color(color_a, color_b):
+    """The plain RGB midpoint of two matplotlib-recognized colors (hex
+    string, named color, ...), as a (r, g, b) tuple in [0, 1] -- used for
+    each "Level N" panel's own wireframe edge color, halfway between
+    white and that face's own fill color (2026-09-16, explicit user
+    request -- was a single fixed PLOT_THEME["fg"] for every face's
+    edges regardless of its own color)."""
+    a, b = np.array(mcolors.to_rgb(color_a)), np.array(mcolors.to_rgb(color_b))
+    return tuple((a + b) / 2)
 
 # The Net panel's own bezier connection curves (self.target_connections,
 # see _draw_target_faces) -- interactive_builder_app's own gluing between
@@ -1518,7 +1542,7 @@ class InflatePolyhedronApp:
         "convergence" and Show normals off when leaving debug mode, so
         release mode never runs a stray fixed-step request or shows a
         stale normals overlay left over from before."""
-        self.root.title(f"Inflate Polyhedron{' (debug mode)' if self.debug_mode else ''}")
+        self.root.title(f"{APP_TITLE}{' (debug mode)' if self.debug_mode else ''}")
         self.history_tree.config(
             displaycolumns="#all" if self.debug_mode else self._release_mode_history_columns)
         # Changing displaycolumns doesn't resize the WIDGET itself, so no
@@ -1850,14 +1874,25 @@ class InflatePolyhedronApp:
             vertex_ids = sorted(positions)
             idx = {v: i for i, v in enumerate(vertex_ids)}
             points = np.array([positions[v] for v in vertex_ids])
-            face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in faces])
-            mesh = pv.PolyData(points, face_conn)
-            colors = np.array(
-                [np.array(mcolors.to_rgb(self.colors[c % len(self.colors)])) * 255
-                 for c in face_of_fine], dtype=np.uint8)
-            mesh.cell_data["colors"] = colors
-            plotter.add_mesh(mesh, scalars="colors", rgb=True, show_edges=True,
-                              edge_color=PLOT_THEME["fg"], line_width=SUBDIVISION_EDGE_WIDTH)
+            # One add_mesh call PER BASE FACE, not one for the whole
+            # mesh with a per-cell "colors" scalar array (2026-09-16,
+            # explicit user request -- wireframe edges should be "the
+            # color halfway between white and the polygon color", which
+            # only makes sense as a PER-FACE edge color; VTK's own
+            # edge_color is a single uniform color per add_mesh call, so
+            # getting a different one per base face needs a separate
+            # call per base face group -- still one scene/depth buffer
+            # (plotter.clear() above, not between these calls), so
+            # occlusion across groups still works exactly like the old
+            # single-call version did.
+            for base_face in sorted(set(face_of_fine)):
+                face_color = self.colors[base_face % len(self.colors)]
+                group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == base_face]
+                face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
+                mesh = pv.PolyData(points, face_conn)
+                plotter.add_mesh(mesh, color=face_color, show_edges=True,
+                                  edge_color=_midpoint_color("white", face_color),
+                                  line_width=SUBDIVISION_EDGE_WIDTH)
 
             if self.show_normals_var.get():
                 starts, ends = [], []
@@ -1989,10 +2024,23 @@ class InflatePolyhedronApp:
         """Rescan data/input/stretchy_nets/ and rebuild the dropdown. No
         more "(not computed)" distinction -- every net now starts from a
         cheap, instant random start (see module docstring), so there's no
-        precomputed-vs-not state left to flag."""
-        paths = sorted(glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.json")))
+        precomputed-vs-not state left to flag. Scans both "*.json" (every
+        hand-authored net, and any older net saved before interactive_
+        builder_app's own File > Save switched extensions) and "*.poly"
+        (that app's own current save extension, 2026-09-16, explicit user
+        request -- same plain JSON content underneath, see its own
+        NET_FILE_EXTENSION) -- this app's own load_stretchy_mesh/json.load
+        calls never cared about the extension at all, only the content,
+        so no further change was needed to actually read one."""
+        paths = sorted(glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.json"))
+                        + glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.poly")))
         self.label_to_path = {}
         for path in paths:
+            # A ".json" and a ".poly" sharing the same basename would
+            # collide here (same derived label, second one silently wins)
+            # -- not handled specially, since the two extensions are
+            # meant to replace one another for a given net, not coexist
+            # under the same name.
             label = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
             self.label_to_path[label] = path
 
@@ -2006,10 +2054,15 @@ class InflatePolyhedronApp:
                     self.current_label = label
                     break
         else:
-            # Default to DEFAULT_NET_BASENAME (cube.json) if present,
-            # else just the first net alphabetically.
-            default_path = os.path.join(STRETCHY_NETS_DIR, DEFAULT_NET_BASENAME + ".json")
-            default_label = next((l for l, p in self.label_to_path.items() if p == default_path), None)
+            # Default to DEFAULT_NET_BASENAME (cube.poly, or cube.json for
+            # an older data/input/stretchy_nets/ that hasn't been renamed
+            # -- matched by BASENAME, not one hardcoded extension, so
+            # this doesn't silently stop finding "cube" the moment its
+            # own file gets saved back out under the other extension) if
+            # present, else just the first net alphabetically.
+            default_label = next(
+                (l for l, p in self.label_to_path.items()
+                 if os.path.splitext(os.path.basename(p))[0] == DEFAULT_NET_BASENAME), None)
             self.current_label = default_label or (labels[0] if labels else None)
 
         if self.current_label:
@@ -2121,9 +2174,15 @@ class InflatePolyhedronApp:
             messagebox.showwarning("Save", "No net is loaded yet.")
             return
         SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        # ".hippo", not ".json" (2026-09-16, explicit user request) --
+        # still plain JSON underneath (model_dump_json below), just a
+        # distinct extension so a saved session doesn't look like an
+        # ordinary .json file (e.g. one of the hand-authored nets under
+        # data/input/stretchy_nets/) in a file picker.
         path = filedialog.asksaveasfilename(
             title="Save session", initialdir=str(SESSION_OUTPUT_DIR),
-            defaultextension=".json", filetypes=[("JSON", "*.json")])
+            defaultextension=SESSION_FILE_EXTENSION,
+            filetypes=[("Inflate Polyhedron session", f"*{SESSION_FILE_EXTENSION}")])
         if not path:
             return
 
@@ -2170,7 +2229,8 @@ class InflatePolyhedronApp:
         every spinner come straight from the file."""
         path = filedialog.askopenfilename(
             title="Load session", initialdir=str(SESSION_OUTPUT_DIR),
-            filetypes=[("JSON", "*.json")])
+            filetypes=[("Inflate Polyhedron session", f"*{SESSION_FILE_EXTENSION}"),
+                       ("JSON", "*.json")])
         if not path:
             return
         try:
@@ -2352,16 +2412,16 @@ class InflatePolyhedronApp:
         """Records/updates the CURRENT level's row: the pressure last
         calibrated for it (None for Level 0, which has no pressure at all
         -- relax_initial_configuration is pure springs, see
-        stretchy_mesh's docstring -- shown as "n/a" by
+        stretchy_mesh's docstring -- shown as "--" by
         _refresh_history_table), steps so far this level
         (self.iteration_count, see _subdivide_step/_finish_relax), the
         stretch stats at this point, and the actual stopping-condition
         value -- the relax's own `optimality` (None before any
         Inflate/Relax at this level, or if a Stop request aborted before
         any step ran -- see relax_once's docstring) -- all from
-        self.last_stats, plus (debug mode only) the "Precomp time"/"Sim
-        time" columns from self._current_precomp_time_s/
-        _current_sim_time_s (see their own comment in __init__). Called on
+        self.last_stats, plus the "Elapsed Time"/"Cumulative Time" columns'
+        own backing state, self._current_precomp_time_s/_current_sim_
+        time_s (see their own comment in __init__). Called on
         every subdivide/promotion, every live Inflate/Relax progress
         update, and when a run finishes, so the row always reflects the
         level's latest state rather than only its final converged one."""
@@ -2385,7 +2445,7 @@ class InflatePolyhedronApp:
             "target_rms_pct": (None if self.subdivision_level == 0
                                 else self.last_stats.get("target_rms_pct")
                                 or self._current_target_rms_pct),
-            # Debug-mode-only "Precomp time"/"Sim time" columns -- see
+            # Backing state for "Elapsed Time"/"Cumulative Time" -- see
             # their own comment in __init__ for when each is set/reset.
             "precomp_time_s": self._current_precomp_time_s,
             "sim_time_s": self._current_sim_time_s,

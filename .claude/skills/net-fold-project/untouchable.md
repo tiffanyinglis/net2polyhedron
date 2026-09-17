@@ -12,7 +12,7 @@ src/apps/ui/{tooltip,cullable_face,__init__}.py
 src/apps/common/{bounding_box,ui_theme,paths,__init__}.py
 src/apps/polygon_subdivision_app/app.py
 src/apps/inflate_polyhedron_app/app.py
-data/input/stretchy_nets/*.json
+data/input/stretchy_nets/*.json, *.poly
 docs/{README,algorithm}.md
 .gitignore, requirements.txt, pytest.ini, .claude/settings.local.json, this skill dir
 tests/run_tests.py + every unit/ test file that already existed
@@ -45,10 +45,24 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   removed (2026-09-16, explicit — "too busy"), connection curve color changed to white
   (2026-09-16, explicit), right-click-drag pan on Net panel + all "Level N" panels with
   middle-click reset (2026-09-16, explicit, still active), `NET_ZOOM_MIN` lowered from 0.2 to 0.1
-  to match every "Level N" panel's own 10%..1000% range (2026-09-16, explicit). See `apps.md`.
+  to match every "Level N" panel's own 10%..1000% range (2026-09-16, explicit), `refresh_net_list`
+  reading `*.poly` alongside `*.json` (2026-09-16, explicit, still active). See `apps.md`.
 
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.
+
+`docs/README.md`: `.poly` extension mentions added alongside every existing `.json` one (2026-09-16,
+explicit — "update docs too", asked directly after the `.poly`-extension change itself).
+`docs/algorithm.md` had nothing to update (no `.json`/net-file-extension mentions in it at all).
+
+`data/input/stretchy_nets/*.json`: all 11 shipped nets renamed `.json` -> `.poly` via `git mv`
+(2026-09-16, explicit — "change the json files in stretchy_nets/ to .poly files") — content
+byte-for-byte unchanged, extension only. Every test file that hardcoded one of these 11 exact
+paths (`tests/unit/inflate_polyhedron/test_stretchy_mesh.py`, `test_stretchy_net_layout.py`,
+`tests/unit/interactive_builder_app/test_app.py`'s own `SHIPPED_NET_PATHS` glob) updated to match
+-- a DIRECT, necessary consequence of the rename (the suite would otherwise fail to find the
+files / silently stop testing any shipped net at all via an empty glob), not separate scope
+creep.
 
 Rigid-unfolding pipeline (`polyhedron_unfolder` app+utils, `persistence/`, `data/input/nets/`) is
 DELETED from this repo entirely — lives in sibling `polyhedron-unfolder` project. Don't

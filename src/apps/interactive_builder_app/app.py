@@ -5,10 +5,11 @@ instances of it into a pan/zoomable drawing area in the middle, then
 select/drag/rotate/delete them. A right-side tool strip (see "Tool
 modes" below) picks which of those canvas interactions is actually
 active at any moment, Photoshop/Illustrator-style. File > New/Load/Save/
-Save As round-trips the whole canvas to/from a stretchy-mesh-format
-.json (see the "net JSON import/export" section below, near
-_layout_faces_with_gap) -- the associated file, once there is one, shows
-in the window title and is what Ctrl+S saves straight to.
+Save As round-trips the whole canvas to/from a stretchy-mesh-format,
+plain-JSON-content ".poly" file (see NET_FILE_EXTENSION and the "net
+JSON import/export" section below, near _layout_faces_with_gap) -- the
+associated file, once there is one, shows in the window title and is
+what Ctrl+S saves straight to.
 
     python src/apps/interactive_builder_app/app.py
 
@@ -306,14 +307,15 @@ Interaction model:
   drift the shape under the mouse away from it).
 - **File > New/Load/Save/Save As...**: "Save As..." (`on_save_as_clicked`)
   always asks where to write the current shapes/connections out as a
-  stretchy-mesh-format `.json` (see "net JSON import/export" below),
-  defaulting to `data/input/stretchy_nets/`, plus a "view" section
-  (`{"scale": self.view_scale}`, this app's own extension) so
-  re-Loading it restores the same zoom level instead of resetting to
-  the default -- and, on success, associates that file with the canvas
-  going forward: its basename appears in the window title in brackets
-  (`_update_title`, e.g. "Interactive Builder [turtle.json]"), and it
-  becomes what plain "Save" (Ctrl+S, `on_save_clicked`) writes straight
+  stretchy-mesh-format, plain-JSON-content `NET_FILE_EXTENSION` (".poly")
+  file (see "net JSON import/export" below), defaulting to
+  `data/input/stretchy_nets/`, plus a "view" section (`{"scale": self.
+  view_scale}`, this app's own extension) so re-Loading it restores the
+  same zoom level instead of resetting to the default -- and, on success,
+  associates that file with the canvas going forward: its basename
+  appears in the window title in brackets (`_update_title`, e.g.
+  "Interactive Builder [turtle.poly]"), and it becomes what plain "Save"
+  (Ctrl+S, `on_save_clicked`) writes straight
   to with no dialog (falling back to Save As if nothing's associated
   yet -- nowhere to save "directly" to). "New" (`on_new_clicked`)
   clears the canvas back to empty and forgets that association;
@@ -449,6 +451,16 @@ from common.paths import STRETCHY_NETS_DIR
 from common.ui_theme import PLOT_THEME, STATUS_COLORS
 from ui.tooltip import Tooltip
 from utils.geometry.polygon_geom import attach_polygon, regular_polygon_vertices
+
+# This app's own File > Save/Save As extension (2026-09-16, explicit user
+# request), not ".json" -- still plain JSON content (see module
+# docstring's "net JSON import/export" section), just a distinct
+# extension marking a file as this pipeline's own net format; also the
+# format inflate_polyhedron_app's own "Choose a net" combo scans for
+# (STRETCHY_NETS_DIR, see its own refresh_net_list). File > Load still
+# ALSO accepts plain ".json" (a second filetypes entry) so every
+# existing hand-authored/previously-saved net still opens.
+NET_FILE_EXTENSION = ".poly"
 
 # Palette entries, in display order.
 POLYGON_NS = [3, 4, 5, 6, 7, 8]
@@ -2085,8 +2097,10 @@ class InteractiveBuilderApp:
                 "Can't save", "Vertex merge error(s) detected. Fix before saving.")
             return False
         path = filedialog.asksaveasfilename(
-            title="Save net as", initialdir=str(STRETCHY_NETS_DIR), defaultextension=".json",
-            filetypes=[("Net JSON", "*.json"), ("All files", "*.*")])
+            title="Save net as", initialdir=str(STRETCHY_NETS_DIR),
+            defaultextension=NET_FILE_EXTENSION,
+            filetypes=[("Net", f"*{NET_FILE_EXTENSION}"), ("Net JSON", "*.json"),
+                       ("All files", "*.*")])
         if not path:
             return False
         return self._save_to_path(path)
@@ -2158,7 +2172,8 @@ class InteractiveBuilderApp:
     def on_load_clicked(self):
         path = filedialog.askopenfilename(
             title="Load net", initialdir=str(STRETCHY_NETS_DIR),
-            filetypes=[("Net JSON", "*.json"), ("All files", "*.*")])
+            filetypes=[("Net", f"*{NET_FILE_EXTENSION}"), ("Net JSON", "*.json"),
+                       ("All files", "*.*")])
         if not path:
             return
         try:

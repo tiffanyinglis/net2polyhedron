@@ -37,6 +37,10 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   columns`). "--" (not "n/a") for Level 0's own pressure (the only level whose pressure is ever
   None) and for `_format_mmss(None)`; an Elapsed Time row with only ONE of precomp/sim done shows
   just that one `mm:ss` alone, not `"mm:ss + --"` (`_refresh_history_table`).
+  `LevelHistoryRecordModel` now saves `precomp_time_s`/`sim_time_s` too (2026-09-16, explicit — a
+  loaded session showed no Elapsed Time at all, since these two used to be silently dropped as
+  "extra" fields pydantic ignores, from an earlier "diagnostic, not persistent" call made back
+  when the columns were debug-only; them being release-mode-visible now is what actually changed).
   Row coloring is 3-state now (2026-09-16, explicit — "should be yellow, not red" while running):
   `self._level_running` (set/cleared in lockstep with `_set_level_action_button_running`, the
   per-level button's own "Stop" state) makes the CURRENT frontier level's row `"running"` instead
@@ -84,6 +88,15 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   never its two handles (this panel is read-only). Net panel no longer shows a fine-mesh
   subdivision overlay (2026-09-16, explicit — "too busy"); just the plain base faces + connection
   curves.
+- **"Level N" panel wireframe edge color**: PER-BASE-FACE now (2026-09-16, explicit — "don't use
+  white... use the color half way between white and the polygon color"), not one fixed
+  `PLOT_THEME["fg"]` for every edge regardless of face. `_draw_level_panel` now does one
+  `add_mesh` call PER base face (grouped via `face_of_fine`) instead of one call for the whole
+  mesh with a per-cell "colors" scalar array — VTK's own `edge_color` is a single uniform color
+  per `add_mesh` call, so a different edge color per face needs a separate call per face group;
+  still one scene/depth buffer (`plotter.clear()` once, not between these calls), so cross-group
+  occlusion still works exactly like the old single-call version did. `_midpoint_color(a, b)`
+  (module-level) is the plain RGB average of two matplotlib-recognized colors.
 - **Pan/zoom (2026-09-16, explicit)**: right-click-drag pans. Level panels share ONE pan
   (`self.level_pan`, a 2D NDC offset applied via `vtkCamera.SetWindowCenter` in
   `_render_level_pv` — a pure post-projection viewport shift, NOT added to focal_point/position).
@@ -247,6 +260,27 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   to. `net_file` (the raw parsed net JSON, embedded wholesale) already carries `interactive_
   builder_app`'s own bezier `a_handle`/`b_handle` connection data through save/load for free —
   no schema change needed there, unlike the camera view.
+- **Session file extension is `.hippo`** (`SESSION_FILE_EXTENSION`, 2026-09-16, explicit user
+  request), not `.json` — content is unchanged (still `SessionStateModel.model_dump_json()`), the
+  extension just distinguishes a saved session from an ordinary `.json` (e.g. a hand-authored net
+  under `data/input/stretchy_nets/`) at a glance. File > Load's own dialog still ALSO accepts plain
+  `*.json` (a second `filetypes` entry) so a session saved before this change still opens.
+- **Window title is `APP_TITLE`** (2026-09-16, explicit user request) — "HIPPO — Hierarchical
+  Inflatable Phabric Polyhedron Optimizer", a backronym named AFTER `.hippo` (the session
+  extension, above) rather than the other way around. Set in `_apply_mode_visibility` (plus
+  " (debug mode)" in debug mode, same as always). Module docstring's own first line and the
+  save/load `filetypes` label text still say "Inflate Polyhedron" — not touched, out of scope for
+  what was actually asked (just the window title).
+- **Reads `*.poly` net files too, alongside `*.json`** (`refresh_net_list`, 2026-09-16, explicit —
+  `interactive_builder_app`'s own new save extension, see its own section below): both globbed
+  and merged under `data/input/stretchy_nets/`; `load_stretchy_mesh`/`json.load` never cared about
+  the extension, only content, so no further change was needed to actually read one. A `.json` and
+  a `.poly` sharing the same basename collide in the combo's own label→path map (second one wins,
+  not handled specially — the two extensions are meant to replace one another per net, not
+  coexist under the same name). `DEFAULT_NET_BASENAME`'s own default-net lookup matches by
+  BASENAME now (`os.path.splitext`), not one hardcoded `+ ".json"` path string — all 11 shipped
+  nets (including `cube`) are `.poly` now (2026-09-16, explicit — see below), so the old exact-path
+  check would otherwise silently stop finding it and fall back to "first net alphabetically".
 
 ## interactive_builder_app (`src/apps/interactive_builder_app/app.py`)
 Unrelated 2D shape-placement canvas, no relation to solving. Palette of regular polygons
@@ -266,7 +300,9 @@ Handles only ever drawn/clickable (thin red line + filled red dot, `_draw_bezier
 `_hit_test_bezier_handle`) for the ONE currently-selected connection, which only happens in Join
 mode — dragging one is a single undo step, connection stays selected throughout.
 
-**File > Save** writes the stretchy vertex-loop JSON format + this app's own `net_layout`
+**File > Save** writes the stretchy vertex-loop JSON format (as `.poly` now, `NET_FILE_EXTENSION`
+— 2026-09-16, explicit; still plain JSON content, and File > Load still ALSO accepts plain
+`.json`) + this app's own `net_layout`
 (`{cx,cy,rotation}` per face) and `view` (`{scale}`) extension fields — any other reader (incl.
 the solver) ignores the extra keys. Validation (self-loop / duplicate-directed-edge) runs ONLY
 at Save, never live while editing — an edge can only be joined once (enforced live), but

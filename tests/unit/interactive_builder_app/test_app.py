@@ -84,7 +84,8 @@ def is_valid_net(faces):
 
 # ---- shipped nets: every one must already validate unflipped ----
 
-SHIPPED_NET_PATHS = sorted(glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.json")))
+SHIPPED_NET_PATHS = sorted(glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.json"))
+                            + glob.glob(os.path.join(STRETCHY_NETS_DIR, "*.poly")))
 
 
 @pytest.mark.parametrize("net_path", SHIPPED_NET_PATHS, ids=[os.path.basename(p) for p in SHIPPED_NET_PATHS])

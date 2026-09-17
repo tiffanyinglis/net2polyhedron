@@ -63,7 +63,9 @@ facing outward).
 
 ## Describing your own net
 
-A net is a JSON `.json` file in `data/input/stretchy_nets/`: a list of
+A net is a JSON file (`.json` for a hand-authored one, or `.poly` —
+`interactive_builder_app`'s own current save extension, same JSON content
+either way) in `data/input/stretchy_nets/`: a list of
 faces, each a loop of vertex ids, with **no coordinates at all** — just
 combinatorics. Shared vertex ids *are* the adjacency, so a face pair
 sharing more than one edge (which would force two rigid, flat faces into
@@ -91,7 +93,7 @@ direction twice. `load_stretchy_mesh` (in
 `src/utils/inflate_polyhedron/stretchy_mesh.py`) checks exactly that and
 raises a clear error naming the offending edge(s) if it's violated.
 
-Drop a new `.json` file into `data/input/stretchy_nets/` and it shows up
+Drop a new `.json` or `.poly` file into `data/input/stretchy_nets/` and it shows up
 in the app's dropdown automatically — there's no cache and no precompute
 step, so it's usable immediately. See the existing files in that
 directory for more examples, including nets (like
@@ -125,11 +127,12 @@ convex hull.
   instead cancels the attempt.
   Connections can be
   selected and deleted too.
-  **File > Save** writes the whole canvas out as a `.json` in the same
-  vertex-loop format as `data/input/stretchy_nets/` (defaulting to that
+  **File > Save** writes the whole canvas out as a `.poly` file (still
+  plain JSON content) in the same vertex-loop format as
+  `data/input/stretchy_nets/` (defaulting to that
   directory), plus this app's own layout info and current zoom level so
   reloading it reproduces the exact positions and view; **File > Load**
-  reads one back — a hand-authored net with no saved layout instead gets
+  reads a `.poly` or plain `.json` net back — a hand-authored net with no saved layout instead gets
   laid out fresh, via a BFS spanning tree over shared edges with a
   one-edge-length gap between connected faces so the net reads as
   visibly disjoint rather than seamlessly glued. A Save that would
@@ -181,7 +184,8 @@ src/
 
 data/
   input/
-    stretchy_nets/*.json       human-authored stretchy (vertex-loop) nets
+    stretchy_nets/*.json       human-authored, or *.poly saved by interactive_builder_app --
+                              both plain-JSON-content stretchy (vertex-loop) nets
 
 tests/
   unit/                       one test file per utils module, mirroring

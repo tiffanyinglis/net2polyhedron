@@ -15,7 +15,7 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 from utils.geometry.polyhedron import Polyhedron
 from utils.inflate_polyhedron.mesh_levels import subdivide_once
 
-PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json"
+PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_one_square.poly"
 
 # Three squares, each pair sharing exactly 2 sides with one "partner" square
 # (cyclically: A-B, B-C, C-A), forcing genuine non-planar bend the same way
@@ -27,7 +27,7 @@ PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_and_a_square.json
 # 3 equatorial points) -- a deliberately awkward, no-slack-for-planarity
 # case for exercising the inflation algorithm, same role PENTAGONS_AND_SQUARE
 # plays for pentagons.
-THREE_SQUARES = "data/input/stretchy_nets/three_squares.json"
+THREE_SQUARES = "data/input/stretchy_nets/three_squares.poly"
 
 TETRAHEDRON_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
 
@@ -165,7 +165,7 @@ def test_planarity_groups_batches_multiple_face_sizes_independently():
 
 
 def test_relax_once_pressure_still_inflates_a_subdivided_mesh():
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
+    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.poly")
     positions = _relaxed_positions(faces)
     faces1, positions1, edge_length1, _ = subdivide_once(
         faces, positions, EDGE_LENGTH, list(range(len(faces))), level=0)
@@ -189,7 +189,7 @@ PLATONIC_STRETCHY_NETS = {
 @pytest.mark.parametrize("name,expected", PLATONIC_STRETCHY_NETS.items())
 def test_platonic_solid_stretchy_nets_load_with_correct_combinatorics(name, expected):
     n_faces, n_verts, n_edges, sides = expected
-    faces, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.json")
+    faces, _ = load_stretchy_mesh(f"data/input/stretchy_nets/{name}.poly")
     assert len(faces) == n_faces
     assert all(len(f) == sides for f in faces)
     assert len({v for face in faces for v in face}) == n_verts
@@ -308,7 +308,7 @@ def test_relax_once_pressure_increases_stretch_over_a_normal_working_range():
     # range comfortably below the pressure where a plain cube stops
     # having any equilibrium at all (see the Design notes on why there's
     # no runaway guard) -- past that, more pressure isn't meaningful.
-    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.json")
+    faces, _ = load_stretchy_mesh("data/input/stretchy_nets/cube.poly")
     positions = _relaxed_positions(faces)
     stretches = []
     for pressure in (0.1, 0.3, 0.8):

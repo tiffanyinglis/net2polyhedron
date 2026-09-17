@@ -68,7 +68,14 @@ class LevelStateModel(BaseModel):
 
 class LevelHistoryRecordModel(BaseModel):
     """Mirrors one row of InflatePolyhedronApp.level_history exactly (see
-    its own _record_level_history docstring)."""
+    its own _record_level_history docstring). precomp_time_s/sim_time_s
+    (2026-09-16, explicit user request -- a loaded session's own
+    Convergence History showed no Elapsed Time at all, since these two
+    used to be dropped as "extra" fields pydantic silently ignores,
+    per an earlier "timing is a live-session diagnostic, not persistent
+    state" decision) ARE saved now too -- "Elapsed Time"/"Cumulative
+    Time" being release-mode-visible columns, not debug-only, is what
+    actually changed since that original call."""
     pressure: Optional[float] = None
     steps: int = 0
     max_stretch_pct: float = 0.0
@@ -77,6 +84,8 @@ class LevelHistoryRecordModel(BaseModel):
     converged: Optional[bool] = None
     gtol: float
     target_rms_pct: Optional[float] = None
+    precomp_time_s: Optional[float] = None
+    sim_time_s: Optional[float] = None
 
 
 class LastStatsModel(BaseModel):
