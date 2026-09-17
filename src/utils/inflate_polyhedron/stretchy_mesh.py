@@ -286,24 +286,10 @@ def _face_index_groups(faces, idx):
     """faces/idx: as elsewhere. Groups EVERY face's vertex indices by
     side count (3..8) -- {n: array of shape (num_faces_with_n_sides, n)}
     -- for vectorized per-face area/outward-normal computation (see
-    _relax_force). Includes triangles, unlike _planarity_groups."""
+    _relax_force)."""
     groups = {}
     for face in faces:
         n = len(face)
-        groups.setdefault(n, []).append([idx[v] for v in face])
-    return {n: np.array(rows, dtype=int) for n, rows in groups.items()}
-
-
-def _planarity_groups(faces, idx):
-    """faces/idx: as above. Precomputed per-face-size index arrays for
-    _relax_force's planarity pull: {n: array of shape (num_n_vertex_faces,
-    n)} for every face with 4+ vertices (triangles are always exactly
-    planar and excluded). Lets same-size faces batch into one SVD call."""
-    groups = {}
-    for face in faces:
-        n = len(face)
-        if n < 4:
-            continue
         groups.setdefault(n, []).append([idx[v] for v in face])
     return {n: np.array(rows, dtype=int) for n, rows in groups.items()}
 
@@ -367,8 +353,7 @@ def _safe_unit_vectors(vecs):
 HARDENING_CUBIC_COEFFICIENT = 0.5
 
 
-def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_length,
-                  pressure=0.0, planarity_weight=0.0):
+def _relax_force(pts, edge_ai, edge_bi, all_face_groups, edge_length, pressure=0.0):
     """relax_once's per-step force: a genuine mechanical force balance.
     Each edge is a HARDENING spring (a `stretch +
     HARDENING_CUBIC_COEFFICIENT * stretch**3` restoring force -- see
@@ -377,9 +362,7 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_
     outward pressure force, `pressure * area * outward_normal` -- area
     and normal computed together straight from its own vertex loop via
     `0.5 * sum_i cross(p_i, p_{i+1})` (Newell's method) -- split evenly
-    across its own vertices; each 4+-gon face also pulls its own vertices
-    a little towards its own best-fit plane (SVD normal, used here as a
-    restoring direction). Returns the (N,3) net force on every vertex --
+    across its own vertices. Returns the (N,3) net force on every vertex --
     relax_once walks a small step along it (see module docstring's
     Design notes for why edge directions need _safe_unit_vectors rather
     than a naive division)."""
@@ -402,15 +385,6 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups, edge_
             per_vertex_force = pressure * area_vector / n_sides
             np.add.at(force, group_idx.ravel(),
                       np.repeat(per_vertex_force, n_sides, axis=0))
-
-    if planarity_weight and planarity_groups:
-        for group_idx in planarity_groups.values():
-            face_pts = pts[group_idx]  # (F, n, 3)
-            centered = face_pts - face_pts.mean(axis=1, keepdims=True)
-            normals = np.linalg.svd(centered, full_matrices=False)[2][:, -1, :]  # (F, 3)
-            signed_dist = np.einsum('fij,fj->fi', centered, normals)  # (F, n)
-            pull = -planarity_weight * signed_dist[..., None] * normals[:, None, :]  # (F, n, 3)
-            np.add.at(force, group_idx.ravel(), pull.reshape(-1, 3))
 
     return force
 
@@ -445,12 +419,6 @@ def _is_orientation_consistent(pts, faces, idx):
     return signs <= {1.0}
 
 
-# How strongly to prefer each face staying close to flat, in the final
-# polish pass -- low, since inflation already tends to leave faces close
-# to flat on its own.
-PLANARITY_WEIGHT = 0.1
-
-
 def _edge_setup(faces, edge_length):
     """faces: vertex-id loops (see module docstring for the winding
     convention); edge_length: scalar rest length, or a {(a,b): length}
@@ -458,20 +426,19 @@ def _edge_setup(faces, edge_length):
     relax_once/relax_initial_configuration: vertex/edge index arrays plus
     the precomputed structures _relax_force needs (built once here, not
     per call). Returns (vertex_ids, idx, edges, edge_ai, edge_bi,
-    all_face_groups, planarity_groups, length_arr, scale)."""
+    all_face_groups, length_arr, scale)."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(faces)
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
     all_face_groups = _face_index_groups(faces, idx)
-    planarity_groups = _planarity_groups(faces, idx)
     if isinstance(edge_length, dict):
         length_arr = np.array([edge_length[e] for e in edges])
         scale = float(np.min(length_arr)) if len(length_arr) else 1.0
     else:
         length_arr = edge_length
         scale = float(edge_length)
-    return (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups,
+    return (vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups,
             length_arr, scale)
 
 
@@ -844,7 +811,7 @@ def _explicit_relax_loop(pts, scale, force_fn,
 
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
-                planarity_weight=PLANARITY_WEIGHT, max_nfev=None, stop_event=None,
+                max_nfev=None, stop_event=None,
                 gtol=CONVERGENCE_GTOL, rng=None, on_progress=None):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
     as _edge_setup. Runs ONE relaxation pass at a fixed `pressure` -- no
@@ -887,13 +854,12 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     None if stopped before a single step ran. `converged` is True only if
     one of the two criteria above (not the step cap or a stop request) is
     what stopped it."""
-    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
+    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
 
     def force_fn(pts):
-        return _relax_force(pts, edge_ai, edge_bi, all_face_groups, planarity_groups,
-                             length_arr, pressure, planarity_weight)
+        return _relax_force(pts, edge_ai, edge_bi, all_face_groups, length_arr, pressure)
 
     def on_check(check_pts, check_steps, check_optimality, check_converged):
         check_positions, check_max_stretch, check_rms_stretch = _positions_and_stretch(
@@ -1026,7 +992,7 @@ def relax_initial_configuration(positions, faces, edge_length,
     happens once, at the very end).
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     optimality, converged) -- exactly relax_once's own return shape."""
-    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, planarity_groups, length_arr, scale = \
+    vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, length_arr, scale = \
         _edge_setup(faces, edge_length)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
 
@@ -1127,7 +1093,7 @@ _DIVERGED_SENTINEL_STRETCH_PCT = 1e6
 
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
-                                          planarity_weight=PLANARITY_WEIGHT, max_iterations=8,
+                                          max_iterations=8,
                                           tol_pct=1.0, max_nfev_per_trial=5000, stop_event=None,
                                           gtol=CONVERGENCE_GTOL, rng=None,
                                           initial_pressure_guess=None):
@@ -1216,7 +1182,7 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     result = None
     for _ in range(max_iterations):
         try:
-            result = relax_once(positions, faces, edge_length, pressure, planarity_weight,
+            result = relax_once(positions, faces, edge_length, pressure,
                                  max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
                                  rng=rng)
             _, _, _, rms_stretch, _, _ = result

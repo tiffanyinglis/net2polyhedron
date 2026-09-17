@@ -44,7 +44,11 @@ an edge with no reverse partner is a valid open boundary (mesh need not be close
     declined (2026-09-16). **Don't reintroduce it without new explicit permission naming this
     specific change.**
 - Each face: `pressure * area * outward_normal` (Newell's method), split across vertices.
-  4+-gon faces get a weak SVD-best-fit-plane restoring pull (planarity regularizer).
+  There WAS a 4+-gon planarity regularizer (SVD-best-fit-plane restoring pull) -- removed
+  entirely (2026-09-17, explicit user request): the app's own pipeline fan-triangulates every
+  face before Level 0/1 ever run (see apps.md), so no face reaching `_relax_force` is ever 4+-gon
+  in practice -- it was dead code in the app's own workflow, tested but unreachable. Don't
+  reintroduce without a caller that actually passes untriangulated n-gon faces to relax_once.
 
 ## Integration
 `dt = step_max_multiplier * scale` (`scale` = mesh's own rest edge length). Originally

@@ -76,7 +76,7 @@ $$
 $$
 
 applied as $+\mathbf f_{a\to b}$ on $b$ and $-\mathbf f_{a\to b}$ on $a$.
-No pressure and no planarity term are present at this stage. This stage
+No pressure is present at this stage. This stage
 deliberately keeps the spring purely linear even though Stage 2 (§4.1)
 does not: with no pressure to resist, there is no large-stretch stability
 concern for a hardening term to address, and the plain linear form
@@ -132,10 +132,7 @@ $$
 
 ($\mathbf A$: the face's area-weighted outward normal via Newell's
 method, summed over its own — possibly non-planar — vertex loop), split
-evenly across its vertices. A ($n \geq 4$)-gon face additionally receives
-a weak restoring pull toward its own best-fit plane (SVD normal), keeping
-faces close to flat as a light regularizer without constraining them
-exactly.
+evenly across its vertices.
 
 ### 4.2 Integration
 

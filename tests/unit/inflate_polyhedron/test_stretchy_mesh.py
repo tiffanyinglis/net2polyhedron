@@ -7,7 +7,7 @@ import pytest
 from utils.inflate_polyhedron import stretchy_mesh
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, mesh_to_polyhedron,
-    _mesh_volume, _volume_indices, _planarity_groups,
+    _mesh_volume, _volume_indices,
     _orientation_signs, _is_orientation_consistent,
     relax_once, relax_initial_configuration, random_initial_positions,
     EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
@@ -104,7 +104,7 @@ def test_mesh_to_polyhedron_handles_non_contiguous_vertex_ids():
     assert np.array_equal(solid.vertices[2], positions[30])
 
 
-# ---- _mesh_volume / planarity groups ----
+# ---- _mesh_volume ----
 
 def _unit_edge_tetrahedron_points():
     verts = np.array(_RIGID_TETRAHEDRON_VERTICES)
@@ -118,19 +118,6 @@ def test_mesh_volume_matches_the_true_regular_tetrahedron_volume():
     idx = {i: i for i in range(len(pts))}
     volume_indices = _volume_indices(faces, idx)
     assert np.isclose(_mesh_volume(pts, volume_indices), TRUE_VOLUME["tetrahedron"], atol=1e-6)
-
-
-def test_planarity_groups_batches_multiple_face_sizes_independently():
-    # two squares + one pentagon: two groups (size 4 with 2 faces, size 5
-    # with 1), each internally batched, and no cross-contamination.
-    square_a = [0, 1, 2, 3]
-    square_b = [4, 5, 6, 7]
-    pentagon = [8, 9, 10, 11, 12]
-    idx = {i: i for i in range(13)}
-    groups = _planarity_groups([square_a, square_b, pentagon], idx)
-    assert set(groups) == {4, 5}
-    assert groups[4].shape == (2, 4)
-    assert groups[5].shape == (1, 5)
 
 
 def test_relax_once_pressure_still_inflates_a_subdivided_mesh():

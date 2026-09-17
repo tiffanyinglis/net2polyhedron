@@ -332,7 +332,7 @@ from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
     estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
-    PLANARITY_WEIGHT, CONVERGENCE_GTOL,
+    CONVERGENCE_GTOL,
 )
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
@@ -3103,7 +3103,7 @@ class InflatePolyhedronApp:
 
         def relax_fn(max_nfev, stop_event, on_progress):
             return relax_once(self.positions, faces, edge_length, pressure,
-                               PLANARITY_WEIGHT, max_nfev=max_nfev, stop_event=stop_event,
+                               max_nfev=max_nfev, stop_event=stop_event,
                                gtol=gtol, rng=rng, on_progress=on_progress)
 
         self._run_chunked_relax_stream(relax_fn, target_steps, stop_event,
