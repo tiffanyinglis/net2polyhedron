@@ -727,11 +727,8 @@ def _explicit_relax_loop(pts, scale, force_fn,
     worst vertex's force has been OSCILLATING rather than genuinely
     dropping (see KICK_WINDOW's own comment), nudges every vertex by a
     small random perturbation weighted toward whichever one is actually
-    stuck; either way then removes whatever rigid rotation/translation
-    the step (plus any kick) introduced (_remove_rigid_motion, see its
-    own docstring for why a free-floating system needs this) -- until
-    EITHER the worst vertex's own displacement over the last
-    CONVERGENCE_CHECK_INTERVAL steps (checked only once every
+    stuck -- until EITHER the worst vertex's own displacement over the
+    last CONVERGENCE_CHECK_INTERVAL steps (checked only once every
     CONVERGENCE_CHECK_INTERVAL steps, not every step -- a TEMPORARY
     change, per explicit user request for testing, from comparing the
     worst vertex's net FORCE against `gtol` every step) drops below
@@ -739,7 +736,24 @@ def _explicit_relax_loop(pts, scale, force_fn,
     it off first (a former THIRD criterion, a max_stretch_pct plateau/
     stall shortcut, was removed entirely per explicit user request -- see
     git history around STALL_WINDOW/STALL_TOL_PCT if it's ever wanted
-    again). `on_check(pts, steps_taken, optimality, converged)`, if
+    again).
+
+    Whatever rigid rotation/translation the raw per-step updates
+    introduce (_remove_rigid_motion, see its own docstring for why a
+    free-floating system needs this) is only stripped out ONCE per
+    CONVERGENCE_CHECK_INTERVAL-step block, immediately before that
+    block's convergence check, rather than after every individual step
+    (explicit user request, 2026-09-17) -- this is exactly equivalent to
+    correcting every step, not an approximation: every force here
+    (spring stretch, pressure area-vector) depends only on relative
+    vertex geometry, so it's translation-invariant and rotation-
+    equivariant, meaning the shape's own intrinsic trajectory (every edge
+    length, every face shape) never depends on what rigid frame the
+    steps in between happened to be sitting in -- only the FINAL
+    comparison against `pts_at_last_check` needs to be in a consistent
+    frame, which one alignment right before that comparison achieves
+    exactly as well as 200 smaller ones would have. `on_check(pts,
+    steps_taken, optimality, converged)`, if
     given, is called every time this periodic check runs (whether or not
     it ends the run) -- this is what lets a caller sync progress
     reporting (e.g. inflate_polyhedron_app redrawing its 3D panels) to
@@ -775,16 +789,15 @@ def _explicit_relax_loop(pts, scale, force_fn,
         # reintroduce without new explicit permission naming this change
         # (see physics.md's "No hacky terms rule").
         dt = step_max_multiplier * scale
-        new_pts = pts + dt * force
+        pts = pts + dt * force
         if rng is not None:
             recent_max_force.append(max_force)
             if (len(recent_max_force) == KICK_WINDOW
                     and max_force > KICK_STALL_RATIO * recent_max_force[0]):
                 weight = (per_vertex_force / max_force)[:, None]
                 kick = rng.normal(scale=KICK_MAGNITUDE_FRACTION * scale, size=pts.shape)
-                new_pts = new_pts + kick * weight
+                pts = pts + kick * weight
                 recent_max_force.clear()  # give the kick a fresh window to show its effect
-        pts = _remove_rigid_motion(pts, new_pts)
         # Stopping condition temporarily changed, per explicit user
         # request, for testing: rather than comparing displacement (or,
         # before that, force) against `gtol` EVERY step, only check once
@@ -793,11 +806,14 @@ def _explicit_relax_loop(pts, scale, force_fn,
         # (not per-step) against CONVERGENCE_CHECK_INTERVAL * gtol, the
         # same effective per-step rate scaled up to the longer window.
         # Measured against pts_at_last_check (the position at the START
-        # of this interval, itself already rigid-motion-removed each
-        # step along the way), so a genuine multi-step drift is caught
-        # even if no single step's own displacement would have tripped
-        # the old every-step check.
+        # of this interval), so a genuine multi-step drift is caught even
+        # if no single step's own displacement would have tripped the old
+        # every-step check. The block's own accumulated rigid rotation/
+        # translation (see this function's own docstring for why raw
+        # steps drift) is stripped out HERE, once per block, rather than
+        # after every step -- exactly equivalent, not an approximation.
         if steps_taken % CONVERGENCE_CHECK_INTERVAL == 0:
+            pts = _remove_rigid_motion(pts_at_last_check, pts)
             block_displacement = float(np.linalg.norm(pts - pts_at_last_check, axis=1).max())
             optimality = block_displacement / CONVERGENCE_CHECK_INTERVAL
             pts_at_last_check = pts.copy()
@@ -807,6 +823,13 @@ def _explicit_relax_loop(pts, scale, force_fn,
                 on_check(pts, steps_taken, optimality, converged)
             if converged:
                 break
+    # A run that stops mid-block (stop_event, or step_cap not a multiple
+    # of CONVERGENCE_CHECK_INTERVAL) never hit the alignment above for
+    # its own trailing partial block -- align once more here so callers
+    # never see a `pts` still carrying uncorrected rigid drift, even
+    # though no convergence check ran against it.
+    if steps_taken % CONVERGENCE_CHECK_INTERVAL != 0:
+        pts = _remove_rigid_motion(pts_at_last_check, pts)
     return pts, steps_taken, optimality, converged
 
 
