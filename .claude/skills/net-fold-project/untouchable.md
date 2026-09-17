@@ -41,7 +41,11 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   spinner (2026-09-16, since REMOVED, also explicit), Convergence History's debug-only "Precomp
   time"/"Sim time" columns (2026-09-16, explicit, still active), Net panel drawing
   `interactive_builder_app`'s saved bezier connection curves (self.target_connections, no
-  handles — read-only panel; 2026-09-16, explicit, still active). See `apps.md`.
+  handles — read-only panel; 2026-09-16, explicit, still active), Net panel's subdivision overlay
+  removed (2026-09-16, explicit — "too busy"), connection curve color changed to white
+  (2026-09-16, explicit), right-click-drag pan on Net panel + all "Level N" panels with
+  middle-click reset (2026-09-16, explicit, still active), `NET_ZOOM_MIN` lowered from 0.2 to 0.1
+  to match every "Level N" panel's own 10%..1000% range (2026-09-16, explicit). See `apps.md`.
 
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.

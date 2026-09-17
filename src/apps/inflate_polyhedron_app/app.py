@@ -211,7 +211,21 @@ work for anyone who wants one.
    no such singularity, since the whole orientation is one object rather
    than two angles applied in a fixed order. Every level panel likewise
    shares ONE mouse-wheel zoom state (self.level_zoom) -- scrolling over
-   any panel zooms all of them together, same rationale.
+   any panel zooms all of them together, same rationale. Both zooms are
+   clamped to the same 10%..1000% range (LEVEL_ZOOM_MIN/MAX,
+   NET_ZOOM_MIN/MAX, 2026-09-16 explicit user request). Every level panel
+   ALSO shares ONE right-click-drag pan state (self.level_pan, a 2D NDC
+   offset applied via vtkCamera's own SetWindowCenter, a pure post-
+   projection viewport shift -- see its own comment in __init__ for why
+   NOT a 3D world-space offset added to focal_point/position, an earlier
+   version's actual bug: that desynced panels of different scale and
+   moved the rotation drag's own orbit center), same rationale again;
+   middle-click resets it to zero (_on_level_pan_reset). The Net panel
+   has its own SEPARATE right-click-drag pan (self.net_pan, a plain 2D
+   data-space offset, _on_net_pan_motion/_on_net_pan_reset) -- not synced
+   with the level panels' pan, same "different rendering stacks, no
+   shared camera state" reason net_zoom/level_zoom already don't share
+   either.
 7. Debug mode ("d" key) adds two developer-only diagnostics, neither of
    which affects the actual solve -- purely for inspecting whatever's
    currently loaded:
@@ -292,6 +306,7 @@ import json
 import math
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -304,7 +319,6 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
 from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from PIL import Image, ImageTk
@@ -322,7 +336,6 @@ from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
 from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
 from utils.geometry.polygon_geom import regular_polygon_vertices, apply_rigid
-from utils.subdivisions import subdivide as subdivide_polygon
 
 from session_state import (
     SessionStateModel, LevelStateModel, LevelHistoryRecordModel, LastStatsModel,
@@ -337,10 +350,11 @@ DEFAULT_NET_BASENAME = "cube"
 # artifact of using this app, not an input to it.
 SESSION_OUTPUT_DIR = DATA_DIR / "output"
 
-# A fabric-subdivided net's fine mesh edges are drawn thin/faint so the
-# subdivision reads as texture rather than a bold wireframe competing
-# with the per-coarse-face coloring -- see load_fabric_spec.
-SUBDIVISION_EDGE_ALPHA = 0.35
+# A fabric-subdivided net's fine mesh edges (the "Level N" panels' own
+# PyVista wireframe overlay, NOT the Net panel -- see _draw_target_faces'
+# own comment on why it dropped its subdivision overlay entirely) are
+# drawn thin so the subdivision reads as texture rather than a bold
+# wireframe competing with the per-coarse-face coloring.
 SUBDIVISION_EDGE_WIDTH = 0.5
 
 # The Net panel's own bezier connection curves (self.target_connections,
@@ -355,6 +369,13 @@ SUBDIVISION_EDGE_WIDTH = 0.5
 CONNECTION_CURVE_COLOR = "white"
 CONNECTION_CURVE_WIDTH = 1.0
 CONNECTION_CURVE_ZORDER = 5
+
+# Convergence History's "running" row tag (_refresh_history_table) --
+# its own dedicated color, NOT STATUS_COLORS["warn"] (a muddy, dark
+# goldenrod tuned for warning TEXT elsewhere in this app, not a bright
+# row highlight) -- brighter, explicit user request after first trying
+# STATUS_COLORS["warn"] here.
+RUNNING_ROW_COLOR = "#e0b400"
 
 # How much of each "Level N" panel's frame the shape's own bounding
 # box fills: axis half-range = shape's half-extent * this. 1.0 would
@@ -399,20 +420,28 @@ LEVEL_DRAG_SENSITIVITY = 0.5
 # one event.delta increment of 120 on Windows) -- >1 zooms in, so the
 # factor camera.parallel_scale is multiplied by is its RECIPROCAL (a
 # smaller parallel_scale means a smaller visible world height, i.e.
-# zoomed in). Clamped by LEVEL_ZOOM_MIN/MAX so scrolling can't shrink the
+# zoomed in). Clamped by LEVEL_ZOOM_MIN/MAX (30%..400%, explicit user
+# request -- was 10%..1000% before this) so scrolling can't shrink the
 # shape to nothing or push it arbitrarily far away.
 LEVEL_ZOOM_STEP = 1.1
-LEVEL_ZOOM_MIN = 0.1
-LEVEL_ZOOM_MAX = 10.0
+LEVEL_ZOOM_MIN = 0.3
+LEVEL_ZOOM_MAX = 4.0
 
 # Same idea as LEVEL_ZOOM_STEP/MIN/MAX, for the Net panel's own
 # mouse-wheel zoom (_on_net_scroll) -- a separate state (self.net_zoom)
 # since the Net panel is matplotlib, not a PyVista camera: it scales the
 # half-extent _draw_target_faces derives from the flat layout's own
-# bounding box, rather than a camera parallel_scale.
+# bounding box, rather than a camera parallel_scale. NET_ZOOM_MAX raised
+# to 800% (2026-09-16, explicit user request -- "the net can be zoomed
+# in a bit more without getting cut off"; was 400%, matching every
+# "Level N" panel) -- decoupled from LEVEL_ZOOM_MAX again since this
+# request is Net-panel-specific: its own bounding box now includes every
+# connection's bezier curve (see _draw_target_faces), which can sweep
+# much further out than the faces themselves, so a closer zoom is
+# genuinely useful here in a way it isn't for the 3D panels.
 NET_ZOOM_STEP = 1.1
-NET_ZOOM_MIN = 0.2
-NET_ZOOM_MAX = 10.0
+NET_ZOOM_MIN = 0.3
+NET_ZOOM_MAX = 8.0
 
 # Overall UI text size multiplier -- applied once, at startup, to every
 # named Tk/ttk font (see _scale_ui_fonts) so the whole app's text (not
@@ -728,29 +757,94 @@ def _validate_mesh(faces):
             e = (face[i], face[(i + 1) % n])
             counts[e] = counts.get(e, 0) + 1
             owners.setdefault(e, []).append(fi)
-    winding_lines = [f"  edge {v}->{w} runs the SAME direction in {c} faces {owners[(v, w)]} "
-                      f"(should be reversed in all but one)"
-                      for (v, w), c in counts.items() if c > 1]
+    bad_faces = set()
+    winding_lines = []
+    for (v, w), c in counts.items():
+        if c > 1:
+            bad_faces.update(owners[(v, w)])
+            winding_lines.append(
+                f"  edge {v}->{w} runs the SAME direction in {c} faces {owners[(v, w)]} "
+                f"(should be reversed in all but one)")
     ok = not winding_lines
 
+    total = len(faces)
     if ok:
-        lines = [f"Structural winding: all {len(faces)} faces agree with their "
-                 f"neighbors -- no shared edge runs the same direction twice (OK)."]
+        lines = [f"PASS: all {total} faces are consistently oriented."]
     else:
-        lines = [f"Structural winding: {len(winding_lines)} edge(s) where neighboring "
-                 f"faces disagree:"]
+        # bad_faces: every face touching at least one conflicting edge --
+        # not just len(winding_lines) (a count of BAD EDGES, which can
+        # differ from the number of faces those edges actually touch).
+        lines = [f"FAIL: {len(bad_faces)}/{total} faces are inconsistently oriented."]
         lines += winding_lines
     return ok, lines
+
+
+class _SpinnerCanvas(tk.Canvas):
+    """The animated "waiting" indicator next to Auto (self.progress) --
+    a small rotating circular arc, not a horizontal bar bouncing back and
+    forth (2026-09-16, explicit user request -- was `ttk.Progressbar(
+    mode="indeterminate")`). Drop-in replacement for just the two calls
+    this app actually makes on it, `start(interval_ms)`/`stop()`, mirroring
+    ttk.Progressbar's own method names/signature so every existing call
+    site (pack/pack_forget/start/stop, scattered across every background-
+    run entry/exit point) needed no changes beyond the constructor itself.
+
+    Runs its own animation loop via repeated `self.after` calls rather
+    than a Tk built-in (plain tk.Canvas has no animated-arc primitive) --
+    start() kicks off the chain; stop() just clears self._running, so the
+    NEXT already-scheduled tick sees it False and quietly stops
+    rescheduling, no `after_cancel` bookkeeping needed."""
+
+    _DIAMETER = 22
+    _STROKE_WIDTH = 3
+    _ARC_EXTENT = 270  # degrees -- a partial ring, not a full closed circle, so a rotating gap actually reads as motion.
+    _DEGREES_PER_TICK = 18
+
+    def __init__(self, master):
+        super().__init__(master, width=self._DIAMETER, height=self._DIAMETER,
+                          bg=PLOT_THEME["bg"], highlightthickness=0, bd=0)
+        pad = self._STROKE_WIDTH
+        self._arc = self.create_arc(
+            pad, pad, self._DIAMETER - pad, self._DIAMETER - pad,
+            start=0, extent=self._ARC_EXTENT, style=tk.ARC,
+            width=self._STROKE_WIDTH, outline=PLOT_THEME["fg"])
+        self._angle = 0
+        self._running = False
+        self._interval_ms = 30
+
+    def start(self, interval_ms=30):
+        self._interval_ms = interval_ms
+        if not self._running:
+            self._running = True
+            self._tick()
+
+    def stop(self):
+        self._running = False
+
+    def _tick(self):
+        if not self._running:
+            return
+        self._angle = (self._angle - self._DEGREES_PER_TICK) % 360
+        self.itemconfigure(self._arc, start=self._angle)
+        self.after(self._interval_ms, self._tick)
 
 
 class InflatePolyhedronApp:
     def __init__(self, root):
         self.root = root
-        # Wide enough for Net + Level 0..MAX_LEVEL (5 panels), each a
-        # fixed LEVEL_PANEL_SIZE-wide image -- the panel row no longer
-        # stretches its frames to fill extra window width (see
-        # panels_row's own comment), so this only needs to fit the
-        # panels' own natural width, not leave room to spread them out.
+        # Wide enough for Net + Level 0..MAX_LEVEL (MAX_LEVEL + 2 panels),
+        # each a fixed LEVEL_PANEL_SIZE-wide image, PLUS view_frame's own
+        # left/right padx=14 -- computed rather than a bigger hardcoded
+        # literal (2026-09-16, explicit user request -- a wider window
+        # left an uneven, wide blank margin on the right, since every row
+        # here packs its own content flush LEFT; the fix is fitting the
+        # window to the content's own natural width, not centering
+        # within a wider one) so it stays exactly right if MAX_LEVEL or
+        # LEVEL_PANEL_SIZE ever changes, rather than needing to be
+        # re-measured by hand again. The panel row no longer stretches
+        # its frames to fill extra window width (see panels_row's own
+        # comment), so this only needs to fit the panels' own natural
+        # width, not leave room to spread them out.
         # Tall enough for Setup + status + Convergence History + each
         # panel's own title-Label-plus-image-plus-button stack at their
         # full natural size (root.winfo_reqheight() once everything is
@@ -759,7 +853,8 @@ class InflatePolyhedronApp:
         # to whatever's left rather than erroring), which visibly cropped
         # the bottom of every panel and threw off where mouse drags
         # actually land on it (see _on_level_drag_start and friends).
-        root.geometry("1700x880")
+        window_width = LEVEL_PANEL_SIZE[0] * (MAX_LEVEL + 2) + 2 * 14
+        root.geometry(f"{window_width}x880")
         root.minsize(820, 600)
 
         sv_ttk.set_theme("dark")
@@ -798,13 +893,18 @@ class InflatePolyhedronApp:
         net_group.pack(side=tk.LEFT)
         ttk.Label(net_group, text="Choose a net:").pack(side=tk.LEFT, padx=(0, 8))
         self.net_var = tk.StringVar()
-        self.combo = ttk.Combobox(net_group, state="readonly", width=30,
+        # width=15 -- 50% of the previous width=30 (explicit user request).
+        self.combo = ttk.Combobox(net_group, state="readonly", width=15,
                                    textvariable=self.net_var)
         self.combo.pack(side=tk.LEFT)
         self.combo.bind("<<ComboboxSelected>>", self.on_select_net)
 
         target_group = ttk.Frame(setup_row)
-        target_group.pack(side=tk.LEFT, padx=(24, 0))
+        # padx=(96, 0) -- 24 -> 32 -> 96 (2026-09-16, explicit user
+        # request twice over, "put some space between" then "3x the
+        # current amount") -- same widened gap tolerance_group/auto_group
+        # use below.
+        target_group.pack(side=tk.LEFT, padx=(96, 0))
         ttk.Label(target_group, text="Target RMS stretch:").pack(side=tk.LEFT, padx=(0, 4))
         # One independent spinner per level (1-3), not a single spinner
         # reset to a new default every time the frontier level changes --
@@ -815,10 +915,23 @@ class InflatePolyhedronApp:
         # self.target_rms_vars[self.subdivision_level] -- there's no
         # separate code path for either workflow.
         self.target_rms_vars = {}
+        self.target_rms_display_vars = {}
         self.target_rms_spins = {}
         for level in (1, 2, 3):
-            ttk.Label(target_group, text=f"L{level}:").pack(side=tk.LEFT, padx=(8, 2))
-            var = tk.DoubleVar(value=LEVEL_DEFAULT_TARGET_RMS_PCT[level])
+            # padx=(20, 2), not (8, 2) -- widened (2026-09-16, explicit
+            # user request, "add some space between target rms stretch,
+            # level 1, level 2, level 3") -- separates "Target RMS
+            # stretch:" from Level 1's own entry, and each level's own
+            # entry from the next level's label, not just the group as a
+            # whole from its neighbors (already widened separately, see
+            # target_group's own comment).
+            ttk.Label(target_group, text=f"Level {level}:").pack(side=tk.LEFT, padx=(20, 2))
+            # Whole numbers only, no decimal place (2026-09-16, explicit
+            # user request -- LEVEL_DEFAULT_TARGET_RMS_PCT's own values
+            # already are whole numbers, so this never actually changes
+            # any DEFAULT, just what the field itself can hold going
+            # forward).
+            var = tk.DoubleVar(value=round(LEVEL_DEFAULT_TARGET_RMS_PCT[level]))
             # A "converged" verdict only applies to the target it was
             # reached at -- editing THIS level's own target while it's
             # the current frontier means the current pressure hasn't
@@ -830,12 +943,40 @@ class InflatePolyhedronApp:
             # (e.g. tweaking Level 3's target while still on Level 1)
             # doesn't touch any gate -- there's nothing to invalidate yet.
             var.trace_add("write", lambda *_a, lv=level: self._on_target_rms_changed(lv))
-            spin = ttk.Spinbox(target_group, from_=0.1, to=200.0,
-                                increment=1.0, width=5,
-                                textvariable=var, format="%.1f")
-            spin.pack(side=tk.LEFT)
-            ttk.Label(target_group, text="%").pack(side=tk.LEFT, padx=(2, 0))
+            # This is the value everywhere ELSE in the app reads
+            # (on_inflate_clicked, session save/load, the history table's
+            # own recorded target, ...) -- UNCHANGED by the entry's own
+            # "%"-suffixed display below, which is purely a presentation
+            # layer over it (self.target_rms_display_vars), never read
+            # anywhere else.
+            var.trace_add("write", lambda *_a, lv=level: self._sync_target_rms_display(lv))
             self.target_rms_vars[level] = var
+
+            # A plain Entry, not a Spinbox (2026-09-16, explicit user
+            # request) -- restricted to numeric-looking input as it's
+            # typed (_register_numeric_entry, no exponent/decimal -- a
+            # whole-number percentage needs neither) and clamped into
+            # [0, 100] once editing finishes (_commit_target_rms_entry,
+            # on Enter or losing focus), rather than a Spinbox's own
+            # from_/to_ range (which only ever gated its up/down ARROWS,
+            # never free typing). Bound to its OWN display StringVar,
+            # not `var` directly -- showing "N%" (the "%" appended once a
+            # number's actually been entered/committed, per explicit
+            # request, not something the user types themselves) while
+            # NOT focused, and the bare number (easy to edit, no "%" to
+            # work around) while it IS (_begin_edit_target_rms, on
+            # <FocusIn>) -- `var` itself stays a plain float throughout,
+            # `_sync_target_rms_display` above is what keeps this
+            # StringVar showing "N%" in sync with it whenever `var`
+            # changes from ANYWHERE (a commit here, a session load, ...).
+            display_var = tk.StringVar(value=f"{var.get():.0f}%")
+            self.target_rms_display_vars[level] = display_var
+            spin = ttk.Entry(target_group, width=5, textvariable=display_var)
+            self._register_numeric_entry(spin, allow_exponent=False, allow_decimal=False)
+            spin.bind("<FocusIn>", lambda event, lv=level: self._begin_edit_target_rms(lv))
+            spin.bind("<Return>", lambda event, lv=level: self._commit_target_rms_entry(lv))
+            spin.bind("<FocusOut>", lambda event, lv=level: self._commit_target_rms_entry(lv))
+            spin.pack(side=tk.LEFT)
             self.target_rms_spins[level] = spin
         # Pressure is no longer user-editable or separately displayed --
         # "Inflate" calibrates it itself (see on_inflate_clicked) and it's
@@ -843,7 +984,7 @@ class InflatePolyhedronApp:
         self.pressure_value = DEFAULT_PRESSURE
 
         tolerance_group = ttk.Frame(setup_row)
-        tolerance_group.pack(side=tk.LEFT, padx=(24, 0))
+        tolerance_group.pack(side=tk.LEFT, padx=(96, 0))
         ttk.Label(tolerance_group, text="Tolerance:").pack(side=tk.LEFT, padx=(0, 4))
         # The `gtol` every relax_once/relax_initial_configuration/
         # estimate_pressure_for_target_stretch call actually uses (see
@@ -865,9 +1006,16 @@ class InflatePolyhedronApp:
         # to a float wherever a numeric `gtol` is actually needed.
         self.tolerance_var = tk.StringVar(value=f"{DEFAULT_TOLERANCE:.0e}")
         self.tolerance_var.trace_add("write", self._on_tolerance_changed)
-        self.tolerance_spin = ttk.Spinbox(tolerance_group, from_=1e-10, to=1e-1,
-                                           increment=1e-7, width=10,
-                                           textvariable=self.tolerance_var, format="%.0e")
+        # A plain Entry, not a Spinbox (2026-09-16, explicit user request,
+        # same as each target_rms_vars[level] entry above) -- restricted
+        # to numeric-looking input as it's typed (_register_numeric_entry,
+        # WITH exponent this time -- this field's own scientific-notation
+        # text, e.g. "1e-03", needs the "e"/sign that a plain percentage
+        # never does). No commit-time clamp (unlike target RMS) -- only a
+        # range was ever requested for that one; `_get_tolerance` already
+        # falls back to DEFAULT_TOLERANCE for anything unparseable.
+        self.tolerance_spin = ttk.Entry(tolerance_group, width=10, textvariable=self.tolerance_var)
+        self._register_numeric_entry(self.tolerance_spin, allow_exponent=True)
         self.tolerance_spin.pack(side=tk.LEFT)
 
         # "Auto": visible/usable in BOTH modes (unlike the debug-only row
@@ -875,10 +1023,23 @@ class InflatePolyhedronApp:
         # Relax/Inflate/Subdivide actions a user could click by hand --
         # see on_auto_clicked/_auto_step for the actual driving logic.
         auto_group = ttk.Frame(setup_row)
-        auto_group.pack(side=tk.LEFT, padx=(24, 0))
+        auto_group.pack(side=tk.LEFT, padx=(96, 0))
         self.auto_button = ttk.Button(auto_group, text="Auto", command=self.on_auto_clicked)
         self.auto_button.pack(side=tk.LEFT)
         self.auto_button.state(["disabled"])  # no net loaded yet -- _update_auto_button syncs this
+        # The animated "waiting" indicator (2026-09-16, explicit user
+        # request -- used to sit next to self.status_label instead, in
+        # status_frame below) -- parented here, next to Auto, rather than
+        # in status_frame, so it stays visible in BOTH modes even though
+        # status_frame itself is debug-only now (see status_frame's own
+        # comment). Packed/unpacked and started/stopped in lockstep by
+        # every long-running operation (background calibration, streamed
+        # Inflate/Relax) -- same widget, same show/hide calls as before,
+        # just living in a different parent frame now. A rotating circle
+        # (_SpinnerCanvas), not a horizontal bar bouncing back and forth
+        # (2026-09-16, explicit user request -- was `ttk.Progressbar(
+        # mode="indeterminate")`).
+        self.progress = _SpinnerCanvas(auto_group)
 
         # Debug-mode-only row: "Iterate for N steps" vs. "until
         # convergence" (the one thing that actually differs between the
@@ -915,13 +1076,17 @@ class InflatePolyhedronApp:
                                                     command=self.draw)
         self.show_normals_check.pack(side=tk.LEFT)
 
-        # ---- Status/progress: shared by both modes, always visible,
-        # positioned right after Setup. ----
-        status_frame = ttk.Frame(root)
-        status_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
-        self.progress = ttk.Progressbar(status_frame, mode="indeterminate", length=160)
+        # ---- Status: debug-mode-only now (2026-09-16, explicit user
+        # request -- "in release mode, don't show warning/error/progress
+        # message"; used to be shared by both modes, always visible). The
+        # animated "waiting" indicator itself (self.progress) moved OUT
+        # of this frame entirely, next to Auto instead -- see auto_group's
+        # own comment -- so it keeps working in release mode even with
+        # this whole frame hidden there (_apply_mode_visibility). ----
+        self.status_frame = ttk.Frame(root)
+        self.status_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
         self.status_var = tk.StringVar(value="")
-        self.status_label = ttk.Label(status_frame, textvariable=self.status_var)
+        self.status_label = ttk.Label(self.status_frame, textvariable=self.status_var)
         self.status_label.pack(side=tk.LEFT)
 
         # ---- Convergence history: one row per subdivision level visited
@@ -946,13 +1111,13 @@ class InflatePolyhedronApp:
         # below whatever's actually populated. ----
         self.history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
         self.history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
-        # "elapsed_time" (Precomp + Sim time) and "cumulative_time" (running
-        # total of every row's own Elapsed Time so far, see
-        # _refresh_history_table) are debug-mode-only (see
-        # _apply_mode_visibility, which toggles Treeview's own
-        # `displaycolumns` -- always DEFINED here regardless of mode, just
-        # not shown in release mode, same "define once, show/hide" idea as
-        # self.mode_row's own widgets).
+        # "max_stretch" is debug-mode-only (2026-09-16, explicit -- release
+        # mode dropped it in favor of "elapsed_time"/"cumulative_time",
+        # which used to be the debug-only ones instead); all three stay
+        # DEFINED here regardless of mode (see _apply_mode_visibility,
+        # which toggles Treeview's own `displaycolumns`), just shown/
+        # hidden per mode, same "define once, show/hide" idea as
+        # self.mode_row's own widgets.
         history_columns = ("level", "pressure", "steps", "max_stretch", "rms_stretch",
                             "elapsed_time", "cumulative_time", "convergence")
         self.history_tree = ttk.Treeview(self.history_frame, columns=history_columns,
@@ -972,10 +1137,16 @@ class InflatePolyhedronApp:
         # distributes leftover space evenly PER COLUMN regardless of each
         # one's own configured width, which is what made an even earlier
         # attempt balloon every column equally instead of proportionally.
+        # 2026-09-16, explicit user request: shifted weight FROM the last
+        # 4 release-mode columns (rms_stretch/elapsed_time/cumulative_
+        # time/convergence -- convergence especially, which had the most
+        # to give) TOWARD the first 3 (level/pressure/steps), which read
+        # as too narrow for their own content relative to how much spare
+        # room convergence in particular was left with.
         self._history_column_weights = {
-            "level": 55, "pressure": 80, "steps": 65, "max_stretch": 115,
-            "rms_stretch": 155, "elapsed_time": 150, "cumulative_time": 140,
-            "convergence": 185,
+            "level": 70, "pressure": 100, "steps": 85, "max_stretch": 115,
+            "rms_stretch": 150, "elapsed_time": 145, "cumulative_time": 135,
+            "convergence": 145,
         }
         for col, heading in (
                 ("level", "Level"), ("pressure", "Pressure"), ("steps", "Steps"),
@@ -991,7 +1162,7 @@ class InflatePolyhedronApp:
         self.history_tree.bind("<Configure>",
                                 lambda event: self._rescale_history_columns(event.width))
         self._release_mode_history_columns = tuple(
-            col for col in history_columns if col not in ("elapsed_time", "cumulative_time"))
+            col for col in history_columns if col != "max_stretch")
         self.history_tree.config(displaycolumns=self._release_mode_history_columns)
         # ttk.Treeview can only color a whole ROW, not one cell -- so the
         # Convergence column's check/cross (see _refresh_history_table)
@@ -999,6 +1170,12 @@ class InflatePolyhedronApp:
         # the mark itself in the default text color.
         self.history_tree.tag_configure("converged", foreground=STATUS_COLORS["success"])
         self.history_tree.tag_configure("not_converged", foreground=STATUS_COLORS["error"])
+        # A run actively in progress for its own row (2026-09-16, explicit
+        # user request) -- see _refresh_history_table's own comment on
+        # why this is distinct from "not_converged": red there is
+        # reserved for an ACTUAL failure (step cap reached, or Stop
+        # clicked), not just "hasn't converged yet, still going".
+        self.history_tree.tag_configure("running", foreground=RUNNING_ROW_COLOR)
         self.history_tree.pack(fill=tk.X)
 
         # ---- Net (flat layout, matplotlib) + one 3D panel per level
@@ -1033,7 +1210,16 @@ class InflatePolyhedronApp:
         panels_row.pack(side=tk.TOP, anchor=tk.W)
 
         net_panel_frame = ttk.Frame(panels_row)
-        net_panel_frame.pack(side=tk.LEFT)
+        # fill=tk.Y (2026-09-16, explicit user request -- "there
+        # shouldn't be a button under the net", which is what used to
+        # claim this same vertical space instead) stretches this frame to
+        # match the row's own height (the tallest "Level N" panel, title
+        # + image + action button) with no button/spacer widget of its
+        # own needed to do it -- the net canvas below (already packed
+        # with fill=tk.BOTH, expand=True) grows into whatever extra
+        # height that leaves, rather than leaving dead space or a
+        # meaningless disabled button.
+        net_panel_frame.pack(side=tk.LEFT, fill=tk.Y)
         # A plain Label, not ax.set_title() -- drawing a title INSIDE a
         # PyVista panel's own rendered image clipped its top edge against
         # the panel boundary (see _render_level_pv's own Design notes);
@@ -1044,17 +1230,21 @@ class InflatePolyhedronApp:
         # neighbors' labels.
         ttk.Label(net_panel_frame, text="Net", font=LEVEL_TITLE_FONT,
                   anchor=tk.CENTER).pack(side=tk.TOP, fill=tk.X)
-        # A disabled, blank button matching every "Level N" panel's own
-        # action button below it -- purely to claim the same vertical
-        # space, so the Net canvas ends up the same height as every level
-        # panel (keeping content aligned in a row rather than Net's
-        # canvas rendering visibly larger for having no button competing
-        # for space underneath it).
-        net_bottom_spacer = ttk.Button(net_panel_frame, text="")
-        net_bottom_spacer.state(["disabled"])
-        net_bottom_spacer.pack(side=tk.BOTTOM, fill=tk.X)
         self.fig_net = plt.figure(figsize=(3.2, 4.5))
-        self.ax2d = self.fig_net.add_subplot(1, 1, 1)
+        # add_axes([0, 0, 1, 1]), not add_subplot -- add_subplot's own
+        # default margins (left=0.125, right=0.9, bottom=0.11, top=0.88)
+        # reserve room for axis labels/ticks that _style_2d_axis's own
+        # set_axis_off() never draws anyway, so the actual plotting area
+        # ended up noticeably SMALLER than the full LEVEL_PANEL_SIZE-
+        # matched figure canvas (2026-09-16, explicit user request -- the
+        # Net panel's own drawing area read as much smaller than every
+        # "Level N" panel's, which has no such margin concept at all:
+        # PyVista's own off-screen viewport already fills its entire
+        # window_size). Filling the whole figure instead makes this
+        # panel's actual drawing area match LEVEL_PANEL_SIZE exactly, the
+        # same way every "Level N" panel's own PyVista viewport already
+        # does.
+        self.ax2d = self.fig_net.add_axes([0, 0, 1, 1])
         self.canvas_net = FigureCanvasTkAgg(self.fig_net, master=net_panel_frame)
         net_widget = self.canvas_net.get_tk_widget()
         net_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -1071,6 +1261,18 @@ class InflatePolyhedronApp:
         net_widget.bind("<MouseWheel>", self._on_net_scroll)
         net_widget.bind("<Button-4>", self._on_net_scroll)
         net_widget.bind("<Button-5>", self._on_net_scroll)
+        # Right-click-drag pans the Net panel (self.net_pan) -- its own
+        # analogue of every "Level N" panel's self.level_pan, entirely
+        # separate state (the Net panel isn't part of that shared-camera
+        # group, see this class's own Design notes); middle-click resets
+        # it to zero, same as a level panel.
+        self.net_pan = np.zeros(2)
+        self._net_panning = False
+        self._net_pan_last_xy = None
+        net_widget.bind("<ButtonPress-3>", self._on_net_pan_start)
+        net_widget.bind("<B3-Motion>", self._on_net_pan_motion)
+        net_widget.bind("<ButtonRelease-3>", self._on_net_pan_end)
+        net_widget.bind("<Button-2>", self._on_net_pan_reset)
 
         self.level_frames = {}
         self.level_plotters = {}
@@ -1095,6 +1297,32 @@ class InflatePolyhedronApp:
         self.level_zoom = 1.0
         self._level_dragging = False
         self._level_last_xy = None
+        # ONE shared pan offset across every level panel, same "one
+        # state, all panels move together" rationale as level_rotation/
+        # level_zoom above -- right-click-drag on any panel updates it
+        # and re-renders all of them (_on_level_pan_motion); middle-click
+        # resets it back to zero (_on_level_pan_reset). Deliberately a 2D
+        # NDC (normalized device coordinate, [-1, 1]) offset applied via
+        # vtkCamera's own SetWindowCenter -- a pure post-projection
+        # VIEWPORT shift -- rather than a 3D world-space vector added to
+        # the camera's focal_point/position (an earlier version did that,
+        # and had two real bugs): (1) since every level panel renders at
+        # the exact same LEVEL_PANEL_SIZE, one shared NDC value produces
+        # the exact same PIXEL shift on every panel regardless of that
+        # panel's own bounding-box scale -- a world-space offset instead
+        # produced a DIFFERENT pixel shift per panel (each level's own
+        # parallel_scale differs), which is what made translation look
+        # unsynced across levels; (2) moving focal_point moves the
+        # camera's own orbit center, so rotating (_on_level_motion) after
+        # a pan no longer orbited the object's true center -- with
+        # SetWindowCenter, the camera's focal_point/position are computed
+        # exactly as if no pan existed (_render_level_pv), so a
+        # subsequent rotation always still orbits the real center; pan
+        # only shifts where that already-correct render lands in the
+        # panel.
+        self.level_pan = np.zeros(2)
+        self._level_panning = False
+        self._level_pan_last_xy = None
         # ONE button per level, below its panel -- no separate button
         # above (see _update_level_action_buttons for its full state
         # machine): idle it reads "Relax" (level 0 only) or "Inflate",
@@ -1117,8 +1345,12 @@ class InflatePolyhedronApp:
             # it AFTER an expand=True widget would starve it of space,
             # since that widget (packed first) would already have
             # claimed the entire remaining cavity by the time it's
-            # placed.
-            button.pack(side=tk.BOTTOM, fill=tk.X, in_=level_frame)
+            # placed. No fill=tk.X (2026-09-16, explicit user request --
+            # a button spanning the panel's full width read as an
+            # oversized bar); left at its own natural, text-sized width
+            # instead, which pack's own default center anchor centers
+            # under the panel above it.
+            button.pack(side=tk.BOTTOM, in_=level_frame)
             self._build_level_pv_panel(level, level_frame)
 
         # Per-level frozen snapshots of {faces, positions, face_of_fine,
@@ -1143,10 +1375,23 @@ class InflatePolyhedronApp:
         self.last_stats = {}
         self.level_history = {}
         self.stop_event = None
-        # Debug-mode-only "Precomp time"/"Sim time" columns -- wall-clock
-        # time (wraps time.perf_counter(), not the solve's own step count)
-        # spent in the CURRENT level's own pressure-calibration phase
-        # (_on_pressure_calibrated, n/a for Level 0/Relax, which has no
+        # Whether the CURRENT frontier level (self.subdivision_level) has
+        # a Relax/Inflate run actively in progress right now -- set/
+        # cleared in lockstep with _set_level_action_button_running (the
+        # single source of truth for the per-level button's own "Stop"
+        # state), read by _refresh_history_table to color that level's
+        # row yellow ("running") instead of red ("not_converged") while
+        # it's still mid-run (2026-09-16, explicit user request -- red
+        # should mean "actually failed to converge", either the step cap
+        # was reached or Stop was clicked, not just "hasn't converged
+        # YET, still going").
+        self._level_running = False
+        # Backing state for the Convergence History table's "Elapsed
+        # Time"/"Cumulative Time" columns (release-mode columns now, see
+        # history_columns' own comment) -- wall-clock time (wraps
+        # time.perf_counter(), not the solve's own step count) spent in
+        # the CURRENT level's own pressure-calibration phase
+        # (_on_pressure_calibrated, None for Level 0/Relax, which has no
         # pressure to calibrate) and its own streamed relax/inflate phase
         # (_run_inflate_stream/_run_relax_stream) respectively. The
         # `_start_time` pair marks when each phase began (None between
@@ -1206,6 +1451,11 @@ class InflatePolyhedronApp:
         self._apply_mode_visibility()
         if self.current_label:
             self.on_select_net()
+        # Fits the window's own starting height to release mode's
+        # (shorter) default layout -- see _refit_window_height's own
+        # docstring for why this has to come AFTER on_select_net's own
+        # draw() call, not right after _apply_mode_visibility above.
+        self._refit_window_height()
 
     def _scale_ui_fonts(self):
         """Scales every named Tk/ttk font by UI_FONT_SCALE, once at
@@ -1253,18 +1503,21 @@ class InflatePolyhedronApp:
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
         self._apply_mode_visibility()
+        self._refit_window_height()
 
     def _apply_mode_visibility(self):
         """The main differences between the two modes: whether the
         steps-vs-convergence radio row (plus Validate Mesh/Show normals)
-        is shown, and whether the Convergence History table's "Precomp
-        time"/"Sim time" columns are shown (self.history_tree's own
-        `displaycolumns` -- both columns stay DEFINED in both modes, just
-        hidden in release mode, so no data is lost switching back and
-        forth). Forces the steps choice back to "convergence" and Show
-        normals off when leaving debug mode, so release mode never runs a
-        stray fixed-step request or shows a stale normals overlay left
-        over from before."""
+        is shown, and whether the Convergence History table's "Max
+        Stretch %" column is shown (self.history_tree's own
+        `displaycolumns` -- debug-only, 2026-09-16 explicit; "Elapsed
+        Time"/"Cumulative Time" are release-mode columns now instead --
+        see history_columns' own comment in __init__ -- all three stay
+        DEFINED in both modes, just hidden per mode, so no data is lost
+        switching back and forth). Forces the steps choice back to
+        "convergence" and Show normals off when leaving debug mode, so
+        release mode never runs a stray fixed-step request or shows a
+        stale normals overlay left over from before."""
         self.root.title(f"Inflate Polyhedron{' (debug mode)' if self.debug_mode else ''}")
         self.history_tree.config(
             displaycolumns="#all" if self.debug_mode else self._release_mode_history_columns)
@@ -1275,6 +1528,9 @@ class InflatePolyhedronApp:
         self._rescale_history_columns(self.history_tree.winfo_width())
         if self.debug_mode:
             self.mode_row.pack(fill=tk.X, pady=(8, 0))
+            self.status_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+            for button in self.level_action_buttons.values():
+                button.pack(side=tk.BOTTOM)
         else:
             self.mode_row.pack_forget()
             self.iterate_mode_var.set("convergence")
@@ -1282,6 +1538,61 @@ class InflatePolyhedronApp:
                 self.show_normals_var.set(False)
                 if self.faces is not None:  # nothing to redraw before a net's ever been loaded
                     self.draw()
+            # The whole status frame, not just its text -- 2026-09-16,
+            # explicit user request ("in release mode, don't show
+            # warning/error/progress message"). self.progress (the
+            # animated "waiting" indicator) lives in auto_group now, not
+            # in here, so it stays visible/running regardless -- only the
+            # TEXT status this frame otherwise shows disappears.
+            self.status_frame.pack_forget()
+            # Per-level Relax/Inflate/Subdivide/Stop buttons are debug-
+            # only now too (2026-09-16, explicit -- "release mode will
+            # just use auto"): hidden here, NOT destroyed, so every other
+            # method that reads/writes their text/state (_update_level_
+            # action_buttons, _set_level_action_button_running, _auto_
+            # step's own driving calls to on_relax_clicked/on_inflate_
+            # clicked/on_subdivide_clicked) keeps working exactly as
+            # before regardless of mode -- Auto never invokes a button
+            # widget directly, only the same plain methods a manual click
+            # would call, so it's unaffected by these being unpacked.
+            for button in self.level_action_buttons.values():
+                button.pack_forget()
+
+    def _refit_window_height(self):
+        """Re-fits the window's own HEIGHT to whatever's actually visible
+        right now (2026-09-16, explicit user request -- release mode used
+        to keep debug mode's own taller height, leaving dead space below
+        the now-hidden mode_row/status_frame/per-level buttons). Called
+        from three places, every one a genuine MODE change (or the
+        equivalent first-time framing) rather than routine net switching:
+        once at the END of __init__ (AFTER on_select_net's own draw()
+        call, not right after _apply_mode_visibility earlier in __init__
+        -- see below for why that ordering matters), from _on_toggle_
+        debug_mode right after _apply_mode_visibility, and from
+        on_load_session_clicked's own tail (its debug_mode can differ
+        from whatever was showing before the load). Deliberately NOT
+        called from plain on_select_net (a fresh net pick, same mode) --
+        picking a different net shouldn't fight a manual resize the user
+        already made; only an actual mode change re-fits the window on
+        its own.
+
+        NOT called directly from _apply_mode_visibility itself, or from
+        inside __init__ before the first draw() -- a "Level N" panel's
+        own image Label has essentially ZERO natural height before its
+        first PhotoImage is set (self.level_photos[level] starts None),
+        so measuring reqheight that early would fit the window to a
+        too-short, pre-image layout and squeeze every panel once images
+        actually appear (see LEVEL_PANEL_SIZE's own __init__ comment on
+        exactly that failure mode) -- by the time _on_toggle_debug_mode
+        can even fire, on_select_net's own startup call has already run.
+        update_idletasks() forces Tk to actually recompute every widget's
+        geometry from whatever pack/pack_forget calls happened since the
+        last idle cycle -- winfo_reqheight() would otherwise still
+        reflect a stale layout. Width is read back from the window's own
+        CURRENT actual size (winfo_width()), not recomputed -- it never
+        changes between modes or net selections, only height does."""
+        self.root.update_idletasks()
+        self.root.geometry(f"{self.root.winfo_width()}x{self.root.winfo_reqheight()}")
 
     def _set_status(self, text, kind="info"):
         # "success" is always dropped, in both modes -- e.g. "Converged
@@ -1293,8 +1604,12 @@ class InflatePolyhedronApp:
         # button state, and history row already say all of it; debug mode
         # keeps "info" since it's meant for someone working on this app,
         # not an end user. "warn"/"error" (Stop requested, a solver
-        # crash) always show in both modes -- those aren't otherwise
-        # visible anywhere else.
+        # crash) still get SET here in both modes (still meaningful
+        # internal state, e.g. for a debug-mode session that toggles on
+        # mid-run), but release mode never actually shows them -- the
+        # whole status_frame is unpacked there (_apply_mode_visibility,
+        # 2026-09-16 explicit -- used to be genuinely visible in both
+        # modes, the one case this comment used to carve out).
         if kind == "success" or (kind == "info" and not self.debug_mode):
             text = ""
         self.status_var.set(text)
@@ -1326,6 +1641,17 @@ class InflatePolyhedronApp:
         label.bind("<ButtonPress-1>", self._on_level_drag_start)
         label.bind("<B1-Motion>", self._on_level_motion)
         label.bind("<ButtonRelease-1>", self._on_level_drag_end)
+        # Right-click-drag pans (self.level_pan, shared across every
+        # level panel like level_rotation/level_zoom); middle-click
+        # resets that pan back to zero -- see their own docstrings. No
+        # per-level state to capture at press time (unlike rotate/zoom,
+        # a pan drag needs no per-panel scale -- see self.level_pan's own
+        # comment in __init__), so every level's label shares these same
+        # three plain, level-agnostic handlers.
+        label.bind("<ButtonPress-3>", self._on_level_pan_start)
+        label.bind("<B3-Motion>", self._on_level_pan_motion)
+        label.bind("<ButtonRelease-3>", self._on_level_pan_end)
+        label.bind("<Button-2>", self._on_level_pan_reset)
         # Windows/macOS deliver <MouseWheel> with event.delta; Linux
         # (X11) delivers wheel motion as Button-4/Button-5 clicks instead
         # -- binding all three covers every platform this app might run
@@ -1410,6 +1736,62 @@ class InflatePolyhedronApp:
         # already keeps every panel live-updated during the drag itself,
         # so this is just a safety net for that edge case, not the
         # primary sync point.
+        self._render_all_level_panels()
+
+    def _on_level_pan_start(self, event):
+        self._level_panning = True
+        self._level_pan_last_xy = (event.x, event.y)
+
+    def _on_level_pan_motion(self, event):
+        """Right-click-drag on ANY level panel translates the shared pan
+        (self.level_pan, a 2D NDC offset applied via vtkCamera's own
+        SetWindowCenter in _render_level_pv -- see its own comment in
+        __init__ for why NDC rather than a 3D world-space offset) and
+        re-renders every panel with it -- pan's own analogue of
+        _on_level_motion's rotation drag. Needs no per-panel scale at all
+        (unlike an earlier, world-space version of this) since NDC is
+        already resolution/scale-independent -- every level panel renders
+        at the same LEVEL_PANEL_SIZE, so converting the drag through that
+        one fixed size, rather than through whichever panel happened to
+        be dragged, is what makes the resulting shift come out visually
+        IDENTICAL (same pixel count) on every panel.
+
+        Sign/scale verified directly (not just derived): rendering a
+        known point with a known SetWindowCenter(x, y) showed x=+1 moves
+        the image LEFT by exactly half the panel's own width, and y=+1
+        moves it DOWN by half the panel's own height -- so a rightward
+        drag (dx > 0) needs a NEGATIVE x term, while a downward drag
+        (dy > 0, screen y already growing downward like SetWindowCenter's
+        own y) needs a POSITIVE y term, unlike x."""
+        if not self._level_panning or self._level_pan_last_xy is None:
+            return
+        last_x, last_y = self._level_pan_last_xy
+        dx, dy = event.x - last_x, event.y - last_y
+        panel_width, panel_height = LEVEL_PANEL_SIZE
+        self.level_pan = self.level_pan + np.array(
+            [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
+        self._level_pan_last_xy = (event.x, event.y)
+        self._render_all_level_panels()
+
+    def _on_level_pan_end(self, event):
+        self._level_panning = False
+        self._level_pan_last_xy = None
+        # Same safety-net rationale as _on_level_drag_end.
+        self._render_all_level_panels()
+
+    def _on_level_pan_reset(self, event=None):
+        """Middle-click on ANY level panel resets the shared pan/zoom/
+        rotation all the way back to their defaults (2026-09-16, explicit
+        user request -- this used to reset pan alone) -- one click gets
+        every panel back to its original framing, rather than needing pan
+        reset plus manually scrolling/dragging zoom and rotation back by
+        feel. self.level_rotation goes back through _initial_level_
+        rotation() (the exact same starting quaternion __init__ builds),
+        not just "identity", since this app's own default view is
+        deliberately non-axis-aligned (see LEVEL_DEFAULT_ELEV/AZIM)."""
+        self.level_pan = np.zeros(2)
+        self.level_zoom = 1.0
+        self.level_rotation = self._initial_level_rotation()
         self._render_all_level_panels()
 
     def _on_level_scroll(self, event):
@@ -1551,6 +1933,13 @@ class InflatePolyhedronApp:
         # a bigger level_zoom (scrolled in) must shrink parallel_scale.
         camera.parallel_scale = (half * max(1.0, panel_height / panel_width)
                                   / LEVEL_ZOOM_FILL / self.level_zoom)
+        # self.level_pan (right-click-drag, _on_level_pan_motion) is
+        # applied HERE, as a pure post-projection viewport shift, rather
+        # than by moving focal_point/position above -- see its own
+        # comment in __init__ for why: this way it can't desync between
+        # panels of different scale, and can't move any panel's own
+        # orbit center out from under a later rotation either.
+        camera.SetWindowCenter(*self.level_pan)
         plotter.reset_camera_clipping_range()
         # plotter.screenshot() does NOT re-render on a camera-only change
         # by itself -- verified directly: two screenshots taken after
@@ -1716,14 +2105,18 @@ class InflatePolyhedronApp:
     def on_save_session_clicked(self):
         """File > Save -- serializes the WHOLE current session (the net,
         every "Target RMS stretch"/Tolerance spinner, the Convergence
-        History table, and the mesh at every subdivision level reached so
-        far) to one JSON file via session_state.SessionStateModel, enough
-        for on_load_session_clicked to reopen it exactly as left with no
-        re-solving. self.level_snapshots holds every level already left
-        behind (see _subdivide_step/_finish_relax); the current frontier
-        level's own live self.faces/positions/face_of_fine/edge_length
-        aren't in there yet, so this adds them under self.subdivision_level
-        itself before writing."""
+        History table, the mesh at every subdivision level reached so
+        far, and each panel's own camera view) to one JSON file via
+        session_state.SessionStateModel, enough for on_load_session_
+        clicked to reopen it exactly as left with no re-solving.
+        self.level_snapshots holds every level already left behind (see
+        _subdivide_step/_finish_relax); the current frontier level's own
+        live self.faces/positions/face_of_fine/edge_length aren't in
+        there yet, so this adds them under self.subdivision_level itself
+        before writing. self.level_rotation (a scipy Rotation) is stored
+        as its own .as_quat() (x, y, z, w) -- JSON has no quaternion type,
+        and a plain tuple round-trips through Rotation.from_quat() with
+        no loss (see on_load_session_clicked)."""
         if self.positions is None:
             messagebox.showwarning("Save", "No net is loaded yet.")
             return
@@ -1754,6 +2147,11 @@ class InflatePolyhedronApp:
             level_history={level: LevelHistoryRecordModel(**rec)
                            for level, rec in self.level_history.items()},
             levels=levels,
+            level_zoom=self.level_zoom,
+            level_pan=(float(self.level_pan[0]), float(self.level_pan[1])),
+            level_rotation=tuple(float(v) for v in self.level_rotation.as_quat()),
+            net_zoom=self.net_zoom,
+            net_pan=(float(self.net_pan[0]), float(self.net_pan[1])),
         )
         try:
             with open(path, "w") as f:
@@ -1814,6 +2212,22 @@ class InflatePolyhedronApp:
         self.last_stats = state.last_stats.model_dump()
         self.level_history = {level: rec.model_dump() for level, rec in state.level_history.items()}
 
+        # Each panel's own camera view -- level_rotation falls back to
+        # _initial_level_rotation() (this app's own non-axis-aligned
+        # default), not any baked-in quaternion, when the field is None
+        # (a session saved before this existed, or one saved with no
+        # panel ever having been rotated -- see SessionStateModel's own
+        # comment on why the default reproduces the ORIGINAL always-
+        # reset-to-default behavior). draw() below re-renders with all of
+        # these live, so nothing further is needed to actually apply them.
+        self.level_zoom = state.level_zoom
+        self.level_pan = np.array(state.level_pan)
+        self.level_rotation = (Rotation.from_quat(state.level_rotation)
+                                if state.level_rotation is not None
+                                else self._initial_level_rotation())
+        self.net_zoom = state.net_zoom
+        self.net_pan = np.array(state.net_pan)
+
         self.level_snapshots = {}
         for level, level_state in state.levels.items():
             faces, positions, face_of_fine, edge_length = level_state.to_mesh()
@@ -1834,6 +2248,13 @@ class InflatePolyhedronApp:
         self._update_level_action_buttons()
         self._update_auto_button()
         self.draw()
+        # A loaded session can carry its OWN debug_mode, different from
+        # whatever was showing before -- unlike a plain net reselection,
+        # this really is a mode change, so it gets the same refit
+        # _on_toggle_debug_mode's own explicit toggle does (see _refit_
+        # window_height's own docstring on why net selection alone
+        # otherwise doesn't refit).
+        self._refit_window_height()
         self._set_status(f"Session loaded from {os.path.basename(path)}.", "info")
 
     # ---- subdivide ----
@@ -1982,14 +2403,15 @@ class InflatePolyhedronApp:
 
     @staticmethod
     def _format_mmss(seconds):
-        """None (n/a for this level -- see the Precomp/Sim time comment in
-        __init__) -> "n/a"; otherwise mm:ss, floored to the second (these
-        columns are wall-clock timings for a human to skim, not a
-        stopwatch reading) -- minutes NOT capped at 59, so an hour-plus
-        run still reads as one growing number ("75:03") instead of
-        wrapping back to "15:03"."""
+        """None (this phase hasn't run yet at this level -- see the
+        Elapsed Time backing-state comment in __init__) -> "--"
+        (2026-09-16, explicit -- was "n/a"); otherwise mm:ss, floored to
+        the second (these columns are wall-clock timings for a human to
+        skim, not a stopwatch reading) -- minutes NOT capped at 59, so an
+        hour-plus run still reads as one growing number ("75:03") instead
+        of wrapping back to "15:03"."""
         if seconds is None:
-            return "n/a"
+            return "--"
         total_seconds = int(seconds)
         return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}"
 
@@ -2034,8 +2456,16 @@ class InflatePolyhedronApp:
         for level in sorted(self.level_history):
             rec = self.level_history[level]
             optimality = rec["optimality"]
+            # A run actively in progress right now for THIS level colors
+            # its row yellow ("running"), overriding whatever the plain
+            # optimality-vs-gtol comparison below would otherwise say --
+            # red ("not_converged") is reserved for an ACTUAL failure
+            # (the step cap was reached, or Stop was clicked), not just
+            # "hasn't converged yet, still going" (2026-09-16, explicit
+            # user request).
+            running_now = level == self.subdivision_level and self._level_running
             if optimality is None:
-                convergence, tags = "n/a", ()
+                convergence, tags = "n/a", (("running",) if running_now else ())
             else:
                 # The checkmark tracks the algorithm's own `converged`
                 # flag rather than redoing the optimality-vs-gtol
@@ -2053,8 +2483,17 @@ class InflatePolyhedronApp:
                 mark = "✔" if converged else "✘"  # colored via row tag, not the glyph itself
                 convergence = (f"{self._format_sci(optimality)} {op} "
                                 f"{self._format_sci(gtol, precision=0)} {mark}")
-                tags = ("converged",) if converged else ("not_converged",)
-            pressure_str = "n/a" if rec["pressure"] is None else f"{rec['pressure']:.4g}"
+                if running_now:
+                    tags = ("running",)
+                elif converged:
+                    tags = ("converged",)
+                else:
+                    tags = ("not_converged",)
+            # "--" for Level 0 (2026-09-16, explicit -- was "n/a"), the
+            # only level whose "pressure" is ever None (see
+            # _record_level_history) since relax_initial_configuration is
+            # pure springs, no pressure to calibrate at all.
+            pressure_str = "--" if rec["pressure"] is None else f"{rec['pressure']:.4g}"
             # Level 0 has no target stretch to chase (relax_initial_configuration
             # is pure springs, not calibrated against the spinner at all).
             # This row's OWN target_rms_pct (recorded at the time IT was
@@ -2068,17 +2507,26 @@ class InflatePolyhedronApp:
             # "Elapsed Time": Precomp + Sim -- except Level 0, which has no
             # precomputation at all (relax_initial_configuration is pure
             # springs, no pressure to calibrate, see on_relax_clicked), so
-            # its row shows just the one (Sim) value, not "n/a + mm:ss".
-            # Levels 1+ show each phase independently "n/a" if it hasn't
-            # run yet at this level (see _format_mmss) -- e.g.
-            # "12:34 + n/a" once calibration finishes but Inflate's own
-            # streamed run hasn't started/updated yet.
+            # its row shows just the one (Sim) value. Levels 1+ show BOTH
+            # phases only once both have actually run; with only one of
+            # the two available (calibration finished but Inflate's own
+            # streamed run hasn't started/updated yet, or vice versa),
+            # the row shows just that ONE mm:ss alone (2026-09-16,
+            # explicit -- was always "precomp + sim", showing e.g.
+            # "12:34 + --" for the half-run case); with NEITHER yet, "--"
+            # alone, same as _format_mmss's own single-value placeholder.
             precomp_s = rec.get("precomp_time_s")
             sim_s = rec.get("sim_time_s")
             if level == 0:
                 elapsed_str = self._format_mmss(sim_s)
-            else:
+            elif precomp_s is not None and sim_s is not None:
                 elapsed_str = f"{self._format_mmss(precomp_s)} + {self._format_mmss(sim_s)}"
+            elif precomp_s is not None:
+                elapsed_str = self._format_mmss(precomp_s)
+            elif sim_s is not None:
+                elapsed_str = self._format_mmss(sim_s)
+            else:
+                elapsed_str = self._format_mmss(None)
             # "Cumulative Time": running total of every row's own Elapsed
             # Time SECONDS so far (both phases, level 0's single one
             # included) -- a level that hasn't run at all yet contributes
@@ -2117,6 +2565,70 @@ class InflatePolyhedronApp:
     def _update_mode_state(self):
         self.steps_spin.state(["!disabled"] if self.iterate_mode_var.get() == "steps"
                                else ["disabled"])
+
+    def _register_numeric_entry(self, entry, allow_exponent, allow_decimal=True):
+        """Restricts `entry` to numeric-looking input as it's typed
+        (2026-09-16, explicit user request: a plain text Entry standing
+        in for what used to be a Spinbox, see each caller's own comment)
+        -- Tk's own `validate="key"` fires this BEFORE a keystroke is
+        accepted, on every insert/delete, with `%P` the field's value AS
+        IT WOULD READ if this keystroke goes through; returning False
+        rejects it outright (the character never appears) rather than
+        accepting then un-doing it, so this never fights the user's own
+        cursor position the way a post-hoc correction would.
+        `allow_exponent` permits an "e"/"E" exponent, for tolerance's own
+        scientific-notation text (e.g. "1e-03") -- a plain percentage
+        never needs one. `allow_decimal` permits a "." -- target RMS
+        entries pass False (2026-09-16, explicit -- whole numbers only,
+        no decimal place)."""
+        vcmd = self.root.register(lambda proposed: self._is_valid_numeric_partial(
+            proposed, allow_exponent, allow_decimal))
+        entry.configure(validate="key", validatecommand=(vcmd, "%P"))
+
+    @staticmethod
+    def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
+        """True if `proposed` is a full number OR a prefix a user could
+        still be in the middle of typing toward one (e.g. "", "-", ".",
+        "1.", "1e", "1e-" when `allow_exponent`) -- accepting these
+        in-progress states, not just a complete `float()`-parseable
+        string, is what lets a user type a negative number or a decimal
+        point at all without the very first keystroke being rejected."""
+        digits = r"\d*\.?\d*" if allow_decimal else r"\d*"
+        pattern = f"-?{digits}(?:[eE][-+]?\\d*)?" if allow_exponent else f"-?{digits}"
+        return re.fullmatch(pattern, proposed) is not None
+
+    def _begin_edit_target_rms(self, level):
+        """<FocusIn> on a target-RMS entry: swaps its displayed "N%" for
+        the bare number alone (2026-09-16, explicit user request -- the
+        "%" is something the field shows once a number's been entered,
+        not something typed, so editing should start from a plain digit
+        string with nothing to work around)."""
+        self.target_rms_display_vars[level].set(f"{self.target_rms_vars[level].get():.0f}")
+
+    def _sync_target_rms_display(self, level):
+        """Reformats a target-RMS entry's displayed text as "N%" from its
+        OWN underlying var -- fires on every write to that var, from
+        ANYWHERE (a commit here, `on_load_session_clicked`, ...), so the
+        "%" suffix (2026-09-16, explicit user request) is never left
+        stale after a change that didn't go through this entry at all."""
+        self.target_rms_display_vars[level].set(f"{self.target_rms_vars[level].get():.0f}%")
+
+    def _commit_target_rms_entry(self, level, _event=None):
+        """<Return>/<FocusOut> on a target-RMS entry: clamps whatever got
+        typed into [0, 100], rounded to the nearest whole number
+        (2026-09-16, explicit user request -- values outside that range
+        are truncated to the nearest extreme, not rejected; no decimal
+        place), or falls back to this level's own default if the field
+        doesn't parse as a number at all right now (e.g. left on "-" or
+        empty) -- the same silent-fallback spirit _get_tolerance already
+        gives tolerance's unparseable states. Setting `self.target_rms_
+        vars[level]` (not the entry's own display var directly) is what
+        triggers _sync_target_rms_display to put the "%" back."""
+        try:
+            value = round(float(self.target_rms_display_vars[level].get()))
+        except (tk.TclError, ValueError):
+            value = LEVEL_DEFAULT_TARGET_RMS_PCT[level]
+        self.target_rms_vars[level].set(max(0, min(100, value)))
 
     def _on_target_rms_changed(self, level):
         # Only the CURRENT frontier level's own spinner invalidates a
@@ -2294,6 +2806,8 @@ class InflatePolyhedronApp:
         is disabled for the whole run too (see _set_controls_enabled),
         and Relax's own promotion only happens in _finish_relax, after
         the run is over."""
+        self._level_running = running
+        self._refresh_history_table()
         button = self.level_action_buttons.get(self.subdivision_level)
         if button is None:
             return
@@ -2806,38 +3320,23 @@ class InflatePolyhedronApp:
         closes it up into the solved 3D shape on the right.
 
         Always shows the BASE (level 0) polygons here -- not the current
-        level's individual fine triangles -- with a faint subdivision
-        overlay at the CURRENT subdivision level (see mesh_levels'
-        docstring: level L's overlay is subdivide_polygon's own
-        resolution 2**(L-1), the absolute-resolution equivalent of this
-        app's own incremental fan-then-quarter scheme), as a 2D preview of
-        the mesh actually being solved. When the loaded net carries
-        interactive_builder_app's own saved connections (self.target_
-        connections), each one's bezier curve is drawn too (module-level
-        _connection_curve_points) -- the curve only, never its two
-        adjustable handles, since this panel is read-only."""
+        level's individual fine triangles, and (2026-09-16, explicit user
+        request -- "too busy") no fine-mesh subdivision overlay either,
+        whatever the current subdivision level -- just the plain base
+        faces, as a 2D preview of the mesh actually being solved. When
+        the loaded net carries interactive_builder_app's own saved
+        connections (self.target_connections), each one's bezier curve is
+        drawn too (module-level _connection_curve_points) -- the curve
+        only, never its two adjustable handles, since this panel is
+        read-only."""
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
-        overlay_level = self.subdivision_level
-        faces = self.base_faces
         all_pts = []
         for face_idx in sorted(self.target_layout):
-            face = faces[face_idx]
             color = self.colors[face_idx % len(self.colors)]
             placed = self.target_layout[face_idx]
             self.ax2d.add_patch(Polygon(placed, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
-            if overlay_level > 0:
-                sub_points, sub_triangles = subdivide_polygon(
-                    len(face), placed, 2 ** (overlay_level - 1))
-                segments = []
-                for i, j, k in sub_triangles:
-                    segments += [(sub_points[i], sub_points[j]),
-                                 (sub_points[j], sub_points[k]),
-                                 (sub_points[k], sub_points[i])]
-                self.ax2d.add_collection(LineCollection(
-                    segments, colors="k", linewidths=SUBDIVISION_EDGE_WIDTH,
-                    alpha=SUBDIVISION_EDGE_ALPHA, zorder=3))
             all_pts.extend(placed)
 
         if self.target_connections:
@@ -2848,6 +3347,16 @@ class InflatePolyhedronApp:
                     self.ax2d.plot(xs, ys, color=CONNECTION_CURVE_COLOR,
                                     linewidth=CONNECTION_CURVE_WIDTH,
                                     zorder=CONNECTION_CURVE_ZORDER)
+                    # A bezier's own control points can bow it well past
+                    # its two faces' combined extent (that's the whole
+                    # point of dragging a handle) -- feeding its sampled
+                    # points into the SAME bounding box the faces use
+                    # below (2026-09-16, explicit user request) is what
+                    # keeps a bulging curve from getting clipped at the
+                    # panel's own edge, and keeps the default (net_pan
+                    # zero) framing centered on everything actually
+                    # drawn, not just the polygons.
+                    all_pts.extend(curve)
 
         all_pts = np.array(all_pts)
         lo, hi = all_pts.min(axis=0), all_pts.max(axis=0)
@@ -2857,8 +3366,32 @@ class InflatePolyhedronApp:
         # half-extent around the layout's own center -- see
         # _on_net_scroll, the Net panel's own analogue of every "Level N"
         # panel's self.level_zoom.
-        center = (lo + hi) / 2
-        half_range = ((hi - lo) / 2 + pad) / self.net_zoom
+        # self.net_pan (world-unit offset, right-drag -- _on_net_pan_motion)
+        # shifts this same center, independently of net_zoom -- its own
+        # analogue of every "Level N" panel's self.level_pan, just a plain
+        # 2D offset here rather than a 3D one added to a PyVista camera.
+        center = (lo + hi) / 2 + self.net_pan
+        half_range = (hi - lo) / 2 + pad
+        # Stretched to the PANEL's own aspect ratio (LEVEL_PANEL_SIZE,
+        # which this panel's own figure size already matches exactly --
+        # see _build_level_pv_panel's own comment) before dividing by
+        # zoom, rather than handing set_aspect("equal") two independent
+        # half_range values and letting IT shrink whichever axis has
+        # proportionally less content (its own default `adjustable=
+        # "box"` behavior) -- 2026-09-16, explicit user request: that
+        # shrinking is exactly what left this panel's own margins
+        # visibly thicker than every "Level N" panel's, which never lets
+        # equal-aspect crop its own box short this way (see camera.
+        # parallel_scale's own `max(1.0, panel_height / panel_width)`
+        # term in _render_level_pv, the same idea applied there).
+        # Whichever axis needs MORE room (relative to the panel's own
+        # aspect ratio) wins; the other is grown to match rather than
+        # left as dead margin, so the box set_xlim/set_ylim request
+        # already fills the panel exactly and set_aspect never has
+        # anything left to shrink.
+        panel_aspect = LEVEL_PANEL_SIZE[0] / LEVEL_PANEL_SIZE[1]
+        half_y = max(half_range[1], half_range[0] / panel_aspect)
+        half_range = np.array([half_y * panel_aspect, half_y]) / self.net_zoom
         self.ax2d.set_xlim(center[0] - half_range[0], center[0] + half_range[0])
         self.ax2d.set_ylim(center[1] - half_range[1], center[1] + half_range[1])
         self.ax2d.set_aspect("equal")
@@ -2880,6 +3413,60 @@ class InflatePolyhedronApp:
         else:
             factor = NET_ZOOM_STEP
         self.net_zoom = max(NET_ZOOM_MIN, min(NET_ZOOM_MAX, self.net_zoom * factor))
+        theme = self._apply_plot_theme()
+        self._draw_target_faces(theme)
+        self._draw_idle_all()
+
+    def _on_net_pan_start(self, event):
+        self._net_panning = True
+        self._net_pan_last_xy = (event.x, event.y)
+
+    def _on_net_pan_motion(self, event):
+        """Right-click-drag on the Net panel translates it (self.net_pan,
+        added directly to _draw_target_faces' own bounding-box center) --
+        the Net panel's own analogue of _on_level_pan_motion, just a
+        plain 2D data-space offset instead of a 3D one applied through a
+        PyVista camera, since this panel is matplotlib. Converts the
+        screen-pixel drag into DATA units via the axes' OWN current
+        x/ylim and the canvas widget's current pixel size (both already
+        reflect the current zoom, so this stays a 1:1 "grabbed and slid"
+        drag at any zoom level). Sign verified directly per axis (not
+        just derived), since the two do NOT match: shifting the view's
+        center by -dx (x) or +dy (y) in data units is what makes a fixed
+        data point's SCREEN position move by the mouse's own (dx, dy) --
+        the y sign flips relative to x because Tk widget pixels grow
+        DOWNWARD while this axes' own data y grows UPWARD, and the two
+        effects don't cancel out the way a naive "same formula, just
+        matplotlib" guess would assume (an earlier version used -dy here
+        and panned vertically backwards)."""
+        if not self._net_panning or self._net_pan_last_xy is None:
+            return
+        last_x, last_y = self._net_pan_last_xy
+        dx, dy = event.x - last_x, event.y - last_y
+        widget = self.canvas_net.get_tk_widget()
+        width_px, height_px = widget.winfo_width(), widget.winfo_height()
+        if width_px <= 1 or height_px <= 1:
+            return
+        xlim, ylim = self.ax2d.get_xlim(), self.ax2d.get_ylim()
+        data_per_pixel_x = (xlim[1] - xlim[0]) / width_px
+        data_per_pixel_y = (ylim[1] - ylim[0]) / height_px
+        self.net_pan = self.net_pan + np.array([-dx * data_per_pixel_x, dy * data_per_pixel_y])
+        self._net_pan_last_xy = (event.x, event.y)
+        theme = self._apply_plot_theme()
+        self._draw_target_faces(theme)
+        self._draw_idle_all()
+
+    def _on_net_pan_end(self, event):
+        self._net_panning = False
+        self._net_pan_last_xy = None
+
+    def _on_net_pan_reset(self, event=None):
+        """Middle-click on the Net panel resets pan AND zoom back to
+        their defaults (2026-09-16, explicit user request -- same idea
+        as _on_level_pan_reset, minus rotation, which this 2D panel has
+        none of)."""
+        self.net_pan = np.zeros(2)
+        self.net_zoom = 1.0
         theme = self._apply_plot_theme()
         self._draw_target_faces(theme)
         self._draw_idle_all()

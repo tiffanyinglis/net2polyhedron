@@ -1,9 +1,9 @@
 """Pydantic models for inflate_polyhedron_app's File > Save/Load: a full
 on-screen session -- the chosen net, every parameter spinner, the
-Convergence History table, and the mesh (faces/positions/face_of_fine) at
-every subdivision level reached so far -- serialized to/from one JSON
-file, enough to reopen a simulation exactly as left without re-running
-anything.
+Convergence History table, the mesh (faces/positions/face_of_fine) at
+every subdivision level reached so far, and each panel's own camera view
+(zoom/pan/rotation) -- serialized to/from one JSON file, enough to reopen
+a simulation exactly as left without re-running anything.
 
 Pure data models with no Tkinter/app-object dependency -- app.py's
 on_save_clicked/on_load_clicked build/apply a SessionStateModel using
@@ -118,3 +118,20 @@ class SessionStateModel(BaseModel):
     last_stats: LastStatsModel
     level_history: Dict[int, LevelHistoryRecordModel]
     levels: Dict[int, LevelStateModel]
+    # Every "Level N" panel's own shared camera state (self.level_zoom/
+    # _pan/_rotation in app.py -- see _render_level_pv) and the Net
+    # panel's own separate self.net_zoom/_pan (_draw_target_faces) --
+    # added once these became persistent-feeling, explicitly-adjusted
+    # view settings (pan/zoom/rotation resets, wider zoom range, etc.)
+    # rather than incidental defaults. All optional with a default that
+    # reproduces the ORIGINAL always-reset-to-default behavior, so a
+    # session file saved before these existed still loads exactly as it
+    # used to -- app.py falls back to _initial_level_rotation() (not a
+    # baked-in quaternion here) when level_rotation is None, since that
+    # method is the one place that non-axis-aligned starting view is
+    # actually defined.
+    level_zoom: float = 1.0
+    level_pan: Tuple[float, float] = (0.0, 0.0)
+    level_rotation: Optional[Tuple[float, float, float, float]] = None  # scipy Rotation (x, y, z, w)
+    net_zoom: float = 1.0
+    net_pan: Tuple[float, float] = (0.0, 0.0)
