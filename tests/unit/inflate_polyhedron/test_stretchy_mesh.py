@@ -17,18 +17,6 @@ from utils.inflate_polyhedron.mesh_levels import subdivide_once
 
 PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_one_square.poly"
 
-# Three squares, each pair sharing exactly 2 sides with one "partner" square
-# (cyclically: A-B, B-C, C-A), forcing genuine non-planar bend the same way
-# PENTAGONS_AND_SQUARE does. Combinatorially: 3 quad faces, 5 vertices
-# (2 "pole" vertices each touching all 3 faces, 3 "equatorial" vertices
-# each touching only 2), 6 edges -- like a triangular bipyramid's 6
-# triangular faces merged pairwise into 3 quads. Inflated, it rounds out
-# into a compact, roughly 4-cornered blob (the 2 poles pull apart from the
-# 3 equatorial points) -- a deliberately awkward, no-slack-for-planarity
-# case for exercising the inflation algorithm, same role PENTAGONS_AND_SQUARE
-# plays for pentagons.
-THREE_SQUARES = "data/input/stretchy_nets/three_squares.poly"
-
 TETRAHEDRON_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
 
 # A real, unit-edge-length regular tetrahedron (CCW-from-outside faces) --
@@ -65,25 +53,6 @@ def _relaxed_positions(faces, edge_length=EDGE_LENGTH, seed=0, max_nfev=None):
     pos0 = random_initial_positions(faces, seed=seed)
     positions, *_ = relax_initial_configuration(pos0, faces, edge_length, max_nfev=max_nfev)
     return positions
-
-
-def test_load_pentagons_and_square_example():
-    faces, name = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
-    assert len(faces) == 3
-    assert [len(f) for f in faces] == [5, 5, 4]
-    assert name == "Two Pentagons and a Square"
-
-
-def test_load_three_squares_example():
-    faces, name = load_stretchy_mesh(THREE_SQUARES)
-    assert len(faces) == 3
-    assert all(len(f) == 4 for f in faces)
-    assert name == "Three Squares"
-    n_verts = len({v for face in faces for v in face})
-    edges = mesh_edges(faces)
-    assert n_verts == 5
-    assert len(edges) == 6
-    assert n_verts - len(edges) + len(faces) == 2  # Euler's formula: closed, genus-0
 
 
 def test_load_stretchy_mesh_allows_unmatched_directed_edge(tmp_path):

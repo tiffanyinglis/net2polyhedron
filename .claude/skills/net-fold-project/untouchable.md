@@ -64,6 +64,12 @@ paths (`tests/unit/inflate_polyhedron/test_stretchy_mesh.py`, `test_stretchy_net
 files / silently stop testing any shipped net at all via an empty glob), not separate scope
 creep.
 
+`tests/unit/inflate_polyhedron/test_stretchy_mesh.py`: `test_load_pentagons_and_square_example`/
+`test_load_three_squares_example` DELETED entirely (2026-09-16, explicit — "i don't [care] about
+that. delete those tests", re: their own pre-existing, unrelated-to-anything-this-session
+title-case-vs-underscored `"name"` field mismatch). `THREE_SQUARES` (now-unused after the delete)
+removed too; `PENTAGONS_AND_SQUARE` kept -- still used by `test_mesh_edges_deduplicates_and_sorts`.
+
 Rigid-unfolding pipeline (`polyhedron_unfolder` app+utils, `persistence/`, `data/input/nets/`) is
 DELETED from this repo entirely — lives in sibling `polyhedron-unfolder` project. Don't
 resurrect here; don't treat references to it in git history as still-live code.
