@@ -2,10 +2,7 @@ import numpy as np
 import pytest
 
 from utils.geometry.polygon_geom import regular_polygon_vertices
-from utils.subdivisions import (
-    SUBDIVISIONS, MAX_LEVEL, subdivide, resolution_for, subdivide_at_level,
-    subdivide_ngon_at_level,
-)
+from utils.subdivisions import SUBDIVISIONS, MAX_LEVEL, subdivide, resolution_for, subdivide_at_level
 
 
 def polygon_area(verts):
@@ -163,73 +160,6 @@ def test_subdivide_at_level_rejects_out_of_range_levels():
         subdivide_at_level(4, verts, -1)
     with pytest.raises(ValueError):
         subdivide_at_level(4, verts, MAX_LEVEL + 1)
-
-
-def test_subdivide_ngon_at_level_0_is_the_undivided_polygon():
-    for n in range(3, 9):
-        verts = regular_polygon_vertices(n)
-        points, triangles = subdivide_ngon_at_level(verts, 0)
-        assert triangles == []
-        assert [tuple(p) for p in points] == [tuple(v) for v in verts]
-
-
-def test_subdivide_ngon_at_level_1_is_always_a_centroid_fan():
-    # Unlike subdivide_at_level (which leaves a triangle whole at level 1,
-    # per SUBDIVISIONS[3]), this always fans out from the centroid,
-    # including for n == 3 -- per the app's own spec.
-    for n in range(3, 9):
-        verts = regular_polygon_vertices(n)
-        _, triangles = subdivide_ngon_at_level(verts, 1)
-        assert len(triangles) == n
-
-
-def test_subdivide_ngon_at_level_quadruples_triangle_count_each_level():
-    for n in range(3, 9):
-        verts = regular_polygon_vertices(n)
-        counts = [len(subdivide_ngon_at_level(verts, level)[1])
-                  for level in range(1, MAX_LEVEL + 1)]
-        for coarser, finer in zip(counts, counts[1:]):
-            assert finer == 4 * coarser
-
-
-def test_subdivide_ngon_at_level_covers_the_polygon_at_every_level():
-    for n in range(3, 9):
-        verts = regular_polygon_vertices(n)
-        area = polygon_area(verts)
-        for level in range(1, MAX_LEVEL + 1):
-            points, triangles = subdivide_ngon_at_level(verts, level)
-            assert np.isclose(sum(mesh_triangle_areas(points, triangles)), area)
-
-
-def test_subdivide_ngon_at_level_points_are_nested_subsets():
-    for n in range(3, 9):
-        verts = regular_polygon_vertices(n)
-        for level in range(0, MAX_LEVEL):
-            coarse_points, _ = subdivide_ngon_at_level(verts, level)
-            fine_points, _ = subdivide_ngon_at_level(verts, level + 1)
-            coarse_set = {(round(p[0], 9), round(p[1], 9)) for p in coarse_points}
-            fine_set = {(round(p[0], 9), round(p[1], 9)) for p in fine_points}
-            assert coarse_set <= fine_set
-
-
-def test_subdivide_ngon_at_level_works_on_a_non_regular_polygon():
-    # The whole point of this function over subdivide_at_level: it must
-    # produce a valid, area-covering mesh for an irregular quadrilateral,
-    # e.g. one with a vertex dragged away from its regular position.
-    verts = [np.array([0.0, 0.0]), np.array([2.0, 0.0]),
-             np.array([3.0, 1.5]), np.array([-0.5, 1.0])]
-    area = polygon_area(verts)
-    for level in range(1, MAX_LEVEL + 1):
-        points, triangles = subdivide_ngon_at_level(verts, level)
-        assert np.isclose(sum(mesh_triangle_areas(points, triangles)), area)
-
-
-def test_subdivide_ngon_at_level_rejects_invalid_input():
-    verts = regular_polygon_vertices(4)
-    with pytest.raises(ValueError):
-        subdivide_ngon_at_level(verts, -1)
-    with pytest.raises(ValueError):
-        subdivide_ngon_at_level(verts[:2], 1)
 
 
 def test_resolution_for_fixes_the_cube_corner_valence_asymmetry():

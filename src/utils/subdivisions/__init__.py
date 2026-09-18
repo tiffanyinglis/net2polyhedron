@@ -9,12 +9,12 @@ Modules:
 """
 from .polygon_subdivisions import (
     SUBDIVISIONS, DEFAULT_RESOLUTION, MAX_LEVEL, subdivide, resolution_for,
-    subdivide_at_level, subdivide_ngon_at_level,
+    subdivide_at_level,
 )
 from .mesh_subdivide import load_fabric_spec
 
 __all__ = [
     "SUBDIVISIONS", "DEFAULT_RESOLUTION", "MAX_LEVEL", "subdivide", "resolution_for",
-    "subdivide_at_level", "subdivide_ngon_at_level",
+    "subdivide_at_level",
     "load_fabric_spec",
 ]

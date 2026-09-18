@@ -135,64 +135,6 @@ def subdivide_at_level(n, vertices, level):
     return points, triangles
 
 
-def subdivide_ngon_at_level(vertices, level):
-    """Generic centroid-fan subdivision for ANY simple n-gon (n >= 3),
-    working directly off the given (not necessarily regular) vertex
-    positions -- used by the interactive polygon_subdivision_app so a
-    dragged vertex still produces a valid mesh. Deliberately separate from
-    `subdivide_at_level` (whose SUBDIVISIONS table special-cases n==3 and
-    only covers n=3..8) so editing that app can't perturb the real
-    solver's behavior.
-
-    Level 0: bare polygon, no triangles. Level 1: connect the centroid to
-    every vertex, splitting the n-gon into n triangles (always, including
-    n==3, unlike SUBDIVISIONS[3]). Each level after that quarters every
-    existing triangle by connecting its edge midpoints. Returns (points,
-    triangles), same shape as subdivide()."""
-    n = len(vertices)
-    if n < 3:
-        raise ValueError(f"need at least 3 vertices, got {n}")
-    if level < 0:
-        raise ValueError(f"level must be >= 0, got {level}")
-
-    if level == 0:
-        return list(vertices), []
-
-    centroid = sum(vertices) / n
-    points = list(vertices) + [centroid]
-    triangles = [(i, (i + 1) % n, n) for i in range(n)]
-
-    for _ in range(level - 1):
-        points, triangles = _quarter_triangles(points, triangles)
-
-    return points, triangles
-
-
-def _quarter_triangles(points, triangles):
-    """Split every triangle into 4 by connecting its edge midpoints (the
-    "triforce" split), merging a midpoint shared between two adjacent
-    triangles into a single point. points: list of vertex coords indexed
-    by triangles' (i, j, k) triples. Returns the new (points, triangles)."""
-    points = list(points)
-    index_of_midpoint = {}
-
-    def midpoint_index(i, j):
-        key = (i, j) if i < j else (j, i)
-        idx = index_of_midpoint.get(key)
-        if idx is None:
-            idx = len(points)
-            index_of_midpoint[key] = idx
-            points.append((points[i] + points[j]) / 2)
-        return idx
-
-    new_triangles = []
-    for a, b, c in triangles:
-        ab, bc, ca = midpoint_index(a, b), midpoint_index(b, c), midpoint_index(c, a)
-        new_triangles += [(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)]
-
-    return points, new_triangles
-
-
 def subdivide(n, vertices, resolution=DEFAULT_RESOLUTION):
     """Build a fine triangular mesh for a regular n-gon (given its CCW
     vertex list, e.g. from polygon_geom.regular_polygon_vertices).
