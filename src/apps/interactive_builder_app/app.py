@@ -859,19 +859,41 @@ def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_widt
 #
 # Written in the same "faces" vertex-loop format stretchy_mesh.py reads
 # (shared vertex ids ARE the adjacency -- see its own module docstring
-# for the full convention), plus two extra top-level keys this app alone
-# understands: "net_layout", a list parallel to "faces" of each face's
-# own {"cx", "cy", "rotation", "flipped"} -- exactly the fields a shape
-# already carries -- as it looked on screen when saved; and
-# "builder_connections", self.connections translated from shape id to
-# FACE INDEX (a fresh shape has no id yet at load time), each entry now
-# also carrying its own "a_handle"/"b_handle" (the {"t", "n"} bezier
-# control-point offsets -- module docstring's "Bezier handles" section --
-# read back as-is, or defaulted via _default_connection_handles for an
-# older file's entry that predates them). Any OTHER program reading this
-# file (the actual stretchy-mesh solver included) only ever looks at
-# "faces"/"name" and has no reason to know either key exists, so it's
-# free to ignore an unrecognized top-level key.
+# for the full convention), plus "edges" (_edges_from_shapes) and two
+# extra top-level keys this app alone understands: "net_layout", a list
+# parallel to "faces" of each face's own {"cx", "cy", "rotation",
+# "flipped"} -- exactly the fields a shape already carries -- as it
+# looked on screen when saved; and "builder_connections", self.connections
+# translated from shape id to FACE INDEX (a fresh shape has no id yet at
+# load time), each entry now also carrying its own "a_handle"/"b_handle"
+# (the {"t", "n"} bezier control-point offsets -- module docstring's
+# "Bezier handles" section -- read back as-is, or defaulted via
+# _default_connection_handles for an older file's entry that predates
+# them).
+#
+# "edges"/"face_edge_ids" are NOT this app's own private extension the
+# way "net_layout"/"builder_connections" are -- stretchy_mesh.py and
+# mesh_levels.py themselves read them (when present) as authoritative,
+# in place of re-deriving edge identity purely from "faces"' shared
+# vertex ids. That re-derivation is ambiguous once two faces glued along
+# multiple edges merge unrelated corners onto the same vertex ids: two
+# of their remaining FREE edges can then coincidentally land on the
+# exact same vertex-id pair as each other despite never being connected,
+# and a plain vertex-pair set can't tell that apart from a genuinely
+# shared edge (see _edges_from_shapes' own docstring). "edges" fixes
+# this for the base mesh's own springs (stretchy_mesh.mesh_edges);
+# "face_edge_ids" (_face_edge_ids_from_shapes) fixes the same ambiguity
+# for mesh_levels.subdivide_once's own Level 1->2 rim-edge splitting,
+# which needs a per-FACE-EDGE answer ("is THIS specific edge of THIS
+# specific face the same physical edge as that one?"), not just the
+# per-mesh-edge one "edges" gives. This app is the one place either
+# ambiguity can still be resolved, since self.connections still records
+# exactly which shape-edges are actually glued -- so both are written on
+# every Save, alongside "faces", not left for a reader to reconstruct.
+# Any OTHER program reading this file only ever looks at "faces"/"name"
+# (or now also "edges"/"face_edge_ids") and has no reason to know
+# "net_layout"/"builder_connections" exist, so it's free to ignore those
+# two.
 #
 # "flipped" can ONLY be correctly restored together with
 # "builder_connections" -- never by re-deriving connections from "faces"
@@ -1122,6 +1144,126 @@ def _faces_from_shapes(shapes, connections):
             face.append(vertex_ids[root])
         faces.append(face)
     return faces
+
+
+def _edges_from_shapes(shapes, connections):
+    """shapes/connections: as _vertex_roots/_faces_from_shapes. Returns
+    the explicit mesh-edge list: one [v, w] vertex-id pair per genuine
+    edge, in the SAME vertex-id numbering _faces_from_shapes assigns
+    (same roots, same shape/corner visiting order, so ids here line up
+    1:1 with that function's own output for the same shapes/
+    connections). Each connection's own glued pair of shape-edges
+    contributes exactly ONE entry (not one per side); every other
+    (free/boundary) shape-edge contributes its own separate entry too,
+    even when its vertex-id pair happens to coincide with some other
+    free edge's -- two coincidentally-same-pair boundary edges are NOT
+    the same edge once vertex dedup has merged unrelated corners onto
+    the same ids (e.g. two faces glued along a pair of opposite edges
+    merges all 4 corners pairwise, so the two faces' own remaining free
+    edges can land on the exact same vertex-id pair as each other by
+    coincidence). A plain vertex-pair set rebuilt from `faces` alone
+    can't tell that case apart from a genuinely shared edge -- this
+    explicit list is what stretchy_mesh.mesh_edges prefers instead, when
+    present, so a duplicate pair here is deliberate, not a bug to
+    dedupe."""
+    roots = _vertex_roots(shapes, connections)
+    vertex_ids = {}
+
+    def vid(slot):
+        root = roots[slot]
+        if root not in vertex_ids:
+            vertex_ids[root] = len(vertex_ids)
+        return vertex_ids[root]
+
+    # Assign ids in the exact same order _faces_from_shapes does, so a
+    # root's id here always matches that function's own numbering.
+    for shape in shapes:
+        for corner in _shape_face_corner_order(shape):
+            vid((shape["id"], corner))
+
+    shapes_by_id = {s["id"]: s for s in shapes}
+    glued_slots = {(conn["a_shape"], conn["a_edge"]) for conn in connections} | \
+                  {(conn["b_shape"], conn["b_edge"]) for conn in connections}
+
+    edges = []
+    seen_conns = set()
+    for conn in connections:
+        pair_key = frozenset({(conn["a_shape"], conn["a_edge"]),
+                               (conn["b_shape"], conn["b_edge"])})
+        if pair_key in seen_conns:
+            continue
+        seen_conns.add(pair_key)
+        n = shapes_by_id[conn["a_shape"]]["n"]
+        edges.append([vid((conn["a_shape"], conn["a_edge"])),
+                      vid((conn["a_shape"], (conn["a_edge"] + 1) % n))])
+
+    for shape in shapes:
+        n = shape["n"]
+        for e in range(n):
+            if (shape["id"], e) in glued_slots:
+                continue
+            edges.append([vid((shape["id"], e)), vid((shape["id"], (e + 1) % n))])
+
+    return edges
+
+
+def _face_edge_ids_from_shapes(shapes, connections):
+    """shapes/connections: as _vertex_roots/_faces_from_shapes. Returns a
+    list parallel to _faces_from_shapes' own `faces`: face_edge_ids[fi]
+    is a list of n small ints, one per edge of that face's own exported
+    vertex loop (edge k runs from loop position k to loop position
+    (k+1) % n -- REVERSED from raw shape-edge order when that shape is
+    flipped, same as _faces_from_shapes/_shape_face_corner_order's own
+    order, see _true_edge_slots). Two face-edges get the SAME id iff a
+    connection glues them (the same genuine mesh edge, seen from its two
+    faces); every other face-edge gets an id no other face-edge uses (a
+    free/boundary edge).
+
+    This is what lets mesh_levels.subdivide_once (via a saved file's own
+    "face_edge_ids" field) correctly disambiguate a rim edge during
+    Level 1->2 subdivision -- see _edges_from_shapes' own docstring for
+    why a plain vertex-id pair can't tell a genuinely shared edge apart
+    from two independent free edges that coincidentally share a
+    vertex-id pair after dedup: without this, subdividing a net like
+    that would silently weld two unrelated boundary edges' new midpoints
+    into one, the exact same bug _edges_from_shapes fixes for the
+    UNsubdivided mesh's own springs."""
+    glued_partner = {}
+    for conn in connections:
+        a_slot = (conn["a_shape"], conn["a_edge"])
+        b_slot = (conn["b_shape"], conn["b_edge"])
+        glued_partner[a_slot] = b_slot
+        glued_partner[b_slot] = a_slot
+
+    def raw_edge_for_loop_position(shape, k):
+        # Loop position k runs corner_order[k] -> corner_order[k+1]
+        # (_shape_face_corner_order); for an unflipped shape that's raw
+        # edge k directly, and for a flipped one (corner_order reversed)
+        # it works out to raw edge (n - 2 - k) % n -- verified directly
+        # against _shape_face_corner_order for n=4 flipped: loop
+        # positions 0..3 land on raw edges 2, 1, 0, 3.
+        n = shape["n"]
+        return k if not shape.get("flipped", False) else (n - 2 - k) % n
+
+    next_id = 0
+    id_of_slot = {}
+    face_edge_ids = []
+    for shape in shapes:
+        n = shape["n"]
+        ids_for_face = []
+        for k in range(n):
+            slot = (shape["id"], raw_edge_for_loop_position(shape, k))
+            cid = id_of_slot.get(slot)
+            if cid is None:
+                cid = next_id
+                next_id += 1
+                id_of_slot[slot] = cid
+                partner = glued_partner.get(slot)
+                if partner is not None:
+                    id_of_slot[partner] = cid
+            ids_for_face.append(cid)
+        face_edge_ids.append(ids_for_face)
+    return face_edge_ids
 
 
 def _degenerate_edge_faces(faces):
@@ -2061,12 +2203,14 @@ class InteractiveBuilderApp:
         before letting New/quitting throw away unsaved work) check
         this."""
         try:
-            faces, net_layout, builder_connections = self._export_faces_and_layout()
+            faces, edges, face_edge_ids, net_layout, builder_connections = \
+                self._export_faces_and_layout()
         except (NetValidationError, ValueError) as e:
             messagebox.showerror("Save failed", str(e))
             return False
         spec = {"name": os.path.splitext(os.path.basename(path))[0], "faces": faces,
-                "net_layout": net_layout, "builder_connections": builder_connections,
+                "edges": edges, "face_edge_ids": face_edge_ids, "net_layout": net_layout,
+                "builder_connections": builder_connections,
                 "view": {"scale": self.view_scale}}
         try:
             with open(path, "w") as f:
@@ -2128,36 +2272,48 @@ class InteractiveBuilderApp:
         return self._save_to_path(self.current_save_path)
 
     def _export_faces_and_layout(self):
-        """Returns (faces, net_layout, builder_connections): `faces` is
-        the vertex-loop list derived from self.shapes/self.connections
-        via _faces_from_shapes; `net_layout` is each shape's own {"cx",
-        "cy", "rotation", "flipped"}, in the same order as `faces`;
-        `builder_connections` is self.connections translated from shape
-        id to FACE INDEX (position in self.shapes, matching position in
-        `faces`) -- both this app's own extensions, see module
-        docstring's "net JSON import/export" section for why Load
-        reconstructs shapes/connections directly from these two
-        (when present) rather than re-deriving them from the plain
-        vertex-loop `faces` alone: re-deriving can only ever recover
-        SOME valid flip/connection assignment for the exported mesh, not
-        necessarily the exact one the user built (see _load_faces' own
-        docstring for why "flipped" specifically can't just be read back
-        onto a re-derived connection). Raises NetValidationError (a
-        ValueError subclass, from _validate_shapes_connections) if
-        self.shapes' CURRENT "flipped" bits (see module docstring's
-        "Flip" section -- set directly by the user, never inferred)
-        don't produce a valid mesh -- should be unreachable in normal
-        use, since Save/Save As already refuse to call this while
-        self._vme_active (_refresh_vme_state re-runs the same check
-        live after every edit -- see module docstring's "Edge
-        connections" section), but kept here as the defensive,
-        authoritative check right before a file is actually written.
-        Validated in "vSHAPE.CORNER" terms, the same live identity debug
-        mode shows, before _faces_from_shapes ever renumbers anything
-        for export, so a failed check's error names corners the user can
-        actually go find (and un-flip, if that's the fix) on screen."""
+        """Returns (faces, edges, face_edge_ids, net_layout,
+        builder_connections): `faces` is the vertex-loop list derived
+        from self.shapes/self.connections via _faces_from_shapes; `edges`
+        is the explicit mesh-edge list from _edges_from_shapes (see its
+        own docstring for why this can't just be re-derived from `faces`
+        alone downstream -- two coincidentally-same-vertex-pair free
+        edges are NOT the same edge); `face_edge_ids` is
+        _face_edge_ids_from_shapes' own per-face-edge disambiguation ids
+        (same reason, but for mesh_levels.subdivide_once's own Level
+        1->2 rim-edge splitting, which can't rely on `edges` alone since
+        it needs a per-FACE-EDGE, not per-mesh-edge, answer); `net_layout`
+        is each shape's own {"cx", "cy", "rotation", "flipped"}, in the
+        same order as `faces`; `builder_connections` is self.connections
+        translated from shape id to FACE INDEX (position in self.shapes,
+        matching position in `faces`) -- all four of `edges`/
+        `face_edge_ids`/`net_layout`/`builder_connections` are this
+        app's own extensions, see module docstring's "net JSON import/
+        export" section for why Load reconstructs shapes/connections
+        directly from `net_layout`/`builder_connections` (when present)
+        rather than re-deriving them from the plain vertex-loop `faces`
+        alone: re-deriving can only ever recover SOME valid flip/
+        connection assignment for the exported mesh, not necessarily the
+        exact one the user built (see _load_faces' own docstring for why
+        "flipped" specifically can't just be read back onto a re-derived
+        connection). Raises NetValidationError (a ValueError subclass,
+        from _validate_shapes_connections) if self.shapes' CURRENT
+        "flipped" bits (see module docstring's "Flip" section -- set
+        directly by the user, never inferred) don't produce a valid mesh
+        -- should be unreachable in normal use, since Save/Save As
+        already refuse to call this while self._vme_active
+        (_refresh_vme_state re-runs the same check live after every edit
+        -- see module docstring's "Edge connections" section), but kept
+        here as the defensive, authoritative check right before a file
+        is actually written. Validated in "vSHAPE.CORNER" terms, the
+        same live identity debug mode shows, before _faces_from_shapes
+        ever renumbers anything for export, so a failed check's error
+        names corners the user can actually go find (and un-flip, if
+        that's the fix) on screen."""
         _validate_shapes_connections(self.shapes, self.connections)
         faces = _faces_from_shapes(self.shapes, self.connections)
+        edges = _edges_from_shapes(self.shapes, self.connections)
+        face_edge_ids = _face_edge_ids_from_shapes(self.shapes, self.connections)
         net_layout = [{"cx": s["cx"], "cy": s["cy"], "rotation": s["rotation"],
                        "flipped": s["flipped"]} for s in self.shapes]
         face_index = {s["id"]: i for i, s in enumerate(self.shapes)}
@@ -2167,7 +2323,7 @@ class InteractiveBuilderApp:
              "a_handle": dict(c["a_handle"]), "b_handle": dict(c["b_handle"])}
             for c in self.connections
         ]
-        return faces, net_layout, builder_connections
+        return faces, edges, face_edge_ids, net_layout, builder_connections
 
     def on_load_clicked(self):
         path = filedialog.askopenfilename(

@@ -370,8 +370,8 @@ import sv_ttk
 from common.paths import STRETCHY_NETS_DIR, DATA_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, relax_once, relax_initial_configuration, random_initial_positions,
-    estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
+    load_stretchy_mesh, load_stretchy_mesh_edges, relax_once, relax_initial_configuration,
+    random_initial_positions, estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
     CONVERGENCE_GTOL,
 )
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
@@ -690,6 +690,36 @@ def _build_level1_topology(base_faces):
     faces, _, edge_length, face_of_fine = subdivide_once(
         base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
     return faces, edge_length, face_of_fine
+
+
+def _fan_level_edges(faces, base_edges):
+    """faces: Level 0/1's own fan-triangulated mesh, as returned by
+    _build_level1_topology; base_edges: the loaded net's own explicit
+    "edges" field (stretchy_mesh.load_stretchy_mesh_edges), or None.
+    Returns the explicit mesh-edge list for `faces` -- for mesh_edges'
+    own `edges` param, so relax_initial_configuration/relax_once/
+    estimate_pressure_for_target_stretch use the correct spring topology
+    at Level 0/1 -- or None if `base_edges` is None (an older file, or
+    one with no ambiguity to disambiguate in the first place; the plain
+    vertex-pair derivation mesh_edges already falls back to is safe).
+
+    Fan triangulation never touches a base face's own RIM edges (see
+    mesh_levels._fan_level_0_to_1's own docstring) -- they're still
+    exactly `base_edges`' own vertex-id pairs, unchanged and already
+    correctly disambiguated (see interactive_builder_app.
+    _edges_from_shapes' own docstring for why that disambiguation
+    matters). The only edges triangulation ADDS are SPOKES (a rim vertex
+    to its own face's fresh centroid id), always globally unique -- a
+    centroid id can never collide with anything else -- so those are
+    safe to derive the plain way. This combines the two: `base_edges`
+    as-is, plus every OTHER edge of `faces` (i.e. every edge NOT between
+    two original base vertex ids) from a plain mesh_edges derivation."""
+    if base_edges is None:
+        return None
+    base_vertex_ids = {v for e in base_edges for v in e}
+    spokes = [e for e in mesh_edges(faces)
+              if not (e[0] in base_vertex_ids and e[1] in base_vertex_ids)]
+    return list(base_edges) + spokes
 
 
 # interactive_builder_app/app.py's own DEFAULT_SHAPE_EDGE_LENGTH -- the
@@ -1458,6 +1488,13 @@ class InflatePolyhedronApp:
         self.face_of_fine = None
         self.subdivision_level = 0
         self.edge_length = None
+        # Level 0/1's own explicit spring-edge override (see
+        # _fan_level_edges) and its ORIGIN, the loaded net's own explicit
+        # "edges"/"face_edge_ids" fields (see load_stretchy_mesh_edges) --
+        # None past Level 1, or for any net/session with no such fields.
+        self.edges = None
+        self.base_edges = None
+        self.base_face_edge_ids = None
         self.target_layout = None
         # interactive_builder_app's own saved "builder_connections" (its
         # bezier control points included), or None -- see on_select_net's
@@ -2433,6 +2470,7 @@ class InflatePolyhedronApp:
         path = self.label_to_path[chosen]
         try:
             faces, self.mesh_name = load_stretchy_mesh(path)
+            base_edges, base_face_edge_ids = load_stretchy_mesh_edges(path)
         except ValueError as e:
             self._set_status(str(e), "error")
             self.faces = None
@@ -2448,6 +2486,18 @@ class InflatePolyhedronApp:
         legacy_coarse_faces, _, _ = load_fabric_spec(path)
         self.base_faces = legacy_coarse_faces if legacy_coarse_faces is not None else faces
         self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.base_faces))]
+        # base_edges/base_face_edge_ids (see _fan_level_edges/
+        # mesh_levels.subdivide_once's own docstrings) are keyed to the
+        # file's own "faces" vertex-id space -- only meaningful when
+        # self.base_faces IS that same "faces" (the ordinary, non-legacy
+        # case); a legacy fabric net's re-derived coarse_faces use a
+        # DIFFERENT vertex-id space entirely, so there's nothing to
+        # disambiguate against and this stays None (the always-safe
+        # plain-vertex-pair fallback every consumer already has).
+        if legacy_coarse_faces is not None:
+            base_edges = base_face_edge_ids = None
+        self.base_edges = base_edges
+        self.base_face_edge_ids = base_face_edge_ids
 
         # Precomputed once per net selection: this panel's flat net
         # layout doesn't change with subdivision level, only its
@@ -2490,6 +2540,11 @@ class InflatePolyhedronApp:
         # (see module docstring) -- computed once here, up front, rather
         # than re-derived on promotion.
         self.faces, self.edge_length, self.face_of_fine = _build_level1_topology(self.base_faces)
+        # Level 0/1's own explicit spring-edge override (see
+        # _fan_level_edges' own docstring) -- None past Level 1 (Level
+        # 2/3's own edges are always unambiguous, see mesh_levels.
+        # subdivide_once's docstring), reset here on every net load.
+        self.edges = _fan_level_edges(self.faces, self.base_edges)
         self.current_path = path
         self.subdivision_level = 0
         self.positions = random_initial_positions(self.faces, seed=0)
@@ -2624,6 +2679,22 @@ class InflatePolyhedronApp:
         self.base_faces = [list(face) for face in state.base_faces]
         self._net_file_json = state.net_file
         self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.base_faces))]
+        # Same "edges"/"face_edge_ids" disambiguation on_select_net reads
+        # from a fresh net file (see _fan_level_edges/mesh_levels.
+        # subdivide_once's own docstrings) -- only meaningful when this
+        # session's own base_faces actually IS the net_file's "faces"
+        # (the ordinary, non-legacy case; see on_select_net's own
+        # comment), which a saved session has no direct record of, so
+        # this checks the same way on_select_net does: length match. A
+        # session with no net_file, or a mismatched one, just falls back
+        # to None (the always-safe plain-vertex-pair derivation).
+        net_file_faces = (self._net_file_json or {}).get("faces")
+        if net_file_faces is not None and len(net_file_faces) == len(self.base_faces):
+            self.base_edges = (self._net_file_json or {}).get("edges")
+            self.base_face_edge_ids = (self._net_file_json or {}).get("face_edge_ids")
+        else:
+            self.base_edges = None
+            self.base_face_edge_ids = None
         # Same layout decision as on_select_net (see its own comment): a
         # net_file carrying its own "net_layout" (e.g. one built and
         # connected in interactive_builder_app) reproduces THAT exact
@@ -2701,6 +2772,13 @@ class InflatePolyhedronApp:
             else:
                 self.level_snapshots[level] = {"faces": faces, "positions": positions,
                                                 "face_of_fine": face_of_fine}
+        # Level 0/1 share their fan-triangulated topology (see
+        # on_select_net's own comment) -- only THOSE levels can still
+        # have an unsplit base rim edge worth disambiguating (see
+        # mesh_levels.subdivide_once's own docstring); None (the plain,
+        # always-safe derivation) past that, same as _subdivide_step.
+        self.edges = (_fan_level_edges(self.faces, self.base_edges)
+                      if self.subdivision_level <= 1 else None)
 
         self.history_tree.delete(*self.history_tree.get_children())
         self.stop_event = None
@@ -2774,8 +2852,15 @@ class InflatePolyhedronApp:
         }
         self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
             self.faces, self.positions, self.edge_length, self.face_of_fine,
-            self.subdivision_level)
+            self.subdivision_level, base_faces=self.base_faces,
+            face_edge_ids=self.base_face_edge_ids)
         self.subdivision_level += 1
+        # Level 2+'s own edges are always unambiguous (see
+        # mesh_levels.subdivide_once's own docstring) -- self.edges (the
+        # Level 0/1-only spring-edge override, see _fan_level_edges) has
+        # no reason to exist past this point; mesh_edges' own plain
+        # derivation (edges=None) is exactly right from here on.
+        self.edges = None
         # This new level's own "Target RMS stretch" spinner (its default,
         # or whatever the user already edited it to, independent of every
         # other level's own spinner) -- just for the history row this
@@ -3070,7 +3155,7 @@ class InflatePolyhedronApp:
         via a relax, for a mesh that hasn't been relaxed at all yet (a
         fresh random start, or the freshly-interpolated positions right
         after a Subdivide click)."""
-        edges = mesh_edges(self.faces)
+        edges = mesh_edges(self.faces, self.edges)
         rest = (np.array([self.edge_length[e] for e in edges])
                 if isinstance(self.edge_length, dict) else self.edge_length)
         lengths = np.array([np.linalg.norm(self.positions[a] - self.positions[b])
@@ -3316,7 +3401,8 @@ class InflatePolyhedronApp:
                 stop_event=self.stop_event,
                 initial_pressure_guess=initial_pressure_guess,
                 capture_frames=True,
-                on_progress=queue_progress),
+                on_progress=queue_progress,
+                edges=self.edges),
             lambda result: self._on_pressure_calibrated(result, self._precomp_base_iteration_count),
             on_progress=self._on_calibration_progress)
 
@@ -3890,7 +3976,8 @@ class InflatePolyhedronApp:
         def relax_fn(max_nfev, stop_event, on_progress):
             return relax_initial_configuration(self.positions, faces, edge_length,
                                                 max_nfev=max_nfev, stop_event=stop_event,
-                                                gtol=gtol, rng=rng, on_progress=on_progress)
+                                                gtol=gtol, rng=rng, on_progress=on_progress,
+                                                edges=self.edges)
 
         self._run_chunked_relax_stream(relax_fn, None, stop_event,
                                         lambda result: self._apply_relax_progress(result, base_iteration_count),

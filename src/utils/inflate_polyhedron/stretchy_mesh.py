@@ -180,7 +180,39 @@ def load_stretchy_mesh(path):
     Returns (faces, name), faces a list of vertex-id lists. Raises
     ValueError if any directed edge appears more than once -- the mesh
     need NOT be closed: an edge with no reverse partner at all is a
-    valid, free boundary edge, not an error."""
+    valid, free boundary edge, not an error. See load_stretchy_mesh_edges
+    for a file's own optional explicit "edges"/"face_edge_ids" fields --
+    kept as a separate call (re-reading the same small JSON file) rather
+    than added to this return, so this function's own return shape stays
+    exactly what its existing callers/tests already unpack."""
+    faces, _spec = _load_stretchy_mesh_spec(path)
+    name = _spec.get("name") or path
+    return faces, name
+
+
+def load_stretchy_mesh_edges(path):
+    """path: as load_stretchy_mesh. Returns (edges, face_edge_ids): the
+    file's own explicit "edges" list (see mesh_edges' own docstring for
+    why this can't always be safely re-derived from `faces` alone) as
+    (a, b) tuples if the file has one, else None; and its own explicit
+    "face_edge_ids" list (see mesh_levels.subdivide_once's own
+    docstring) if the file has one, else None. A file written before
+    these fields existed, or a hand-authored net where every edge's
+    vertex-id pair is already unambiguous, has no reason to carry
+    either."""
+    _faces, spec = _load_stretchy_mesh_spec(path)
+    raw_edges = spec.get("edges")
+    edges = [tuple(e) for e in raw_edges] if raw_edges else None
+    face_edge_ids = spec.get("face_edge_ids") or None
+    return edges, face_edge_ids
+
+
+def _load_stretchy_mesh_spec(path):
+    """Shared parse+validate behind load_stretchy_mesh/
+    load_stretchy_mesh_edges -- reads and winding-validates `path` once,
+    returning (faces, spec) so each public function only picks its own
+    fields out of the same parsed JSON, rather than duplicating the
+    parse/validation."""
     with open(path) as f:
         spec = json.load(f)
 
@@ -201,13 +233,26 @@ def load_stretchy_mesh(path):
         raise ValueError(f"{path}: not a consistently-oriented mesh:\n  " +
                           "\n  ".join(problems))
 
-    name = spec.get("name") or path
-    return faces, name
+    return faces, spec
 
 
-def mesh_edges(faces):
-    """faces: vertex-id loops. Returns the mesh's unique undirected edges
-    as a sorted list of (a, b) with a < b."""
+def mesh_edges(faces, edges=None):
+    """faces: vertex-id loops. Returns the mesh's undirected edges as a
+    list of (a, b) with a < b. If `edges` is given (a file's own
+    explicit edge list, e.g. from load_stretchy_mesh or
+    interactive_builder_app._edges_from_shapes), it's returned as-is
+    (each pair sorted, duplicates PRESERVED) instead of being re-derived
+    from `faces`. Re-deriving purely from `faces`' shared vertex ids is
+    ambiguous once vertex dedup has merged unrelated corners onto the
+    same ids: two faces glued along more than one shared edge merges
+    ALL of their connected corners pairwise, and their remaining FREE
+    edges can then coincidentally land on the exact same vertex-id pair
+    as each other despite never being connected -- a plain `set` (this
+    function's fallback, for a file with no explicit `edges`, where that
+    ambiguity can't arise) can't tell that apart from a genuinely shared
+    edge, silently fusing two independent boundary edges into one."""
+    if edges is not None:
+        return [tuple(sorted(e)) for e in edges]
     edges = {tuple(sorted(e)) for face in faces for e in _face_edges(face)}
     return sorted(edges)
 
@@ -419,17 +464,18 @@ def _is_orientation_consistent(pts, faces, idx):
     return signs <= {1.0}
 
 
-def _edge_setup(faces, edge_length):
+def _edge_setup(faces, edge_length, edges=None):
     """faces: vertex-id loops (see module docstring for the winding
     convention); edge_length: scalar rest length, or a {(a,b): length}
-    dict for a non-uniform (e.g. subdivided) mesh. Shared setup for
-    relax_once/relax_initial_configuration: vertex/edge index arrays plus
-    the precomputed structures _relax_force needs (built once here, not
-    per call). Returns (vertex_ids, idx, edges, edge_ai, edge_bi,
-    all_face_groups, length_arr, scale)."""
+    dict for a non-uniform (e.g. subdivided) mesh; edges: an explicit
+    mesh-edge list (see mesh_edges' own docstring), or None to derive one
+    from `faces`. Shared setup for relax_once/relax_initial_configuration:
+    vertex/edge index arrays plus the precomputed structures _relax_force
+    needs (built once here, not per call). Returns (vertex_ids, idx,
+    edges, edge_ai, edge_bi, all_face_groups, length_arr, scale)."""
     vertex_ids = sorted({v for face in faces for v in face})
     idx = {v: i for i, v in enumerate(vertex_ids)}
-    edges = mesh_edges(faces)
+    edges = mesh_edges(faces, edges)
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
     all_face_groups = _face_index_groups(faces, idx)
     if isinstance(edge_length, dict):
@@ -835,11 +881,11 @@ def _explicit_relax_loop(pts, scale, force_fn,
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL, rng=None, on_progress=None):
-    """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length:
-    as _edge_setup. Runs ONE relaxation pass at a fixed `pressure` -- no
-    automatic ramp; call again with the result to keep steering it. Each
-    iteration moves
+                gtol=CONVERGENCE_GTOL, rng=None, on_progress=None, edges=None):
+    """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length/
+    edges: as _edge_setup. Runs ONE relaxation pass at a fixed `pressure`
+    -- no automatic ramp; call again with the result to keep steering it.
+    Each iteration moves
     every vertex a small step along its own net force from _relax_force
     (see module docstring's Design notes for why this walks explicitly
     rather than handing the force balance to a Newton-style solver) --
@@ -878,7 +924,7 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     one of the two criteria above (not the step cap or a stop request) is
     what stopped it."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, length_arr, scale = \
-        _edge_setup(faces, edge_length)
+        _edge_setup(faces, edge_length, edges)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
 
     def force_fn(pts):
@@ -980,8 +1026,8 @@ def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
 
 def relax_initial_configuration(positions, faces, edge_length,
                                  max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None,
-                                 on_progress=None):
-    """positions/faces/edge_length: as relax_once, but `positions` is
+                                 on_progress=None, edges=None):
+    """positions/faces/edge_length/edges: as relax_once, but `positions` is
     typically random_initial_positions' output here, not a meaningful
     embedding -- this is what turns it into one, WITHOUT ever touching
     pressure: pure Hooke's-law springs only (_spring_only_force). Nothing
@@ -1016,7 +1062,7 @@ def relax_initial_configuration(positions, faces, edge_length,
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     optimality, converged) -- exactly relax_once's own return shape."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, length_arr, scale = \
-        _edge_setup(faces, edge_length)
+        _edge_setup(faces, edge_length, edges)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
 
     def force_fn(pts):
@@ -1120,8 +1166,8 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           tol_pct=1.0, max_nfev_per_trial=5000, stop_event=None,
                                           gtol=CONVERGENCE_GTOL, rng=None,
                                           initial_pressure_guess=None,
-                                          capture_frames=False, on_progress=None):
-    """positions/faces/edge_length: as relax_once. Finds a pressure whose
+                                          capture_frames=False, on_progress=None, edges=None):
+    """positions/faces/edge_length/edges: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
     unevenly, and RMS is what the "Target RMS stretch" spinner asks for).
@@ -1282,7 +1328,8 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
         try:
             result = relax_once(positions, faces, edge_length, pressure,
                                  max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
-                                 rng=rng, on_progress=_relax_progress if need_progress else None)
+                                 rng=rng, on_progress=_relax_progress if need_progress else None,
+                                 edges=edges)
             _, trial_steps, _, rms_stretch, _, _ = result
         except np.linalg.LinAlgError:
             # A pathological trial (e.g. a pressure far outside any sane
@@ -1359,7 +1406,8 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                 best_result = relax_once(new_positions, faces, edge_length, best_pressure,
                                           max_nfev=None, stop_event=stop_event, gtol=gtol,
                                           rng=rng,
-                                          on_progress=_topup_progress if need_progress else None)
+                                          on_progress=_topup_progress if need_progress else None,
+                                          edges=edges)
                 (new_positions, top_up_steps, max_stretch, rms_stretch,
                  optimality, converged) = best_result
                 best_result = (new_positions, steps_taken + top_up_steps, max_stretch,
