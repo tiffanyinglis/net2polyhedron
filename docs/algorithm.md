@@ -148,9 +148,9 @@ Stage 2's hardening spring, 0.2 for Stage 1's plain linear one — each
 force law tolerates a different step size before overshooting into an
 undamped oscillation, verified directly by bisecting the largest stable
 value on reproducing cases). $\Delta t$ was previously also divided by
-the current largest force, an adaptive term that shrinks the step when
-force is large; that term is presently removed as a simplification under
-active evaluation, leaving a flat step size. Either way, this explicit
+the current largest force, an adaptive term that shrunk the step when
+force was large; that term has been permanently removed (re-evaluated
+and re-declined), leaving a flat step size. Either way, this explicit
 walk is a deliberate choice over a Newton/least-squares solver:
 re-linearizing the whole system and jumping to the linearized root can
 land on a distant, spurious equilibrium — e.g. a doubled-size,
@@ -233,6 +233,15 @@ sharing an edge produce the opposite response — the procedure retains
 whichever trial came closest to $\sigma^*$ rather than only the final
 one, so a topology violating the assumption does not diverge chasing a
 target that is moving away from it.
+
+When a mesh has already been calibrated at a nearby subdivision level,
+that result gives a better starting guess than $P_0$ alone: since
+subdivision quarters every triangle (roughly halving edge length) without
+changing total rest area, matching the same target stretch at the next
+level empirically takes about double the pressure. The search may
+therefore be seeded from `prior_pressure * (target / prior_achieved) *
+2^(level difference)` instead of the area-only estimate, reducing the
+number of trials needed without changing the final answer.
 
 ## 6. Incremental subdivision
 

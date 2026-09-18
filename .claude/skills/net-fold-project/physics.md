@@ -99,7 +99,7 @@ solids — re-verified unaffected by the `c=1.0->0.5` hardening change, since at
 cubic term is negligible). Refines via bracket-then-bisect once both a sane-under-target and an
 insane-or-over-target trial exist; before that, rescales by `target/achieved` clamped to
 `[0.2x, 5x]` per step. Keeps whichever SANE trial got closest to target (not just the last) since
-stretch isn't always monotonic in pressure (`three_squares.json` stretches LESS as pressure
+stretch isn't always monotonic in pressure (`three_squares.poly` stretches LESS as pressure
 rises). `max_nfev_per_trial = 5000` (was 20000) is a SEARCH-time budget only, not a real stopping
 criterion — the WINNING trial, once chosen, is topped up with one further uncapped `relax_once`
 call (capped only by `MAX_UNBOUNDED_STEPS`) if it hadn't actually converged yet (2026-09-17,
@@ -137,7 +137,7 @@ design — so on its own it under-guesses every level past the first). `inflate_
 `(pressure, rms_stretch_pct)` pair in `self.level_history`: `prior_pressure * (new_target /
 prior_achieved) * 2^(level difference)` — the `2^` term is the user's own empirical observation
 that each Subdivide level (quarters every triangle, ~halves edge length) needs roughly DOUBLE the
-pressure to reach the SAME target RMS stretch % there. Verified directly on `hippo.json`: Level 2
+pressure to reach the SAME target RMS stretch % there. Verified directly on `hippo.poly`: Level 2
 (target 40%, from a converged Level 1 at pressure 0.725/81.46% RMS) took 8 relax_once calls to
 calibrate from the generic guess vs. 5 from the history-based one (`0.725 * (40/81.46) * 2 ≈
 0.712`), landing at essentially the same final pressure/accuracy either way (~0.87, ~40.5% RMS)

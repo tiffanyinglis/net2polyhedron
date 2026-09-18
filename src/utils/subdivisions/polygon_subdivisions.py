@@ -11,30 +11,11 @@ library, so this stays cheap even redrawn on every UI toggle):
    only extra point: n=3 is already a triangle (no centroid needed); n=4
    through n=8 all use a centroid fan (n congruent isoceles triangles,
    exactly equilateral at n=6, since the fan's apex angle is 360/n).
-
-   n=4 used to be a diagonal split (two 45-45-90 triangles from the
-   square's own corners, no centroid) instead of a fan -- "the most
-   regular split possible with only 2 pieces", per an earlier version of
-   this docstring. That turned out to have a real cost once these
-   n-gons are glued edge-to-edge into a whole polyhedron: a diagonal
-   split only adds an extra edge between TWO of a square's four corners
-   (whichever two the diagonal connects), so a polyhedron built entirely
-   out of squares -- a cube -- ends up with two opposite corners at a
-   LOWER mesh valence (fewer edges, hence less resistance to stretching)
-   than the other six, purely as an accident of which corner each square
-   face's diagonal happened to touch. Verified directly on the
-   diagonal-split version of data/input/stretchy_nets/cube_res3.json (then
-   still named cube_res4.json, at resolution 4 -- regenerated at
-   resolution 3 as part of this same fix, see
-   generate_subdivided_stretchy_nets.py's comment on why the resolution
-   changed too): 2 of the cube's 8 corners
-   at valence 3, the other 6 at valence 5 -- invisible at modest
-   inflation pressure, but a visibly lopsided bulge at high pressure,
-   since the two weaker corners give more than the rest. A centroid fan
-   doesn't have this problem: EVERY corner of a fan-subdivided face gets
-   exactly one spoke edge to that face's own centroid, so a polyhedron
-   built from congruent faces (any Platonic solid) gets the SAME valence
-   increase at every one of its corners, symmetric by construction.
+   A centroid fan gives every corner of every face exactly one spoke
+   edge to that face's own centroid, so a polyhedron built from
+   congruent faces (any Platonic solid) gets the same mesh valence
+   increase at every corner, symmetric by construction -- unlike a
+   diagonal split, which would leave some corners weaker than others.
 
 2. `_subdivide_triangle` -- splits each coarse triangle into
    `resolution ** 2` small ones via a regular barycentric grid (the
