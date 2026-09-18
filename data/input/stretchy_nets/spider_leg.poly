@@ -1,0 +1,62 @@
+{
+  "name": "spider_leg",
+  "faces": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    [
+      2,
+      6,
+      7,
+      8,
+      9,
+      3
+    ]
+  ],
+  "net_layout": [
+    {
+      "cx": 21.258732000000006,
+      "cy": -175.99061966666665,
+      "rotation": 0.0,
+      "flipped": false,
+      "polygon_fold": {
+        "a_edge": 0,
+        "b_edge": 3
+      }
+    },
+    {
+      "cx": 168.172928,
+      "cy": -73.67711166666668,
+      "rotation": 0.0,
+      "flipped": false,
+      "polygon_fold": {
+        "a_edge": 1,
+        "b_edge": 4
+      }
+    }
+  ],
+  "builder_connections": [
+    {
+      "a_face": 0,
+      "a_edge": 2,
+      "b_face": 1,
+      "b_edge": 5,
+      "a_handle": {
+        "t": 5.049666359434093,
+        "n": 19.04820779424824
+      },
+      "b_handle": {
+        "t": 5.049666359434105,
+        "n": 19.048207794248246
+      }
+    }
+  ],
+  "view": {
+    "scale": 0.9090909090909094
+  }
+}

@@ -26,11 +26,15 @@ itself checks (a vertex merge error -- two different corners of one face
 resolving to the same vertex -- AND a duplicate directed edge). See each
 test's own docstring for what was actually checked.
 
-Connecting a shape to one of its OWN (different) edges is not supported
-yet (planned for later -- _hit_test_any_edge_handle refuses a handle on
-the pending connection's own origin SHAPE, not just its origin edge), so
-there is deliberately no test coverage here for a_shape == b_shape --
-_connection_pairs is never called with one."""
+Connecting a shape to one of its OWN (different) edges via an ordinary
+connection is still never supported (_hit_test_any_edge_handle refuses a
+handle on the pending connection's own origin SHAPE, not just its origin
+edge), so there is deliberately no test coverage here for
+_validate_shapes_connections/_connection_pairs ever being called with
+a_shape == b_shape. Same-polygon joins go through a completely separate
+mechanism instead -- Polygon Fold (`shape["fold"]`, never an entry in
+`self.connections` at all) -- see the _polygon_fold_conflicts/
+_validate_net/_sanitized_polygon_fold tests further down for that one."""
 import glob
 import itertools
 import json
@@ -388,3 +392,77 @@ class TestDedupVertexGrouping:
             frozenset({(1, 2)}), frozenset({(1, 3)}), frozenset({(1, 4)}),
             frozenset({(6, 0)}), frozenset({(6, 1)}), frozenset({(6, 5)}),
         })
+
+
+def fold_shape(shape_id, n, a_edge, b_edge):
+    return {"id": shape_id, "n": n, "flipped": False, "fold": {"a_edge": a_edge, "b_edge": b_edge}}
+
+
+class TestPolygonFold:
+    """_polygon_fold_conflicts/_polygon_fold_problems/_validate_net/
+    _sanitized_polygon_fold -- check 3 and its plumbing, entirely
+    separate from check 1/2 above (a fold is never an entry in
+    self.connections, see module docstring's "Polygon Fold" section).
+    Ground truth for the hexagon "roll into a cylinder" case matches
+    the real case this feature was introduced for: gluing a hexagon's
+    edge 0 to its edge 3 (opposite sides, same-direction pairing) is
+    fine -- no face collapses -- even though the SAME pair, run through
+    an ordinary connection's opposite-direction pairing after first
+    splitting the hexagon into a centroid fan, provably never validates
+    (see git history around this feature's own introduction)."""
+
+    def test_no_fold_has_no_conflicts(self):
+        assert builder_app._polygon_fold_conflicts(shape(1, 4)) == []
+        assert builder_app._polygon_fold_conflicts({"id": 1, "n": 4, "flipped": False, "fold": None}) == []
+
+    def test_hexagon_rolled_into_a_cylinder_has_no_conflicts(self):
+        # Opposite edges, same-direction pairing (v1==v3, v2==v4 -- not
+        # the reversed pairing an ordinary connection uses) -- top
+        # corners meet top corners, bottom corners meet bottom corners,
+        # exactly like rolling a strip of paper into a tube.
+        assert builder_app._polygon_fold_conflicts(fold_shape(1, 6, 0, 3)) == []
+
+    def test_square_folded_on_adjacent_edges_collapses_both(self):
+        # Folding edge 0 onto edge 1 (they already share corner 1) forces
+        # corners 0, 1, and 2 all to the same vertex -- both edge 0 and
+        # edge 1 (but not edge 2 or edge 3) end up with their own two
+        # corners identical.
+        assert builder_app._polygon_fold_conflicts(fold_shape(1, 4, 0, 1)) == [0, 1]
+
+    def test_polygon_fold_problems_only_reports_shapes_with_a_bad_fold(self):
+        shapes = [fold_shape(1, 6, 0, 3), fold_shape(2, 4, 0, 1), shape(3, 5)]
+        problems = builder_app._polygon_fold_problems(shapes)
+        assert len(problems) == 2
+        assert all("shape 2" in p for p in problems)
+
+    def test_validate_net_combines_check_1_2_and_check_3(self):
+        # TestTwoShapeBend's own net (a pure duplicate-directed-edge
+        # conflict, check 2, already verified above), PLUS a bad fold
+        # (check 3) on a third, unrelated shape -- both should be
+        # reported, and neither check's own inputs should leak into the
+        # other (the fold must not itself be flagged as a check 1/2
+        # vertex-merge error, since it was never a connection).
+        shapes = TestTwoShapeBend.SHAPES + [fold_shape(3, 4, 0, 1)]
+        connections = TestTwoShapeBend.CONNECTIONS
+        with pytest.raises(NetValidationError) as excinfo:
+            builder_app._validate_net(shapes, connections)
+        message = str(excinfo.value)
+        assert "appears 2 times" in message
+        assert "shape 3" in message
+
+    def test_validate_net_passes_with_a_good_fold_and_good_connections(self):
+        shapes = [shape(1, 3), shape(2, 3), fold_shape(3, 6, 0, 3)]
+        connections = [conn(1, 1, 0, 2, 0)]
+        builder_app._validate_net(shapes, connections)  # must not raise
+
+    def test_sanitized_polygon_fold_accepts_two_distinct_in_range_edges(self):
+        assert builder_app._sanitized_polygon_fold({"a_edge": 0, "b_edge": 3}, 6) == \
+            {"a_edge": 0, "b_edge": 3}
+
+    def test_sanitized_polygon_fold_rejects_missing_or_malformed(self):
+        assert builder_app._sanitized_polygon_fold(None, 6) is None
+        assert builder_app._sanitized_polygon_fold({}, 6) is None
+        assert builder_app._sanitized_polygon_fold({"a_edge": 0, "b_edge": 0}, 6) is None
+        assert builder_app._sanitized_polygon_fold({"a_edge": 0, "b_edge": 6}, 6) is None
+        assert builder_app._sanitized_polygon_fold({"a_edge": -1, "b_edge": 2}, 6) is None
+        assert builder_app._sanitized_polygon_fold({"a_edge": "0", "b_edge": 2}, 6) is None
