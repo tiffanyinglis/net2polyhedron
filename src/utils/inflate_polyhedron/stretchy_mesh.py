@@ -1119,7 +1119,8 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           max_iterations=8,
                                           tol_pct=1.0, max_nfev_per_trial=5000, stop_event=None,
                                           gtol=CONVERGENCE_GTOL, rng=None,
-                                          initial_pressure_guess=None):
+                                          initial_pressure_guess=None,
+                                          capture_frames=False, on_progress=None):
     """positions/faces/edge_length: as relax_once. Finds a pressure whose
     relax_once result lands within `tol_pct` of `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
@@ -1189,26 +1190,100 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     steps_taken, max_stretch_pct, rms_stretch_pct, optimality, converged)
     -- the last five exactly as relax_once's own return, from whichever
     trial this settled on (if every single trial was insane, the LAST
-    one anyway, so this never raises for an irrecoverably bad target)."""
+    one anyway, so this never raises for an irrecoverably bad target).
+
+    The WINNING trial, if it hasn't actually converged yet (it only ran
+    `max_nfev_per_trial` steps, a search-time budget, not a real
+    convergence criterion), is topped up with one further UNCAPPED
+    `relax_once` call from wherever it left off, at the same pressure/
+    gtol/rng, before returning (2026-09-17, explicit user request) --
+    calibration no longer just picks a pressure and hands back a
+    part-finished trial for a caller to somehow finish separately; this
+    function now always returns a trial that's either genuinely converged
+    or hit relax_once's own MAX_UNBOUNDED_STEPS runaway cap. `steps_taken`
+    in the return already includes this top-up's own steps. Skipped
+    entirely if no sane trial was ever found (nothing worth finishing) or
+    `stop_event` was set (the caller asked to stop, not to keep going).
+
+    `capture_frames` (2026-09-17, explicit user request), if True, adds
+    an 8th return value: the WINNING trial's own positions every
+    CONVERGENCE_CHECK_INTERVAL steps (relax_once's own on_progress
+    cadence) as `(positions, cumulative_steps_taken)` pairs, from its
+    starting `positions` (step 0) through however far it got -- INCLUDING
+    the convergence top-up above, so a caller replaying these sees the
+    same one continuous run the top-up folds into, not a break at
+    `max_nfev_per_trial`. A caller (inflate_polyhedron_app) can replay
+    these as a visual recap of that ONE trial's own run, instead of a
+    second real relax_once call at the winning pressure just to have
+    something to show frame-by-frame (the previous design -- see this
+    function's own git history for why that was pure duplicated work:
+    every trial already starts from the same `positions`, at the same
+    pressure once found, with the same `gtol`/`rng`, so a follow-up call
+    would retrace an already-computed trial's exact trajectory). Every
+    trial captures its own frames as it runs (there's no way to know in
+    advance which will end up best), but only the winning trial's list is
+    kept -- every other trial's frames are discarded along with its
+    positions. Costs one extra on_progress call per checkpoint per trial
+    (negligible next to the trial's own force computation); when False
+    (the default), no frames are captured at all and the return shape is
+    unchanged from before this param existed.
+
+    `on_progress(cumulative_steps)`, if given (2026-09-17, explicit user
+    request), is called every CONVERGENCE_CHECK_INTERVAL steps of EVERY
+    trial attempted (and of the convergence top-up), with the TOTAL
+    number of relax_once steps actually computed so far across every
+    trial -- including ones that turn out insane/thrown-away, since those
+    are real computation a caller watching this run would want reflected
+    too. Deliberately NOT reset to 0 between trials (a caller displaying
+    this live, e.g. as a "Steps" counter, would see it visibly jump
+    BACKWARDS every time a new trial starts otherwise, reading as broken
+    progress rather than genuine work) -- monotonically increasing for
+    the whole call, though NOT necessarily ending exactly at the final
+    returned `steps_taken` (that's only the WINNING trial's own count):
+    whichever trial ends up best isn't always the last one attempted (the
+    search can keep probing after finding a good-enough candidate if nothing
+    satisfies `tol_pct` outright), so a caller relying on `on_progress` for
+    a live "still working" indicator should snap its own displayed count to
+    the real returned `steps_taken` once this function actually returns,
+    rather than trusting the last `on_progress` value as authoritative."""
     if initial_pressure_guess is not None:
         pressure = initial_pressure_guess
     else:
         total_area = _total_rest_area(faces, edge_length)
         pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
     insane_ceiling = max(_INSANE_STRETCH_FLOOR_PCT, target_rms_pct * _INSANE_STRETCH_TARGET_MULTIPLE)
-    best_error, best_pressure, best_result = None, None, None
+    best_error, best_pressure, best_result, best_frames = None, None, None, None
     # Once both are set, every remaining trial bisects between them:
     # lo_pressure is the LARGEST pressure so far confirmed sane and AT OR
     # UNDER target; hi_pressure is the SMALLEST pressure so far confirmed
     # either insane or over target.
     lo_pressure = hi_pressure = None
     result = None
+    trial_frames = None
+    cumulative_steps = 0
     for _ in range(max_iterations):
+        # `(positions, 0)` -- this trial's own starting point at step 0
+        # (the same starting `positions` for every trial) -- is the very
+        # first frame, so a replay of the winning trial's own frames
+        # starts from where it actually did.
+        trial_frames = [(positions, 0)] if capture_frames else None
+        # `trial_base` (NOT `cumulative_steps` directly) is captured by
+        # value via this default-arg trick, not by reference -- a plain
+        # closure over the loop's own `cumulative_steps` would see
+        # whatever it's grown to by the time the callback actually FIRES
+        # (mid-relax_once, on a LATER iteration's value), not the value
+        # at the moment THIS trial started.
+        def _relax_progress(new_positions, steps_taken, *_rest, trial_base=cumulative_steps):
+            if capture_frames:
+                trial_frames.append((new_positions, steps_taken))
+            if on_progress is not None:
+                on_progress(trial_base + steps_taken)
+        need_progress = capture_frames or on_progress is not None
         try:
             result = relax_once(positions, faces, edge_length, pressure,
                                  max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
-                                 rng=rng)
-            _, _, _, rms_stretch, _, _ = result
+                                 rng=rng, on_progress=_relax_progress if need_progress else None)
+            _, trial_steps, _, rms_stretch, _, _ = result
         except np.linalg.LinAlgError:
             # A pathological trial (e.g. a pressure far outside any sane
             # range) can still blow the explicit integrator up into
@@ -1216,15 +1291,20 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
             # can't converge on garbage input. Not worth crashing
             # calibration over: treated exactly
             # like an ordinary insane/blown-up trial instead (see
-            # _DIVERGED_SENTINEL_STRETCH_PCT).
+            # _DIVERGED_SENTINEL_STRETCH_PCT). Its own frames (if any)
+            # are meaningless -- discarded rather than kept for replay.
             result = (positions, 0, _DIVERGED_SENTINEL_STRETCH_PCT,
                       _DIVERGED_SENTINEL_STRETCH_PCT, None, False)
             rms_stretch = _DIVERGED_SENTINEL_STRETCH_PCT
+            trial_frames = None
+            trial_steps = 0
+        cumulative_steps += trial_steps
         sane = rms_stretch < insane_ceiling
         if sane:
             error = abs(rms_stretch - target_rms_pct)
             if best_error is None or error < best_error:
-                best_error, best_pressure, best_result = error, pressure, result
+                best_error, best_pressure, best_result, best_frames = (
+                    error, pressure, result, trial_frames)
         stopped = stop_event is not None and stop_event.is_set()
         if stopped or (sane and error < tol_pct):
             break
@@ -1245,12 +1325,58 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
             pressure *= ratio
         else:
             break  # degenerate reading (zero stretch) with nothing to bracket against yet
+    stopped = stop_event is not None and stop_event.is_set()
     if best_result is None:
         # Every trial was insane -- no sane candidate exists at all
         # within max_iterations; report the last attempt anyway rather
         # than raising, same as the original algorithm's own contract
         # (always returns SOMETHING derived from an actual relax_once
-        # call).
-        best_pressure, best_result = pressure, result
+        # call). Not a real trial worth topping up to convergence.
+        best_pressure, best_result, best_frames = pressure, result, trial_frames
+    else:
+        new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = best_result
+        if not converged and not stopped:
+            # Seeded with the SAME duplicate-first-frame convention
+            # `trial_frames` uses above (its own step-0 entry is the
+            # trial's starting point, dropped as a duplicate once merged
+            # into a prior trial's own frames) -- `top_up_frames[0]` here
+            # is `(new_positions, steps_taken)`, exactly `best_frames[-1]`,
+            # so the SAME `[1:]` slice below drops a genuine duplicate
+            # rather than the top-up's own first real checkpoint (a
+            # bug caught directly: without this seed, `top_up_frames[0]`
+            # IS that first real checkpoint, and `[1:]` silently dropped
+            # it, leaving a visible gap in the replayed step sequence).
+            top_up_frames = [(new_positions, steps_taken)] if capture_frames else None
+
+            def _topup_progress(p, s, *_rest):
+                if capture_frames:
+                    top_up_frames.append((p, steps_taken + s))
+                if on_progress is not None:
+                    on_progress(cumulative_steps + s)
+
+            need_progress = capture_frames or on_progress is not None
+            try:
+                best_result = relax_once(new_positions, faces, edge_length, best_pressure,
+                                          max_nfev=None, stop_event=stop_event, gtol=gtol,
+                                          rng=rng,
+                                          on_progress=_topup_progress if need_progress else None)
+                (new_positions, top_up_steps, max_stretch, rms_stretch,
+                 optimality, converged) = best_result
+                best_result = (new_positions, steps_taken + top_up_steps, max_stretch,
+                                rms_stretch, optimality, converged)
+                if capture_frames:
+                    # top_up_frames[0] (its own step-0 checkpoint) is the
+                    # exact same position as best_frames[-1] -- merged in
+                    # as one continuous run, not duplicated.
+                    best_frames = best_frames + top_up_frames[1:]
+            except np.linalg.LinAlgError:
+                # The winning trial was itself sane -- a genuine
+                # divergence during its OWN top-up would be surprising,
+                # but not worth losing the already-good `best_result`
+                # over; keep it exactly as the bracket search left it.
+                pass
     new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = best_result
+    if capture_frames:
+        return (best_pressure, new_positions, steps_taken, max_stretch, rms_stretch,
+                optimality, converged, best_frames or [])
     return best_pressure, new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged

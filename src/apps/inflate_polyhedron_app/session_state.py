@@ -70,16 +70,27 @@ class LevelHistoryRecordModel(BaseModel):
     """Mirrors one row of InflatePolyhedronApp.level_history exactly (see
     its own _record_level_history docstring). precomp_time_s/sim_time_s
     (2026-09-16, explicit user request -- a loaded session's own
-    Convergence History showed no Elapsed Time at all, since these two
+    Convergence History showed no Simulation Time at all, since these two
     used to be dropped as "extra" fields pydantic silently ignores,
     per an earlier "timing is a live-session diagnostic, not persistent
-    state" decision) ARE saved now too -- "Elapsed Time"/"Cumulative
-    Time" being release-mode-visible columns, not debug-only, is what
-    actually changed since that original call."""
+    state" decision) ARE saved now too -- "Simulation Time" (renamed from
+    "Elapsed Time" 2026-09-17)/"Cumulative Time" being release-mode-
+    visible columns, not debug-only, is what actually changed since that
+    original call. Field names themselves are unchanged by that rename --
+    only the UI-facing column id/label ("simulation_time"/"Simulation
+    Time" in app.py) moved, so an older saved session still loads here
+    with no migration needed."""
     pressure: Optional[float] = None
     steps: int = 0
     max_stretch_pct: float = 0.0
-    rms_stretch_pct: float = 0.0
+    # Optional now (2026-09-17, explicit user request -- "RMS stretch %"
+    # shows "--" for the whole Computing phase, backed by a genuine
+    # `None` in app.py's own self.level_history, not a 0.0 placeholder --
+    # see _record_level_history's own comment) -- a Save while a run is
+    # actively computing (the File menu isn't disabled during a run, see
+    # _set_controls_enabled's own widget list) would otherwise fail
+    # Pydantic validation entirely, right when Save is invoked.
+    rms_stretch_pct: Optional[float] = None
     optimality: Optional[float] = None
     converged: Optional[bool] = None
     gtol: float
@@ -90,9 +101,11 @@ class LevelHistoryRecordModel(BaseModel):
 
 class LastStatsModel(BaseModel):
     """Mirrors InflatePolyhedronApp.last_stats -- the current frontier
-    level's own live stats (see _compute_stretch_stats/relax_once)."""
+    level's own live stats (see _compute_stretch_stats/relax_once).
+    rms_stretch_pct is Optional -- same "--"-while-computing sentinel as
+    LevelHistoryRecordModel's own field, see its comment."""
     max_stretch_pct: float = 0.0
-    rms_stretch_pct: float = 0.0
+    rms_stretch_pct: Optional[float] = None
     optimality: Optional[float] = None
     converged: Optional[bool] = None
     gtol: Optional[float] = None
@@ -119,7 +132,15 @@ class SessionStateModel(BaseModel):
     # saved with no net file behind it at all.
     net_file: Optional[Dict[str, Any]] = None
     subdivision_level: int
-    pressure_value: float
+    # Optional now (2026-09-17, explicit user request -- "the pressure
+    # should also be -- until things converge"): app.py's own
+    # self.pressure_value is a genuine `None` for the whole Computing
+    # phase (see on_inflate_clicked's own comment), and the File menu
+    # isn't disabled during a run (_set_controls_enabled's own widget
+    # list), so a Save mid-run needs this to validate too. on_load_
+    # session_clicked falls back to DEFAULT_PRESSURE when None, same as
+    # __init__'s own starting value.
+    pressure_value: Optional[float] = None
     iteration_count: int
     debug_mode: bool
     tolerance: str
@@ -127,20 +148,33 @@ class SessionStateModel(BaseModel):
     last_stats: LastStatsModel
     level_history: Dict[int, LevelHistoryRecordModel]
     levels: Dict[int, LevelStateModel]
-    # Every "Level N" panel's own shared camera state (self.level_zoom/
-    # _pan/_rotation in app.py -- see _render_level_pv) and the Net
-    # panel's own separate self.net_zoom/_pan (_draw_target_faces) --
-    # added once these became persistent-feeling, explicitly-adjusted
-    # view settings (pan/zoom/rotation resets, wider zoom range, etc.)
-    # rather than incidental defaults. All optional with a default that
-    # reproduces the ORIGINAL always-reset-to-default behavior, so a
-    # session file saved before these existed still loads exactly as it
-    # used to -- app.py falls back to _initial_level_rotation() (not a
-    # baked-in quaternion here) when level_rotation is None, since that
-    # method is the one place that non-axis-aligned starting view is
-    # actually defined.
+    # Levels 1-3's own SHARED camera state (self._level13_camera in
+    # app.py -- see _render_level_pv) and the Net panel's own separate
+    # self.net_zoom/_pan (_draw_target_faces) -- added once these became
+    # persistent-feeling, explicitly-adjusted view settings (pan/zoom/
+    # rotation resets, wider zoom range, etc.) rather than incidental
+    # defaults. Field names kept as the ORIGINAL "level_*" (not renamed
+    # to "level13_*") even though Level 0 split off into its own
+    # independent camera (self._level0_camera, level0_zoom/_pan/_rotation
+    # below, 2026-09-17 explicit user request -- "separate the zoom/
+    # rotation/translation of level 0 from level 1-3 since they look so
+    # different") -- an OLDER session file's own single camera (from
+    # before that split, when every level including 0 shared it) maps
+    # naturally onto "the Levels 1-3 group" this way, with no migration
+    # needed; only level0_zoom/_pan/_rotation being absent (None) makes
+    # Level 0 fall back to a FRESH default rather than inheriting
+    # whatever that old file's one shared camera happened to be.
+    # All optional with a default that reproduces the ORIGINAL always-
+    # reset-to-default behavior, so a session file saved before ANY of
+    # this existed still loads exactly as it used to -- app.py falls back
+    # to _initial_level_rotation() (not a baked-in quaternion here) when
+    # a rotation field is None, since that method is the one place that
+    # non-axis-aligned starting view is actually defined.
     level_zoom: float = 1.0
     level_pan: Tuple[float, float] = (0.0, 0.0)
     level_rotation: Optional[Tuple[float, float, float, float]] = None  # scipy Rotation (x, y, z, w)
+    level0_zoom: float = 1.0
+    level0_pan: Tuple[float, float] = (0.0, 0.0)
+    level0_rotation: Optional[Tuple[float, float, float, float]] = None  # scipy Rotation (x, y, z, w)
     net_zoom: float = 1.0
     net_pan: Tuple[float, float] = (0.0, 0.0)

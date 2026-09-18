@@ -100,9 +100,15 @@ cubic term is negligible). Refines via bracket-then-bisect once both a sane-unde
 insane-or-over-target trial exist; before that, rescales by `target/achieved` clamped to
 `[0.2x, 5x]` per step. Keeps whichever SANE trial got closest to target (not just the last) since
 stretch isn't always monotonic in pressure (`three_squares.json` stretches LESS as pressure
-rises). `max_nfev_per_trial = 5000` (was 20000). `stop_event` now forwarded and actually
-interrupts calibration (see apps.md — this was a real bug: Stop used to do nothing during
-calibration since no `stop_event` existed yet at that point).
+rises). `max_nfev_per_trial = 5000` (was 20000) is a SEARCH-time budget only, not a real stopping
+criterion — the WINNING trial, once chosen, is topped up with one further uncapped `relax_once`
+call (capped only by `MAX_UNBOUNDED_STEPS`) if it hadn't actually converged yet (2026-09-17,
+explicit user request — see apps.md; this is inside `estimate_pressure_for_target_stretch` itself,
+so its own wall-clock time is included in whatever the caller already times around this call, no
+separate bookkeeping needed). `stop_event` now forwarded and actually interrupts calibration (see
+apps.md — this was a real bug: Stop used to do nothing during calibration since no `stop_event`
+existed yet at that point) — also respected by the convergence top-up, which is skipped entirely
+if `stop_event` fired during the search.
 
 **No step-size multiplier anymore.** Every calibration trial now uses the EXACT same step size
 and step budget (`max_nfev_per_trial`) a real Inflate run would use — `relax_once`'s own

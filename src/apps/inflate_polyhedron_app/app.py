@@ -70,32 +70,63 @@ work for anyone who wants one.
    overall curvature) but independently user-editable at any time, and
    used identically by a manual Inflate click and by "Auto" (both just
    call on_inflate_clicked, which always reads whichever level is
-   current). Then applies ONE relaxation pass
-   (stretchy_mesh.relax_once) at that pressure, continuing from wherever
-   the mesh currently is -- so repeated clicks let you watch/steer the
-   shape settle incrementally, and re-calibrate each time since pressure
-   is no longer something the user sets directly (required pressure
-   varies a lot between nets -- it scales with total surface area, not
-   vertex/face count -- so a single fixed number would be either too
-   gentle or wildly excessive depending which net is loaded). relax_once
-   walks small explicit steps along a genuine spring-vs-pressure force
-   (see stretchy_mesh's Design notes) -- no volume or remembered state
-   anywhere in it, so it can't compound across a Subdivide.
-   - The radio buttons control how much work the actual inflation part of
-     each "Inflate" click does (after calibration): either a capped
-     number of relax_once steps (`max_nfev`, literally N iterations now),
-     or an uncapped run to relax_once's own convergence tolerance -- the
-     "Tolerance" spinner in Setup (self.tolerance_var, default
-     DEFAULT_TOLERANCE, NOT the fixed stretchy_mesh.CONVERGENCE_GTOL a
-     bare relax_once/relax_initial_configuration call would otherwise
-     default to -- some meshes have a long, slow-shrinking tail after the
-     shape has visibly settled, so a looser tolerance than it might seem
-     it needs to be is often the right call). Captured once per Relax/
+   current). The WINNING calibration trial's own already-computed result
+   is the entire Inflate outcome (2026-09-17, explicit user request) --
+   there's no separate second relax_once pass at that pressure any more.
+   There used to be one, but it was pure duplicated work: every
+   calibration trial already starts from the same positions, and the
+   winning trial runs at the exact pressure/gtol/rng a follow-up call
+   would use, so it retraced an already-computed trajectory step for
+   step just to have something to show frame-by-frame. The winning trial
+   is also topped up to REAL convergence if `max_nfev_per_trial` (its own
+   search-time step budget, not a real stopping criterion) cut it off
+   first (2026-09-17, explicit user request) -- estimate_pressure_for_
+   target_stretch no longer hands back a merely part-finished trial for
+   someone else to somehow finish; the extra wall-clock time this can
+   take is included in "Precomp time" for free, since it all happens
+   inside that one call. estimate_pressure_for_target_stretch itself
+   captures the winning trial's own `(positions, cumulative_steps_taken)`
+   every CONVERGENCE_CHECK_INTERVAL steps (`capture_frames=True`,
+   including the top-up), and _on_pressure_calibrated replays THOSE
+   (_start_frame_replay) once calibration lands on a pressure -- this
+   level's own panel shows an animated "Computing..." placeholder
+   (_start_computing_animation) while the search (and any top-up) runs
+   (most of its several trials are thrown away, so there's nothing
+   meaningful to show frame-by-frame until it's done), then the replay
+   plays the winning trial's own shape evolving at REPLAY_FPS once it's
+   known -- `iteration_count` (the "Steps" column) advances in step with
+   each replayed frame's own recorded step count too (explicit user
+   request, same date), even though it's a purely visual recap and no new
+   simulation runs during it.
+   Repeated Inflate clicks still let you watch/steer the shape further,
+   each one re-calibrating fresh from wherever the PREVIOUS click's
+   winning trial left off -- pressure is still not something the user
+   sets directly (required pressure varies a lot between nets -- it
+   scales with total surface area, not vertex/face count -- so a single
+   fixed number would be either too gentle or wildly excessive depending
+   which net is loaded). relax_once itself (used by every calibration
+   trial) walks small explicit steps along a genuine spring-vs-pressure
+   force (see stretchy_mesh's Design notes) -- no volume or remembered
+   state anywhere in it, so it can't compound across a Subdivide.
+   - The steps-vs-convergence radio buttons (self.iterate_mode_var/
+     steps_var) no longer affect Inflate at all now that there's no
+     separate post-calibration pass for them to bound -- each calibration
+     trial always runs up to its own fixed `max_nfev_per_trial` (see
+     estimate_pressure_for_target_stretch). They're left in place,
+     inert, rather than removed outright, pending a decision on whether
+     to repurpose or drop them. Relax (Level 0) never read them either
+     (see on_relax_clicked's own docstring) -- "Tolerance" (self.
+     tolerance_var, default DEFAULT_TOLERANCE, NOT the fixed
+     stretchy_mesh.CONVERGENCE_GTOL a bare relax_once/relax_initial_
+     configuration call would otherwise default to -- some meshes have a
+     long, slow-shrinking tail after the shape has visibly settled, so a
+     looser tolerance than it might seem it needs to be is often the
+     right call) is still very much live: captured once per Relax/
      Inflate click (self._current_gtol), not re-read live mid-run (the
      spinner is disabled for the run's duration anyway), and forwarded to
-     pressure calibration too (estimate_pressure_for_target_stretch's own
-     `gtol`) so a run's calibration phase and its actual inflation settle
-     against the SAME threshold.
+     pressure calibration (estimate_pressure_for_target_stretch's own
+     `gtol`) so every one of its trials settles against the SAME
+     threshold Relax itself uses.
    - relax_once/relax_initial_configuration also remove any RIGID
      rotation/translation each step introduces (stretchy_mesh.
      _remove_rigid_motion) -- a free-floating spring/pressure system has
@@ -170,8 +201,8 @@ work for anyone who wants one.
    plus Level 0). The Net panel supports its own mouse-wheel zoom
    (self.net_zoom, _on_net_scroll) scaling _draw_target_faces' own
    bounding-box-derived view, independent of every "Level N" panel's own
-   self.level_zoom (they're different rendering stacks -- matplotlib
-   here, PyVista there -- with no shared camera state). When the loaded
+   zoom (see point 6 below -- different rendering stacks, matplotlib here,
+   PyVista there, with no shared camera state). When the loaded
    file carries its own flat arrangement from interactive_builder_app
    (`_layout_from_net_layout`, its own "net_layout" section), that
    reconstruction also corrects a real coordinate-convention mismatch --
@@ -202,32 +233,41 @@ work for anyone who wants one.
    faces would wrongly show through. PyVista gives a real GPU depth
    buffer instead, which handles arbitrary triangle soups correctly
    regardless of convexity, blitted into a plain Tkinter Label as an
-   off-screen-rendered image. Every level panel shares ONE click-drag
-   rotation state (self.level_rotation, a scipy.spatial.transform.Rotation
-   quaternion -- see _on_level_motion) -- a drag on any panel rotates all
-   of them together, matching what the old matplotlib panels' rotation
-   sync used to do. (Tried on Level 0 alone first, to validate the
-   approach before applying it to every level.) An earlier version stored
-   azimuth/elevation as two separate Euler angles, which hits gimbal lock
-   near the poles (elevation approaching +-90 degrees) -- a quaternion has
-   no such singularity, since the whole orientation is one object rather
-   than two angles applied in a fixed order. Every level panel likewise
-   shares ONE mouse-wheel zoom state (self.level_zoom) -- scrolling over
-   any panel zooms all of them together, same rationale. Both zooms are
-   clamped to the same 10%..1000% range (LEVEL_ZOOM_MIN/MAX,
-   NET_ZOOM_MIN/MAX, 2026-09-16 explicit user request). Every level panel
-   ALSO shares ONE right-click-drag pan state (self.level_pan, a 2D NDC
-   offset applied via vtkCamera's own SetWindowCenter, a pure post-
-   projection viewport shift -- see its own comment in __init__ for why
-   NOT a 3D world-space offset added to focal_point/position, an earlier
-   version's actual bug: that desynced panels of different scale and
-   moved the rotation drag's own orbit center), same rationale again;
-   middle-click resets it to zero (_on_level_pan_reset). The Net panel
-   has its own SEPARATE right-click-drag pan (self.net_pan, a plain 2D
-   data-space offset, _on_net_pan_motion/_on_net_pan_reset) -- not synced
-   with the level panels' pan, same "different rendering stacks, no
-   shared camera state" reason net_zoom/level_zoom already don't share
-   either.
+   off-screen-rendered image. Level panels share their click-drag
+   rotation state (a scipy.spatial.transform.Rotation quaternion -- see
+   _on_level_motion) in TWO independent groups now, not one (2026-09-17,
+   explicit user request -- "separate the zoom/rotation/translation of
+   level 0 from level 1-3 since they look so different"): Level 0 has its
+   own (self._level0_camera), Levels 1-3 continue sharing a single one
+   among themselves (self._level13_camera) -- a drag on any panel in a
+   group rotates every panel in THAT group together, but leaves the other
+   group untouched (_level_camera/_camera_group_levels/
+   _render_camera_group). Originally every level (including 0) shared
+   ONE state, matching what the old matplotlib panels' rotation sync used
+   to do -- tried on Level 0 alone first, to validate the drag-rotation
+   approach before applying it to every level, well before the later
+   independent-groups split. An earlier version stored azimuth/elevation
+   as two separate Euler angles, which hits gimbal lock near the poles
+   (elevation approaching +-90 degrees) -- a quaternion has no such
+   singularity, since the whole orientation is one object rather than two
+   angles applied in a fixed order. Each group likewise has its own
+   mouse-wheel zoom state -- scrolling over a panel zooms every panel in
+   THAT panel's own group together. Both groups' zooms are clamped to the
+   same 10%..1000% range (LEVEL_ZOOM_MIN/MAX, NET_ZOOM_MIN/MAX,
+   2026-09-16 explicit user request) as the Net panel's own separate zoom.
+   Each group ALSO has its own right-click-drag pan (a 2D NDC offset
+   applied via vtkCamera's own SetWindowCenter, a pure post-projection
+   viewport shift -- see its own comment in __init__ for why NOT a 3D
+   world-space offset added to focal_point/position, an earlier version's
+   actual bug: that desynced panels of different scale and moved the
+   rotation drag's own orbit center); middle-click resets a group's own
+   pan/zoom/rotation together, whichever panel it's clicked on
+   (_on_level_pan_reset). The Net panel has its own SEPARATE right-click-
+   drag pan (self.net_pan, a plain 2D data-space offset, _on_net_pan_
+   motion/_on_net_pan_reset) -- not synced with either level-panel camera
+   group, same "different rendering stacks, no shared camera state"
+   reason net_zoom and the level panels' own zoom groups already don't
+   share either.
 7. Debug mode ("d" key) adds two developer-only diagnostics, neither of
    which affects the actual solve -- purely for inspecting whatever's
    currently loaded:
@@ -401,15 +441,6 @@ CONNECTION_CURVE_ZORDER = 5
 # STATUS_COLORS["warn"] here.
 RUNNING_ROW_COLOR = "#e0b400"
 
-# How much of each "Level N" panel's frame the shape's own bounding
-# box fills: axis half-range = shape's half-extent * this. 1.0 would
-# exactly touch the frame edge; below 1.0 crops in past it, making the
-# shape look bigger within the same panel ("zooming in" without actually
-# resizing the panel/window). 0.8 (was 1.2, a 20% MARGIN, before any
-# zooming) makes the shape 1.2/0.8 = 50% larger within the frame than
-# that original size.
-WIREFRAME_VIEW_FILL = 0.8
-
 # Every "Level N" panel renders via PyVista/VTK instead of matplotlib
 # (see _build_level_pv_panel) -- a real GPU depth buffer, needed because
 # a mesh here is routinely self-intersecting/non-convex (mid-relax or
@@ -420,16 +451,56 @@ WIREFRAME_VIEW_FILL = 0.8
 # validate the approach before applying it to every level. Pixel size
 # matches figsize=(3.2, 4.5) at the ~100dpi the Net panel's matplotlib
 # figure renders at, so every level panel is the same size as its
-# neighbors.
-LEVEL_PANEL_SIZE = (320, 450)
+# neighbors. The Net panel's OWN figure size (figsize=(3.2, 4.5) in
+# _build_menu's neighbor, the Net-panel setup code) is independent of
+# this now (2026-09-18, explicit user request -- only "the level 0
+# drawing area" shrinks, not Net) -- NET_PANEL_SIZE is what that literal
+# figsize corresponds to in pixels, kept as its own named constant purely
+# so a reader doesn't have to reverse-engineer figsize*dpi by hand.
+NET_PANEL_SIZE = (320, 450)
+# "Level N" panels are no longer all the same width (2026-09-18, explicit
+# user request -- "make the level 0 drawing area and label 60% of its
+# current width... distribute [the other 40%] evenly to level1-3 so they
+# are wider"): Level 0's own panel shrinks to 60% of the ORIGINAL shared
+# width (320 -> 192); the 128px this frees up is split evenly three ways
+# and added to Levels 1-3's own width instead (320 -> ~363). Height is
+# unchanged for every panel. `_level_panel_size(level)` returns the right
+# (width, height) pair; every other constant/comment that used to say
+# "LEVEL_PANEL_SIZE" for a level panel now calls that instead.
+LEVEL_PANEL_HEIGHT = 450
+LEVEL_PANEL_WIDTH_LEVEL_0 = round(320 * 0.6)
+LEVEL_PANEL_WIDTH_LEVELS_1_3 = round(320 + (320 - LEVEL_PANEL_WIDTH_LEVEL_0) / 3)
+
+
+def _level_panel_size(level):
+    """(width, height) for `level`'s own panel -- see LEVEL_PANEL_WIDTH_
+    LEVEL_0/_LEVELS_1_3's own comment."""
+    width = LEVEL_PANEL_WIDTH_LEVEL_0 if level == 0 else LEVEL_PANEL_WIDTH_LEVELS_1_3
+    return (width, LEVEL_PANEL_HEIGHT)
+
+
 # How much of the panel the shape's own bounding box fills, on top of
 # the aspect-ratio correction below -- 1.0 would make the shape's widest
 # dimension exactly touch the panel edge; below 1.0 leaves margin around
-# it (shrinks the apparent shape without resizing the panel). 0.6, then
-# a further "60% of that" per two rounds of user request (the unzoomed
-# 1.0 rendered noticeably too large/cropped against the panel, and 0.6
-# alone still did too) -- 0.6 * 0.6 = 0.36.
-LEVEL_ZOOM_FILL = 0.36
+# it (shrinks the apparent shape without resizing the panel). Was one
+# shared value (0.36: 0.6, then a further "60% of that" per two rounds of
+# user request -- the unzoomed 1.0 rendered noticeably too large/cropped
+# against the panel, and 0.6 alone still did too). Split into two
+# LEVEL-DEPENDENT defaults (2026-09-17, explicit user request -- "level 0
+# should default to filling 50%... level 1-3 should default to filling
+# 95%", the latter then adjusted down to 90% by explicit follow-up
+# request); Level 0's OWN fill then raised to match, 0.5 -> 0.9
+# (2026-09-18, explicit user request, alongside shrinking its panel's own
+# width -- see LEVEL_PANEL_WIDTH_LEVEL_0's comment): both levels now fill
+# the SAME 90% fraction of their own (differently-sized) panels.
+LEVEL_ZOOM_FILL_LEVEL_0 = 0.9
+LEVEL_ZOOM_FILL_LEVELS_1_3 = 0.90
+
+
+def _level_zoom_fill(level):
+    """LEVEL_ZOOM_FILL_LEVEL_0 for level 0, LEVEL_ZOOM_FILL_LEVELS_1_3 for
+    every other level -- see that pair's own comment."""
+    return LEVEL_ZOOM_FILL_LEVEL_0 if level == 0 else LEVEL_ZOOM_FILL_LEVELS_1_3
 # Initial camera angle -- arbitrary, just a reasonable non-axis-aligned
 # starting view (close to mplot3d's own default elev=30/azim=-60). Only
 # used once, to build the initial self.level_rotation quaternion (see
@@ -477,10 +548,38 @@ UI_FONT_SCALE = 1.3
 # its image/canvas, not text drawn inside the image itself -- a title
 # drawn INSIDE a PyVista panel's own rendered scene clipped against the
 # panel's own edge (see _render_level_pv's Design notes), which a real
-# widget placed above the image can't do. Scaled by UI_FONT_SCALE like
-# every other font (see _scale_ui_fonts) since it's a plain (family,
-# size) tuple, not a named Tk font _scale_ui_fonts can reach on its own.
-LEVEL_TITLE_FONT = ("TkDefaultFont", round(11 * UI_FONT_SCALE))
+# widget placed above the image can't do. Can't be a plain module-level
+# (family, size) tuple (as it used to be, hardcoded to "TkDefaultFont")
+# since that string is a NAMED font's name, not a real family -- passed
+# as a tuple's first element, Tk takes it literally as a (nonexistent)
+# family and silently falls back to Arial, NOT actually matching the
+# rest of the UI's real Segoe UI Variable Text look despite being scaled
+# by the same UI_FONT_SCALE (2026-09-18, explicit user request -- "make
+# sure ... the font is uniform. I like the size and font of 'Choose a
+# net'" -- that mismatch was exactly the bug). Computed instead as
+# self.LEVEL_TITLE_FONT once at startup (_init_ui_fonts), from "Choose a
+# net"'s own actual rendered font (ttk.Label's default style, routed by
+# sv_ttk to SunValleyBodyFont) so every title/message label genuinely
+# matches it in both family and size, not just size.
+
+# The bottom-of-panel status message ("Computing...", "Replay frame N /
+# M" -- see _tick_computing_animation/_replay_step/_set_level_message),
+# 2026-09-17 explicit user request: LEFT-justified (anchor=tk.W) rather
+# than tk.CENTER, so its OWN start position never re-anchors on every
+# update the way true centering would (a dot added, a frame count going
+# from 1 to 2 digits) -- but a genuinely FIXED left inset (tried first)
+# doesn't actually look centered for every message: "Computing" (no
+# dots yet) is much shorter than "Replay frame 27 / 93", so a single
+# constant pad tuned for one reads noticeably off-center for the other
+# (observed directly). _set_level_message instead measures each specific
+# string's own rendered width (tkfont.Font.measure, LEVEL_MESSAGE_FONT)
+# and computes the left inset that would ACTUALLY center it, then applies
+# that as a plain fixed `padx` via anchor=W -- visually equivalent to
+# true centering for any one message, but the position only shifts by
+# however much THAT message's own text width actually changed since the
+# last update (a dot's width for "Computing" -> "Computing.", near zero
+# for most frame-count changes), not a full from-scratch re-center.
+# self.LEVEL_MESSAGE_FONT == self.LEVEL_TITLE_FONT (see _init_ui_fonts).
 
 # Shown on the Pressure readout before the user has ever clicked "Auto"
 # -- pressure isn't user-editable (see the "Auto" button), so this only
@@ -803,86 +902,41 @@ def _validate_mesh(faces):
     return ok, lines
 
 
-class _SpinnerCanvas(tk.Canvas):
-    """The animated "waiting" indicator next to Auto (self.progress) --
-    a small rotating circular arc, not a horizontal bar bouncing back and
-    forth (2026-09-16, explicit user request -- was `ttk.Progressbar(
-    mode="indeterminate")`). Drop-in replacement for just the two calls
-    this app actually makes on it, `start(interval_ms)`/`stop()`, mirroring
-    ttk.Progressbar's own method names/signature so every existing call
-    site (pack/pack_forget/start/stop, scattered across every background-
-    run entry/exit point) needed no changes beyond the constructor itself.
-
-    Runs its own animation loop via repeated `self.after` calls rather
-    than a Tk built-in (plain tk.Canvas has no animated-arc primitive) --
-    start() kicks off the chain; stop() just clears self._running, so the
-    NEXT already-scheduled tick sees it False and quietly stops
-    rescheduling, no `after_cancel` bookkeeping needed."""
-
-    _DIAMETER = 22
-    _STROKE_WIDTH = 3
-    _ARC_EXTENT = 270  # degrees -- a partial ring, not a full closed circle, so a rotating gap actually reads as motion.
-    _DEGREES_PER_TICK = 18
-
-    def __init__(self, master):
-        super().__init__(master, width=self._DIAMETER, height=self._DIAMETER,
-                          bg=PLOT_THEME["bg"], highlightthickness=0, bd=0)
-        pad = self._STROKE_WIDTH
-        self._arc = self.create_arc(
-            pad, pad, self._DIAMETER - pad, self._DIAMETER - pad,
-            start=0, extent=self._ARC_EXTENT, style=tk.ARC,
-            width=self._STROKE_WIDTH, outline=PLOT_THEME["fg"])
-        self._angle = 0
-        self._running = False
-        self._interval_ms = 30
-
-    def start(self, interval_ms=30):
-        self._interval_ms = interval_ms
-        if not self._running:
-            self._running = True
-            self._tick()
-
-    def stop(self):
-        self._running = False
-
-    def _tick(self):
-        if not self._running:
-            return
-        self._angle = (self._angle - self._DEGREES_PER_TICK) % 360
-        self.itemconfigure(self._arc, start=self._angle)
-        self.after(self._interval_ms, self._tick)
-
-
 class InflatePolyhedronApp:
     def __init__(self, root):
         self.root = root
-        # Wide enough for Net + Level 0..MAX_LEVEL (MAX_LEVEL + 2 panels),
-        # each a fixed LEVEL_PANEL_SIZE-wide image, PLUS view_frame's own
-        # left/right padx=14 -- computed rather than a bigger hardcoded
-        # literal (2026-09-16, explicit user request -- a wider window
-        # left an uneven, wide blank margin on the right, since every row
-        # here packs its own content flush LEFT; the fix is fitting the
-        # window to the content's own natural width, not centering
-        # within a wider one) so it stays exactly right if MAX_LEVEL or
-        # LEVEL_PANEL_SIZE ever changes, rather than needing to be
-        # re-measured by hand again. The panel row no longer stretches
-        # its frames to fill extra window width (see panels_row's own
-        # comment), so this only needs to fit the panels' own natural
-        # width, not leave room to spread them out.
+        # Wide enough for the Net panel (NET_PANEL_SIZE) + Level 0
+        # (LEVEL_PANEL_WIDTH_LEVEL_0) + Levels 1..MAX_LEVEL
+        # (LEVEL_PANEL_WIDTH_LEVELS_1_3 each -- no longer all the same
+        # width as Level 0, see that pair's own comment, 2026-09-18
+        # explicit user request), PLUS view_frame's own left/right
+        # padx=14 -- computed rather than a bigger hardcoded literal
+        # (2026-09-16, explicit user request -- a wider window left an
+        # uneven, wide blank margin on the right, since every row here
+        # packs its own content flush LEFT; the fix is fitting the window
+        # to the content's own natural width, not centering within a
+        # wider one) so it stays exactly right if MAX_LEVEL or either
+        # panel width ever changes, rather than needing to be re-measured
+        # by hand again. The panel row no longer stretches its frames to
+        # fill extra window width (see panels_row's own comment), so this
+        # only needs to fit the panels' own natural width, not leave room
+        # to spread them out.
         # Tall enough for Setup + status + Convergence History + each
         # panel's own title-Label-plus-image-plus-button stack at their
         # full natural size (root.winfo_reqheight() once everything is
         # built) -- too short here silently SQUEEZES every image Label
-        # below LEVEL_PANEL_SIZE's own height (Tk shrinks a packed widget
-        # to whatever's left rather than erroring), which visibly cropped
+        # below its own panel height (Tk shrinks a packed widget to
+        # whatever's left rather than erroring), which visibly cropped
         # the bottom of every panel and threw off where mouse drags
         # actually land on it (see _on_level_drag_start and friends).
-        window_width = LEVEL_PANEL_SIZE[0] * (MAX_LEVEL + 2) + 2 * 14
+        window_width = (NET_PANEL_SIZE[0] + LEVEL_PANEL_WIDTH_LEVEL_0
+                        + LEVEL_PANEL_WIDTH_LEVELS_1_3 * MAX_LEVEL + 2 * 14)
         root.geometry(f"{window_width}x880")
         root.minsize(820, 600)
 
         sv_ttk.set_theme("dark")
         self._scale_ui_fonts()
+        self._init_ui_fonts()
         self._build_menu()
 
         # ---- Debug mode vs. release mode: the ONLY difference between
@@ -1048,22 +1102,9 @@ class InflatePolyhedronApp:
         # see on_auto_clicked/_auto_step for the actual driving logic.
         auto_group = ttk.Frame(setup_row)
         auto_group.pack(side=tk.LEFT, padx=(96, 0))
-        self.auto_button = ttk.Button(auto_group, text="Auto", command=self.on_auto_clicked)
+        self.auto_button = ttk.Button(auto_group, text="Run Simulation", command=self.on_auto_clicked)
         self.auto_button.pack(side=tk.LEFT)
         self.auto_button.state(["disabled"])  # no net loaded yet -- _update_auto_button syncs this
-        # The animated "waiting" indicator (2026-09-16, explicit user
-        # request -- used to sit next to self.status_label instead, in
-        # status_frame below) -- parented here, next to Auto, rather than
-        # in status_frame, so it stays visible in BOTH modes even though
-        # status_frame itself is debug-only now (see status_frame's own
-        # comment). Packed/unpacked and started/stopped in lockstep by
-        # every long-running operation (background calibration, streamed
-        # Inflate/Relax) -- same widget, same show/hide calls as before,
-        # just living in a different parent frame now. A rotating circle
-        # (_SpinnerCanvas), not a horizontal bar bouncing back and forth
-        # (2026-09-16, explicit user request -- was `ttk.Progressbar(
-        # mode="indeterminate")`).
-        self.progress = _SpinnerCanvas(auto_group)
 
         # Debug-mode-only row: "Iterate for N steps" vs. "until
         # convergence" (the one thing that actually differs between the
@@ -1102,11 +1143,7 @@ class InflatePolyhedronApp:
 
         # ---- Status: debug-mode-only now (2026-09-16, explicit user
         # request -- "in release mode, don't show warning/error/progress
-        # message"; used to be shared by both modes, always visible). The
-        # animated "waiting" indicator itself (self.progress) moved OUT
-        # of this frame entirely, next to Auto instead -- see auto_group's
-        # own comment -- so it keeps working in release mode even with
-        # this whole frame hidden there (_apply_mode_visibility). ----
+        # message"; used to be shared by both modes, always visible). ----
         self.status_frame = ttk.Frame(root)
         self.status_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
         self.status_var = tk.StringVar(value="")
@@ -1117,7 +1154,7 @@ class InflatePolyhedronApp:
         # this net session (including Level 0 now -- see module
         # docstring), showing the pressure last calibrated for it
         # (self.pressure_value -- only ever set by on_inflate_clicked's
-        # calibration phase; "n/a" for Level 0, which has no pressure at
+        # calibration phase; "--" for Level 0, which has no pressure at
         # all, see _record_level_history), how many Inflate/Relax steps
         # that level took (self.iteration_count, reset to 0 on every
         # Subdivide/promotion -- see _subdivide_step/_finish_relax), the
@@ -1136,14 +1173,15 @@ class InflatePolyhedronApp:
         self.history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
         self.history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
         # "max_stretch" is debug-mode-only (2026-09-16, explicit -- release
-        # mode dropped it in favor of "elapsed_time"/"cumulative_time",
+        # mode dropped it in favor of "simulation_time"/"cumulative_time"
+        # (renamed from "elapsed_time" 2026-09-17, explicit user request),
         # which used to be the debug-only ones instead); all three stay
         # DEFINED here regardless of mode (see _apply_mode_visibility,
         # which toggles Treeview's own `displaycolumns`), just shown/
         # hidden per mode, same "define once, show/hide" idea as
         # self.mode_row's own widgets.
         history_columns = ("level", "pressure", "steps", "max_stretch", "rms_stretch",
-                            "elapsed_time", "cumulative_time", "convergence")
+                            "simulation_time", "cumulative_time", "convergence")
         self.history_tree = ttk.Treeview(self.history_frame, columns=history_columns,
                                           show="headings", height=MAX_LEVEL + 1)
         # Per-column "weight" -- proportions (NOT fixed pixel widths) each
@@ -1162,20 +1200,20 @@ class InflatePolyhedronApp:
         # one's own configured width, which is what made an even earlier
         # attempt balloon every column equally instead of proportionally.
         # 2026-09-16, explicit user request: shifted weight FROM the last
-        # 4 release-mode columns (rms_stretch/elapsed_time/cumulative_
+        # 4 release-mode columns (rms_stretch/simulation_time/cumulative_
         # time/convergence -- convergence especially, which had the most
         # to give) TOWARD the first 3 (level/pressure/steps), which read
         # as too narrow for their own content relative to how much spare
         # room convergence in particular was left with.
         self._history_column_weights = {
             "level": 70, "pressure": 100, "steps": 85, "max_stretch": 115,
-            "rms_stretch": 150, "elapsed_time": 145, "cumulative_time": 135,
+            "rms_stretch": 150, "simulation_time": 145, "cumulative_time": 135,
             "convergence": 145,
         }
         for col, heading in (
                 ("level", "Level"), ("pressure", "Pressure"), ("steps", "Steps"),
                 ("max_stretch", "Max Stretch %"), ("rms_stretch", "RMS Stretch %"),
-                ("elapsed_time", "Elapsed Time"), ("cumulative_time", "Cumulative Time"),
+                ("simulation_time", "Simulation Time"), ("cumulative_time", "Cumulative Time"),
                 ("convergence", "Convergence")):
             self.history_tree.heading(col, text=heading)
             # stretch=False -- widths are set explicitly, proportionally,
@@ -1252,7 +1290,7 @@ class InflatePolyhedronApp:
         # too, so keeping Net's title as a matplotlib ax.set_title()
         # would leave it inconsistently positioned relative to its
         # neighbors' labels.
-        ttk.Label(net_panel_frame, text="Net", font=LEVEL_TITLE_FONT,
+        ttk.Label(net_panel_frame, text="Net", font=self.LEVEL_TITLE_FONT,
                   anchor=tk.CENTER).pack(side=tk.TOP, fill=tk.X)
         self.fig_net = plt.figure(figsize=(3.2, 4.5))
         # add_axes([0, 0, 1, 1]), not add_subplot -- add_subplot's own
@@ -1301,38 +1339,50 @@ class InflatePolyhedronApp:
         self.level_frames = {}
         self.level_plotters = {}
         self.level_labels = {}
+        self.level_message_labels = {}
+        # For _set_level_message's own width measurement (tkfont.Font.
+        # measure) -- a real Font OBJECT, not the (family, size) tuple
+        # LEVEL_MESSAGE_FONT itself is, since only a Font object exposes
+        # `.measure()`. Needs a Tk root to already exist, which it does by
+        # this point in __init__.
+        self._level_message_font = tkfont.Font(root=self.root, family=self.LEVEL_MESSAGE_FONT[0],
+                                                 size=self.LEVEL_MESSAGE_FONT[1])
         self.level_photos = {}
         self._level_center = {}
         self._level_half = {}
-        # ONE shared camera orientation across every level panel (see this
-        # section's own Design notes above) -- updated by a drag on any
-        # panel (_on_level_motion), applied to all of them
-        # (_render_all_level_panels). A quaternion (scipy Rotation) rather
-        # than a separate azimuth/elevation pair -- two Euler angles hit
-        # gimbal lock near the poles (elevation -> +-90 degrees, where a
-        # horizontal drag stops rotating around a sensible axis); a
-        # quaternion represents the whole orientation as one object with
-        # no such singularity. _initial_level_rotation() reproduces the
-        # old LEVEL_DEFAULT_AZIM/ELEV starting view as a Rotation.
-        self.level_rotation = self._initial_level_rotation()
-        # ONE shared zoom factor across every level panel, same rationale
-        # as level_rotation above -- a scroll on any panel updates
-        # it and re-renders all of them (see _on_level_scroll).
-        self.level_zoom = 1.0
-        self._level_dragging = False
-        self._level_last_xy = None
-        # ONE shared pan offset across every level panel, same "one
-        # state, all panels move together" rationale as level_rotation/
-        # level_zoom above -- right-click-drag on any panel updates it
-        # and re-renders all of them (_on_level_pan_motion); middle-click
-        # resets it back to zero (_on_level_pan_reset). Deliberately a 2D
-        # NDC (normalized device coordinate, [-1, 1]) offset applied via
-        # vtkCamera's own SetWindowCenter -- a pure post-projection
-        # VIEWPORT shift -- rather than a 3D world-space vector added to
-        # the camera's focal_point/position (an earlier version did that,
-        # and had two real bugs): (1) since every level panel renders at
-        # the exact same LEVEL_PANEL_SIZE, one shared NDC value produces
-        # the exact same PIXEL shift on every panel regardless of that
+        # TWO independent camera groups now (2026-09-17, explicit user
+        # request -- "separate the zoom/rotation/translation of level 0
+        # from level 1-3 since they look so different"): Level 0 (a
+        # random-start-then-relax result, often tangled/widely spread) has
+        # its OWN rotation/zoom/pan, while Levels 1-3 (an actual
+        # settling/settled solid) continue sharing ONE set among
+        # themselves, exactly as every level used to share before this
+        # change. `_level_camera(level)` returns the (mutable, in-place-
+        # updated) dict for whichever group `level` belongs to;
+        # `_camera_group_levels(level)` returns every level panel that
+        # needs re-rendering when THAT group's own state changes (`[0]`
+        # for Level 0, `[1, 2, 3]` for any of Levels 1-3) -- a drag/scroll/
+        # pan on one group's panel no longer re-renders the OTHER group's
+        # panels at all, not just leaves their camera unchanged.
+        #
+        # Each group's own "rotation" is a quaternion (scipy Rotation)
+        # rather than a separate azimuth/elevation pair -- two Euler
+        # angles hit gimbal lock near the poles (elevation -> +-90
+        # degrees, where a horizontal drag stops rotating around a
+        # sensible axis); a quaternion represents the whole orientation as
+        # one object with no such singularity. _initial_level_rotation()
+        # reproduces the old LEVEL_DEFAULT_AZIM/ELEV starting view as a
+        # Rotation, used as BOTH groups' own starting rotation (they just
+        # don't stay in sync with each other once either is dragged).
+        #
+        # Each group's own "pan" is a 2D NDC (normalized device
+        # coordinate, [-1, 1]) offset applied via vtkCamera's own
+        # SetWindowCenter -- a pure post-projection VIEWPORT shift --
+        # rather than a 3D world-space vector added to the camera's
+        # focal_point/position (an earlier version did that, and had two
+        # real bugs): (1) since every level panel renders at the exact
+        # same LEVEL_PANEL_SIZE, one NDC value produces the exact same
+        # PIXEL shift on every panel in its own group regardless of that
         # panel's own bounding-box scale -- a world-space offset instead
         # produced a DIFFERENT pixel shift per panel (each level's own
         # parallel_scale differs), which is what made translation look
@@ -1340,13 +1390,33 @@ class InflatePolyhedronApp:
         # camera's own orbit center, so rotating (_on_level_motion) after
         # a pan no longer orbited the object's true center -- with
         # SetWindowCenter, the camera's focal_point/position are computed
-        # exactly as if no pan existed (_render_level_pv), so a
-        # subsequent rotation always still orbits the real center; pan
-        # only shifts where that already-correct render lands in the
-        # panel.
-        self.level_pan = np.zeros(2)
+        # exactly as if no pan existed (_render_level_pv), so a subsequent
+        # rotation always still orbits the real center; pan only shifts
+        # where that already-correct render lands in the panel.
+        self._level0_camera = {"rotation": self._initial_level_rotation(),
+                                "zoom": 1.0, "pan": np.zeros(2)}
+        self._level13_camera = {"rotation": self._initial_level_rotation(),
+                                 "zoom": 1.0, "pan": np.zeros(2)}
+        # Populated by _build_level_pv_panel (label -> level), so a drag/
+        # pan/scroll event (whose only clue which level it came from is
+        # `event.widget`, the image Label that received it) can look up
+        # which camera GROUP it should actually update.
+        self._level_of_label = {}
+        self._level_dragging = False
+        self._level_last_xy = None
+        # Which level's own camera group a drag/pan currently in progress
+        # is updating -- captured once at press time (_on_level_drag_
+        # start/_on_level_pan_start) and reused for every motion event
+        # during that SAME drag, rather than re-deriving it from
+        # event.widget on every motion call -- Tk's implicit button-1
+        # grab keeps motion/release events routed to the originally-
+        # pressed widget regardless of where the mouse strays, so re-
+        # deriving would give the same answer anyway, but capturing once
+        # is simpler and doesn't depend on that grab behavior holding.
+        self._level_drag_group_level = None
         self._level_panning = False
         self._level_pan_last_xy = None
+        self._level_pan_group_level = None
         # ONE button per level, below its panel -- no separate button
         # above (see _update_level_action_buttons for its full state
         # machine): idle it reads "Relax" (level 0 only) or "Inflate",
@@ -1410,28 +1480,56 @@ class InflatePolyhedronApp:
         # was reached or Stop was clicked, not just "hasn't converged
         # YET, still going").
         self._level_running = False
-        # Backing state for the Convergence History table's "Elapsed
+        # Backing state for the Convergence History table's "Simulation
         # Time"/"Cumulative Time" columns (release-mode columns now, see
         # history_columns' own comment) -- wall-clock time (wraps
         # time.perf_counter(), not the solve's own step count) spent in
         # the CURRENT level's own pressure-calibration phase
         # (_on_pressure_calibrated, None for Level 0/Relax, which has no
-        # pressure to calibrate) and its own streamed relax/inflate phase
-        # (_run_inflate_stream/_run_relax_stream) respectively. The
-        # `_start_time` pair marks when each phase began (None between
-        # runs); the `_current_*_time_s` pair is what _record_level_history
-        # actually reads -- precomp is set ONCE, when calibration finishes
-        # (it has no progress callback of its own to update live); sim
+        # pressure to calibrate) and, for Level 0 only, its own streamed
+        # relax phase (_run_relax_stream) -- Level 1+ no longer has a
+        # separate "sim" phase at all (2026-09-17, explicit user request):
+        # pressure calibration's own winning trial IS the Inflate result
+        # now (see on_inflate_clicked), so all of a Level 1+ row's own
+        # wall-clock time is "precomp". The `_start_time` pair marks when
+        # each phase began (None between runs); the `_current_*_time_s`
+        # pair is what _record_level_history actually reads -- precomp is
+        # set ONCE, when calibration finishes (it has no progress callback
+        # of its own to update live, though the poll loop that waits on it
+        # still ticks it forward every 100ms -- see _run_background); sim
         # updates LIVE on every progress callback, same as iteration_count,
         # then again at the phase's own finish. Reset to None (see
         # on_select_net/_subdivide_step/_finish_relax's promotion branch)
         # anywhere iteration_count itself resets, so a freshly-promoted or
         # freshly-Subdivided level's row doesn't show the PREVIOUS level's
         # own timing before anything has actually run at the new one.
+        # Deliberately NEVER incremented during a frame replay (see
+        # _start_frame_replay) -- that's pure animation of an already-
+        # finished trial's own cached positions, not new simulation work.
         self._precomp_start_time = None
         self._sim_start_time = None
         self._current_precomp_time_s = None
         self._current_sim_time_s = None
+        # "Computing..." placeholder (see _start_computing_animation):
+        # which level's OWN panel is currently showing it (None normally)
+        # -- _render_level_pv skips that level entirely while this is set,
+        # so nothing (a resize, a drag-rotate) can paint a stale image
+        # over it mid-calibration. _computing_after_id is the pending
+        # `root.after` callback driving its dot-cycle animation.
+        self._computing_level = None
+        self._computing_after_id = None
+        self._computing_dots = 0
+        # Frame-replay state (see _start_frame_replay/_replay_step): the
+        # winning calibration trial's own cached positions (estimate_
+        # pressure_for_target_stretch's capture_frames), played back
+        # purely for display once calibration lands on a pressure --
+        # _replay_after_id is the pending `root.after` callback driving
+        # playback, None when no replay is in progress.
+        self._replay_after_id = None
+        self._replay_frames = None
+        self._replay_index = 0
+        self._replay_final_result = None
+        self._replay_base_iteration_count = 0
         # The gtol actually in effect for the run currently underway (or
         # the last one that ran) -- captured from self.tolerance_var at
         # the moment Relax/Inflate starts (_on_pressure_calibrated/
@@ -1481,6 +1579,24 @@ class InflatePolyhedronApp:
         # draw() call, not right after _apply_mode_visibility above.
         self._refit_window_height()
 
+    def _init_ui_fonts(self):
+        """Computes self.LEVEL_TITLE_FONT/LEVEL_MESSAGE_FONT (and the
+        File menu's own font, see _build_menu) from "Choose a net"'s own
+        actual rendered font -- a plain ttk.Label with no font= override,
+        so it renders via sv_ttk's default TLabel style, routed to the
+        named font "SunValleyBodyFont" (see _scale_ui_fonts). Must run
+        AFTER _scale_ui_fonts (needs its final, already-scaled size), and
+        AFTER sv_ttk.set_theme (SunValleyBodyFont doesn't exist before
+        that). Using its actual .actual() family/size (not a hardcoded
+        string) is what makes every title/message label genuinely match
+        "Choose a net" in both family and size (2026-09-18, explicit user
+        request) -- a family name here that isn't real just silently
+        falls back to a generic default (see LEVEL_TITLE_FONT's own
+        comment for the bug this replaces)."""
+        reference = tkfont.nametofont("SunValleyBodyFont", root=self.root).actual()
+        self.LEVEL_TITLE_FONT = (reference["family"], reference["size"])
+        self.LEVEL_MESSAGE_FONT = self.LEVEL_TITLE_FONT
+
     def _scale_ui_fonts(self):
         """Scales every named Tk/ttk font by UI_FONT_SCALE, once at
         startup, right after sv_ttk.set_theme -- covers the whole UI's
@@ -1516,11 +1632,29 @@ class InflatePolyhedronApp:
         """This app's only menu bar -- File > Load.../Save..., Load above
         Save since it's the more common entry point (opening a
         previously-saved session before continuing it). See
-        on_save_clicked/on_load_clicked for what the two actually do."""
-        menubar = tk.Menu(self.root)
-        file_menu = tk.Menu(menubar, tearoff=False)
-        file_menu.add_command(label="Load...", command=self.on_load_session_clicked)
-        file_menu.add_command(label="Save...", command=self.on_save_session_clicked)
+        on_save_clicked/on_load_clicked for what the two actually do.
+
+        Explicit `font=` on every Menu/add_command call here (2026-09-18,
+        explicit user request -- "the file menu text is a bit small"):
+        Windows renders the native menu bar via its OWN chrome, which
+        IGNORES "TkMenuFont"'s own configured size -- _scale_ui_fonts
+        already scales that named font like every other one in the app,
+        with no visible effect on this specific widget, a known
+        Tk-on-Windows limitation for the top-level menu bar specifically.
+        An explicit per-widget/per-item font IS respected even where the
+        named-font default isn't. Reuses self.LEVEL_TITLE_FONT (see
+        _init_ui_fonts) -- "Choose a net"'s own actual family/size --
+        rather than TkMenuFont's own family/a separately-guessed size, so
+        the menu genuinely matches the rest of the UI (2026-09-18,
+        explicit user request -- "make sure the font size is uniform...
+        the font is uniform" -- an earlier version of this used
+        TkMenuFont's family at a bigger, independently-chosen size,
+        which read both mismatched AND "a tad" too large)."""
+        menu_font = self.LEVEL_TITLE_FONT
+        menubar = tk.Menu(self.root, font=menu_font)
+        file_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
+        file_menu.add_command(label="Load...", command=self.on_load_session_clicked, font=menu_font)
+        file_menu.add_command(label="Save...", command=self.on_save_session_clicked, font=menu_font)
         menubar.add_cascade(label="File", menu=file_menu)
         self.root.config(menu=menubar)
 
@@ -1534,7 +1668,7 @@ class InflatePolyhedronApp:
         steps-vs-convergence radio row (plus Validate Mesh/Show normals)
         is shown, and whether the Convergence History table's "Max
         Stretch %" column is shown (self.history_tree's own
-        `displaycolumns` -- debug-only, 2026-09-16 explicit; "Elapsed
+        `displaycolumns` -- debug-only, 2026-09-16 explicit; "Simulation
         Time"/"Cumulative Time" are release-mode columns now instead --
         see history_columns' own comment in __init__ -- all three stay
         DEFINED in both modes, just hidden per mode, so no data is lost
@@ -1564,10 +1698,7 @@ class InflatePolyhedronApp:
                     self.draw()
             # The whole status frame, not just its text -- 2026-09-16,
             # explicit user request ("in release mode, don't show
-            # warning/error/progress message"). self.progress (the
-            # animated "waiting" indicator) lives in auto_group now, not
-            # in here, so it stays visible/running regardless -- only the
-            # TEXT status this frame otherwise shows disappears.
+            # warning/error/progress message").
             self.status_frame.pack_forget()
             # Per-level Relax/Inflate/Subdivide/Stop buttons are debug-
             # only now too (2026-09-16, explicit -- "release mode will
@@ -1651,13 +1782,33 @@ class InflatePolyhedronApp:
         click-drag-to-rotate behavior mplot3d used to give the old
         matplotlib panels for free, see _on_level_drag_start/_motion/_end
         below) instead of also embedding VTK's own widget/event loop."""
-        ttk.Label(level_frame, text=f"Level {level}", font=LEVEL_TITLE_FONT,
+        ttk.Label(level_frame, text=f"Level {level}", font=self.LEVEL_TITLE_FONT,
                   anchor=tk.CENTER).pack(side=tk.TOP, fill=tk.X)
+        # Reserved status-message strip (see _set_level_message's own
+        # comment) -- built for EVERY level, including 0 (which never
+        # actually populates it), so every "Level N" panel reserves the
+        # exact same fixed height regardless of whether its own message
+        # is in use right now. Packed BEFORE the image label below, with
+        # side=tk.BOTTOM, so it claims its own strip at the bottom of the
+        # frame first; the image label's fill=tk.BOTH/expand=True then
+        # fills whatever's left between the title and this strip. Skipping
+        # this for Level 0 (matching "only used for 1-3") would leave its
+        # own frame one strip SHORTER than the others -- exactly the same
+        # cross-panel height-mismatch failure mode already hit once with
+        # the "Computing..." placeholder (see _tick_computing_animation's
+        # own comment) -- so it's always built, just always blank at
+        # Level 0. `padx` is left at 0 here -- _set_level_message computes
+        # and applies it per-message instead of a static value.
+        message_label = tk.Label(level_frame, text="", anchor=tk.W, bg=PLOT_THEME["bg"],
+                                  fg=PLOT_THEME["fg"], font=self.LEVEL_MESSAGE_FONT)
+        message_label.pack(side=tk.BOTTOM, fill=tk.X)
+        self.level_message_labels[level] = message_label
         label = tk.Label(level_frame, bg=PLOT_THEME["bg"], bd=0)
         label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        plotter = pv.Plotter(off_screen=True, window_size=list(LEVEL_PANEL_SIZE))
+        plotter = pv.Plotter(off_screen=True, window_size=list(_level_panel_size(level)))
         plotter.set_background(PLOT_THEME["bg"])
         self.level_labels[level] = label
+        self._level_of_label[label] = level
         self.level_plotters[level] = plotter
         self.level_photos[level] = None  # keeps a reference alive -- Tk drops a GC'd PhotoImage
         self._level_center[level] = np.zeros(3)
@@ -1711,14 +1862,44 @@ class InflatePolyhedronApp:
         up = np.cross(direction, right)
         return Rotation.from_matrix(np.column_stack([direction, right, up]))
 
+    def _level_camera(self, level):
+        """The mutable camera-state dict (`{"rotation", "zoom", "pan"}`)
+        for `level`'s own group -- see __init__'s own Design notes on why
+        Level 0 has an independent one from Levels 1-3's shared one.
+        Callers mutate the returned dict's own keys in place (or replace
+        just one key, e.g. `cam["zoom"] = ...`) rather than reassigning
+        self._level0_camera/_level13_camera themselves."""
+        return self._level0_camera if level == 0 else self._level13_camera
+
+    def _camera_group_levels(self, level):
+        """Every level panel sharing `level`'s own camera group -- just
+        `[0]` for Level 0, every OTHER level currently built for anything
+        else (Levels 1-3)."""
+        if level == 0:
+            return [0]
+        return [lvl for lvl in self.level_plotters if lvl != 0]
+
+    def _render_camera_group(self, level):
+        """Re-renders every panel in `level`'s own camera group (NOT
+        every level panel -- see _camera_group_levels) -- what a drag/
+        pan/scroll on one group's panel should refresh, now that the two
+        groups no longer share a single camera."""
+        for lvl in self._camera_group_levels(level):
+            self._render_level_pv(lvl)
+
     def _on_level_drag_start(self, event):
         self._level_dragging = True
         self._level_last_xy = (event.x, event.y)
+        self._level_drag_group_level = self._level_of_label.get(event.widget, 1)
 
     def _on_level_motion(self, event):
-        """Left-click-drag on ANY level panel rotates the shared camera
-        orientation (self.level_rotation) and re-renders EVERY panel with
-        it in real time -- this app's own analogue of mplot3d's built-in
+        """Left-click-drag on a level panel rotates THAT panel's own
+        camera group's orientation (self._level_drag_group_level, set at
+        press time -- see _on_level_drag_start) and re-renders every
+        panel in that SAME group (_render_camera_group) -- not every
+        level panel any more, now that Level 0 and Levels 1-3 have
+        independent cameras (see __init__'s own Design notes). This
+        app's own analogue of mplot3d's built-in
         drag rotation, reimplemented here since PyVista/VTK panels are
         plain images, not interactive widgets (see _build_level_pv_panel).
         Re-rendering all four costs ~30ms (measured), well within
@@ -1733,52 +1914,58 @@ class InflatePolyhedronApp:
         horizontal drag, about the CURRENT right axis for a vertical one
         -- onto the existing quaternion, rather than accumulating into a
         stored azimuth/elevation pair. This is a free trackball rotation:
-        because "up" is whatever self.level_rotation currently says it
-        is (not re-pinned to world +z every frame the way the old
+        because "up" is whatever this group's own rotation currently says
+        it is (not re-pinned to world +z every frame the way the old
         azim/elev formula did), there's no pole for elevation to
         approach and lock up near -- the earlier version had to clamp
         elevation to +-89 degrees for exactly this reason; this version
         needs no clamp at all."""
         if not self._level_dragging or self._level_last_xy is None:
             return
+        cam = self._level_camera(self._level_drag_group_level)
         last_x, last_y = self._level_last_xy
         dx, dy = event.x - last_x, event.y - last_y
-        up = self.level_rotation.apply([0.0, 0.0, 1.0])
-        right = self.level_rotation.apply([0.0, 1.0, 0.0])
+        up = cam["rotation"].apply([0.0, 0.0, 1.0])
+        right = cam["rotation"].apply([0.0, 1.0, 0.0])
         sensitivity = np.radians(LEVEL_DRAG_SENSITIVITY)
         yaw = Rotation.from_rotvec(-dx * sensitivity * up)
         pitch = Rotation.from_rotvec(-dy * sensitivity * right)
-        self.level_rotation = pitch * yaw * self.level_rotation
+        cam["rotation"] = pitch * yaw * cam["rotation"]
         self._level_last_xy = (event.x, event.y)
-        self._render_all_level_panels()
+        self._render_camera_group(self._level_drag_group_level)
 
     def _on_level_drag_end(self, event):
         self._level_dragging = False
         self._level_last_xy = None
         # One last explicit render, in case the button release didn't
         # come with its own trailing motion event -- _on_level_motion
-        # already keeps every panel live-updated during the drag itself,
-        # so this is just a safety net for that edge case, not the
-        # primary sync point.
-        self._render_all_level_panels()
+        # already keeps this group's panels live-updated during the drag
+        # itself, so this is just a safety net for that edge case, not
+        # the primary sync point.
+        if self._level_drag_group_level is not None:
+            self._render_camera_group(self._level_drag_group_level)
+        self._level_drag_group_level = None
 
     def _on_level_pan_start(self, event):
         self._level_panning = True
         self._level_pan_last_xy = (event.x, event.y)
+        self._level_pan_group_level = self._level_of_label.get(event.widget, 1)
 
     def _on_level_pan_motion(self, event):
-        """Right-click-drag on ANY level panel translates the shared pan
-        (self.level_pan, a 2D NDC offset applied via vtkCamera's own
-        SetWindowCenter in _render_level_pv -- see its own comment in
-        __init__ for why NDC rather than a 3D world-space offset) and
-        re-renders every panel with it -- pan's own analogue of
-        _on_level_motion's rotation drag. Needs no per-panel scale at all
-        (unlike an earlier, world-space version of this) since NDC is
-        already resolution/scale-independent -- every level panel renders
-        at the same LEVEL_PANEL_SIZE, so converting the drag through that
-        one fixed size, rather than through whichever panel happened to
-        be dragged, is what makes the resulting shift come out visually
-        IDENTICAL (same pixel count) on every panel.
+        """Right-click-drag on a level panel translates THAT panel's own
+        camera group's pan (self._level_pan_group_level, set at press
+        time -- see _on_level_pan_start; the pan value itself is a 2D NDC
+        offset applied via vtkCamera's own SetWindowCenter in
+        _render_level_pv -- see its own comment in __init__ for why NDC
+        rather than a 3D world-space offset) and re-renders every panel
+        in that SAME group -- pan's own analogue of _on_level_motion's
+        rotation drag. Needs no per-panel scale at all (unlike an
+        earlier, world-space version of this) since NDC is already
+        resolution/scale-independent -- every level panel renders at the
+        same LEVEL_PANEL_SIZE, so converting the drag through that one
+        fixed size, rather than through whichever panel happened to be
+        dragged, is what makes the resulting shift come out visually
+        IDENTICAL (same pixel count) on every panel in the group.
 
         Sign/scale verified directly (not just derived): rendering a
         known point with a known SetWindowCenter(x, y) showed x=+1 moves
@@ -1789,49 +1976,64 @@ class InflatePolyhedronApp:
         own y) needs a POSITIVE y term, unlike x."""
         if not self._level_panning or self._level_pan_last_xy is None:
             return
+        cam = self._level_camera(self._level_pan_group_level)
         last_x, last_y = self._level_pan_last_xy
         dx, dy = event.x - last_x, event.y - last_y
-        panel_width, panel_height = LEVEL_PANEL_SIZE
-        self.level_pan = self.level_pan + np.array(
+        panel_width, panel_height = _level_panel_size(self._level_pan_group_level)
+        cam["pan"] = cam["pan"] + np.array(
             [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
         self._level_pan_last_xy = (event.x, event.y)
-        self._render_all_level_panels()
+        self._render_camera_group(self._level_pan_group_level)
 
     def _on_level_pan_end(self, event):
         self._level_panning = False
         self._level_pan_last_xy = None
         # Same safety-net rationale as _on_level_drag_end.
-        self._render_all_level_panels()
+        if self._level_pan_group_level is not None:
+            self._render_camera_group(self._level_pan_group_level)
+        self._level_pan_group_level = None
 
     def _on_level_pan_reset(self, event=None):
-        """Middle-click on ANY level panel resets the shared pan/zoom/
-        rotation all the way back to their defaults (2026-09-16, explicit
-        user request -- this used to reset pan alone) -- one click gets
-        every panel back to its original framing, rather than needing pan
-        reset plus manually scrolling/dragging zoom and rotation back by
-        feel. self.level_rotation goes back through _initial_level_
+        """Middle-click on a level panel resets THAT panel's own camera
+        group's pan/zoom/rotation all the way back to their defaults
+        (2026-09-16, explicit user request -- this used to reset pan
+        alone; 2026-09-17, explicit user request -- Level 0 and Levels
+        1-3 are now independent groups, so this only resets the ONE
+        group the click landed on, not every panel) -- one click gets
+        every panel in that group back to its original framing, rather
+        than needing pan reset plus manually scrolling/dragging zoom and
+        rotation back by feel. Each group's own rotation goes back
+        through _initial_level_
         rotation() (the exact same starting quaternion __init__ builds),
         not just "identity", since this app's own default view is
-        deliberately non-axis-aligned (see LEVEL_DEFAULT_ELEV/AZIM)."""
-        self.level_pan = np.zeros(2)
-        self.level_zoom = 1.0
-        self.level_rotation = self._initial_level_rotation()
-        self._render_all_level_panels()
+        deliberately non-axis-aligned (see LEVEL_DEFAULT_ELEV/AZIM).
+        `event=None` (no caller currently does this) falls back to
+        resetting the Levels-1-3 shared group."""
+        level = self._level_of_label.get(event.widget, 1) if event is not None else 1
+        cam = self._level_camera(level)
+        cam["pan"] = np.zeros(2)
+        cam["zoom"] = 1.0
+        cam["rotation"] = self._initial_level_rotation()
+        self._render_camera_group(level)
 
     def _on_level_scroll(self, event):
-        """Mouse-wheel-scroll on ANY level panel zooms the shared camera
-        (self.level_zoom) and re-renders EVERY panel with it -- the same
-        shared-state-across-all-panels approach _on_level_motion uses for
-        rotation (see this class's own Design notes in __init__), just
-        for zoom instead of angle. event.num is Button-4/5 on X11 (no
-        event.delta there); event.delta is Windows/macOS's own signed
-        notch count (positive delta zooms in)."""
+        """Mouse-wheel-scroll on a level panel zooms THAT panel's own
+        camera group (self._level_camera) and re-renders every panel in
+        that SAME group -- Level 0 and Levels 1-3 zoom independently now
+        (see __init__'s own Design notes), not the single shared state
+        every panel used to scroll together. event.num is Button-4/5 on
+        X11 (no event.delta there); event.delta is Windows/macOS's own
+        signed notch count (positive delta zooms in)."""
+        level = self._level_of_label.get(event.widget)
+        if level is None:
+            return
+        cam = self._level_camera(level)
         if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
             factor = 1.0 / LEVEL_ZOOM_STEP
         else:
             factor = LEVEL_ZOOM_STEP
-        self.level_zoom = max(LEVEL_ZOOM_MIN, min(LEVEL_ZOOM_MAX, self.level_zoom * factor))
-        self._render_all_level_panels()
+        cam["zoom"] = max(LEVEL_ZOOM_MIN, min(LEVEL_ZOOM_MAX, cam["zoom"] * factor))
+        self._render_camera_group(level)
 
     def _render_all_level_panels(self):
         for level in self.level_plotters:
@@ -1913,22 +2115,82 @@ class InflatePolyhedronApp:
                     segment_points[1::2] = ends
                     plotter.add_lines(segment_points, color=NORMAL_COLOR, width=2.0)
 
+            # Each level fills its OWN panel to 90% from its OWN current
+            # bounding box (2026-09-18, explicit user request, superseding
+            # a same-day earlier attempt at a FIXED reference framing
+            # shared from Level 1's converged state -- that made the
+            # camera framing itself identical across levels, verified
+            # directly, but a real net showed why that alone isn't
+            # enough: the app's own per-level target RMS % TAPERS down
+            # (80/40/10 by default), and the converged mesh's own
+            # absolute size can genuinely shrink a lot across levels as a
+            # result (a Dodecahedron net's own half-extent measured
+            # 2.36 -> 1.79 -> 1.41 across levels 1-3) -- a literally fixed
+            # camera then just honestly displays that real shrinkage,
+            # which read as "inconsistent sizes" rather than the
+            # consistent LOOK actually wanted. Rotation/pan/zoom
+            # (self._level13_camera) stay SHARED across Levels 1-3
+            # regardless -- that's a separate, still-current mechanism
+            # (see __init__'s own Design notes) this change doesn't touch;
+            # only the auto-fit center/half computation reverted to being
+            # per-level again.
+            # `half` is the shape's own BOUNDING-SPHERE radius (largest
+            # distance from center to any vertex), not half of the
+            # largest single WORLD-AXIS extent as an earlier version used
+            # (2026-09-18, explicit user request -- "90% zoom means both
+            # width and height are at most 90%"): a single-axis measure
+            # UNDERESTIMATES the true on-screen extent for a shape viewed
+            # from an oblique angle (its diagonal reaches further across
+            # the screen than any one axis's own half-length does), which
+            # is exactly what let real renders clip past the top/bottom
+            # edge despite `_level_zoom_fill` claiming "90%" -- a proper
+            # radius bounds the shape from EVERY direction at once, so
+            # whatever angle the shared rotation currently shows, it's
+            # guaranteed to still fit. `_render_level_pv`'s own aspect
+            # handling (`max(1, panel_height/panel_width)`) then makes
+            # the PANEL'S OWN NARROWER dimension (width, for these
+            # portrait panels) the exact `_level_zoom_fill(level)`
+            # fraction of the frame, with the taller dimension getting
+            # EXTRA slack rather than less -- so both width and height
+            # end up at MOST that fraction, never more.
+            #
+            # No separate "WIREFRAME_VIEW_FILL" margin multiplied in here
+            # any more, either (was 0.8, REMOVED entirely) -- it and
+            # `_level_zoom_fill` were two independently-tuned "how much
+            # margin" knobs that ended up COMPOUNDING as `_level_zoom_
+            # fill / WIREFRAME_VIEW_FILL` (0.9 / 0.8 = 112.5%) instead of
+            # each acting alone, which is the OTHER reason "fill 90%"
+            # was actually rendering well past 100% and clipping --
+            # `_level_zoom_fill` alone is now the single, authoritative
+            # fill fraction.
             lo, hi = points.min(axis=0), points.max(axis=0)
-            self._level_center[level] = (lo + hi) / 2
-            self._level_half[level] = (hi - lo).max() / 2 * WIREFRAME_VIEW_FILL + 1e-6
+            center = (lo + hi) / 2
+            self._level_center[level] = center
+            self._level_half[level] = float(np.linalg.norm(points - center, axis=1).max()) + 1e-6
         self._render_level_pv(level)
 
     def _render_level_pv(self, level):
         """Positions an orthographic (parallel-projection) camera from
-        the SHARED self.level_rotation (see the drag handlers) at a
-        distance derived from THIS level's own current bounding box
-        (self._level_center/_level_half, set by _draw_level_panel --
-        necessary since neither a pure-spring relax nor a pressure
-        inflation has any mechanism keeping the result near the origin
-        or at a familiar scale), renders off-screen, and blits the
-        result into self.level_labels[level]. Parallel rather than
-        perspective projection to give every panel fixed, comparable
-        axis-limit-like framing with no foreshortening. The panel's
+        `level`'s OWN camera group's rotation (self._level_camera(level)
+        -- see __init__'s own Design notes on why Level 0 and Levels 1-3
+        no longer share one) at a distance derived from THIS level's own
+        current bounding box (self._level_center/_level_half, set by
+        _draw_level_panel -- necessary since neither a pure-spring relax
+        nor a pressure inflation has any mechanism keeping the result
+        near the origin or at a familiar scale), renders off-screen, and
+        blits the result into self.level_labels[level]. Parallel rather
+        than perspective projection to give every panel fixed, comparable
+        axis-limit-like framing with no foreshortening.
+
+        Skips entirely (leaving the panel's own "Computing..." text
+        alone) while `level` is the one currently showing it (self.
+        _computing_level, see _start_computing_animation) -- the single
+        choke point every caller (draw(), a drag-rotate's own
+        _render_camera_group/_render_all_level_panels, a resize) goes
+        through, so nothing can paint a stale image back over the
+        placeholder mid-calibration.
+
+        The panel's
         "Level N" title is a separate Tkinter Label (see
         _build_level_pv_panel), not drawn into this image -- a title
         drawn INSIDE the rendered scene (tried first, via
@@ -1937,8 +2199,11 @@ class InflatePolyhedronApp:
         actor's positioning/justification doesn't guarantee it stays
         fully inside the viewport the way a real widget placed above the
         image trivially does."""
-        direction = self.level_rotation.apply([1.0, 0.0, 0.0])
-        up = self.level_rotation.apply([0.0, 0.0, 1.0])
+        if level == self._computing_level:
+            return
+        cam = self._level_camera(level)
+        direction = cam["rotation"].apply([1.0, 0.0, 0.0])
+        up = cam["rotation"].apply([0.0, 0.0, 1.0])
         center, half = self._level_center[level], self._level_half[level]
         distance = half * 4
         plotter = self.level_plotters[level]
@@ -1960,21 +2225,22 @@ class InflatePolyhedronApp:
         # portrait) guarantees the full half-extent fits in BOTH
         # directions, matching what set_box_aspect([1,1,1]) effectively
         # gave the old matplotlib panels for free; dividing by
-        # LEVEL_ZOOM_FILL then shrinks the shape within that
-        # guaranteed-fitting frame.
-        panel_width, panel_height = LEVEL_PANEL_SIZE
-        # self.level_zoom is a divisor here (like LEVEL_ZOOM_FILL) since
+        # _level_zoom_fill(level) (Level 0 vs Levels 1-3 default to
+        # different fill fractions, see that pair's own comment) then
+        # shrinks the shape within that guaranteed-fitting frame.
+        panel_width, panel_height = _level_panel_size(level)
+        # cam["zoom"] is a divisor here (like _level_zoom_fill) since
         # parallel_scale is a visible-world-HEIGHT, not a magnification --
-        # a bigger level_zoom (scrolled in) must shrink parallel_scale.
+        # a bigger zoom (scrolled in) must shrink parallel_scale.
         camera.parallel_scale = (half * max(1.0, panel_height / panel_width)
-                                  / LEVEL_ZOOM_FILL / self.level_zoom)
-        # self.level_pan (right-click-drag, _on_level_pan_motion) is
-        # applied HERE, as a pure post-projection viewport shift, rather
-        # than by moving focal_point/position above -- see its own
-        # comment in __init__ for why: this way it can't desync between
-        # panels of different scale, and can't move any panel's own
-        # orbit center out from under a later rotation either.
-        camera.SetWindowCenter(*self.level_pan)
+                                  / _level_zoom_fill(level) / cam["zoom"])
+        # cam["pan"] (right-click-drag, _on_level_pan_motion) is applied
+        # HERE, as a pure post-projection viewport shift, rather than by
+        # moving focal_point/position above -- see its own comment in
+        # __init__ for why: this way it can't desync between panels of
+        # different scale, and can't move any panel's own orbit center
+        # out from under a later rotation either.
+        camera.SetWindowCenter(*cam["pan"])
         plotter.reset_camera_clipping_range()
         # plotter.screenshot() does NOT re-render on a camera-only change
         # by itself -- verified directly: two screenshots taken after
@@ -1988,7 +2254,100 @@ class InflatePolyhedronApp:
         plotter.render()
         image = plotter.screenshot(return_img=True)
         self.level_photos[level] = ImageTk.PhotoImage(Image.fromarray(image))
+        # text="" clears whatever "Computing..." text _tick_computing_
+        # animation last set -- harmless to leave (Label's default
+        # compound="none" shows the image over it regardless), but tidier
+        # than leaving stale placeholder text configured on the widget.
+        self.level_labels[level].configure(image=self.level_photos[level], text="")
+
+    # ---- "Computing..." placeholder (pressure calibration) ----
+
+    # How often the "Computing" dot-cycle advances (nothing->1->2->3->
+    # repeat) -- purely decorative, so any value that reads as "still
+    # working" without being distractingly fast is fine.
+    COMPUTING_DOT_INTERVAL_MS = 500
+
+    def _set_level_message(self, level, text):
+        """Sets `level`'s own bottom status message (self.
+        level_message_labels), left-anchored (anchor=tk.W, set once at
+        construction) but with `padx` computed HERE to make THIS specific
+        `text` land visually centered under the panel -- true tk.CENTER
+        anchoring was tried first and rejected (explicit user request,
+        2026-09-17): it re-anchors from scratch on every update, so a
+        message's own LEFT edge visibly jumps every time its length
+        changes. A single fixed left inset (also tried) doesn't actually
+        look centered for every message either -- "Computing" (no dots
+        yet) is much shorter than "Replay frame 27 / 93", so a pad tuned
+        for one read noticeably off-center for the other (observed
+        directly). Measuring this specific string's own rendered width
+        (self._level_message_font, a real Font object -- LEVEL_MESSAGE_
+        FONT itself is just the plain (family, size) tuple Tk widgets
+        take, which has no .measure()) and computing the inset that
+        would ACTUALLY center it gives the best of both: visually
+        equivalent to true centering for whatever message is showing
+        right now, but the position only shifts by however much THIS
+        message's own width actually changed since the last call (a
+        dot's width for "Computing" -> "Computing.", near zero for most
+        frame-count changes) rather than a full from-scratch re-center."""
+        text_width = self._level_message_font.measure(text)
+        pad = max(0, (_level_panel_size(level)[0] - text_width) // 2)
+        self.level_message_labels[level].configure(text=text, padx=pad)
+
+    def _start_computing_animation(self, level):
+        """Blanks `level`'s own panel image (plain background, no mesh)
+        and shows an animated "Computing..." in its bottom message area
+        (_set_level_message) for as long as pressure calibration
+        (estimate_pressure_for_target_stretch) is searching -- explicit
+        user request, 2026-09-17: most of calibration's own several
+        relax_once trials are thrown away (see on_inflate_clicked), so
+        there's no single meaningful shape to show frame-by-frame while
+        it runs, unlike Level 0's own Relax (which stays live -- there's
+        only ever one run there, see _apply_relax_progress). _render_
+        level_pv skips `level` entirely for as long as self._computing_
+        level is set to it, so nothing else can paint back over the blank
+        image (the message label needs no such guard -- nothing else
+        writes to it while calibration is running).
+
+        The blank image is rendered ONCE here, not regenerated every dot-
+        cycle tick like an earlier version did (baking "Computing..." into
+        the image itself, before this dedicated message area existed) --
+        a flat background never changes frame to frame, so there's
+        nothing to re-render; only the separate message Label's own text
+        needs to keep ticking, which is far cheaper than a PIL image
+        regenerate + PhotoImage conversion every 500ms."""
+        self._computing_level = level
+        self._computing_dots = 0
+        blank = Image.new("RGB", _level_panel_size(level), PLOT_THEME["bg"])
+        self.level_photos[level] = ImageTk.PhotoImage(blank)
         self.level_labels[level].configure(image=self.level_photos[level])
+        self._tick_computing_animation()
+
+    def _tick_computing_animation(self):
+        if self._computing_level is None:
+            return
+        self._set_level_message(self._computing_level, "Computing" + "." * self._computing_dots)
+        self._computing_dots = (self._computing_dots + 1) % 4
+        self._computing_after_id = self.root.after(
+            self.COMPUTING_DOT_INTERVAL_MS, self._tick_computing_animation)
+
+    def _stop_computing_animation(self):
+        """Cancels the dot-cycle, clears the message area, and clears
+        self._computing_level -- _render_level_pv is free to draw that
+        level normally again after this, but doesn't do so ON ITS OWN;
+        the caller (_on_pressure_calibrated) always follows this with
+        either a real draw() (the stopped-during-calibration case) or the
+        start of a frame replay (whose own first _replay_step tick
+        immediately overwrites the message area with "Replay frame ..."
+        anyway -- clearing here first is just so the stopped-during-
+        calibration case, which has nothing else to overwrite it, doesn't
+        leave "Computing..." showing with nothing actually happening)."""
+        if self._computing_after_id is not None:
+            self.root.after_cancel(self._computing_after_id)
+            self._computing_after_id = None
+        level = self._computing_level
+        self._computing_level = None
+        if level is not None:
+            self._set_level_message(level, "")
 
     # ---- theme ----
 
@@ -2148,6 +2507,21 @@ class InflatePolyhedronApp:
         # between runs, but reset defensively regardless).
         self._auto_active = False
         self._auto_attempted_level = None
+        # Fresh camera state for BOTH groups on every new net selection
+        # (2026-09-18, explicit user request -- "every time i load a new
+        # .poly file, the images should show default zoom/rotation/
+        # translation") -- previously carried over unchanged from
+        # whatever the PREVIOUS net's camera happened to be left at,
+        # which made no sense once a totally different-looking shape is
+        # now on screen. Doesn't affect File > Load (on_load_session_
+        # clicked, "but if i load a .hippo, then use the zoom/rotation/
+        # translation specified in that file") -- that method builds its
+        # own state directly from the saved SessionStateModel, including
+        # its own camera fields, and never calls this one.
+        self._level0_camera = {"rotation": self._initial_level_rotation(),
+                                "zoom": 1.0, "pan": np.zeros(2)}
+        self._level13_camera = {"rotation": self._initial_level_rotation(),
+                                 "zoom": 1.0, "pan": np.zeros(2)}
         self._record_level_history()
         self._update_level_action_buttons()
         self._update_auto_button()
@@ -2206,9 +2580,12 @@ class InflatePolyhedronApp:
             level_history={level: LevelHistoryRecordModel(**rec)
                            for level, rec in self.level_history.items()},
             levels=levels,
-            level_zoom=self.level_zoom,
-            level_pan=(float(self.level_pan[0]), float(self.level_pan[1])),
-            level_rotation=tuple(float(v) for v in self.level_rotation.as_quat()),
+            level_zoom=self._level13_camera["zoom"],
+            level_pan=(float(self._level13_camera["pan"][0]), float(self._level13_camera["pan"][1])),
+            level_rotation=tuple(float(v) for v in self._level13_camera["rotation"].as_quat()),
+            level0_zoom=self._level0_camera["zoom"],
+            level0_pan=(float(self._level0_camera["pan"][0]), float(self._level0_camera["pan"][1])),
+            level0_rotation=tuple(float(v) for v in self._level0_camera["rotation"].as_quat()),
             net_zoom=self.net_zoom,
             net_pan=(float(self.net_pan[0]), float(self.net_pan[1])),
         )
@@ -2262,7 +2639,16 @@ class InflatePolyhedronApp:
             self.target_connections = None
 
         self.subdivision_level = state.subdivision_level
-        self.pressure_value = state.pressure_value
+        # Falls back to DEFAULT_PRESSURE (this app's own __init__
+        # default) when None -- a session saved mid-Computing (the File
+        # menu isn't disabled during a run) genuinely has no real
+        # pressure yet (see on_inflate_clicked's own comment); loading it
+        # back shouldn't leave self.pressure_value itself as None, since
+        # nothing downstream expects that (unlike level_history's own
+        # rms_stretch_pct, which _refresh_history_table explicitly
+        # handles as a "--" sentinel).
+        self.pressure_value = (state.pressure_value if state.pressure_value is not None
+                                else DEFAULT_PRESSURE)
         self.iteration_count = state.iteration_count
         self.debug_mode = state.debug_mode
         self.tolerance_var.set(state.tolerance)
@@ -2272,19 +2658,36 @@ class InflatePolyhedronApp:
         self.last_stats = state.last_stats.model_dump()
         self.level_history = {level: rec.model_dump() for level, rec in state.level_history.items()}
 
-        # Each panel's own camera view -- level_rotation falls back to
+        # Each panel's own camera view -- a rotation field falls back to
         # _initial_level_rotation() (this app's own non-axis-aligned
-        # default), not any baked-in quaternion, when the field is None
-        # (a session saved before this existed, or one saved with no
-        # panel ever having been rotated -- see SessionStateModel's own
-        # comment on why the default reproduces the ORIGINAL always-
-        # reset-to-default behavior). draw() below re-renders with all of
-        # these live, so nothing further is needed to actually apply them.
-        self.level_zoom = state.level_zoom
-        self.level_pan = np.array(state.level_pan)
-        self.level_rotation = (Rotation.from_quat(state.level_rotation)
-                                if state.level_rotation is not None
-                                else self._initial_level_rotation())
+        # default), not any baked-in quaternion, when it's None (a
+        # session saved before this existed, or one saved with no panel
+        # ever having been rotated -- see SessionStateModel's own comment
+        # on why the default reproduces the ORIGINAL always-reset-to-
+        # default behavior). Levels 1-3's own shared group reads the
+        # ORIGINAL "level_*" fields (an older, pre-split session file's
+        # one shared camera maps onto this group, see SessionStateModel's
+        # own comment); Level 0's own independent group (2026-09-17,
+        # explicit user request) reads the newer "level0_*" fields, which
+        # simply aren't present in an older file -- falling back to a
+        # FRESH default for Level 0 specifically in that case, not
+        # whatever the old file's one shared camera happened to be. draw()
+        # below re-renders with all of these live, so nothing further is
+        # needed to actually apply them.
+        self._level13_camera = {
+            "zoom": state.level_zoom,
+            "pan": np.array(state.level_pan),
+            "rotation": (Rotation.from_quat(state.level_rotation)
+                         if state.level_rotation is not None
+                         else self._initial_level_rotation()),
+        }
+        self._level0_camera = {
+            "zoom": state.level0_zoom,
+            "pan": np.array(state.level0_pan),
+            "rotation": (Rotation.from_quat(state.level0_rotation)
+                         if state.level0_rotation is not None
+                         else self._initial_level_rotation()),
+        }
         self.net_zoom = state.net_zoom
         self.net_pan = np.array(state.net_pan)
 
@@ -2419,7 +2822,7 @@ class InflatePolyhedronApp:
         value -- the relax's own `optimality` (None before any
         Inflate/Relax at this level, or if a Stop request aborted before
         any step ran -- see relax_once's docstring) -- all from
-        self.last_stats, plus the "Elapsed Time"/"Cumulative Time" columns'
+        self.last_stats, plus the "Simulation Time"/"Cumulative Time" columns'
         own backing state, self._current_precomp_time_s/_current_sim_
         time_s (see their own comment in __init__). Called on
         every subdivide/promotion, every live Inflate/Relax progress
@@ -2429,7 +2832,12 @@ class InflatePolyhedronApp:
             "pressure": None if self.subdivision_level == 0 else self.pressure_value,
             "steps": self.iteration_count,
             "max_stretch_pct": self.last_stats.get("max_stretch_pct", 0.0),
-            "rms_stretch_pct": self.last_stats.get("rms_stretch_pct", 0.0),
+            # No 0.0 fallback here (unlike max_stretch_pct above) -- None
+            # is a genuine, DISTINCT state ("not known yet, still
+            # computing" -- see on_inflate_clicked's own comment), shown
+            # as "--" by _refresh_history_table rather than a misleading
+            # "0.00" or a stale leftover number from before this run.
+            "rms_stretch_pct": self.last_stats.get("rms_stretch_pct"),
             "optimality": self.last_stats.get("optimality"),
             "converged": self.last_stats.get("converged"),
             # The gtol actually used to reach this optimality/converged
@@ -2445,7 +2853,7 @@ class InflatePolyhedronApp:
             "target_rms_pct": (None if self.subdivision_level == 0
                                 else self.last_stats.get("target_rms_pct")
                                 or self._current_target_rms_pct),
-            # Backing state for "Elapsed Time"/"Cumulative Time" -- see
+            # Backing state for "Simulation Time"/"Cumulative Time" -- see
             # their own comment in __init__ for when each is set/reset.
             "precomp_time_s": self._current_precomp_time_s,
             "sim_time_s": self._current_sim_time_s,
@@ -2464,7 +2872,7 @@ class InflatePolyhedronApp:
     @staticmethod
     def _format_mmss(seconds):
         """None (this phase hasn't run yet at this level -- see the
-        Elapsed Time backing-state comment in __init__) -> "--"
+        Simulation Time backing-state comment in __init__) -> "--"
         (2026-09-16, explicit -- was "n/a"); otherwise mm:ss, floored to
         the second (these columns are wall-clock timings for a human to
         skim, not a stopwatch reading) -- minutes NOT capped at 59, so an
@@ -2522,10 +2930,28 @@ class InflatePolyhedronApp:
             # red ("not_converged") is reserved for an ACTUAL failure
             # (the step cap was reached, or Stop was clicked), not just
             # "hasn't converged yet, still going" (2026-09-16, explicit
-            # user request).
-            running_now = level == self.subdivision_level and self._level_running
+            # user request). Gated on `optimality is None` too, not just
+            # `self._level_running`, since 2026-09-17 (explicit user
+            # request -- "during replay, the text ... is yellow, it
+            # should be green because it's already reached convergence"):
+            # self._level_running stays True through the WHOLE Inflate
+            # click, including the purely-visual replay after a real
+            # result is already known (see _on_pressure_calibrated's own
+            # comment on when optimality/last_stats actually get set) --
+            # "running" should mean "still WAITING on a result", which
+            # ends once `optimality` is real, not once the animation
+            # finishes.
+            running_now = (level == self.subdivision_level and self._level_running
+                           and optimality is None)
             if optimality is None:
-                convergence, tags = "n/a", (("running",) if running_now else ())
+                # "--" (2026-09-17, explicit user request -- "any cell
+                # that doesn't have a value yet should be -- and not
+                # n/a"), covering both "never run at this level yet" and
+                # "actively computing right now" (optimality is reset to
+                # None at the start of every Inflate click, same "--"
+                # sentinel treatment as RMS Stretch %/Pressure -- see
+                # on_inflate_clicked's own comment).
+                convergence, tags = "--", (("running",) if running_now else ())
             else:
                 # The checkmark tracks the algorithm's own `converged`
                 # flag rather than redoing the optimality-vs-gtol
@@ -2537,23 +2963,30 @@ class InflatePolyhedronApp:
                 # agrees with the displayed comparison -- kept as the
                 # single source of truth anyway rather than assuming
                 # that'll always hold.
+                # `running_now` is always False here -- it requires
+                # `optimality is None` (see its own definition above),
+                # and this branch only runs when optimality is NOT None
+                # -- so this cell only ever shows two colors: green
+                # ("converged"), always with a checkmark, or red
+                # ("not_converged"), always with an X (2026-09-17,
+                # explicit user request -- "red is only used when
+                # convergence is not reached at the end... green is used
+                # when convergence is reached at the end... it's never
+                # any other colour" -- "--"/yellow, this cell's only other
+                # possible state, is handled entirely by the `if` branch
+                # above instead).
                 gtol = rec["gtol"]
                 converged = rec["converged"]
                 op = "<" if optimality < gtol else ">"
                 mark = "✔" if converged else "✘"  # colored via row tag, not the glyph itself
                 convergence = (f"{self._format_sci(optimality)} {op} "
                                 f"{self._format_sci(gtol, precision=0)} {mark}")
-                if running_now:
-                    tags = ("running",)
-                elif converged:
-                    tags = ("converged",)
-                else:
-                    tags = ("not_converged",)
+                tags = ("converged",) if converged else ("not_converged",)
             # "--" for Level 0 (2026-09-16, explicit -- was "n/a"), the
             # only level whose "pressure" is ever None (see
             # _record_level_history) since relax_initial_configuration is
             # pure springs, no pressure to calibrate at all.
-            pressure_str = "--" if rec["pressure"] is None else f"{rec['pressure']:.4g}"
+            pressure_str = "--" if rec["pressure"] is None else f"{rec['pressure']:.2f}"
             # Level 0 has no target stretch to chase (relax_initial_configuration
             # is pure springs, not calibrated against the spinner at all).
             # This row's OWN target_rms_pct (recorded at the time IT was
@@ -2561,42 +2994,69 @@ class InflatePolyhedronApp:
             # field's own comment in __init__), so a level's row keeps
             # showing what it was actually chasing even after the
             # spinner later shows a different level's own default.
-            rms_str = f"{rec['rms_stretch_pct']:.2f}"
-            if level != 0 and rec.get("target_rms_pct") is not None:
+            # "--" (2026-09-17, explicit user request) while this run's
+            # own RMS isn't known yet -- "don't calculate/show RMS
+            # stretch % until convergence or step 5000 [i.e. the trial's
+            # own real stopping point]; only update the value at the end
+            # of the simulation" -- see on_inflate_clicked's own comment
+            # for where rms_stretch_pct gets reset to None at the start
+            # of a run and _on_pressure_calibrated for where it's filled
+            # in with the real number, the instant it's actually known
+            # (before replay even starts, same as "Convergence" above).
+            # Level 0 ALWAYS shows "--" here too, regardless of its own
+            # last_stats value (2026-09-17, further explicit user request
+            # -- "for level 0, no need to compute rms stretch %, just
+            # keep it as --") -- relax_initial_configuration's own RMS
+            # reading is still computed and stored (last_stats/level_
+            # history), just never actually surfaced for this level's row;
+            # not worth threading a "don't compute it at all" flag all the
+            # way down into _apply_relax_progress for one already-cheap
+            # vectorized stat that's part of the same _positions_and_
+            # stretch call max_stretch_pct (still shown for Level 0)
+            # already needs.
+            rms_str = ("--" if level == 0 or rec["rms_stretch_pct"] is None
+                       else f"{rec['rms_stretch_pct']:.1f}")
+            # "(target: ...)" is debug-mode-only now (2026-09-17, explicit
+            # user request -- release mode shouldn't show it at all).
+            if self.debug_mode and level != 0 and rec.get("target_rms_pct") is not None:
                 rms_str += f" (target: {rec['target_rms_pct']:.1f})"
-            # "Elapsed Time": Precomp + Sim -- except Level 0, which has no
-            # precomputation at all (relax_initial_configuration is pure
-            # springs, no pressure to calibrate, see on_relax_clicked), so
-            # its row shows just the one (Sim) value. Levels 1+ show BOTH
-            # phases only once both have actually run; with only one of
-            # the two available (calibration finished but Inflate's own
-            # streamed run hasn't started/updated yet, or vice versa),
-            # the row shows just that ONE mm:ss alone (2026-09-16,
-            # explicit -- was always "precomp + sim", showing e.g.
-            # "12:34 + --" for the half-run case); with NEITHER yet, "--"
-            # alone, same as _format_mmss's own single-value placeholder.
+            # "Simulation Time" (renamed from "Elapsed Time" 2026-09-17,
+            # explicit user request): Precomp + Sim -- except Level 0,
+            # which has no precomputation at all (relax_initial_
+            # configuration is pure springs, no pressure to calibrate, see
+            # on_relax_clicked), so its row shows just the one (Sim)
+            # value, and Level 1+, which no longer has a separate Sim
+            # phase at all (2026-09-17 -- pressure calibration's own
+            # winning trial IS the Inflate result now, see
+            # on_inflate_clicked/_finish_frame_replay), so its row shows
+            # just Precomp. A row could still show BOTH if loaded from a
+            # session saved before this change; that case (and the
+            # half-run "only one of the two available yet" case) still
+            # shows just whichever mm:ss values are actually present, same
+            # as before (2026-09-16 -- was always "precomp + sim", showing
+            # e.g. "12:34 + --" for the half-run case); with NEITHER yet,
+            # "--" alone, same as _format_mmss's own single-value
+            # placeholder.
             precomp_s = rec.get("precomp_time_s")
             sim_s = rec.get("sim_time_s")
-            if level == 0:
-                elapsed_str = self._format_mmss(sim_s)
-            elif precomp_s is not None and sim_s is not None:
-                elapsed_str = f"{self._format_mmss(precomp_s)} + {self._format_mmss(sim_s)}"
+            if precomp_s is not None and sim_s is not None:
+                sim_time_str = f"{self._format_mmss(precomp_s)} + {self._format_mmss(sim_s)}"
             elif precomp_s is not None:
-                elapsed_str = self._format_mmss(precomp_s)
+                sim_time_str = self._format_mmss(precomp_s)
             elif sim_s is not None:
-                elapsed_str = self._format_mmss(sim_s)
+                sim_time_str = self._format_mmss(sim_s)
             else:
-                elapsed_str = self._format_mmss(None)
-            # "Cumulative Time": running total of every row's own Elapsed
-            # Time SECONDS so far (both phases, level 0's single one
-            # included) -- a level that hasn't run at all yet contributes
-            # 0, not "n/a", since the running total up to and including an
-            # untouched row is still a real, known number (whatever the
-            # rows before it added up to).
+                sim_time_str = self._format_mmss(None)
+            # "Cumulative Time": running total of every row's own
+            # Simulation Time SECONDS so far (both phases, level 0's
+            # single one included) -- a level that hasn't run at all yet
+            # contributes 0, not "n/a", since the running total up to and
+            # including an untouched row is still a real, known number
+            # (whatever the rows before it added up to).
             cumulative_seconds += (precomp_s or 0.0) + (sim_s or 0.0)
             cumulative_str = self._format_mmss(cumulative_seconds)
             values = (level, pressure_str, rec["steps"], f"{rec['max_stretch_pct']:.2f}",
-                      rms_str, elapsed_str, cumulative_str, convergence)
+                      rms_str, sim_time_str, cumulative_str, convergence)
             iid = str(level)
             if self.history_tree.exists(iid):
                 self.history_tree.item(iid, values=values, tags=tags)
@@ -2754,16 +3214,33 @@ class InflatePolyhedronApp:
         return None
 
     def on_inflate_clicked(self):
-        """Two phases: first calibrate a pressure for the current "Target
-        RMS stretch" (stretchy_mesh.estimate_pressure_for_target_stretch,
-        via _run_background -- see _on_pressure_calibrated), THEN actually
-        inflate at that pressure via the normal streamed _run_inflate_stream
-        (respecting the steps-vs-convergence mode and the Stop button, same
-        as always). Recalibrates fresh from wherever self.positions
-        currently is on every click, since the user can no longer set
-        pressure directly. Calibrates against the CURRENT "Tolerance"
-        spinner value too, so the pressure search settles at the same
-        threshold the actual inflate run right after it will use. The
+        """Calibrates a pressure for the current "Target RMS stretch"
+        (stretchy_mesh.estimate_pressure_for_target_stretch, via
+        _run_background -- see _on_pressure_calibrated) and, once found,
+        that's the WHOLE run -- there's no separate second relax_once call
+        at the winning pressure any more (2026-09-17, explicit user
+        request). There used to be one (_run_inflate_stream), but it was
+        pure duplicated work: every calibration trial already starts from
+        the same `positions`, and the final trial runs at the SAME
+        pressure/gtol/rng a follow-up call would use, so it retraced an
+        already-computed trajectory step for step just to have something
+        to show frame-by-frame. Now estimate_pressure_for_target_stretch
+        itself captures the winning trial's own frames
+        (capture_frames=True) and _on_pressure_calibrated replays THOSE
+        (_start_frame_replay) once calibration lands on a pressure --
+        same visual result, zero recomputation.
+
+        While calibration itself is searching, this level's own panel
+        shows an animated "Computing..." placeholder instead of a live
+        redraw (_start_computing_animation) -- most of calibration's own
+        several trials are thrown away, so there's no single meaningful
+        shape to show frame-by-frame until it actually finishes. Level 0's
+        Relax has no such phase (see _apply_relax_progress) and keeps
+        redrawing live throughout, unchanged.
+
+        Recalibrates fresh from wherever self.positions currently is on
+        every click, since the user can no longer set pressure directly.
+        Calibrates against the CURRENT "Tolerance" spinner value too. The
         search's own STARTING pressure comes from
         _guess_pressure_from_history when a usable prior level exists
         (falling back to estimate_pressure_for_target_stretch's own
@@ -2790,38 +3267,107 @@ class InflatePolyhedronApp:
         self._current_target_rms_pct = target_rms_pct
         tolerance = self._get_tolerance()
         initial_pressure_guess = self._guess_pressure_from_history(target_rms_pct)
-        target_steps = max(1, self.steps_var.get()) if self.iterate_mode_var.get() == "steps" else None
         self.stop_event = threading.Event()
         # Marks the start of the "Precomp time" column's own phase -- see
         # its own comment in __init__. Consumed (turned into
-        # self._current_precomp_time_s) in _on_pressure_calibrated.
+        # self._current_precomp_time_s) in _on_pressure_calibrated. Level
+        # 1+ no longer has a separate "Sim time" phase after this (see
+        # this method's own docstring) -- ALL of a Level 1+ row's own
+        # Simulation Time is "Precomp" now.
         self._precomp_start_time = time.perf_counter()
+        # Read by _on_calibration_progress, which fires from a
+        # _run_background poll tick, not a call this method's own local
+        # scope survives until -- has to live on self.
+        self._precomp_base_iteration_count = self.iteration_count
+        # Snapshot to restore if this run gets Stopped (see
+        # _on_pressure_calibrated's own stop_event branch) -- and, right
+        # after taking it, blank "RMS Stretch %", "Pressure", AND
+        # "Convergence" to "--" for the duration of this run (2026-09-17,
+        # explicit user request, three separate asks: "don't calculate
+        # RMS stretch % until convergence or step 5000... show RMS
+        # stretch % as -- [while computing], only update the value at the
+        # end"; "the pressure should also be -- until things converge";
+        # "when convergence is not reached yet, convergence should be
+        # --"). Without this, the row would keep showing whatever stale
+        # RMS/pressure/convergence data was left over from BEFORE this
+        # click (the previous run's own result) -- not live numbers, just
+        # old data sitting there looking as if it might be current.
+        # `optimality=None` is what actually blanks "Convergence" --
+        # _refresh_history_table's own display logic already treated
+        # `None` there as "no result yet" (originally just for "never run
+        # at this level"), so resetting it here reuses that same path;
+        # `converged`/`gtol` don't need resetting alongside it, since the
+        # display logic never reads them while optimality is None.
+        self._pre_computing_last_stats = dict(self.last_stats)
+        self._pre_computing_pressure_value = self.pressure_value
+        self.last_stats = {**self.last_stats, "rms_stretch_pct": None, "optimality": None}
+        self.pressure_value = None
+        self._record_level_history()
         self._set_level_action_button_running(True)
+        self._start_computing_animation(self.subdivision_level)
         self._set_status(f"Finding a pressure that settles around {target_rms_pct:.1f}% "
                           "RMS stretch...", "info")
         self._run_background(
-            lambda: estimate_pressure_for_target_stretch(positions, faces, edge_length,
-                                                           target_rms_pct=target_rms_pct,
-                                                           gtol=tolerance,
-                                                           rng=None,
-                                                           stop_event=self.stop_event,
-                                                           initial_pressure_guess=initial_pressure_guess),
-            (), lambda result: self._on_pressure_calibrated(result, target_steps))
+            lambda queue_progress: estimate_pressure_for_target_stretch(
+                positions, faces, edge_length,
+                target_rms_pct=target_rms_pct,
+                gtol=tolerance,
+                rng=None,
+                stop_event=self.stop_event,
+                initial_pressure_guess=initial_pressure_guess,
+                capture_frames=True,
+                on_progress=queue_progress),
+            lambda result: self._on_pressure_calibrated(result, self._precomp_base_iteration_count),
+            on_progress=self._on_calibration_progress)
 
-    def _on_pressure_calibrated(self, result, target_steps):
+    def _on_calibration_progress(self, cumulative_steps):
+        """Live "Steps" column update while pressure calibration itself
+        is computing (2026-09-17, explicit user request -- "increment
+        Steps during simulation rather than replay") -- `cumulative_steps`
+        is estimate_pressure_for_target_stretch's own running total across
+        every trial attempted so far (see its own on_progress docstring
+        for why it's not reset per trial: a live counter visibly dropping
+        BACKWARDS every time a new trial starts would read as broken, not
+        as progress). NOT necessarily the same number the row ends up
+        showing once calibration actually finishes -- _on_pressure_
+        calibrated snaps self.iteration_count to the TRUE final
+        steps_taken (the winning trial's own count) the instant the real
+        result comes back, before replay ever starts, exactly as that
+        docstring recommends -- so any mismatch is a single, one-time
+        correction at the Computing-to-Replay transition, not something
+        visible mid-count."""
+        self.iteration_count = self._precomp_base_iteration_count + cumulative_steps
+        self._record_level_history()
+
+    def _on_pressure_calibrated(self, result, base_iteration_count):
         if self.stop_event is not None and self.stop_event.is_set():
             # Stopped during calibration itself -- its own trial positions
             # are discarded regardless of how it ends (see
             # estimate_pressure_for_target_stretch's own docstring), so
             # there's nothing from `result` to apply; just report it the
-            # same way a stopped streamed run would (_finish_inflate).
+            # same way a stopped run would (_finish_inflate). Restores
+            # this level's own normal panel (it was showing "Computing..."
+            # -- self.positions/faces are unchanged from before this
+            # click, so there's nothing new to show, just the old image
+            # back).
+            self._stop_computing_animation()
             self._set_level_action_button_running(False)
             self._set_status(
                 f"Stopped (during pressure calibration at level "
                 f"{self.subdivision_level}).", "warn")
+            # No real result to show -- restore "RMS Stretch %"/"Pressure"
+            # (blanked to "--" at the start of this click, see
+            # on_inflate_clicked's own comment) back to whatever they
+            # genuinely were before this run started, rather than leaving
+            # them stuck at "--" forever.
+            self.last_stats = self._pre_computing_last_stats
+            self.pressure_value = self._pre_computing_pressure_value
+            self._record_level_history()
+            self.draw()
             self._auto_step()  # no-op unless Auto is what actually drove this run
             return
-        pressure = result[0]
+        (pressure, new_positions, steps_taken, max_stretch, rms_stretch,
+         optimality, converged, frames) = result
         self.pressure_value = pressure
         # "Precomp time" (see __init__): calibration has no progress
         # callback of its own to update this live, so it's set ONCE here,
@@ -2829,31 +3375,173 @@ class InflatePolyhedronApp:
         self._current_precomp_time_s = time.perf_counter() - self._precomp_start_time
         # Captured once here, not re-read live during the run -- the
         # spinner is disabled for the duration anyway (_set_controls_
-        # enabled) -- and reused by _apply_inflate_progress so every
-        # progress update this run records the SAME threshold it's
-        # actually converging against, even if the spinner's value
-        # changes later (after the run finishes).
+        # enabled) -- and reused by _finish_frame_replay so the recorded
+        # outcome shows the SAME threshold it actually converged against,
+        # even if the spinner's value changes later.
         self._current_gtol = self._get_tolerance()
+        self._stop_computing_animation()
+        # _run_background's own completion just re-synced every control,
+        # including the frontier button, back to its normal (non-Stop)
+        # state (_set_controls_enabled(True), called right before this
+        # callback runs) -- re-disable them and turn the frontier button
+        # back into "Stop" for the replay that's about to start (Stop
+        # during replay just skips to the final frame, see _replay_step).
         self._set_controls_enabled(False)
-        # _run_background's own completion just re-synced every button,
-        # including the frontier one, back to its normal (non-Stop) state
-        # (_set_controls_enabled(True), called right before this callback
-        # runs) -- turn it back into "Stop" for the streamed inflate phase
-        # that's about to start; _set_controls_enabled(False) just above
-        # deliberately leaves the frontier button alone (see its own
-        # comment), expecting exactly this.
         self._set_level_action_button_running(True)
-        self.progress.pack(side=tk.LEFT, padx=(10, 0))
-        self.progress.start(12)
-        status = (f"Inflating at pressure {pressure:.4g} for {target_steps} steps..."
-                   if target_steps is not None else
-                   f"Inflating at pressure {pressure:.4g} until convergence...")
-        self._set_status(status, "info")
-        # Marks the start of the "Sim time" column's own phase -- see its
-        # own comment in __init__. Updated live by _apply_inflate_progress,
-        # finalized by _finish_inflate.
-        self._sim_start_time = time.perf_counter()
-        self._run_inflate_stream(pressure, target_steps, self.stop_event)
+        self._set_status(f"Replaying the winning trial at pressure {pressure:.2f}...", "info")
+        # Snaps "Steps" AND the Convergence History row's own stretch/
+        # Convergence columns to their TRUE final values the instant the
+        # real result is actually known -- explicit user request,
+        # 2026-09-17: "once the simulation converges, the convergence
+        # column should be updated. it doesn't need to wait for the
+        # replay to finish." self.last_stats normally only updates once a
+        # run FULLY finishes (_finish_frame_replay), but replay itself can
+        # take a while (many frames at REPLAY_FPS) -- there's no reason
+        # the Convergence/RMS/Max Stretch columns should sit on STALE
+        # (pre-click) numbers for that whole stretch when the real answer
+        # is sitting right here. self.positions is deliberately NOT
+        # updated yet, though (that stays whatever _replay_step shows,
+        # frame by frame, until the animation actually reaches the end)
+        # -- only the STATS/history-row columns jump ahead, not the 3D
+        # panel itself.
+        self.iteration_count = base_iteration_count + steps_taken
+        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
+                            "optimality": optimality, "converged": converged,
+                            "gtol": self._current_gtol,
+                            "target_rms_pct": self._current_target_rms_pct}
+        self._record_level_history()
+        final_result = (new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged)
+        self._start_frame_replay(frames, final_result, base_iteration_count)
+
+    # Target frames per second during a replay (see _start_frame_replay)
+    # -- purely a display rate for an already-finished trial's own
+    # positions, fast enough to read as "watching it happen" without
+    # dragging out a recap of what's already done. A CEILING, not a
+    # guarantee: each tick still pays the real cost of rendering one
+    # "Level N" panel (_draw_level_panel), which can exceed
+    # REPLAY_FRAME_INTERVAL_MS on a dense mesh -- _replay_step schedules
+    # the NEXT tick only after the current one's own render finishes, so
+    # a slow render just means fewer actual fps that tick, never a
+    # backlog of queued redraws.
+    REPLAY_FPS = 30
+    REPLAY_FRAME_INTERVAL_MS = round(1000 / REPLAY_FPS)
+    # Advances this many CAPTURED frames (each already CONVERGENCE_CHECK_
+    # INTERVAL=200 physics steps apart, see estimate_pressure_for_target_
+    # stretch's own capture_frames) per tick, not 1 -- e.g. step 800,
+    # 1600, ... instead of 200, 400, ... (2026-09-17, explicit user
+    # request). Effectively plays the SAME captured sequence back ~4x
+    # faster in wall-clock time than one-frame-per-tick would at the same
+    # REPLAY_FPS, while still ticking (and rendering) at a smooth 30fps --
+    # skipping frames outright rather than just raising REPLAY_FPS
+    # further, which would only make each individual render (the real
+    # bottleneck, not the tick rate) more likely to fall behind its own
+    # interval (see this constant's own comment above).
+    REPLAY_FRAME_STRIDE = 4
+
+    def _start_frame_replay(self, frames, final_result, base_iteration_count):
+        """Plays back estimate_pressure_for_target_stretch's own captured
+        `frames` (the winning trial's own `(positions, steps_taken)` pairs
+        every CONVERGENCE_CHECK_INTERVAL steps, from its own starting
+        point through however far it got, INCLUDING its own convergence
+        top-up -- see that function's own docstring) at REPLAY_FPS -- a
+        purely visual recap of a run that's already finished; no physics
+        runs here, and neither a TIMER nor `iteration_count` moves during
+        it (explicit user request, 2026-09-17 -- "Steps" increments during
+        the actual simulation now, via _on_calibration_progress, snapped
+        to its true final value by _on_pressure_calibrated BEFORE this is
+        even called -- replay only re-displays a shape that already
+        finished changing, so neither wall-clock time nor the step count
+        should move again during it). The bottom-of-panel message
+        (_set_level_message) instead shows "Replaying" + a 0-3-dot cycle
+        (2026-09-17 explicit user request -- was "Replaying - N%" before
+        that, "Replay frame N / M" before that) through _replay_step,
+        clearing once done (_finish_frame_replay).
+        `final_result` (new_positions, steps_taken, max_stretch_pct,
+        rms_stretch_pct, optimality, converged) is only actually applied
+        once the replay reaches its own last frame (_finish_frame_replay)
+        -- every frame in between is display-only, self.positions
+        temporarily set to it just so draw() shows it."""
+        self._replay_frames = frames
+        self._replay_index = 0
+        self._replay_final_result = final_result
+        self._replay_base_iteration_count = base_iteration_count
+        self._replay_step()
+
+    def _replay_step(self):
+        # A Stop click during replay jumps straight to the final frame --
+        # there's no live physics left to interrupt, just an animation, so
+        # skipping ahead to the real outcome is more useful than replaying
+        # the rest of a recap the user already asked to cut short.
+        skip_ahead = self.stop_event is not None and self.stop_event.is_set()
+        total = len(self._replay_frames)
+        if self._replay_index < total and not skip_ahead:
+            positions, _steps_taken = self._replay_frames[self._replay_index]
+            self.positions = positions
+            # Dot count derived from wall-clock time, not from a replay-
+            # tick counter -- REPLAY_FRAME_INTERVAL_MS (~33ms at
+            # REPLAY_FPS=30) is far faster than a readable dot-cycle, so
+            # ticking the dots once per replay frame would flicker
+            # unreadably; deriving from time.perf_counter() instead gives
+            # the SAME ~500ms-per-dot pace _tick_computing_animation uses
+            # (COMPUTING_DOT_INTERVAL_MS), with no separate timer/state of
+            # its own needed.
+            dots = int(time.perf_counter() / (self.COMPUTING_DOT_INTERVAL_MS / 1000)) % 4
+            self._set_level_message(self.subdivision_level, "Replaying" + "." * dots)
+            # Only THIS level's own panel actually changes frame to frame
+            # -- a full draw() (Net panel plus every "Level N" panel) was
+            # tried first and measured taking ~0.5s on its own for a
+            # mid-size net, five-plus times slower than REPLAY_FRAME_
+            # INTERVAL_MS, since it re-renders three unrelated, unchanged
+            # panels on every single tick. _draw_level_panel alone keeps
+            # replay actually running near REPLAY_FPS.
+            self._draw_level_panel(self.subdivision_level, self.faces,
+                                    self.positions, self.face_of_fine)
+            # Advances by REPLAY_FRAME_STRIDE captured frames, not 1 (see
+            # its own comment) -- clamped so the LAST captured frame (the
+            # true final state) always gets its own tick even when the
+            # stride would otherwise jump past it, rather than silently
+            # skipping straight from some earlier frame to "done".
+            if self._replay_index >= total - 1:
+                self._replay_index = total  # just showed the last frame -- next tick ends it
+            else:
+                self._replay_index = min(self._replay_index + self.REPLAY_FRAME_STRIDE, total - 1)
+            self._replay_after_id = self.root.after(self.REPLAY_FRAME_INTERVAL_MS,
+                                                       self._replay_step)
+        else:
+            self._replay_after_id = None
+            self._finish_frame_replay()
+
+    def _finish_frame_replay(self):
+        # A Stop click can only ever reach here meaning "skip the replay
+        # ANIMATION" (see _replay_step's own skip_ahead) -- a Stop that
+        # actually interrupted the real computation is caught earlier, in
+        # _on_pressure_calibrated's own stop_event branch, which returns
+        # before a replay ever starts. By the time this runs, the
+        # winning trial's own result is already final and complete
+        # regardless of whether the animation played in full -- clearing
+        # stop_event here keeps _finish_inflate's own "Stopped"/"Converged"
+        # status message honest about which one actually happened.
+        self.stop_event = None
+        new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = (
+            self._replay_final_result)
+        self.positions = new_positions
+        # iteration_count/last_stats are already set to these exact
+        # values by _on_pressure_calibrated, before replay even started
+        # (see _start_frame_replay's own docstring) -- reassigned here
+        # anyway for robustness/symmetry with the rest of this method's
+        # own final-state bookkeeping, not because replay itself changed
+        # them.
+        self.iteration_count = self._replay_base_iteration_count + steps_taken
+        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
+                            "optimality": optimality, "converged": converged,
+                            "gtol": self._current_gtol,
+                            "target_rms_pct": self._current_target_rms_pct}
+        self._record_level_history()
+        # "once replay is done, message disappears" -- explicit user
+        # request.
+        self._set_level_message(self.subdivision_level, "")
+        self.draw()
+        self._finish_inflate()
 
     def _set_level_action_button_running(self, running):
         """Neither mode has a separate Stop button -- instead, the
@@ -2936,24 +3624,24 @@ class InflatePolyhedronApp:
     def _update_auto_button(self):
         """Single source of truth for the Auto button, mirroring
         _update_level_action_buttons' own state machine for the per-level
-        buttons: idle (self._auto_active is False) it reads "Auto",
-        enabled only once a net is loaded -- otherwise disabled like
+        buttons: idle (self._auto_active is False) it reads "Run
+        Simulation", enabled only once a net is loaded -- otherwise disabled like
         every other control while ANY run is in progress (see
         _set_controls_enabled, which calls this itself after toggling
         everything else, and which this does NOT need to independently
         duplicate for the "disabled during a run" case). While Auto
         itself is driving a run (self._auto_active is True), it instead
-        reads "Stop Auto" and is explicitly RE-ENABLED regardless of
+        reads "Stop Simulation" and is explicitly RE-ENABLED regardless of
         what _set_controls_enabled(False) just did -- the same "frontier
         button survives the blanket disable" pattern
         _set_level_action_button_running uses for the per-level buttons
         -- so the one control that can interrupt a multi-step Auto
         sequence stays clickable throughout every step of it."""
         if self._auto_active:
-            self.auto_button.config(text="Stop Auto", command=self.on_auto_stop_clicked)
+            self.auto_button.config(text="Stop Simulation", command=self.on_auto_stop_clicked)
             self.auto_button.state(["!disabled"])
         else:
-            self.auto_button.config(text="Auto", command=self.on_auto_clicked)
+            self.auto_button.config(text="Run Simulation", command=self.on_auto_clicked)
             self.auto_button.state(["!disabled"] if self.positions is not None else ["disabled"])
 
     def _auto_step(self):
@@ -3015,8 +3703,12 @@ class InflatePolyhedronApp:
             self.on_inflate_clicked()
 
     def _run_chunked_relax_stream(self, relax_fn, target_steps, stop_event, on_progress, on_finished):
-        """Shared driver behind _run_inflate_stream and _run_relax_stream:
-        calls `relax_fn(max_nfev, stop_event, queue_progress) -> result`
+        """Driver behind _run_relax_stream (Level 0's own Relax, its only
+        remaining caller -- Inflate's own equivalent, _run_inflate_stream,
+        was removed 2026-09-17: pressure calibration's own winning trial
+        IS the Inflate result now, replayed from its cached frames rather
+        than recomputed, see on_inflate_clicked). Calls
+        `relax_fn(max_nfev, stop_event, queue_progress) -> result`
         (result's own shape: (positions, nfev, max_stretch_pct,
         rms_stretch_pct, optimality, converged), same for relax_once and
         relax_initial_configuration) ONCE, in a background thread --
@@ -3060,99 +3752,92 @@ class InflatePolyhedronApp:
         threading.Thread(target=worker, daemon=True).start()
 
         def poll():
+            # Drains the WHOLE queue every cycle, but coalesces "progress"
+            # messages down to the LATEST one instead of calling
+            # on_progress (hence _apply_relax_progress's own panel
+            # redraw) once per queued message (2026-09-17, explicit user
+            # report -- "Simulation Time" was visibly stalling then
+            # jumping). If physics runs faster than a single redraw
+            # (~0.2-0.3s measured for a mid-size net, still slower than
+            # this poll's own 80ms interval), the worker thread can queue
+            # several progress messages before poll() next runs -- older
+            # ones are immediately superseded and would just be wasted
+            # render time, so only the newest is ever actually drawn. This
+            # is what actually fixes the stall-then-jump: rendering every
+            # queued message, oldest first, meant a backlog only ever grew
+            # (each render taking longer than the interval it was trying
+            # to keep up with), so the display fell further and further
+            # behind before catching up all at once; skipping straight to
+            # whatever's newest each cycle means poll() itself always
+            # finishes quickly, keeping "Simulation Time" and the panel
+            # both genuinely live instead of just eventually consistent.
+            latest_progress = None
             try:
                 while True:
                     kind, payload = q.get_nowait()
                     if kind == "progress":
-                        on_progress(payload)
-                    elif kind == "final":
+                        latest_progress = payload
+                        continue
+                    if latest_progress is not None:
+                        on_progress(latest_progress)
+                        latest_progress = None
+                    if kind == "final":
                         on_finished()
                         return
                     elif kind == "error":
-                        self.progress.stop()
-                        self.progress.pack_forget()
                         self._set_controls_enabled(True)
                         self._set_status(f"Failed: {payload}", "error")
                         self._abort_auto()  # nothing left to call _auto_step from otherwise
                         return
             except queue.Empty:
-                pass
+                if latest_progress is not None:
+                    on_progress(latest_progress)
+                else:
+                    # Ticks "Simulation Time"/"Cumulative Time" LIVE
+                    # between actual progress events (2026-09-17, explicit
+                    # user request -- Level 0's own on_progress only fires
+                    # every CONVERGENCE_CHECK_INTERVAL steps, which can
+                    # leave the displayed time visibly frozen for a while
+                    # in between; same wall-clock-not-solver-progress idea
+                    # _run_background's own poll loop already uses for
+                    # "Precomp time" during pressure calibration, which
+                    # has no progress callback of its own at all).
+                    self._current_sim_time_s = time.perf_counter() - self._sim_start_time
+                    self._record_level_history()
             self.root.after(80, poll)
 
         self.root.after(80, poll)
 
-    def _run_inflate_stream(self, pressure, target_steps, stop_event):
-        faces, edge_length = self.faces, self.edge_length
-        gtol = self._current_gtol
-        # KICK_WINDOW's random-perturbation mechanism (stretchy_mesh.py)
-        # disabled here for now, per explicit user request -- it was
-        # found to interact badly with a genuinely slow (not stuck)
-        # relaxation, re-disturbing the mesh right as it was converging.
-        # See LEVEL0_STEP_MAX_MULTIPLIER's own comment in stretchy_mesh.py
-        # for the specific failure this caused at Level 0 before that fix.
-        rng = None
-        # relax_once's own `nfev`/`steps_taken` -- both in each on_progress
-        # callback and in its final return -- is now the CUMULATIVE count
-        # for this one call (there's no more chunking to make it merely
-        # incremental, see _run_chunked_relax_stream's own docstring), but
-        # self.iteration_count needs to keep accumulating across SEPARATE
-        # Inflate clicks at the same level too (reset only on Subdivide/
-        # promotion -- see _record_level_history) -- so this call's own
-        # contribution is `base_iteration_count + nfev`, not nfev alone.
-        base_iteration_count = self.iteration_count
-
-        def relax_fn(max_nfev, stop_event, on_progress):
-            return relax_once(self.positions, faces, edge_length, pressure,
-                               max_nfev=max_nfev, stop_event=stop_event,
-                               gtol=gtol, rng=rng, on_progress=on_progress)
-
-        self._run_chunked_relax_stream(relax_fn, target_steps, stop_event,
-                                        lambda result: self._apply_inflate_progress(result, base_iteration_count),
-                                        self._finish_inflate)
-
-    def _apply_inflate_progress(self, result, base_iteration_count):
-        positions, nfev, max_stretch, rms_stretch, optimality, converged = result
-        self.positions = positions
-        self.iteration_count = base_iteration_count + nfev
-        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
-                            "optimality": optimality, "converged": converged,
-                            "gtol": self._current_gtol,
-                            "target_rms_pct": self._current_target_rms_pct}
-        # "Sim time" (see __init__): live-updated on every progress
-        # callback, same cadence as iteration_count.
-        self._current_sim_time_s = time.perf_counter() - self._sim_start_time
-        self._record_level_history()
-        self._set_status(f"Inflating at level {self.subdivision_level}... "
-                          f"{self.iteration_count} steps so far "
-                          f"(edges stretched up to {max_stretch:.2f}%).", "info")
-        self.draw()
-
     def _finish_inflate(self):
-        self.progress.stop()
-        self.progress.pack_forget()
+        """Tail end of an Inflate click, called once _finish_frame_replay
+        has already applied the winning calibration trial's own final
+        result to self.positions/last_stats/iteration_count -- this method
+        only reports it (no `_current_sim_time_s` update here any more:
+        Level 1+ has no separate "Sim" phase left at all, see on_inflate_
+        clicked's own docstring; ALL of a Level 1+ row's own Simulation
+        Time is "Precomp", already finalized in _on_pressure_calibrated)."""
         self._set_controls_enabled(True)
         self._set_level_action_button_running(False)
         was_stopped = self.stop_event is not None and self.stop_event.is_set()
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
-        self._current_sim_time_s = time.perf_counter() - self._sim_start_time
         self._record_level_history()
         if was_stopped:
             self._set_status(
                 f"Stopped ({self.iteration_count} steps at level {self.subdivision_level}): "
                 f"edges stretched up to {max_stretch:.2f}% from rest length "
-                f"(RMS {rms_stretch:.2f}%).", "warn")
+                f"(RMS {rms_stretch:.1f}%).", "warn")
         elif converged:
             self._set_status(
                 f"Converged after {self.iteration_count} steps at level "
                 f"{self.subdivision_level}: edges stretched up to {max_stretch:.2f}% from rest "
-                f"length (RMS {rms_stretch:.2f}%).", "success")
+                f"length (RMS {rms_stretch:.1f}%).", "success")
         else:
             self._set_status(
                 f"Inflated ({self.iteration_count} steps at level {self.subdivision_level}, "
                 f"step cap reached): edges stretched up to {max_stretch:.2f}% from rest length "
-                f"(RMS {rms_stretch:.2f}%).",
+                f"(RMS {rms_stretch:.1f}%).",
                 "info")
         self._auto_step()  # no-op unless Auto is what actually drove this run
 
@@ -3174,8 +3859,6 @@ class InflatePolyhedronApp:
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
         self._set_level_action_button_running(True)
-        self.progress.pack(side=tk.LEFT, padx=(10, 0))
-        self.progress.start(12)
         self._set_status("Relaxing random start into a well-separated shape...", "info")
         # Level 0 has no pressure-calibration phase at all (see this
         # method's own docstring) -- "Precomp time" stays n/a; only "Sim
@@ -3186,11 +3869,22 @@ class InflatePolyhedronApp:
     def _run_relax_stream(self, stop_event):
         faces, edge_length = self.faces, self.edge_length
         gtol = self._current_gtol
-        # Disabled for now, per explicit user request -- see the same
-        # note in _run_inflate_stream.
+        # KICK_WINDOW's random-perturbation mechanism (stretchy_mesh.py)
+        # disabled here for now, per explicit user request -- it was found
+        # to interact badly with a genuinely slow (not stuck) relaxation,
+        # re-disturbing the mesh right as it was converging. See
+        # LEVEL0_STEP_MAX_MULTIPLIER's own comment in stretchy_mesh.py for
+        # the specific failure this caused at Level 0 before that fix.
         rng = None
-        # See _run_inflate_stream's own comment on why this base count is
-        # needed -- nfev is cumulative per call now, not per chunk.
+        # relax_initial_configuration's own `nfev`/`steps_taken` -- both in
+        # each on_progress callback and in its final return -- is the
+        # CUMULATIVE count for this one call (there's no chunking to make
+        # it merely incremental, see _run_chunked_relax_stream's own
+        # docstring), but self.iteration_count needs to keep accumulating
+        # across SEPARATE Relax clicks at Level 0 too (reset only on
+        # promotion -- see _finish_relax/_record_level_history) -- so this
+        # call's own contribution is `base_iteration_count + nfev`, not
+        # nfev alone.
         base_iteration_count = self.iteration_count
 
         def relax_fn(max_nfev, stop_event, on_progress):
@@ -3206,19 +3900,55 @@ class InflatePolyhedronApp:
         positions, nfev, max_stretch, rms_stretch, optimality, converged = result
         self.positions = positions
         self.iteration_count = base_iteration_count + nfev
+        # optimality/converged are stashed here (self._pending_relax_
+        # stats), NOT written into self.last_stats -- Level 0's own
+        # Convergence column shows "--" for the WHOLE time Relax is
+        # running (2026-09-17, explicit user request -- "only show the
+        # convergence value after simulation is done"), same "--"-while-
+        # unknown sentinel Level 1-3's own Computing phase already uses,
+        # via last_stats["optimality"] staying None throughout. _finish_
+        # relax is what actually reveals it, reading the real final value
+        # back from here -- it needs the true converged flag regardless
+        # of whether the display shows it yet.
+        self._pending_relax_stats = {"optimality": optimality, "converged": converged}
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
-                            "optimality": optimality, "converged": converged,
+                            "optimality": None, "converged": None,
                             "gtol": self._current_gtol}
         self._current_sim_time_s = time.perf_counter() - self._sim_start_time
         self._record_level_history()
         self._set_status(f"Relaxing... {self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
-        self.draw()
+        # Only Level 0's own panel actually changes here -- a full draw()
+        # (Net panel plus every "Level N" panel) was the original code,
+        # but measured at ~0.3-0.5s per call for a mid-size net, which is
+        # SLOWER than _run_chunked_relax_stream's own 80ms poll interval.
+        # That mismatch is what made "Simulation Time" look like it
+        # "stalls then jumps" (2026-09-17, explicit user report) even
+        # after the poll loop itself started ticking it every 80ms
+        # (see that method's own comment): once a single progress event's
+        # own draw() call runs longer than the poll interval, every
+        # already-due `after()` callback queued up behind it gets
+        # processed in the SAME burst before Tk's event loop ever returns
+        # control to actually repaint the screen -- the underlying DATA
+        # was updating the whole time, but the display only caught up
+        # once the burst ran out. Exactly the same root cause fixed for
+        # Inflate's own replay (_replay_step's own comment) -- a targeted
+        # _draw_level_panel call keeps each progress tick cheap enough
+        # that the poll loop's own 80ms cadence (and the live time tick
+        # riding along with it) actually reaches the screen promptly.
+        self._draw_level_panel(0, self.faces, self.positions, self.face_of_fine)
 
     def _finish_relax(self):
-        self.progress.stop()
-        self.progress.pack_forget()
         was_stopped = self.stop_event is not None and self.stop_event.is_set()
+        # Reveals the real optimality/converged now -- see _apply_relax_
+        # progress's own comment for why these were stashed separately
+        # rather than kept live in self.last_stats while Relax was still
+        # running. Applies regardless of HOW this run ended (converged,
+        # Stopped, or step-cap) -- all three count as "simulation is
+        # done" for the purpose of finally showing a real value here.
+        pending = getattr(self, "_pending_relax_stats", {})
+        self.last_stats["optimality"] = pending.get("optimality")
+        self.last_stats["converged"] = pending.get("converged")
         converged = self.last_stats.get("converged")
         max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
         rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
@@ -3227,7 +3957,7 @@ class InflatePolyhedronApp:
         if was_stopped:
             self._set_status(
                 f"Stopped ({self.iteration_count} relax steps): edges stretched up to "
-                f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%).", "warn")
+                f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.1f}%).", "warn")
         elif converged:
             # Level 0 and Level 1 share the exact fan-triangulated
             # topology (see module docstring) -- promoting the
@@ -3250,11 +3980,11 @@ class InflatePolyhedronApp:
             self._record_level_history()
             self._set_status(
                 f"Relaxed (edges stretched up to {max_stretch:.2f}% from rest length, RMS "
-                f"{rms_stretch:.2f}%). Promoted to Level 1 -- press Inflate to continue.", "info")
+                f"{rms_stretch:.1f}%). Promoted to Level 1 -- press Inflate to continue.", "info")
         else:
             self._set_status(
                 f"Relaxed ({self.iteration_count} steps, step cap reached): edges stretched up "
-                f"to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.2f}%). Press Relax "
+                f"to {max_stretch:.2f}% from rest length (RMS {rms_stretch:.1f}%). Press Relax "
                 "again to continue.", "info")
         self._set_controls_enabled(True)
         self._set_level_action_button_running(False)
@@ -3315,57 +4045,82 @@ class InflatePolyhedronApp:
         # per-level buttons -- see _update_auto_button's own docstring.
         self._update_auto_button()
 
-    def _run_background(self, fn, args, on_done):
-        """Run fn(*args) in a background thread and call on_done(result)
-        on the main thread once it finishes -- used for on_inflate_clicked's
-        pressure calibration (estimate_pressure_for_target_stretch), which
-        can take a moment. Tk isn't thread-safe, so the worker only ever
-        pushes to a queue; the main thread (via the scheduled poll below)
-        is the only one that touches Tk widgets. (Inflate/Relax each have
-        their own streaming variant, _run_inflate_stream/_run_relax_stream,
-        since they report incremental progress rather than one final
-        result.)
+    def _run_background(self, fn, on_done, on_progress=None):
+        """Run fn(queue_progress) in a background thread and call
+        on_done(result) on the main thread once it finishes -- used for
+        on_inflate_clicked's pressure calibration
+        (estimate_pressure_for_target_stretch), which can take a moment.
+        `queue_progress` is a callable fn may call zero or more times
+        (from the background thread -- Tk isn't thread-safe, so it only
+        ever pushes to a queue) to report LIVE progress; the main thread
+        (via the scheduled poll below) is the only one that touches Tk
+        widgets, and calls `on_progress(payload)` with whatever fn last
+        reported, if `on_progress` is given. (Relax has its own streaming
+        variant, _run_relax_stream, since it needs a live PANEL redraw too
+        -- Inflate used to as well, _run_inflate_stream, before pressure
+        calibration's own winning trial became the entire Inflate result,
+        see on_inflate_clicked.)
 
-        Unlike those, calibration has no progress DATA of its own to
-        report mid-run (estimate_pressure_for_target_stretch takes no
-        on_progress callback) -- but the poll loop below still ticks the
-        "Precomp time"/"Cumulative Time" columns LIVE while it waits
+        Progress messages are COALESCED, same as _run_chunked_relax_
+        stream's own poll (see its comment for why -- a slow on_progress
+        handler could otherwise fall behind a fast-arriving backlog and
+        never catch up): only the LATEST queued progress payload is ever
+        passed to `on_progress` in a given poll cycle, older ones are
+        dropped as superseded. "Precomp time"/"Cumulative Time" tick LIVE
         (self._current_precomp_time_s from self._precomp_start_time,
-        which on_inflate_clicked sets right before calling this), same
-        wall-clock-not-progress idea "Sim time" already used, just driven
-        by this method's own 100ms poll interval instead of a real
-        progress callback -- per explicit user request. Couples this
-        generic-looking helper to calibration specifically, but so does
-        its docstring above already (it has exactly one caller)."""
+        which on_inflate_clicked sets right before calling this) on
+        EVERY poll cycle UNCONDITIONALLY, same wall-clock-not-progress
+        idea "Sim time" already used -- per explicit user request. This
+        has to be unconditional, not an "else" alongside on_progress (an
+        earlier version had it as one -- a real bug, caught directly:
+        with progress messages arriving on essentially every 100ms poll
+        during calibration, the timer tick's own branch almost never ran
+        at all, so "Simulation Time" visibly stopped updating for Level
+        1-3 specifically, the one case with an on_progress callback in
+        the first place). Couples this generic-looking helper to
+        calibration specifically, but so does its docstring above
+        already (it has exactly one caller)."""
         self._set_controls_enabled(False)
-        self.progress.pack(side=tk.LEFT, padx=(10, 0))
-        self.progress.start(12)
         q = queue.Queue()
+
+        def queue_progress(payload):
+            q.put(("progress", payload))
 
         def worker():
             try:
-                q.put(("done", fn(*args)))
+                q.put(("done", fn(queue_progress)))
             except Exception as e:  # surface a solver crash instead of hanging forever
                 q.put(("error", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
         def poll():
+            latest_progress = None
             try:
-                kind, payload = q.get_nowait()
+                while True:
+                    kind, payload = q.get_nowait()
+                    if kind == "progress":
+                        latest_progress = payload
+                        continue
+                    if latest_progress is not None and on_progress is not None:
+                        on_progress(latest_progress)
+                    self._set_controls_enabled(True)
+                    if kind == "error":
+                        self._set_status(f"Failed: {payload}", "error")
+                        self._abort_auto()  # nothing left to call _auto_step from otherwise
+                        return
+                    on_done(payload)
+                    return
             except queue.Empty:
-                self._current_precomp_time_s = time.perf_counter() - self._precomp_start_time
+                pass
+            # Unconditional -- see this method's own docstring for why an
+            # "else" here (alongside on_progress below) was a real bug.
+            self._current_precomp_time_s = time.perf_counter() - self._precomp_start_time
+            if latest_progress is not None and on_progress is not None:
+                on_progress(latest_progress)  # also refreshes the history table itself
+            else:
                 self._record_level_history()
-                self.root.after(100, poll)
-                return
-            self.progress.stop()
-            self.progress.pack_forget()
-            self._set_controls_enabled(True)
-            if kind == "error":
-                self._set_status(f"Failed: {payload}", "error")
-                self._abort_auto()  # nothing left to call _auto_step from otherwise
-                return
-            on_done(payload)
+            self.root.after(100, poll)
 
         self.root.after(100, poll)
 
@@ -3432,7 +4187,7 @@ class InflatePolyhedronApp:
         # 2D offset here rather than a 3D one added to a PyVista camera.
         center = (lo + hi) / 2 + self.net_pan
         half_range = (hi - lo) / 2 + pad
-        # Stretched to the PANEL's own aspect ratio (LEVEL_PANEL_SIZE,
+        # Stretched to the PANEL's own aspect ratio (NET_PANEL_SIZE,
         # which this panel's own figure size already matches exactly --
         # see _build_level_pv_panel's own comment) before dividing by
         # zoom, rather than handing set_aspect("equal") two independent
@@ -3449,7 +4204,7 @@ class InflatePolyhedronApp:
         # left as dead margin, so the box set_xlim/set_ylim request
         # already fills the panel exactly and set_aspect never has
         # anything left to shrink.
-        panel_aspect = LEVEL_PANEL_SIZE[0] / LEVEL_PANEL_SIZE[1]
+        panel_aspect = NET_PANEL_SIZE[0] / NET_PANEL_SIZE[1]
         half_y = max(half_range[1], half_range[0] / panel_aspect)
         half_range = np.array([half_y * panel_aspect, half_y]) / self.net_zoom
         self.ax2d.set_xlim(center[0] - half_range[0], center[0] + half_range[0])
