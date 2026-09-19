@@ -404,7 +404,7 @@ DEFAULT_NET_BASENAME = "cube"
 # The app's own backronym (2026-09-16, explicit user request) -- used as
 # the window title (_apply_mode_visibility); ".hippo" (SESSION_FILE_
 # EXTENSION, below) was named first, this is what it stands for.
-APP_TITLE = "HIPPO — Hierarchical Inflatable Phabric Polyhedron Optimizer [BUILD-CHECK-2026-09-19-B]"
+APP_TITLE = "HIPPO — Hierarchical Inflatable Phabric Polyhedron Optimizer"
 
 # File > Save/Load's own default directory for a whole SESSION (see
 # on_save_session_clicked/on_load_session_clicked) -- deliberately NOT
@@ -3048,9 +3048,6 @@ class InflatePolyhedronApp:
             # field existed, so _guess_pressure_from_history's own filter
             # (below) doesn't spuriously exclude either.
             "pressure_found": self.last_stats.get("pressure_found", True),
-            # TEMPORARY diagnostic (2026-09-19) -- see on_inflate_clicked's
-            # own comment on self._debug_initial_pressure_guess.
-            "debug_initial_pressure_guess": getattr(self, "_debug_initial_pressure_guess", None),
         }
         self._refresh_history_table()
 
@@ -3486,12 +3483,6 @@ class InflatePolyhedronApp:
         self._current_target_rms_pct = target_rms_pct
         tolerance = self._get_tolerance()
         initial_pressure_guess = self._guess_pressure_from_history(target_rms_pct)
-        # TEMPORARY diagnostic (2026-09-19) -- recorded into level_history/
-        # the saved session so a live run's actual starting guess can be
-        # inspected after the fact, without needing to reproduce it
-        # separately. Remove once the pressure_found/history-guess
-        # investigation is closed out.
-        self._debug_initial_pressure_guess = initial_pressure_guess
         self.stop_event = threading.Event()
         # Marks the start of the "Precomp time" column's own phase -- see
         # its own comment in __init__. Consumed (turned into

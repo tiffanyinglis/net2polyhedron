@@ -110,10 +110,6 @@ class LevelHistoryRecordModel(BaseModel):
     # session saved then reloaded between levels lost this flag, letting
     # a later level's guess wrongly inherit an already-abandoned pressure.
     pressure_found: bool = True
-    # TEMPORARY diagnostic (2026-09-19, see app.py's on_inflate_clicked/
-    # _record_level_history) -- remove once the pressure_found/history-
-    # guess investigation is closed out.
-    debug_initial_pressure_guess: Optional[float] = None
 
 
 class LastStatsModel(BaseModel):
