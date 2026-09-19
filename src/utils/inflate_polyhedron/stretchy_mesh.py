@@ -77,95 +77,44 @@ stops it).
 Design notes (the "why" behind choices that would otherwise look
 arbitrary -- kept here rather than repeated across every function that
 touches them, per this project's docstring convention in
-.claude/skills/net-fold-project/SKILL.md):
+.claude/skills/net-fold-project/SKILL.md). Full scientific writeup:
+docs/algorithm.md; current-state/tuning summary: .claude/skills/
+net-fold-project/physics.md. Keep all three in sync when changing the
+physics.
 
 - **relax_once is a genuine force balance, walked step by step -- no
   volume anywhere** (_relax_force): each edge is a HARDENING spring (a
   `stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3` restoring force --
-  see the next note for why); each face applies a real outward force, `pressure * area * normal`, split across
-  its own vertices. Each call moves every vertex a small step along its
-  OWN net force (explicit relaxation), not a least_squares solve: a
-  Newton-style solver re-linearizes the whole mesh and can jump straight
-  past the physically-reachable equilibrium to a distant, spurious one
-  (verified directly, back when the spring was still linear -- a plain
-  cube at pressure=1 landed on a doubled-size, 99%-stretched "solution"
-  in 5 solver evaluations; at pressure=3 on a subdivided cube it likewise
-  imploded to near-zero volume without any face ever flipping, since a
-  uniform implosion never disagrees with itself -- both are real zeros
-  of the same equations, just not the one a physical process starting
-  nearby would ever walk to). Explicit small steps can't teleport past
-  the reachable equilibrium the way a linearized jump can. Step size was
-  self-normalizing (a fraction of the mesh's own rest edge length,
-  divided by the largest current force) so it adapted to whatever
-  pressure/mesh scale was in play without a fixed constant; that adaptive
-  term is currently removed, per explicit user request for testing (see
-  STEP_MAX_MULTIPLIER's own comment) -- the step is presently just a flat
-  fraction of rest edge length, with no force-dependent shrinking.
-  Direction vectors use _safe_unit_vectors (a fixed fallback at an exact
-  zero vector) instead of a naive division: without it, "every vertex
-  exactly coincident" is a real zero of the force (every edge and face
-  vanishes together) the relaxation could still land exactly on instead
-  of the intended shape.
+  see the next note for why); each face applies a real outward force,
+  `pressure * area * normal`, split across its own vertices. Each call
+  moves every vertex a small step along its OWN net force (explicit
+  relaxation), not a least_squares solve: a Newton-style solver
+  re-linearizes the whole mesh and can jump straight past the
+  physically-reachable equilibrium to a distant, spurious one (a
+  doubled-size, heavily-stretched "solution", or a near-zero-volume
+  implosion -- both real zeros of the same equations, but not ones a
+  physical process starting nearby would ever walk to; see algorithm.md
+  sec 4.2 for the full argument). Direction vectors use
+  _safe_unit_vectors (a fixed fallback at an exact zero vector) instead
+  of a naive division: without it, "every vertex exactly coincident" is
+  a real zero of the force (every edge and face vanishes together) the
+  relaxation could still land exactly on instead of the intended shape.
 
-- **A hardening (linear + cubic) spring, not pure Hooke's-law linear --
-  a genuine strain-stiffening term, added at the user's own explicit
-  request.** A face's outward pressure force scales with its AREA
-  (~ edge_length^2, i.e. quadratic in stretch), so a plain LINEAR
-  spring's pull can't keep up past some critical pressure -- past it,
-  there's no equilibrium at all, and the mesh inflates without bound
-  (this is the same reason a real balloon's own idealized under-
-  stiffened material models -- e.g. a bare neo-Hookean membrane -- show
-  this exact "no equilibrium past a critical pressure" instability in
-  the nonlinear-elasticity literature). A REAL rubber balloon doesn't
-  blow up to an unbounded size the same way, because real rubber's
-  stress-strain curve stiffens sharply once its polymer chains run out
-  of slack at large stretch -- see the two-balloon experiment
-  (https://en.wikipedia.org/wiki/Two-balloon_experiment) for the same
-  underlying stiffening curve. A first version of this fix replaced the
-  linear spring with a PURE quartic one (`stretch**3` alone): this
-  worked -- pressure past the old critical value now settles at a large
-  but finite stretch instead of diverging -- but a cubic force is much
-  WEAKER than the linear one for a SMALL deviation (its own local
-  stiffness is `3*stretch**2`, which vanishes at stretch=0), so a mesh
-  near its rest length became far slower to settle: `dx/dt = -x**3` has
-  a POWER-LAW solution (`x(t) ~ 1/sqrt(t)`) rather than a linear spring's
-  EXPONENTIAL one, so each extra decimal of precision costs roughly an
-  order of magnitude more steps, not a fixed multiple. The fix, per the
-  user's own explicit request for a compromise: `stretch +
-  HARDENING_CUBIC_COEFFICIENT * stretch**3` (see that constant's own
-  comment for its current value and history) -- both terms are real,
-  literal spring-force contributions (`force = -dU/dx` for a smooth
-  potential, no clamp or bolted-on limit), so this is deliberately NOT
-  the same thing as the per-edge soft stretch limit tried and removed
-  earlier in this project's history (see .claude/skills/net-fold-
-  project/SKILL.md's "No hacky terms" section) -- that was added
-  specifically to paper over this exact instability without the user
-  asking for it, where this is a real physical term the user did ask
-  for. Near rest (stretch << 1) the linear term dominates (`stretch**3`
-  is negligible), recovering the original spring's fast, near-
-  exponential settling; past stretch ~= 1 the cubic term takes over and
-  grows faster than pressure's own quadratic area growth, so an
-  equilibrium still exists at any pressure, same as the pure-quartic
-  version. Every pressure/step-size constant tuned against either the
-  original linear spring or the intermediate pure-quartic one (see
-  CONVERGENCE_GTOL, STEP_MAX_MULTIPLIER, _PRESSURE_AREA_PRODUCT_ESTIMATE,
-  and estimate_pressure_for_target_stretch's own docstring) was
-  re-verified/re-tuned directly against this combined force -- see each
-  constant's own comment for what changed and why.
+- **A hardening (linear + cubic) spring, not pure Hooke's-law linear.**
+  See algorithm.md sec 4.1/4.4 and physics.md's Force model section for
+  the full rationale: why pressure's quadratic area growth defeats a
+  plain linear spring past some critical value, why a pure-cubic
+  replacement was rejected (power-law rather than exponential settling
+  near rest), and why the combined term is a real physical addition
+  rather than the same kind of hack as the rejected stretch-limit (see
+  physics.md's "No hacky terms rule").
 
-- **relax_initial_configuration (Level 0's own "Relax" step) uses a
-  PLAIN LINEAR spring (_spring_only_force), not the hardening one
-  above.** With `pressure=0`, there's no outward force for the hardening
-  term to guard against in the first place -- the whole reason it exists
-  is to stop a plain linear spring's pull from losing to pressure's own
-  quadratic area growth, which simply doesn't apply here. A user
-  reported Level 0 visibly failing to settle at a normal tolerance
-  (1e-3) under the hardening spring, "jiggling" rather than converging;
-  switching this ONE function back to plain linear resolved it directly
-  (verified across cube/hippo/octahedron/dodecahedron/three_squares, all
-  converging cleanly at gtol=1e-3). relax_once's own force
-  (_relax_force), used for every level's actual pressure-driven
-  inflation, keeps the hardening term unchanged.
+- **relax_initial_configuration (Level 0's "Relax" step) uses a PLAIN
+  LINEAR spring (_spring_only_force), not the hardening one above** --
+  see physics.md's Force model section for why (no pressure there for
+  the hardening term to guard against, and plain linear settles faster
+  near rest). relax_once's own force (_relax_force) keeps the hardening
+  term unchanged for every level's actual pressure-driven inflation.
 """
 import collections
 import json
@@ -412,14 +361,10 @@ def _safe_unit_vectors(vecs):
 
 
 # The cubic term's own coefficient in _relax_force's hardening spring
-# (`stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3`) -- was 1.0 (an
-# unweighted sum), lowered per explicit user request for a stronger
-# relative quadratic-energy (linear-force) component, i.e. more of the
-# original linear spring's behavior and less of the quartic term's, while
-# still keeping enough large-stretch stiffening to prevent the unbounded
-# pressure blow-up a plain linear spring alone allows (see module
-# docstring's Design notes). See STEP_MAX_MULTIPLIER's own comment for
-# the re-verification this prompted.
+# (`stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3`). Was 1.0
+# (unweighted sum); lowered to keep more of the original linear spring's
+# behavior while still preventing the unbounded pressure blow-up a plain
+# linear spring allows -- see physics.md's Force model section.
 HARDENING_CUBIC_COEFFICIENT = 0.5
 
 
@@ -528,24 +473,20 @@ def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
 # force computed by _relax_force -- unlike the old scipy `optimality`
 # measure, this is just "how far from equilibrium is the worst vertex",
 # so it's meaningful on its own rather than needing scipy's internals to
-# interpret. (Currently compared against displacement, not force -- see
-# _explicit_relax_loop's own docstring -- a temporary change for testing;
-# this constant's own value/meaning as a per-step rate is unaffected.)
+# interpret. Currently compared against displacement, not force, checked
+# only every CONVERGENCE_CHECK_INTERVAL steps rather than every step --
+# see physics.md's Convergence section (an active experiment, easy to
+# revert to an every-step force comparison); this constant's own
+# value/meaning as a per-step rate is unaffected either way.
 CONVERGENCE_GTOL = 1e-4
 
 # How often _explicit_relax_loop actually checks the stopping condition
-# above, in steps -- a TEMPORARY change per explicit user request, for
-# testing: rather than comparing displacement against `gtol` every single
-# step, check once every this-many steps instead, against `gtol` scaled
-# up by the same factor (see _explicit_relax_loop's own comment). Raised
-# 100 -> 200 per further explicit request. (This USED to also matter for
-# inflate_polyhedron_app's own now-removed chunk schedule -- a user
-# traced an app-reported "515 steps" convergence directly to this check
-# only ever being reachable at a chunk's own boundary; that whole chunking
-# scheme is gone now, in favor of relax_once/relax_initial_configuration
-# calling this check's own `on_check` hook directly -- see
-# inflate_polyhedron_app's own git history for the chunk-schedule details
-# if useful context.)
+# above, in steps, rather than comparing against `gtol` every single step
+# (see physics.md's Convergence section). This also used to gate
+# inflate_polyhedron_app's own chunked calling pattern, now removed in
+# favor of relax_once/relax_initial_configuration calling this check's
+# own `on_check` hook directly (see physics.md's Progress callback
+# section for the "515 steps" artifact that chunking caused).
 CONVERGENCE_CHECK_INTERVAL = 200
 
 # Explicit relaxation step size: the vertex with the largest net force
@@ -553,92 +494,24 @@ CONVERGENCE_CHECK_INTERVAL = 200
 # iteration; every other vertex moves proportionally less (force is
 # normalized by its own max each step). Keeps steps small and stable
 # (a real physical walk, not a linearized jump that can overshoot the
-# reachable equilibrium -- see module docstring's Design notes).
+# reachable equilibrium -- see module docstring's Design notes). The
+# former adaptive term (shrinking the step further when force is large)
+# is gone -- see _explicit_relax_loop's own comment -- so this constant
+# is currently the WHOLE step size, not just a cap on it.
 #
-# Originally paired with an ADAPTIVE term (`STEP_MAX_FRACTION * scale /
-# max_force`, shrinking the step when force is large, capped by this
-# constant so it doesn't also grow unbounded as force shrinks near
-# equilibrium) -- that adaptive term was temporarily removed per explicit
-# user request, for testing (see _explicit_relax_loop's own comment), so
-# this constant is currently the WHOLE step size, not just a cap on it.
-# STEP_MAX_FRACTION itself (was 0.2, the same value as this constant) was
-# removed as dead code once nothing referenced it any more.
+# Scaled by the mesh's own rest edge length (`scale`), not a fixed
+# absolute cap: a fixed cap would be a shrinking fraction of an edge as
+# the mesh subdivides finer but a growing one as it gets coarser, since
+# `scale` itself is an absolute length and drops at each Subdivide level.
 #
-# This value (as a fraction of edge length, properly scaled by `scale` --
-# a FIXED, unscaled cap would represent a shrinking FRACTION of an edge
-# length as the mesh subdivides finer but a GROWING one as it gets
-# coarser, since `scale` itself is an absolute length) was found via
-# direct verification, not derivation: run the same fixed-point relax on
-# cube/tetrahedron/icosahedron at several pressures (1, 3, 5) and step
-# multipliers, at Level 3 (194+ vertices, the finest/most failure-prone
-# resolution this app reaches), watching for an undamped 2-cycle in
-# max_stretch_pct (the same failure mode below). Stable through 0.3; a
-# genuine 2-cycle reappears at 0.4+. 0.2 leaves a healthy margin.
-#
-# An EARLIER version of this constant (0.05, UNSCALED) was found the
-# same way but without the `scale` factor: a level-3-subdivided cube at
-# pressure=1 (194 vertices) was seen to settle into an exact, undamped
-# 2-cycle under an unscaled 0.1 (max_stretch_pct alternating ~18.9%/
-# ~24.4% forever), while unscaled 0.05 converged cleanly -- BUT that
-# 0.05 was only ever actually "5% of an edge length" at Level 0/1, where
-# `scale ≈ 1`; at Level 3 (`scale ≈ 0.18` for a cube), it was silently
-# behaving as ~28% of an edge length (0.05 / 0.18), landing in the
-# stable range purely by chance rather than by being correctly scaled --
-# and remained needlessly small (hence needlessly slow to correct a
-# small, stuck, locally-concave vertex trying to "pop out") at coarser
-# levels where `scale` is closer to 1 and a much bigger relative step
-# was actually safe. A user's report of exactly that (a slow-to-correct
-# concave vertex, network otherwise looking right) is what prompted
-# re-deriving this from scratch with the missing `scale` factor
-# included, rather than just nudging the old unscaled constant.
-#
-# Re-tuned again (0.2 -> 0.05) after the spring force itself changed from
-# Hooke's-law LINEAR to QUARTIC (stretch**3, see module docstring's
-# Design notes -- added at the user's own request for genuine strain-
-# stiffening) -- a user reported a mesh (hippo.json Level 1, calibrated
-# for 80% target RMS stretch) that never converged, with the reported
-# force hovering around 1.5 indefinitely. Traced directly (not assumed):
-# one vertex was in an EXACT, undamped 2-cycle -- force alternating
-# 1.97/1.00 forever, position displacement identical every step, never
-# decaying -- the same failure mode 0.2 was originally tuned to avoid,
-# now reappearing because a cubic force's local stiffness near a
-# sharply-stretched edge is much higher than the linear spring's was,
-# so the same step size that was safe before can overshoot past the new
-# force law's equilibrium and land exactly on the opposite side, forever.
-# Bisected directly on that reproducing case: stable from 0.12 down,
-# still oscillating at 0.14+. Verified 0.05 stays stable across cube/
-# octahedron/dodecahedron/three_squares/hippo at target RMS stretch
-# 10/40/80% (a low-target, near-rest reading can still take many steps
-# to reach gtol, but that's the expected slow POWER-LAW tail a cubic
-# force has near equilibrium -- see estimate_pressure_for_target_
-# stretch's own docstring -- not a repeat of this oscillation: its own
-# force trace dips and slowly wanders rather than cleanly alternating
-# between two fixed values forever).
-#
-# The spring force itself was changed again shortly after (pure QUARTIC
-# -> a HARDENING `stretch + stretch**3`, see module docstring's Design
-# notes) specifically to fix that slow power-law tail near rest, per the
-# user's own request for a compromise between convergence speed and
-# large-stretch stability. This value did NOT need to change again for
-# that: re-verified directly on the exact same hippo.json reproducing
-# case above -- 0.05 still converges cleanly (no oscillation) while 0.1+
-# still shows the same large, non-decaying force (checked via a single
-# 200-step chunk, matching inflate_polyhedron_app's own chunk size, to
-# rule out the stall detector papering over a real 2-cycle) -- and a
-# broader sweep (cube/hippo/octahedron/dodecahedron/three_squares at
-# 10/40/80% target RMS stretch) now converges cleanly and lands within
-# about a point of target everywhere, including the previously-stuck
-# hippo/80% case.
-#
-# Re-checked again after HARDENING_CUBIC_COEFFICIENT was lowered
-# (1.0 -> 0.5, see its own comment): a weaker cubic term could plausibly
-# tolerate a bigger step before overshooting, so re-ran the same
-# hippo.json boundary search rather than assuming 0.05 still applies
-# unexamined. The boundary barely moved (stable through 0.12, oscillating
-# at 0.13+ -- versus 0.12/0.14 at coefficient 1.0), so 0.05 was kept
-# rather than raised for marginal extra speed at a smaller safety margin;
-# re-verified the same 5-net/3-target sweep above still converges
-# cleanly at this value.
+# Value found by direct bisection for stability -- an undamped 2-cycle in
+# max_stretch_pct (force stuck alternating between two fixed values
+# forever, distinct from a genuinely slow but decaying power-law tail
+# near equilibrium) is the failure mode being avoided -- re-verified
+# after each change to the spring force itself (linear -> pure quartic ->
+# the current hardening term) and after HARDENING_CUBIC_COEFFICIENT was
+# lowered from 1.0 to 0.5 (boundary barely moved). See physics.md's Force
+# model / Defaults sections for the current value and force-law history.
 STEP_MAX_MULTIPLIER = 0.05
 
 # Hard cap on iterations when max_nfev=None (run-to-convergence): explicit
@@ -648,28 +521,19 @@ MAX_UNBOUNDED_STEPS = 200_000
 
 # The plateau/stall-window convergence shortcut (STALL_WINDOW/
 # STALL_TOL_PCT: converge once max_stretch_pct's range over many steps
-# stops moving, alongside the real gtol check) was REMOVED entirely per
-# explicit user request: it's a fixed, gtol-INDEPENDENT threshold, so at
-# a tighter gtol (e.g. 1e-5) than it was ever tuned against it declared
-# "converged" early -- reported stopping around 4600 steps at every
-# level, well before the mesh had actually reached the real, much
-# tighter target. Once disabled (an intermediate step, kept only long
-# enough to confirm this was the cause) it was removed outright rather
-# than kept as unused dead code -- inflate_polyhedron_app's own
-# INFLATE_SAFETY_STEP_CAP (a hard step-count cap per run) is judged
-# sufficient on its own as the non-gtol way a run can end. See git
-# history (STALL_WINDOW/STALL_TOL_PCT/STALL_DETECTION_ENABLED) for the
-# original reasoning if a plateau-style shortcut is ever wanted again --
-# it existed to keep a mesh with a tiny persistent wobble or a very long
-# slow tail from running to the step cap for no visible benefit, and (a
-# separate, later fix) to stop a locally concave vertex's own genuinely
-# slow-but-real correction from being mistaken for a plateau.
+# stops moving, alongside the real gtol check) was REMOVED entirely --
+# it's a fixed, gtol-INDEPENDENT threshold, so at a tighter gtol than it
+# was ever tuned against it declared "converged" early, well before the
+# mesh had actually reached the real target (see physics.md's Convergence
+# section). inflate_polyhedron_app's own INFLATE_SAFETY_STEP_CAP is judged
+# sufficient on its own as the non-gtol way a run can end. See git history
+# (STALL_WINDOW/STALL_TOL_PCT/STALL_DETECTION_ENABLED) if a plateau-style
+# shortcut is ever wanted again.
 
-# Escaping a genuine local-minimum "dimple" (see the removed STALL_WINDOW's own
-# comment for how this was diagnosed): a pure explicit gradient-style
-# walk has no momentum to coast through a shallow energy barrier with,
-# so once a vertex settles into one, smaller OR larger steps both just
-# oscillate around it forever rather than crossing over. `rng`
+# Escaping a genuine local-minimum "dimple": a pure explicit gradient-
+# style walk has no momentum to coast through a shallow energy barrier
+# with, so once a vertex settles into one, smaller OR larger steps both
+# just oscillate around it forever rather than crossing over. `rng`
 # (optional, `None` by default on every function here -- see their own
 # docstrings) opts a caller into an occasional small random perturbation
 # instead: if `max_force` hasn't dropped to at most KICK_STALL_RATIO of
@@ -684,18 +548,8 @@ MAX_UNBOUNDED_STEPS = 200_000
 # caller (including this module's own tests, which expect exact,
 # reproducible results) keeps its current fully-deterministic behavior.
 # inflate_polyhedron_app currently passes rng=None (disabled) for its own
-# Relax/Inflate runs, per a later explicit user request -- see that
-# app's own comment in _run_inflate_stream/_run_relax_stream.
-#
-# This value's own history predates two things that no longer apply as
-# literally as originally written: `recent_max_force` still resets FRESH
-# on every relax_once/relax_initial_configuration call, but the app's
-# streamed Inflate/Relax no longer chunks that call into short pieces at
-# all (see inflate_polyhedron_app's own git history) -- so a window this
-# size is no longer at risk of never fitting inside a single call. The
-# original verification (KICK_WINDOW=500 chunked at 200: zero kicks fired
-# over 20,000 steps; 150: ~100 did) is kept here as the empirical basis
-# for the value itself, not as a still-binding chunk-size constraint.
+# Relax/Inflate runs -- found to interact badly with a genuinely slow
+# (not stuck) relaxation (see physics.md's Convergence section).
 KICK_WINDOW = 150
 KICK_STALL_RATIO = 0.5
 KICK_MAGNITUDE_FRACTION = 0.3
@@ -751,15 +605,12 @@ def _remove_rigid_motion(pts_before, pts_after):
     floating-point rounding) can accumulate into a slow but visible net
     spin over many steps with nothing to damp it, since nothing in
     _relax_force/_spring_only_force distinguishes "genuine shape change"
-    from "the whole shape turning in place." A user watching
-    inflate_polyhedron_app noticed exactly this -- a net visibly rotating
-    mid-Inflate with no shape change to show for it -- and, worse, since
-    each level's starting position is whatever the previous one was left
-    at, a level frozen (Subdivide/promotion) at a DIFFERENT accumulated
-    spin than another leaves the "Level N" panels' supposedly-SHARED
-    camera (self.level_rotation) looking inconsistent between them even
-    though that shared quaternion itself was never touched -- the MESH
-    was moving, not the camera. Called every step (see
+    from "the whole shape turning in place" -- visible both as an open
+    net spinning mid-Inflate for no shape-related reason, and as
+    different levels (each starting from wherever the previous one left
+    off) accumulating different amounts of spin, making the app's
+    shared per-level camera look inconsistent between them even though
+    the camera itself never moved. Called every step (see
     _explicit_relax_loop) so each step's own small rotation is what gets
     cancelled, transitively pinning the whole run's trajectory back to
     wherever it started -- an O(N) matrix product plus one 3x3 SVD per
@@ -784,60 +635,50 @@ def _explicit_relax_loop(pts, scale, force_fn,
                           step_max_multiplier=None, on_check=None):
     """Shared explicit-relaxation driver for relax_once and
     relax_initial_configuration -- the only things that vary between
-    them are the force itself (`force_fn(pts) -> (N,3)`) and, since each
-    force law has its own safe step size (see STEP_MAX_MULTIPLIER's own
-    comment), `step_max_multiplier` (defaults to the module's own
-    STEP_MAX_MULTIPLIER, tuned for relax_once's hardening spring;
-    relax_initial_configuration passes LEVEL0_STEP_MAX_MULTIPLIER
-    instead, tuned for its own plain linear one) -- the walking logic
-    (stopping criteria) itself is otherwise identical, so it lives here
-    once rather than being kept in sync by hand in two places.
+    them are the force itself (`force_fn(pts) -> (N,3)`) and each force
+    law's own safe step size (`step_max_multiplier`, defaulting to the
+    module's own STEP_MAX_MULTIPLIER for relax_once's hardening spring;
+    relax_initial_configuration passes LEVEL0_STEP_MAX_MULTIPLIER for its
+    own plain linear one) -- the walking/stopping logic is otherwise
+    identical, so it lives here once rather than kept in sync by hand.
 
-    Repeatedly nudges `pts` a small step along `force_fn(pts)` (see
-    `step_max_multiplier`'s own comment); if `rng` is given and the
-    worst vertex's force has been OSCILLATING rather than genuinely
-    dropping (see KICK_WINDOW's own comment), nudges every vertex by a
-    small random perturbation weighted toward whichever one is actually
-    stuck -- until EITHER the worst vertex's own displacement over the
-    last CONVERGENCE_CHECK_INTERVAL steps (checked only once every
-    CONVERGENCE_CHECK_INTERVAL steps, not every step -- a TEMPORARY
-    change, per explicit user request for testing, from comparing the
-    worst vertex's net FORCE against `gtol` every step) drops below
-    `CONVERGENCE_CHECK_INTERVAL * gtol`, or `max_nfev`/`stop_event` cuts
-    it off first (a former THIRD criterion, a max_stretch_pct plateau/
-    stall shortcut, was removed entirely per explicit user request -- see
-    git history around STALL_WINDOW/STALL_TOL_PCT if it's ever wanted
-    again).
+    Repeatedly nudges `pts` a small step along `force_fn(pts)`; if `rng`
+    is given and the worst vertex's force has been OSCILLATING rather
+    than genuinely dropping (see KICK_WINDOW's own comment), nudges every
+    vertex by a small random perturbation weighted toward whichever one
+    is actually stuck -- until EITHER the worst vertex's own displacement
+    over the last CONVERGENCE_CHECK_INTERVAL steps drops below
+    `CONVERGENCE_CHECK_INTERVAL * gtol` (checked only once every
+    CONVERGENCE_CHECK_INTERVAL steps -- see physics.md's Convergence
+    section for the current tuning/rationale), or `max_nfev`/`stop_event`
+    cuts it off first.
 
     Whatever rigid rotation/translation the raw per-step updates
     introduce (_remove_rigid_motion, see its own docstring for why a
     free-floating system needs this) is only stripped out ONCE per
     CONVERGENCE_CHECK_INTERVAL-step block, immediately before that
-    block's convergence check, rather than after every individual step
-    (explicit user request, 2026-09-17) -- this is exactly equivalent to
-    correcting every step, not an approximation: every force here
-    (spring stretch, pressure area-vector) depends only on relative
-    vertex geometry, so it's translation-invariant and rotation-
-    equivariant, meaning the shape's own intrinsic trajectory (every edge
-    length, every face shape) never depends on what rigid frame the
-    steps in between happened to be sitting in -- only the FINAL
-    comparison against `pts_at_last_check` needs to be in a consistent
-    frame, which one alignment right before that comparison achieves
-    exactly as well as 200 smaller ones would have. `on_check(pts,
-    steps_taken, optimality, converged)`, if
-    given, is called every time this periodic check runs (whether or not
-    it ends the run) -- this is what lets a caller sync progress
-    reporting (e.g. inflate_polyhedron_app redrawing its 3D panels) to
-    the SAME cadence as the actual convergence check, in place of the
-    app's own previous artificial chunk-size schedule (which had no
-    relationship to this check's own period at all -- see
-    CONVERGENCE_CHECK_INTERVAL's own comment). Returns (pts, steps_taken,
-    optimality, converged) -- `optimality` is that same worst-vertex
-    displacement from the last completed check, divided back down by
-    CONVERGENCE_CHECK_INTERVAL so it's directly comparable to plain
-    `gtol` (matching what it used to report every step), `None` if
-    stopped before a single check completed. Callers each compute their
-    own final positions/stretch stats from `pts`."""
+    block's convergence check, rather than after every individual step --
+    this is exactly equivalent to correcting every step, not an
+    approximation: every force here (spring stretch, pressure area-
+    vector) depends only on relative vertex geometry, so it's
+    translation-invariant and rotation-equivariant, meaning the shape's
+    own intrinsic trajectory (every edge length, every face shape) never
+    depends on what rigid frame the steps in between happened to be
+    sitting in -- only the FINAL comparison against `pts_at_last_check`
+    needs to be in a consistent frame, which one alignment right before
+    that comparison achieves exactly as well as 200 smaller ones would
+    have. `on_check(pts, steps_taken, optimality, converged)`, if given,
+    is called every time this periodic check runs (whether or not it
+    ends the run) -- lets a caller sync progress reporting (e.g.
+    inflate_polyhedron_app redrawing its 3D panels) to the SAME cadence
+    as the actual convergence check.
+
+    Returns (pts, steps_taken, optimality, converged) -- `optimality` is
+    that same worst-vertex displacement from the last completed check,
+    divided back down by CONVERGENCE_CHECK_INTERVAL so it's directly
+    comparable to plain `gtol`, `None` if stopped before a single check
+    completed. Callers each compute their own final positions/stretch
+    stats from `pts`."""
     if step_max_multiplier is None:
         step_max_multiplier = STEP_MAX_MULTIPLIER
     step_cap = max_nfev if max_nfev is not None else MAX_UNBOUNDED_STEPS
@@ -854,11 +695,9 @@ def _explicit_relax_loop(pts, scale, force_fn,
         per_vertex_force = np.linalg.norm(force, axis=1)
         max_force = float(per_vertex_force.max())
         # Adaptive term (STEP_MAX_FRACTION * scale / max_force, shrinking dt
-        # when max_force is large) removed per explicit user request -- NOT
-        # a temporary testing state: re-offered as a fix for calibration-
-        # step divergence (2026-09-16) and explicitly declined again. Don't
-        # reintroduce without new explicit permission naming this change
-        # (see physics.md's "No hacky terms rule").
+        # when max_force is large) removed and re-offered/declined again
+        # since -- don't reintroduce without new explicit permission naming
+        # this change (see physics.md's "No hacky terms rule").
         dt = step_max_multiplier * scale
         pts = pts + dt * force
         if rng is not None:
@@ -869,17 +708,14 @@ def _explicit_relax_loop(pts, scale, force_fn,
                 kick = rng.normal(scale=KICK_MAGNITUDE_FRACTION * scale, size=pts.shape)
                 pts = pts + kick * weight
                 recent_max_force.clear()  # give the kick a fresh window to show its effect
-        # Stopping condition temporarily changed, per explicit user
-        # request, for testing: rather than comparing displacement (or,
-        # before that, force) against `gtol` EVERY step, only check once
-        # every CONVERGENCE_CHECK_INTERVAL steps -- comparing the worst
-        # vertex's own displacement ACCUMULATED over that whole interval
-        # (not per-step) against CONVERGENCE_CHECK_INTERVAL * gtol, the
-        # same effective per-step rate scaled up to the longer window.
-        # Measured against pts_at_last_check (the position at the START
-        # of this interval), so a genuine multi-step drift is caught even
-        # if no single step's own displacement would have tripped the old
-        # every-step check. The block's own accumulated rigid rotation/
+        # Checked only once every CONVERGENCE_CHECK_INTERVAL steps (see
+        # physics.md's Convergence section), comparing the worst vertex's
+        # own displacement ACCUMULATED over that whole interval (against
+        # pts_at_last_check, the position at the START of the interval)
+        # to CONVERGENCE_CHECK_INTERVAL * gtol, the same per-step rate
+        # scaled up to the longer window -- so a genuine multi-step drift
+        # is caught even if no single step's own displacement would trip
+        # an every-step check. The block's own accumulated rigid rotation/
         # translation (see this function's own docstring for why raw
         # steps drift) is stripped out HERE, once per block, rather than
         # after every step -- exactly equivalent, not an approximation.
@@ -910,37 +746,31 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length/
     edges: as _edge_setup. Runs ONE relaxation pass at a fixed `pressure`
     -- no automatic ramp; call again with the result to keep steering it.
-    Each iteration moves
-    every vertex a small step along its own net force from _relax_force
-    (see module docstring's Design notes for why this walks explicitly
-    rather than handing the force balance to a Newton-style solver) --
-    `pressure` is a real per-face outward force, with no volume or
-    remembered state anywhere in it.
+    Each iteration moves every vertex a small step along its own net
+    force from _relax_force (see module docstring's Design notes for why
+    this walks explicitly rather than handing the force balance to a
+    Newton-style solver) -- `pressure` is a real per-face outward force,
+    with no volume or remembered state anywhere in it.
 
     `max_nfev` caps the number of steps; None runs until convergence
     (capped at MAX_UNBOUNDED_STEPS as a runaway guard), via the worst
-    vertex's own displacement in its last step dropping below `gtol` (a
-    TEMPORARY change from comparing its net FORCE, per explicit user
-    request for testing -- see _explicit_relax_loop's own docstring) --
-    the former max_stretch_pct/STALL_WINDOW plateau shortcut has been
-    removed entirely (see CONVERGENCE_GTOL's neighboring comment for why).
-    `stop_event` (a
-    threading.Event), if given, is checked before each step and aborts
-    at the next one, returning whatever position was last reached. `rng`
-    (a numpy Generator, e.g. `np.random.default_rng()`), if given, opts
-    into an occasional random perturbation when a vertex is stuck
-    oscillating rather than genuinely converging -- see KICK_WINDOW's
-    own comment; `None` (the default) is fully deterministic, exactly
-    this function's original behavior.
+    vertex's own displacement dropping below `gtol` (see
+    _explicit_relax_loop / physics.md's Convergence section for the
+    current check cadence). `stop_event` (a threading.Event), if given,
+    is checked before each step and aborts at the next one, returning
+    whatever position was last reached. `rng` (a numpy Generator, e.g.
+    `np.random.default_rng()`), if given, opts into an occasional random
+    perturbation when a vertex is stuck oscillating rather than genuinely
+    converging -- see KICK_WINDOW's own comment; `None` (the default) is
+    fully deterministic.
 
     `on_progress(new_positions, steps_taken, max_stretch_pct,
     rms_stretch_pct, optimality, converged)`, if given, is called every
     CONVERGENCE_CHECK_INTERVAL steps (the same cadence the stopping
-    condition itself is checked at -- see _explicit_relax_loop's own
-    `on_check`) with exactly this function's own return shape, so a
-    caller can sync its own progress reporting (e.g.
-    inflate_polyhedron_app redrawing its 3D panels) to real convergence-
-    check points instead of an unrelated schedule of its own.
+    condition itself is checked at) with exactly this function's own
+    return shape, so a caller can sync its own progress reporting to
+    real convergence-check points instead of an artificial schedule of
+    its own (see physics.md's Progress callback section).
 
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     optimality, converged). `optimality` is exactly the quantity compared
@@ -988,74 +818,33 @@ def random_initial_positions(faces, spread=INITIAL_RANDOM_SPREAD, seed=0):
 
 
 # relax_initial_configuration's OWN step-size cap, separate from
-# relax_once's STEP_MAX_MULTIPLIER -- since _spring_only_force is now a
+# relax_once's STEP_MAX_MULTIPLIER -- since _spring_only_force is a
 # plain LINEAR spring (see its own docstring), not the hardening one
-# STEP_MAX_MULTIPLIER=0.05 was re-tuned for, sharing that smaller value
-# here just needlessly throttles a force law that never needed it in the
-# first place. Restored to 0.2, the ORIGINAL value this project used for
-# a plain linear spring before the hardening term existed at all (see
-# STEP_MAX_MULTIPLIER's own history) -- verified stable in this project's
-# own past tuning history for a linear spring specifically.
-#
-# This mattered more than it looks: a user reported Level 0 ("Relax")
-# visibly failing to converge/settle at a normal tolerance (1e-3),
-# "jiggling" rather than finishing, on data/input/stretchy_nets/
-# hippo.json and dodecahedron.json specifically -- traced directly (not
-# assumed) to inflate_polyhedron_app's own chunked calling pattern
-# (_run_chunked_relax_stream, capped at INFLATE_CHUNK_MAX=200 steps per
-# call): STALL_WINDOW (2000) can never fill within one chunk (a known,
-# already-documented limitation), so convergence there can ONLY happen
-# via the strict gtol check -- and inflate_polyhedron_app also opts every
-# Relax/Inflate run into the KICK_WINDOW mechanism (`rng=np.random.
-# default_rng()`), which perturbs the WHOLE mesh whenever the worst
-# vertex's force hasn't dropped by half over the last 150 steps. At the
-# smaller, hardening-spring-tuned step size, a perfectly healthy but
-# slower-moving linear-spring relaxation can fail to clear that 50%-drop
-# bar purely because of the smaller step, triggering a kick that
-# re-disturbs the mesh right as it's genuinely converging -- a
-# self-defeating loop that can run forever without ever satisfying gtol.
-# Verified directly: reproducing inflate_polyhedron_app's own chunking on
-# hippo.json/dodecahedron.json, the OLD shared 0.05 hit the 20,000-step
-# safety cap without converging on both, while 0.1 and 0.2 converged
-# cleanly (0.2 fastest, in 3,301 and 2,196 steps respectively) -- and a
-# broader 5-net check (cube/hippo/octahedron/dodecahedron/three_squares)
-# at gtol=1e-3 with the kick enabled converges cleanly for every one of
-# them at this value.
-#
-# Lowered again, 0.2 -> 0.1 (2026-09-19, explicit user request), once
-# mesh_levels._TRIANGLE_FAN started fanning every triangular face around
-# its own centroid at Level 0/1 too: a high-valence "joint" vertex
-# shared by many triangles (data/input/stretchy_nets/
-# composite_spider_leg.poly's own vertices 0/5, each touching 8 base
-# faces) now picks up one extra spoke spring per incident triangle --
-# a large, localized jump in effective local stiffness right at that
-# vertex, which diverged explosively (position norms reaching ~1e83
-# within the very first CONVERGENCE_CHECK_INTERVAL) under the OLD fixed
-# 0.2 step for this explicit, non-adaptive integrator (see this
-# constant's own "no adaptive step-shrink" design note). 0.1 verified
-# directly to keep composite_spider_leg stable (800 steps to converge)
-# while every previously-working net (pinched_tri_hex, two_triangles,
-# cube, hippo, dodecahedron, three_squares) still converges cleanly too
-# -- slower (e.g. hippo: 3,400 -> 8,600 steps) but not by an amount that
-# matters at this project's scale; smaller multipliers tried (0.05,
-# 0.02, 0.01) bought no further stability benefit, just more steps
-# everywhere, so 0.1 is the smallest change that fixes the regression.
+# STEP_MAX_MULTIPLIER=0.05 was tuned for, sharing that smaller value here
+# just needlessly throttles a force law that never needed it. See
+# physics.md's Force model section for the current value and the
+# history of why it moved: restored to 0.2 (the pre-hardening value for
+# a plain linear spring) after a smaller shared step interacted badly
+# with the KICK_WINDOW mechanism and caused Level 0 to jiggle instead of
+# converging; then lowered again to 0.1 once every triangular face
+# started getting fanned too, since a high-valence "joint" vertex (e.g.
+# composite_spider_leg.poly's vertex 0/5, each touching 8 base faces)
+# gains enough extra local stiffness from the added spoke springs to
+# diverge explosively under the old fixed 0.2 step.
 LEVEL0_STEP_MAX_MULTIPLIER = 0.1
 
 
 def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
     """Pure Hooke's-law LINEAR spring force for relax_initial_configuration
     -- deliberately NOT the same hardening term _relax_force uses (see
-    module docstring's Design notes): with pressure=0, there's no outward
-    force for a hardening term to guard against in the first place, and a
-    user reported Level 0 (relax_initial_configuration's own random-
-    start-then-relax step) visibly failing to settle at a normal
-    tolerance under the hardening spring -- switching back to plain
-    linear here resolved it directly. Faces aren't expected to be flat or
-    even non-self-intersecting at this stage (see
-    relax_initial_configuration's docstring); the only goal is a
-    well-separated, edge-length-plausible starting point to hand off to
-    the real per-face pressure model afterward."""
+    module docstring's Design notes and physics.md's Force model
+    section): with pressure=0, there's no outward force for a hardening
+    term to guard against in the first place, and plain linear settles
+    faster near rest. Faces aren't expected to be flat or even
+    non-self-intersecting at this stage (see relax_initial_configuration's
+    docstring); the only goal is a well-separated, edge-length-plausible
+    starting point to hand off to the real per-face pressure model
+    afterward."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
     diff = pts[edge_bi] - pts[edge_ai]
@@ -1091,14 +880,11 @@ def relax_initial_configuration(positions, faces, edge_length,
     rectangular frame), not a rigid one, so springs alone can't stop it
     flexing arbitrarily.
 
-    Same stopping rule as relax_once (see _explicit_relax_loop): `gtol`
-    on the worst vertex's own last-step displacement (a TEMPORARY change
-    from its net force, per explicit user request for testing) -- the
-    former STALL_WINDOW plateau shortcut has been removed entirely (see
-    CONVERGENCE_GTOL's neighboring comment) -- OR `max_nfev`/`stop_event`.
-    `rng`, as in relax_once, opts into an
-    occasional random perturbation when stuck oscillating (`None` -- the
-    default -- is fully deterministic).
+    Same stopping rule as relax_once (see _explicit_relax_loop /
+    physics.md's Convergence section): `gtol` on the worst vertex's own
+    last-step displacement, or `max_nfev`/`stop_event`. `rng`, as in
+    relax_once, opts into an occasional random perturbation when stuck
+    oscillating (`None` -- the default -- is fully deterministic).
     `on_progress`, as in relax_once, is called every CONVERGENCE_CHECK_
     INTERVAL steps with this function's own return shape (note: reflects
     the PRE-reflection embedding described below, since that fix-up only
@@ -1145,27 +931,13 @@ def relax_initial_configuration(positions, faces, edge_length,
     return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
 
 
-# Empirical starting point for estimate_pressure_for_target_stretch: bisected
-# the pressure giving ~10% stretch on each of the 5 Platonic solids (max
-# and RMS stretch coincide there -- a regular solid stretches every edge
-# equally) and found `pressure * total_rest_area` lands in a much tighter
-# band (1.9-3.2) than raw pressure does (0.11-1.44) -- i.e. required
-# pressure scales with how much total AREA it's pushing against, not
-# vertex/face count. This is the average of pressure*area/target_fraction
-# across those 5 solids (range was 19-32) -- a decent first guess, not
-# exact, which is why the function refines it against an actual
-# relax_once result rather than trusting it alone.
-#
-# Re-checked, not re-derived, after the spring force changed to a
-# hardening `stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3` (see
-# module docstring's Design notes): at this 10%-ish target the cubic
-# term is negligible (stretch**3 ~= 0.001 vs stretch ~= 0.1) regardless
-# of its own coefficient, so the combined spring behaves almost exactly
-# like the plain linear one this constant was originally derived
-# against. Re-running the same bisection at HARDENING_CUBIC_COEFFICIENT
-# = 0.5 gave a mean of 25.0 (range 18.75-34.5) -- again indistinguishable
-# from the original 25.0 within the same per-solid noise the original
-# derivation already had -- so this value was kept rather than nudged.
+# Empirical starting point for estimate_pressure_for_target_stretch:
+# required pressure scales with how much total rest AREA it's pushing
+# against, not vertex/face count -- see physics.md's Pressure calibration
+# section for the derivation (bisected on the 5 Platonic solids) and why
+# it didn't need re-deriving after the spring force became hardening. A
+# decent first guess, not exact, which is why the function refines it
+# against an actual relax_once result rather than trusting it alone.
 _PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0
 
 # How far a single calibration step is allowed to rescale pressure --
@@ -1193,31 +965,21 @@ _INSANE_STRETCH_TARGET_MULTIPLE = 5.0
 # Sentinel RMS/max stretch reading for a calibration trial whose integrator
 # diverged into NaN/Inf positions before relax_once could even compute real
 # stretch stats -- always >= _INSANE_STRETCH_FLOOR_PCT so it's treated
-# exactly like any other insane/blown-up trial by the bracket search. Never
-# surfaced to a user in practice (only used if EVERY trial in a calibration
-# run diverged, same already-degenerate fallback path as an ordinary
-# all-insane run). A generic safety net, kept even though calibration now
-# uses the exact same step size a real Inflate run always has (see git
-# history around PRESSURE_CALC_STEP_MULTIPLIER for the bigger-step
-# experiments this was originally added for, removed 2026-09-16 per
-# explicit user request -- "just 1x", no multiplier).
+# exactly like any other insane/blown-up trial by the bracket search.
+# Never surfaced to a user in practice. A generic safety net, kept even
+# though calibration now uses the exact same step size a real Inflate run
+# always has -- see physics.md's Pressure calibration section for why the
+# old step-size multiplier was removed.
 _DIVERGED_SENTINEL_STRETCH_PCT = 1e6
 
 # How many consecutive trials, still in the pure-rescale phase (no
-# lo/hi bracket established yet -- see estimate_pressure_for_target_
-# stretch's own docstring), with essentially NO change in achieved
+# lo/hi bracket established yet), with essentially NO change in achieved
 # stretch despite pressure being rescaled (up to the 5x ceiling each
 # time), before giving up on finding a real pressure at this level
-# rather than escalating pressure without bound. A mesh that's
-# genuinely unresponsive to pressure here (e.g. every face's pressure
-# force exactly cancels against an identical-vertex-set, opposite-wound
-# partner face -- see interactive_builder_app._edges_from_shapes' own
-# docstring for how such a net can arise) can never be rescaled into
-# responding; only more resolution (a Subdivide, which can split those
-# faces apart into distinct sub-triangles) gives it real degrees of
-# freedom. 2026-09-19, explicit user request, after this exact case
-# escalated pressure to ~600000 over a full max_iterations budget with
-# achieved stretch stuck at ~1e-10 the whole time.
+# rather than escalating pressure without bound -- see physics.md's
+# Pressure calibration section (Unresponsive-mesh stall detection) for
+# the full rationale and the concrete ravioli-paired-mesh case this
+# guards against.
 _STALL_TRIAL_LIMIT = 2
 # "Essentially no change" between consecutive rescale-phase trials --
 # deliberately tiny and NOT tied to tol_pct (which is about being close
@@ -1257,132 +1019,79 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     Starts from _PRESSURE_AREA_PRODUCT_ESTIMATE's geometric guess, unless
     `initial_pressure_guess` is given -- a caller with a BETTER starting
     point (e.g. inflate_polyhedron_app's `_guess_pressure_from_history`,
-    extrapolating from a previous level's own already-calibrated pressure
-    rather than this function's generic per-solid-derived constant) can
-    skip straight past the generic guess's own inaccuracy, landing the
-    bracket/rescale search closer on the FIRST trial and needing fewer of
-    the `max_iterations` budget to converge. The search itself is now
-    BRACKET-then-BISECT rather than a single multiplicative rescale
-    repeated blindly: as long as
-    every trial so far has landed on the SAME side of the target (all
-    under it, or all "insane" -- see _INSANE_STRETCH_FLOOR_PCT/
-    _INSANE_STRETCH_TARGET_MULTIPLE, a mesh that's blown up rather than
-    settled), it keeps rescaling by (target / achieved), clamped by
-    _PRESSURE_RATIO_CLAMP, exactly as the original single-rescale version
-    did. The MOMENT a trial lands on the OPPOSITE side from the best one
-    seen so far (a sane, under-target trial and an over-target-or-insane
-    one now both exist), pressure is bracketed between them and every
-    remaining trial simply bisects the bracket -- the only way to
-    actually CONVERGE on an intermediate pressure once the mesh's own
-    response to pressure turns out highly nonlinear near some critical
-    value, rather than the old rescale-only approach's real failure
-    mode: a large target whose naive rescale ratio overshoots straight
-    past the mesh's own stable range and into catastrophic divergence,
-    then rescales right back down from THAT diverged reading to
-    approximately the ORIGINAL too-low pressure, forever alternating
-    between the same two pressures without ever trying anything in
-    between (verified directly: data/input/stretchy_nets/hippo.json at
-    Level 1, target 60% RMS stretch, oscillated exactly this way under
-    the old algorithm -- 0.165 giving 9.55%, rescaled up to 0.827 giving
-    a diverged 70,185%, rescaled back down to 0.165, repeating
-    indefinitely, never landing anywhere near 60%).
+    see physics.md's Pressure calibration section) can land the search
+    closer on the FIRST trial, needing fewer of the `max_iterations`
+    budget. The search is BRACKET-then-BISECT rather than a single
+    multiplicative rescale repeated blindly: as long as every trial so
+    far has landed on the SAME side of the target (all under it, or all
+    "insane" -- see _INSANE_STRETCH_FLOOR_PCT/_INSANE_STRETCH_TARGET_
+    MULTIPLE, a mesh that's blown up rather than settled), it keeps
+    rescaling by (target / achieved), clamped by _PRESSURE_RATIO_CLAMP.
+    The MOMENT a trial lands on the OPPOSITE side from the best one seen
+    so far, pressure is bracketed between them and every remaining trial
+    bisects the bracket instead -- the only way to actually converge on
+    an intermediate pressure once the mesh's own response to pressure
+    turns out highly nonlinear near some critical value (a pure-rescale
+    search can otherwise overshoot past the mesh's stable range and
+    oscillate between the same two pressures forever without ever trying
+    anything in between).
 
     Keeps whichever SANE trial got CLOSEST to the target rather than
-    just the last one (an insane/diverged trial is never a candidate,
-    however numerically close its own stretch number might coincidentally
-    land, since that number doesn't reflect a real equilibrium): the
-    rescale step (still used before a bracket exists) assumes more
-    pressure means more stretch, which fails on at least one known net
-    (data/input/stretchy_nets/three_squares.json actually stretches LESS
-    as pressure rises -- a genuine property of that topology, not a bug
-    here) -- without keeping the best-so-far, a net where that
-    assumption is wrong would escalate pressure every iteration chasing
-    a target it's moving away from; this is unchanged from the original
-    algorithm, and this net's own existing test coverage still passes
-    with the bracket/bisect logic added. Returns (pressure, new_positions,
-    steps_taken, max_stretch_pct, rms_stretch_pct, optimality, converged,
-    pressure_found) -- the middle five exactly as relax_once's own
-    return, from whichever trial this settled on (if every single trial
-    was insane, the LAST one anyway, so this never raises for an
-    irrecoverably bad target).
+    just the last one (an insane/diverged trial is never a candidate):
+    the rescale step assumes more pressure means more stretch, which
+    fails on at least one known net (three_squares.json actually
+    stretches LESS as pressure rises) -- without keeping the best-so-far,
+    a net where that assumption is wrong would escalate pressure every
+    iteration chasing a target it's moving away from. Returns (pressure,
+    new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
+    optimality, converged, pressure_found) -- the middle five exactly as
+    relax_once's own return, from whichever trial this settled on (if
+    every single trial was insane, the LAST one anyway, so this never
+    raises for an irrecoverably bad target).
 
-    `pressure_found` (2026-09-19, explicit user request) is True unless
-    this gave up WITHOUT ever finding a usable pressure: either every
-    trial was insane, or -- the case this was actually added for -- the
-    mesh turned out completely UNRESPONSIVE to pressure at this level
-    (still in the pure-rescale phase, `_STALL_TRIAL_LIMIT` consecutive
-    trials all landing within `_STALL_DELTA_PCT` of each other despite
-    pressure being rescaled by up to 5x each time). A ravioli-paired mesh
-    (two faces sharing the exact same vertex set, opposite-wound -- see
-    interactive_builder_app._edges_from_shapes' own docstring for how
-    dedup can produce one) is the concrete example: its pressure forces
-    cancel EXACTLY, at every pressure, so `converged` still comes back
-    True (a real force-equilibrium WAS found, honestly) while
-    `pressure_found` is False (that equilibrium is nowhere near the
-    target -- no pressure could ever get it there at this level). This
-    stops the search from escalating pressure without bound chasing a
-    response that will never come (previously observed reaching ~600000
-    over a full `max_iterations` budget, stretch stuck at ~1e-10 the
-    whole time), and gives a caller (inflate_polyhedron_app's own
-    `_guess_pressure_from_history`) a clean signal to exclude this
-    level's own returned `pressure` from any later level's starting
-    guess, rather than extrapolating from a number that was never a real
-    calibration in the first place.
+    `pressure_found` is True unless this gave up WITHOUT ever finding a
+    usable pressure: either every trial was insane, or the mesh turned
+    out completely UNRESPONSIVE to pressure at this level (see
+    _STALL_TRIAL_LIMIT / physics.md's Pressure calibration section) --
+    e.g. a ravioli-paired mesh whose pressure forces cancel EXACTLY at
+    every pressure, so `converged` can still come back True (a real
+    equilibrium was found) while `pressure_found` is False (no pressure
+    could ever reach the target there).
 
     The WINNING trial, if it hasn't actually converged yet (it only ran
     `max_nfev_per_trial` steps, a search-time budget, not a real
     convergence criterion), is topped up with one further UNCAPPED
     `relax_once` call from wherever it left off, at the same pressure/
-    gtol/rng, before returning (2026-09-17, explicit user request) --
-    calibration no longer just picks a pressure and hands back a
-    part-finished trial for a caller to somehow finish separately; this
-    function now always returns a trial that's either genuinely converged
-    or hit relax_once's own MAX_UNBOUNDED_STEPS runaway cap. `steps_taken`
-    in the return already includes this top-up's own steps. Skipped
-    entirely if no sane trial was ever found (nothing worth finishing) or
-    `stop_event` was set (the caller asked to stop, not to keep going).
+    gtol/rng, before returning -- this function always returns a trial
+    that's either genuinely converged or hit relax_once's own
+    MAX_UNBOUNDED_STEPS runaway cap. `steps_taken` in the return already
+    includes this top-up's own steps. Skipped entirely if no sane trial
+    was ever found, or `stop_event` was set.
 
-    `capture_frames` (2026-09-17, explicit user request), if True, adds
-    an 8th return value: the WINNING trial's own positions every
-    CONVERGENCE_CHECK_INTERVAL steps (relax_once's own on_progress
-    cadence) as `(positions, cumulative_steps_taken)` pairs, from its
-    starting `positions` (step 0) through however far it got -- INCLUDING
-    the convergence top-up above, so a caller replaying these sees the
-    same one continuous run the top-up folds into, not a break at
-    `max_nfev_per_trial`. A caller (inflate_polyhedron_app) can replay
-    these as a visual recap of that ONE trial's own run, instead of a
-    second real relax_once call at the winning pressure just to have
-    something to show frame-by-frame (the previous design -- see this
-    function's own git history for why that was pure duplicated work:
-    every trial already starts from the same `positions`, at the same
-    pressure once found, with the same `gtol`/`rng`, so a follow-up call
-    would retrace an already-computed trial's exact trajectory). Every
-    trial captures its own frames as it runs (there's no way to know in
-    advance which will end up best), but only the winning trial's list is
-    kept -- every other trial's frames are discarded along with its
-    positions. Costs one extra on_progress call per checkpoint per trial
-    (negligible next to the trial's own force computation); when False
-    (the default), no frames are captured at all and the return shape is
-    unchanged from before this param existed.
+    `capture_frames`, if True, adds an 8th return value: the WINNING
+    trial's own positions every CONVERGENCE_CHECK_INTERVAL steps
+    (relax_once's own on_progress cadence) as `(positions,
+    cumulative_steps_taken)` pairs, from its starting `positions` (step
+    0) through however far it got -- INCLUDING the convergence top-up
+    above, so a caller replaying these sees one continuous run rather
+    than a break at `max_nfev_per_trial`. Every trial captures its own
+    frames as it runs (there's no way to know in advance which will end
+    up best), but only the winning trial's list is kept. When False (the
+    default), no frames are captured and the return shape is unchanged
+    from before this param existed.
 
-    `on_progress(cumulative_steps)`, if given (2026-09-17, explicit user
-    request), is called every CONVERGENCE_CHECK_INTERVAL steps of EVERY
-    trial attempted (and of the convergence top-up), with the TOTAL
-    number of relax_once steps actually computed so far across every
-    trial -- including ones that turn out insane/thrown-away, since those
-    are real computation a caller watching this run would want reflected
-    too. Deliberately NOT reset to 0 between trials (a caller displaying
-    this live, e.g. as a "Steps" counter, would see it visibly jump
-    BACKWARDS every time a new trial starts otherwise, reading as broken
-    progress rather than genuine work) -- monotonically increasing for
-    the whole call, though NOT necessarily ending exactly at the final
-    returned `steps_taken` (that's only the WINNING trial's own count):
-    whichever trial ends up best isn't always the last one attempted (the
-    search can keep probing after finding a good-enough candidate if nothing
-    satisfies `tol_pct` outright), so a caller relying on `on_progress` for
-    a live "still working" indicator should snap its own displayed count to
-    the real returned `steps_taken` once this function actually returns,
-    rather than trusting the last `on_progress` value as authoritative."""
+    `on_progress(cumulative_steps)`, if given, is called every
+    CONVERGENCE_CHECK_INTERVAL steps of EVERY trial attempted (and of the
+    convergence top-up), with the TOTAL number of relax_once steps
+    actually computed so far across every trial -- including insane/
+    thrown-away ones, since that's still real computation. Deliberately
+    NOT reset to 0 between trials (so a live "Steps" counter never jumps
+    backwards) -- monotonically increasing for the whole call, though NOT
+    necessarily ending exactly at the final returned `steps_taken` (only
+    the WINNING trial's own count), since the search can keep probing
+    after a good-enough candidate if nothing satisfies `tol_pct` outright;
+    a caller should snap its own displayed count to the real returned
+    `steps_taken` once this function returns."""
     if initial_pressure_guess is not None:
         pressure = initial_pressure_guess
     else:
@@ -1510,15 +1219,12 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
         new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = best_result
         if not converged and not stopped:
             # Seeded with the SAME duplicate-first-frame convention
-            # `trial_frames` uses above (its own step-0 entry is the
-            # trial's starting point, dropped as a duplicate once merged
-            # into a prior trial's own frames) -- `top_up_frames[0]` here
-            # is `(new_positions, steps_taken)`, exactly `best_frames[-1]`,
-            # so the SAME `[1:]` slice below drops a genuine duplicate
-            # rather than the top-up's own first real checkpoint (a
-            # bug caught directly: without this seed, `top_up_frames[0]`
-            # IS that first real checkpoint, and `[1:]` silently dropped
-            # it, leaving a visible gap in the replayed step sequence).
+            # `trial_frames` uses above: `top_up_frames[0]` here is
+            # `(new_positions, steps_taken)`, exactly `best_frames[-1]`,
+            # so the `[1:]` slice below drops that genuine duplicate
+            # rather than the top-up's own first real checkpoint (without
+            # this seed, `[1:]` would silently drop the first real
+            # checkpoint instead, leaving a gap in the replayed sequence).
             top_up_frames = [(new_positions, steps_taken)] if capture_frames else None
 
             def _topup_progress(p, s, *_rest):

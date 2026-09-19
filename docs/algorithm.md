@@ -182,11 +182,9 @@ could end a run well before the tolerance was actually satisfied.
 
 ### 4.4 Why no volume or target term, and what changed about the stretch limit
 
-A plain Hooke's-law spring cannot support unbounded pressure: pressure's
-contribution grows with face area ($\sim \ell^2$) while a spring's
-restoring force grows only linearly with stretch, so above a critical
-pressure no equilibrium exists at all. Two additions were tried to paper
-over this and both were rejected as fixing the wrong layer: a
+A plain Hooke's-law spring cannot support unbounded pressure at all (§4.1
+above). Two additions were tried to paper over this and both were
+rejected as fixing the wrong layer: a
 target/reference-volume pressure term (which silently follows wherever
 the mesh currently sits, compounding stretch across repeated
 subdivide-then-inflate cycles) and a per-edge soft stretch limit (which
@@ -234,14 +232,19 @@ whichever trial came closest to $\sigma^*$ rather than only the final
 one, so a topology violating the assumption does not diverge chasing a
 target that is moving away from it.
 
-When a mesh has already been calibrated at a nearby subdivision level,
-that result gives a better starting guess than $P_0$ alone: since
+When a mesh has already been calibrated at another subdivision level,
+that history gives a better starting guess than $P_0$ alone: since
 subdivision quarters every triangle (roughly halving edge length) without
 changing total rest area, matching the same target stretch at the next
-level empirically takes about double the pressure. The search may
-therefore be seeded from `prior_pressure * (target / prior_achieved) *
-2^(level difference)` instead of the area-only estimate, reducing the
-number of trials needed without changing the final answer.
+level empirically takes about double the pressure. The search is
+therefore seeded from whichever prior level's own recorded
+$(\text{pressure}, \text{achieved stretch})$ pair landed *closest* to the
+new target, scaled by $2^{\Delta\text{level}}$ — not a
+`target / achieved` rescale of that pair, which explodes when the prior
+achieved stretch was ~0 (pressure genuinely had no effect at that level,
+e.g. before a later subdivision gives the mesh real degrees of freedom).
+Either way this only reduces the number of trials needed, never changes
+the final answer.
 
 ## 6. Incremental subdivision
 

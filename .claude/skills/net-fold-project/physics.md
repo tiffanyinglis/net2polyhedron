@@ -119,14 +119,12 @@ if `stop_event` fired during the search.
 and step budget (`max_nfev_per_trial`) a real Inflate run would use — `relax_once`'s own
 `step_max_multiplier` param and the whole `PRESSURE_CALC_STEP_MULTIPLIER`/debug-mode "Pressure
 calc step ×" spinner mechanism were REMOVED entirely (2026-09-16, explicit user request — "don't
-use any multipliers, just 1x"), after a sequence of bigger-step experiments (flat 2x — safe; flat
-4x and several 3x/4x-led coarse-to-fine schedules — all found genuinely unsafe, diverging even at
-pressure=0 on a Level 2+ mesh's own pre-existing post-Subdivide stretch, since a Subdivided
-level's rest lengths come from the pristine flat target geometry rather than the current shape,
-so it typically starts already significantly stretched relative to them well before Inflate or
-calibration ever runs). Don't reintroduce a calibration-only step multiplier without new explicit
-permission naming this change — attention shifted instead to a better INITIAL guess (below),
-which needs fewer trials in the first place rather than making each trial cheaper/riskier. A
+use any multipliers, just 1x"): step multipliers >1x were tried and found unsafe (diverge even at
+pressure=0 on a Level 2+ mesh, which already starts significantly stretched relative to its own
+post-Subdivide rest lengths before Inflate/calibration ever runs). Don't reintroduce a
+calibration-only step multiplier without new explicit permission naming this change — attention
+shifted instead to a better INITIAL guess (below), which needs fewer trials in the first place
+rather than making each trial cheaper/riskier. A
 trial that still diverges numerically (`_remove_rigid_motion`'s SVD raising `LinAlgError` on
 NaN/Inf positions) is CAUGHT and treated as an ordinary insane/over-target trial
 (`_DIVERGED_SENTINEL_STRETCH_PCT`) rather than crashing — kept as a generic safety net even
@@ -151,6 +149,18 @@ freedom — see mesh_levels.py's rim-edge disambiguation for how such a mesh can
 loaded at all now), handing the NEXT level an absurd guess that overflows the solver before it
 ever finds the shape that's actually reachable there. Picking the closest-achieved record instead
 never divides by anything.
+
+**Unresponsive-mesh stall detection.** If `_STALL_TRIAL_LIMIT` (2) consecutive
+rescale-phase trials land within `_STALL_DELTA_PCT` (1e-6) of each other despite
+pressure being rescaled by up to 5x, the mesh is judged unresponsive to pressure
+at this level (e.g. a ravioli-paired mesh whose two identical, opposite-wound
+faces cancel pressure exactly) and the search gives up rather than escalating
+pressure without bound (previously seen reaching ~600000 with stretch stuck at
+~1e-10). Return value gains `pressure_found` (False in this case, though
+`converged` can still be True — a real equilibrium was found, just not one
+pressure can reach the target from) so `inflate_polyhedron_app`'s
+`_guess_pressure_from_history` can exclude this level's pressure from later
+levels' starting guess.
 
 ## Defaults (current)
 - `LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}` (app, per-level spinner default)

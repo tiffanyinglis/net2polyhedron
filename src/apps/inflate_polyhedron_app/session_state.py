@@ -68,28 +68,16 @@ class LevelStateModel(BaseModel):
 
 class LevelHistoryRecordModel(BaseModel):
     """Mirrors one row of InflatePolyhedronApp.level_history exactly (see
-    its own _record_level_history docstring). precomp_time_s/sim_time_s
-    (2026-09-16, explicit user request -- a loaded session's own
-    Convergence History showed no Simulation Time at all, since these two
-    used to be dropped as "extra" fields pydantic silently ignores,
-    per an earlier "timing is a live-session diagnostic, not persistent
-    state" decision) ARE saved now too -- "Simulation Time" (renamed from
-    "Elapsed Time" 2026-09-17)/"Cumulative Time" being release-mode-
-    visible columns, not debug-only, is what actually changed since that
-    original call. Field names themselves are unchanged by that rename --
-    only the UI-facing column id/label ("simulation_time"/"Simulation
-    Time" in app.py) moved, so an older saved session still loads here
-    with no migration needed."""
+    its own _record_level_history docstring and apps.md's Convergence
+    History section). precomp_time_s/sim_time_s are explicit fields (not
+    left for pydantic to silently drop as "extra") so a loaded session's
+    Simulation/Cumulative Time columns aren't blank."""
     pressure: Optional[float] = None
     steps: int = 0
     max_stretch_pct: float = 0.0
-    # Optional now (2026-09-17, explicit user request -- "RMS stretch %"
-    # shows "--" for the whole Computing phase, backed by a genuine
-    # `None` in app.py's own self.level_history, not a 0.0 placeholder --
-    # see _record_level_history's own comment) -- a Save while a run is
-    # actively computing (the File menu isn't disabled during a run, see
-    # _set_controls_enabled's own widget list) would otherwise fail
-    # Pydantic validation entirely, right when Save is invoked.
+    # Optional: `None` is the genuine "--" sentinel while Computing (see
+    # app.py's on_inflate_clicked) -- a Save mid-run (the File menu isn't
+    # disabled during one) would otherwise fail validation outright.
     rms_stretch_pct: Optional[float] = None
     optimality: Optional[float] = None
     converged: Optional[bool] = None
@@ -99,16 +87,11 @@ class LevelHistoryRecordModel(BaseModel):
     sim_time_s: Optional[float] = None
     # False only for a level whose pressure calibration gave up WITHOUT
     # finding a usable pressure (see stretchy_mesh.
-    # estimate_pressure_for_target_stretch's own docstring) -- excluded
-    # by _guess_pressure_from_history's own filter so a LATER level's
-    # calibration doesn't extrapolate from a number that was never a
-    # real calibration in the first place. Default True (not saved
-    # before this field existed) matches that filter's own default for
-    # a record with no such flag at all -- same "field predates this,
-    # don't silently drop it on save/load" fix as precomp_time_s/
-    # sim_time_s above, added after the exact same failure mode: a
-    # session saved then reloaded between levels lost this flag, letting
-    # a later level's guess wrongly inherit an already-abandoned pressure.
+    # estimate_pressure_for_target_stretch's own docstring) -- excluded by
+    # _guess_pressure_from_history's own filter so a later level's guess
+    # doesn't extrapolate from an abandoned calibration. Default True
+    # (predates this field) matches that filter's own default for a
+    # record with no such flag at all.
     pressure_found: bool = True
 
 
@@ -145,14 +128,10 @@ class SessionStateModel(BaseModel):
     # saved with no net file behind it at all.
     net_file: Optional[Dict[str, Any]] = None
     subdivision_level: int
-    # Optional now (2026-09-17, explicit user request -- "the pressure
-    # should also be -- until things converge"): app.py's own
-    # self.pressure_value is a genuine `None` for the whole Computing
-    # phase (see on_inflate_clicked's own comment), and the File menu
-    # isn't disabled during a run (_set_controls_enabled's own widget
-    # list), so a Save mid-run needs this to validate too. on_load_
-    # session_clicked falls back to DEFAULT_PRESSURE when None, same as
-    # __init__'s own starting value.
+    # Optional: `None` is the genuine "--" sentinel while Computing (see
+    # app.py's on_inflate_clicked), and a Save mid-run needs this to
+    # validate too. on_load_session_clicked falls back to DEFAULT_PRESSURE
+    # when None, same as __init__'s own starting value.
     pressure_value: Optional[float] = None
     iteration_count: int
     debug_mode: bool
@@ -162,27 +141,17 @@ class SessionStateModel(BaseModel):
     level_history: Dict[int, LevelHistoryRecordModel]
     levels: Dict[int, LevelStateModel]
     # Levels 1-3's own SHARED camera state (self._level13_camera in
-    # app.py -- see _render_level_pv) and the Net panel's own separate
-    # self.net_zoom/_pan (_draw_target_faces) -- added once these became
-    # persistent-feeling, explicitly-adjusted view settings (pan/zoom/
-    # rotation resets, wider zoom range, etc.) rather than incidental
-    # defaults. Field names kept as the ORIGINAL "level_*" (not renamed
-    # to "level13_*") even though Level 0 split off into its own
-    # independent camera (self._level0_camera, level0_zoom/_pan/_rotation
-    # below, 2026-09-17 explicit user request -- "separate the zoom/
-    # rotation/translation of level 0 from level 1-3 since they look so
-    # different") -- an OLDER session file's own single camera (from
-    # before that split, when every level including 0 shared it) maps
-    # naturally onto "the Levels 1-3 group" this way, with no migration
-    # needed; only level0_zoom/_pan/_rotation being absent (None) makes
-    # Level 0 fall back to a FRESH default rather than inheriting
-    # whatever that old file's one shared camera happened to be.
-    # All optional with a default that reproduces the ORIGINAL always-
-    # reset-to-default behavior, so a session file saved before ANY of
-    # this existed still loads exactly as it used to -- app.py falls back
-    # to _initial_level_rotation() (not a baked-in quaternion here) when
-    # a rotation field is None, since that method is the one place that
-    # non-axis-aligned starting view is actually defined.
+    # app.py) and the Net panel's own separate net_zoom/_pan. Field names
+    # kept as the ORIGINAL "level_*" (not renamed to "level13_*") even
+    # though Level 0 later split off into its own independent camera
+    # (level0_zoom/_pan/_rotation below, see apps.md) -- an OLDER session
+    # file's single shared camera maps naturally onto "the Levels 1-3
+    # group" this way, with no migration needed; only level0_* being
+    # absent (None) makes Level 0 fall back to a fresh default instead of
+    # inheriting that old shared camera. All optional with a default that
+    # reproduces the ORIGINAL always-reset behavior, so a session saved
+    # before any of this existed still loads as it used to -- app.py
+    # falls back to _initial_level_rotation() when a rotation is None.
     level_zoom: float = 1.0
     level_pan: Tuple[float, float] = (0.0, 0.0)
     level_rotation: Optional[Tuple[float, float, float, float]] = None  # scipy Rotation (x, y, z, w)

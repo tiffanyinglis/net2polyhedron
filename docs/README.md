@@ -57,10 +57,11 @@ Press "d" for debug mode: an extra row of controls includes stepping a
 fixed number of iterations instead of running to convergence, a
 **Validate Mesh** button (checks the net's underlying structure — no
 duplicate edges, every face's winding consistent with its neighbors),
-and a **Show normals** toggle (draws each face's outward normal on
-every 3D panel, so an inward-pointing one is obvious at a glance —
-this, not Validate Mesh, is how to check whether the CURRENT shape is
-facing outward).
+and two normal-arrow toggles for checking whether the CURRENT shape is
+facing outward at a glance: **Show face normals** (one arrow per face,
+from its centroid) and **Show vertex normals** (one per vertex,
+averaged from its touching faces — catches a vertex where the touching
+faces disagree, which a per-face check alone can miss).
 
 ## Describing your own net
 
@@ -98,7 +99,7 @@ Drop a new `.json` or `.poly` file into `data/input/stretchy_nets/` and it shows
 in the app's dropdown automatically — there's no cache and no precompute
 step, so it's usable immediately. See the existing files in that
 directory for more examples, including nets (like
-`two_pentagons_and_a_square.json`) that genuinely can't stay flat and
+`two_pentagons_one_square.poly`) that genuinely can't stay flat and
 rigid. See [algorithm.md](algorithm.md) for how the solver itself works.
 
 If you already know a solid's exact 3D vertex coordinates and want to
@@ -117,30 +118,29 @@ convex hull.
 - **`src/apps/interactive_builder_app/app.py`** — an unrelated 2D
   shape-placement canvas: pick a regular polygon (triangle through
   8-gon, each with its own fixed color) from the left palette, click to
-  drop instances of it into the drawing area on the right, then
-  select/drag/delete them. With a shape selected, right-click-drag
-  rotates it; with nothing selected, right-click-drag pans the view
-  instead. Scroll to zoom. Every shape's edges have a small handle at
-  their midpoint — a connected edge shows a solid dot at all times; an
-  unconnected one only reveals its (empty) ring once the cursor is
-  close enough to click it. Click one, then click another shape's own
-  handle to connect them (a thin grey line); clicking empty space
-  instead cancels the attempt.
-  Connections can be
-  selected and deleted too.
+  drop instances of it into the drawing area, then arrange them with a
+  right-side toolbar of tool modes:
+  - **Move [M]** (default): drag/select shapes (Ctrl+click or a marquee
+    drag for multi-select), right-drag to rotate the selection, Flip
+    Horizontal/Vertical, copy/paste, delete.
+  - **Join [J]**: click an edge's midpoint handle, then another SHAPE's
+    handle, to connect the two edges (a thin grey curve, adjustable like
+    a bezier); click a connection to select/delete it.
+  - **Polygon Fold [P]**: the same click-click gesture as Join, but
+    between two edges of the *same* shape instead — for a polygon that
+    folds onto itself rather than gluing to a neighbor.
+
+  With nothing selected, right-click-drag pans the view; scroll to zoom.
   **File > Save** writes the whole canvas out as a `.poly` file (still
   plain JSON content) in the same vertex-loop format as
-  `data/input/stretchy_nets/` (defaulting to that
-  directory), plus this app's own layout info and current zoom level so
-  reloading it reproduces the exact positions and view; **File > Load**
-  reads a `.poly` or plain `.json` net back — a hand-authored net with no saved layout instead gets
-  laid out fresh, via a BFS spanning tree over shared edges with a
-  one-edge-length gap between connected faces so the net reads as
-  visibly disjoint rather than seamlessly glued. A Save that would
-  produce an invalid net (e.g. a connection that collapses a face's own
-  two adjacent corners into one point) is refused with an error message
-  naming the exact conflict, and rings every corner involved in orange
-  right on the canvas until the next edit.
+  `data/input/stretchy_nets/` (defaulting to that directory), plus this
+  app's own layout/connection info and current zoom level so reloading
+  it reproduces the exact arrangement; **File > Load** reads a `.poly` or
+  plain `.json` net back — a hand-authored net with no saved layout
+  instead gets laid out fresh via a BFS spanning tree over shared edges.
+  A Save that would produce an invalid net (e.g. a connection that
+  collapses a face's own two corners into one point) is refused with an
+  error message naming the exact conflict.
 
 ## Running the tests
 

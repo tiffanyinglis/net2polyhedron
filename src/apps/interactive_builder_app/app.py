@@ -158,16 +158,12 @@ Interaction model:
   v1-v2 meeting edge w1-w2 could pair v1~w1/v2~w2 or v1~w2/v2~w1, and
   either is a perfectly legitimate physical gluing -- see _true_edge_
   slots' own docstring) -- flipping one of the two shapes involved is
-  what switches between them. This REPLACED an earlier automatic
-  search (`_infer_shape_flips`, since removed) that tried to find some
-  working combination of flips on its own at Save time: for any mesh
-  with a real cycle in its connections (most non-trivial ones), MORE
-  THAN ONE combination often validates -- e.g. flipping either of two
-  halves joined by a single connection is equally valid in isolation
-  -- so an automatic search could only ever produce "a species of
-  valid," not necessarily the specific arrangement the user actually
-  intends to crochet. Making the choice explicit and visible, one keypress
-  at a time, removes that ambiguity instead of trying to guess through it.
+  what switches between them. There is no automatic flip-solver: for a
+  mesh with a real cycle in its connections, more than one flip
+  combination often validates, so an automatic search could only find
+  "a species of valid," not necessarily the arrangement the user
+  actually intends to crochet. An explicit per-shape keypress avoids
+  that ambiguity.
 - **Esc** cancels a connection that's been armed from one handle (the
   first click of the click-click gesture below) but not yet completed
   onto a second one -- the line following the cursor just disappears,
@@ -200,24 +196,18 @@ Interaction model:
   (see "unsaved changes" below), not just "some undo happened".
 - **Edge connections**: every shape already on the canvas (not a still-
   armed/not-yet-dropped ghost) has a small circular handle at the
-  midpoint of each of its edges -- selecting the shape first is NOT
-  required (an earlier version needed that, so starting a connection
-  took two clicks: select the shape, then click its handle; now a single
-  click straight onto any handle starts one, whether or not that shape
-  happens to be selected). A handle that's already the endpoint of a
-  real connection is a solid filled dot ("occupied"), stays visible all
-  the time, and is no longer clickable at all -- an edge can only ever
-  be joined ONCE; connecting an already-joined edge a second time is
-  what silently corrupted a hand-built net (transitively merging
-  unrelated vertices together the next time it was saved) before this
-  was fixed. One that isn't yet joined is an UNFILLED (outline-only)
-  ring that
-  only shows up once the cursor is close enough to it -- showing every
-  free handle on every shape at all times was tried first and just read
-  as clutter across a canvas with more than a couple of shapes. The
-  reveal distance is the exact same one a click needs to actually hit
-  the handle, so "visible" and "clickable" never disagree. Click-click,
-  not click-drag:
+  midpoint of each of its edges -- a single click straight onto any
+  handle starts a connection, whether or not that shape is selected. A
+  handle that's already the endpoint of a real connection is a solid
+  filled dot ("occupied"), stays visible all the time, and is no longer
+  clickable at all -- an edge can only ever be joined ONCE; connecting
+  an already-joined edge a second time used to silently corrupt a
+  hand-built net (transitively merging unrelated vertices on the next
+  save). One that isn't yet joined is an UNFILLED (outline-only) ring
+  that only shows up once the cursor is close enough to it, to avoid
+  clutter on a busy canvas. The reveal distance is the exact same one a
+  click needs to actually hit the handle, so "visible" and "clickable"
+  never disagree. Click-click, not click-drag:
   clicking a handle DESELECTS the shape (its outline stops being
   highlighted, if it happened to be selected at all) and "arms" a
   pending connection from that edge instead -- the POINT becomes the
@@ -274,22 +264,14 @@ Interaction model:
   shape -- connecting a shape to one of its own other edges isn't
   supported yet (planned for later; needed for a shape like a leg that
   folds back onto itself). Neither depends on what any
-  OTHER connection elsewhere happens to imply. An EARLIER version also
-  ran a full trial merge (union-find over every corner, following every
-  connection transitively) before allowing a connection to complete, and
-  rejected it live if that merge would force two different corners of
-  some face to collapse into one vertex (a vertex merge error) -- this sounded
-  right but backfired in practice: two individually-free edges that
-  LOOKED like an obviously fine, ordinary connection got silently
-  rejected because of what some OTHER, unrelated connection elsewhere
-  already implied about a shared corner label -- confusing, since that
-  implied sharing is itself just as fluid as any single connection (delete
-  the connection causing it, and the "shared" vertex stops being shared).
-  Treating two corners as fully, physically identified with each other
-  during EDITING, rather than as a purely LOCAL, pairwise link each
-  connection independently represents, was the actual bug -- so making
-  a connection is never REJECTED over what it implies about some other,
-  already-accepted connection elsewhere.
+  OTHER connection elsewhere happens to imply -- a connection is never
+  REJECTED over what it implies about some other, already-accepted
+  connection elsewhere. (A full live trial-merge via union-find was
+  tried and reverted: it treated corners as fully identified with each
+  other during editing rather than as the purely local, pairwise link
+  each connection actually is, so an individually-fine connection could
+  get silently rejected over what an unrelated connection merely
+  implied about a shared corner label.)
 
   What changed since: full structural validation (vertex-merge-error and
   duplicate-directed-edge checks, `_validate_shapes_connections`) is
@@ -388,17 +370,13 @@ Interaction model:
   edge's midpoint handle) rings it and labels it "vSHAPE.CORNER" (white
   text on a 50%-alpha black box, for legibility over any shape color
   underneath) using that corner's OWN `(shape_id, corner_index)` --
-  ALWAYS that, never the union-find ROOT `_vertex_roots` might give it,
-  which can legitimately belong to a different, genuinely-connected
-  shape (e.g. shape 42's own corner 2 showing as "v34.0" because it's
-  really the same vertex as shape 34's corner 0, via however many
-  connections tie the two together). An earlier version showed that
-  root instead, so hovering two corners that already share an id showed
-  identical text -- in principle useful, but confusing in practice on a
-  big, densely-connected net (most corners of most shapes ARE genuinely
-  shared with a neighbor, so most hovers showed a foreign-looking
-  label); a user asked for every corner to always show its own
-  polygon's number instead. A failed Save (`_validate_shapes_
+  ALWAYS that, never the union-find ROOT `_vertex_roots` might give it
+  (e.g. shape 42's own corner 2 showing as "v34.0" because it's really
+  the same vertex as shape 34's corner 0) -- showing the root instead
+  was tried and reverted, since most corners on a densely-connected net
+  ARE genuinely shared with a neighbor, making most hovers show a
+  foreign-looking label instead of the shape actually under the cursor.
+  A failed Save (`_validate_shapes_
   connections`) still names the exact problem in "vSHAPE.CORNER" terms,
   PLUS the specific chain of existing connections responsible
   (`_connection_chain`) -- that, not hovering here, is now how shared or
@@ -481,27 +459,19 @@ NET_FILE_EXTENSION = ".poly"
 # Palette entries, in display order.
 POLYGON_NS = [3, 4, 5, 6, 7, 8]
 
-# One FIXED color per polygon type (never per-instance), each an
-# explicit (hue_deg, lightness, saturation) rather than one formula
-# swept evenly across all 6 -- started that way (an even hue gradient,
-# green -> blue -> purple, flat lightness/saturation throughout except
-# a darker/less-saturated override for two green entries -- see git
-# history), but per-color tweaks since (dropping the first green and
-# shifting the rest up, inserting a new hue between the darker blue and
-# the purple, lightening that darker blue, darkening the turquoise) left
-# the hues unevenly spaced and several with their own lightness/
-# saturation -- an explicit table reads more clearly at this point than
-# a formula with growing exceptions bolted onto it. Order matches
-# POLYGON_NS (triangle..8-gon); base lightness/saturation is 0.50/0.65
-# (medium / medium-high, not maxed-out) except where a color's own tweak
-# departs from it.
+# One FIXED color per polygon type (never per-instance), as an explicit
+# (hue_deg, lightness, saturation) table rather than a formula swept
+# evenly across all 6 -- per-color tweaks over time left hues unevenly
+# spaced, so an explicit table reads more clearly than exceptions
+# bolted onto a formula. Order matches POLYGON_NS (triangle..8-gon);
+# base lightness/saturation is 0.50/0.65 except where a color's own
+# tweak departs from it.
 _POLYGON_HLS = [
-    (136, 0.38, 0.50),  # triangle: green (darker/less saturated -- the
-                         # untouched one of what used to be two greens)
+    (136, 0.38, 0.50),  # triangle: green (darker/less saturated)
     (172, 0.40, 0.65),  # square: turquoise, darkened a bit
     (208, 0.50, 0.65),  # pentagon: blue
     (244, 0.58, 0.65),  # hexagon: darker blue, lightened a bit
-    (262, 0.50, 0.65),  # 7-gon: violet (new -- between the darker blue and purple)
+    (262, 0.50, 0.65),  # 7-gon: violet
     (280, 0.50, 0.65),  # 8-gon: purple
 ]
 
@@ -975,7 +945,7 @@ def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_widt
 # rather than duplicated wholesale from a file that can't be edited to
 # take one.
 
-GAP = DEFAULT_SHAPE_EDGE_LENGTH  # "separated by unit edge length", per the user's own suggestion
+GAP = DEFAULT_SHAPE_EDGE_LENGTH  # separated by one edge length
 
 
 def _faces_shared_edges(faces):
@@ -1295,9 +1265,7 @@ def _face_edge_ids_from_shapes(shapes, connections):
         # Loop position k runs corner_order[k] -> corner_order[k+1]
         # (_shape_face_corner_order); for an unflipped shape that's raw
         # edge k directly, and for a flipped one (corner_order reversed)
-        # it works out to raw edge (n - 2 - k) % n -- verified directly
-        # against _shape_face_corner_order for n=4 flipped: loop
-        # positions 0..3 land on raw edges 2, 1, 0, 3.
+        # it works out to raw edge (n - 2 - k) % n.
         n = shape["n"]
         return k if not shape.get("flipped", False) else (n - 2 - k) % n
 
@@ -1353,10 +1321,10 @@ def _expand_folded_shapes(shapes, connections):
     machinery already knows how to validate. Each folded shape's own `n`
     spokes are added as new connections gluing consecutive triangles at
     the shared centroid (triangle i's edge 1 <-> triangle (i+1)%n's edge
-    2) -- verified by hand: this unions triangle i's own corner 1 with
-    triangle (i+1)%n's corner 0 (the shared original corner i+1) AND both
-    triangles' own corner 2 (the shared centroid), exactly the sharing a
-    real fan of triangles has.
+    2), which unions triangle i's own corner 1 with triangle (i+1)%n's
+    corner 0 (the shared original corner i+1) AND both triangles' own
+    corner 2 (the shared centroid) -- exactly the sharing a real fan of
+    triangles has.
 
     `source_polygon_id` is parallel to `expanded_shapes` (and, after
     _faces_from_shapes, to the exported "faces"): the ORIGINAL shape's
@@ -2632,9 +2600,9 @@ class InteractiveBuilderApp:
         connections, corrupts the mesh -- flipping any single already-
         fully-integrated shape reverses EVERY one of its edges' true
         direction at once, which the freshly re-derived connections
-        don't expect (confirmed directly: re-flipping one shape this way
-        after a round-trip produces exactly the vertex-merge-error/duplicate-edge
-        errors _validate_shapes_connections exists to catch). Restoring
+        don't expect, producing exactly the vertex-merge-error/
+        duplicate-edge errors _validate_shapes_connections exists to
+        catch. Restoring
         "flipped" is only safe together with the EXACT connections it
         was originally paired with, which is what `builder_connections`
         supplies -- there is no way to derive a correct substitute from
@@ -2930,12 +2898,11 @@ class InteractiveBuilderApp:
                  "flipped": False}
         self._next_shape_id += 1
         self.shapes.append(shape)
-        # Left selected (per explicit user request) so it can be
-        # immediately rotated, connected, or copied without a separate
-        # click -- the _on_palette_clicked call right after this (in
-        # _on_canvas_press) only clears a selection when ARMING a new
-        # type, not when disarming (which is what actually happens
-        # here), so this survives that call.
+        # Left selected so it can be immediately rotated, connected, or
+        # copied without a separate click -- the _on_palette_clicked call
+        # right after this (in _on_canvas_press) only clears a selection
+        # when ARMING a new type, not when disarming (which is what
+        # actually happens here), so this survives that call.
         self.selected_ids = {shape["id"]}
         self.selected_connection_id = None
 
@@ -3061,13 +3028,10 @@ class InteractiveBuilderApp:
         mirroring a whole polygon also REVERSES which direction its
         vertices are traversed in (a genuine reflection has no fixed
         handedness the way a rotation does), so the correct replacement
-        rotation also depends on _LOCAL_VERTICES' own starting angle.
-        Verified directly (comparing the FULL vertex set, not just one
-        point, against a true coordinate-negating reflection, for
-        n=3..6 across several rotations): for this app's own
-        _LOCAL_VERTICES convention, `rotation = -rotation` reproduces a
-        HORIZONTAL mirror (flip left-right) and `rotation = pi -
-        rotation` reproduces a VERTICAL one (flip up-down) -- the
+        rotation also depends on _LOCAL_VERTICES' own starting angle. For
+        this app's own _LOCAL_VERTICES convention, `rotation = -rotation`
+        reproduces a HORIZONTAL mirror (flip left-right) and `rotation =
+        pi - rotation` reproduces a VERTICAL one (flip up-down) -- the
         reverse of what the single-point intuition suggests.
 
         Reflecting a shape's OWN vertex set about an axis OTHER than its
@@ -3098,14 +3062,12 @@ class InteractiveBuilderApp:
         actually changed, only which local index each shape happens to
         call it by.
 
-        A touched connection's own bezier handle (2026-09-19, explicit
-        user request) also gets its "t" component NEGATED (the "n"
-        component is left alone) -- verified directly (comparing against
-        genuinely mirroring the handle's own WORLD point, for n=3..6,
-        several rotations, both flipped states, both axes): mirroring
-        reverses which physical direction "corner k -> corner k+1"
-        actually points along a given edge (the same handedness reversal
-        the edge-index remap above exists for), so a "t" (tangent-axis)
+        A touched connection's own bezier handle (2026-09-19, explicit)
+        also gets its "t" component NEGATED (the "n" component is left
+        alone): mirroring reverses which physical direction "corner k ->
+        corner k+1" actually points along a given edge (the same
+        handedness reversal the edge-index remap above exists for), so a
+        "t" (tangent-axis)
         offset must flip sign to keep the control point at its own
         correctly-mirrored world position, while "n" (the normal-axis
         offset, "how far outward from centroid") is a handedness-
@@ -3591,12 +3553,12 @@ class InteractiveBuilderApp:
         # shape -- see _on_canvas_press: the POINT is the selected thing
         # now, not the shape it belongs to) or its CURRENT hover target
         # (`hover_point`) -- deliberately just that one edge, not every
-        # edge of the shape it's on: an earlier version lit the whole
-        # target shape (mirroring how a real selection looks), and the
-        # user asked for it to stop doing that -- only the specific edge
-        # a second click would actually complete onto lights up now,
-        # leaving the rest of that shape (including its outline, in the
-        # shape-drawing loop above) at its normal, unselected look.
+        # edge of the shape it's on (an earlier version lit the whole
+        # target shape, which read as a stray selection): only the
+        # specific edge a second click would actually complete onto
+        # lights up now, leaving the rest of that shape (including its
+        # outline, in the shape-drawing loop above) at its normal,
+        # unselected look.
         # Otherwise a handle is filled white if some connection already
         # uses it, or an unfilled ring if not (see _draw_handle_circle).
         if self.tool_mode in ("join", "fold"):
@@ -3618,10 +3580,9 @@ class InteractiveBuilderApp:
                         # -- HANDLE_HIT_RADIUS again, same as what actually
                         # clicking it requires, so "visible" and "clickable"
                         # never disagree (same principle as the pending-
-                        # connection hover check above). Showing every free
-                        # handle on every shape all the time was tried first
-                        # and read as visual noise across a canvas with more
-                        # than a couple of shapes.
+                        # connection hover check above); showing every free
+                        # handle all the time read as visual noise on a busy
+                        # canvas.
                         if self._cursor_screen is None:
                             continue
                         sx, sy = self._world_to_screen(mx, my)
@@ -3674,13 +3635,11 @@ class InteractiveBuilderApp:
         ROOT slot _vertex_roots might give it (which can legitimately
         belong to some other, genuinely-connected shape, e.g. shape 42's
         own corner 2 showing as "v34.0" because it's really the same
-        vertex as shape 34's corner 0). An earlier version showed that
-        root instead, so hovering two corners that already share an id
-        showed identical text -- useful in principle, but a user found
-        it confusing in practice on a big, densely-connected net like
-        hippo.json (lots of neighboring corners are genuinely shared,
-        so lots of foreign-looking labels), and asked for every corner
-        to always show its own polygon's number. Shared/conflicting
+        vertex as shape 34's corner 0) -- showing the root instead was
+        tried and reverted, since most corners on a big, densely-
+        connected net ARE genuinely shared with a neighbor, so most
+        hovers showed a foreign-looking label instead of the shape
+        actually under the cursor. Shared/conflicting
         identity is still fully diagnosable -- just via
         _validate_shapes_connections's Save-time error and its
         _connection_chain trace, not via hovering here. The label is
