@@ -100,6 +100,7 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 from interactive_builder_app.app import (
     ICON_SIZE, MENU_ACTIVE_BG, MENU_BG, MENU_DISABLED_FG, MENU_FG, NetValidationError,
     POLYGON_COLORS, POLYGON_NS, InteractiveBuilderApp, _ICON_VERTICES, _rasterize_polygon,
+    _enable_windows_dpi_awareness,
 )
 
 INFLATER_APP_DIR = Path(__file__).resolve().parent
@@ -391,6 +392,15 @@ class InflaterPane:
         self.subdivision_level = 0
         self._running = False
 
+        # The plotter's own render resolution -- starts at PANEL_SIZE but is kept in sync with
+        # the panel_label's actual on-screen pixel size by _on_panel_configure below, so the
+        # mesh always renders at full native resolution for whatever space it's actually given
+        # (2026-09-19, explicit: "the resolution... seems low compared to the other apps" --
+        # inflate_polyhedron_app's own panels render at their own fixed, already-correct pixel
+        # size; this app's single panel didn't adapt to ITS pane's real, larger size).
+        self.panel_size = PANEL_SIZE
+        self._resize_after_id = None
+
         self._center = np.zeros(3)
         self._half = 1.0
         self._camera = {"rotation": self._initial_rotation(), "zoom": 1.0, "pan": np.zeros(2)}
@@ -447,9 +457,10 @@ class InflaterPane:
         self.panel_label = tk.Label(self.root, bg=PLOT_THEME["bg"], bd=0,
                                      width=PANEL_SIZE[0], height=PANEL_SIZE[1])
         self.panel_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        self.plotter = pv.Plotter(off_screen=True, window_size=list(PANEL_SIZE))
+        self.plotter = pv.Plotter(off_screen=True, window_size=list(self.panel_size))
         self.plotter.set_background(PLOT_THEME["bg"])
         self._photo = None
+        self.panel_label.bind("<Configure>", self._on_panel_configure)
 
         # Left-drag rotates (trackball), right-drag pans, middle-click resets, wheel zooms --
         # same gesture set as inflate_polyhedron_app's own "Level N" panels, reimplemented for
@@ -497,6 +508,29 @@ class InflaterPane:
         self._running = running
         self.inflate_button.state(["disabled"] if running else ["!disabled"])
 
+    def _on_panel_configure(self, event):
+        """Keeps the off-screen plotter's own render resolution matched to panel_label's real,
+        current pixel size -- debounced via a rescheduled `after` call (Configure fires
+        continuously while the window/sash is being dragged; rebuilding the plotter on every
+        single event would be wasteful and janky) so the actual rebuild+re-render only happens
+        once motion settles. Ignores the initial 1x1 Configure Tk sends before real layout."""
+        width, height = event.width, event.height
+        if width <= 1 or height <= 1:
+            return
+        if (width, height) == self.panel_size:
+            return
+        if self._resize_after_id is not None:
+            self.root.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.root.after(80, lambda: self._apply_panel_resize(width, height))
+
+    def _apply_panel_resize(self, width, height):
+        self._resize_after_id = None
+        self.panel_size = (width, height)
+        self.plotter.close()
+        self.plotter = pv.Plotter(off_screen=True, window_size=[width, height])
+        self.plotter.set_background(PLOT_THEME["bg"])
+        self._render()
+
     # ---- camera (rotate/pan/zoom) ----
 
     @staticmethod
@@ -527,7 +561,7 @@ class InflaterPane:
         camera.focal_point = tuple(self._center)
         camera.position = tuple(self._center + direction * distance)
         camera.up = tuple(up)
-        panel_width, panel_height = PANEL_SIZE
+        panel_width, panel_height = self.panel_size
         camera.parallel_scale = (self._half * max(1.0, panel_height / panel_width)
                                   / PANEL_ZOOM_FILL / cam["zoom"])
         camera.SetWindowCenter(*cam["pan"])
@@ -564,7 +598,7 @@ class InflaterPane:
             return
         last_x, last_y = self._pan_last_xy
         dx, dy = event.x - last_x, event.y - last_y
-        panel_width, panel_height = PANEL_SIZE
+        panel_width, panel_height = self.panel_size
         self._camera["pan"] = self._camera["pan"] + np.array(
             [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
         self._pan_last_xy = (event.x, event.y)
@@ -837,6 +871,13 @@ class CombinedApp:
 
 
 def main():
+    # Must run BEFORE tk.Tk() -- once the window exists it's too late to change how Windows
+    # scales it. Reused from interactive_builder_app (imported, not duplicated) rather than a
+    # second copy in this file; without it, Tk renders at a virtualized 96 DPI and Windows
+    # bitmap-stretches the whole window (UI text included, not just the 3D panel) to the
+    # display's real scaling -- the actual cause of "the entire app... down to the UI. the
+    # text looks fuzzy too" (2026-09-19, explicit).
+    _enable_windows_dpi_awareness()
     root = tk.Tk()
     CombinedApp(root)
     root.mainloop()
