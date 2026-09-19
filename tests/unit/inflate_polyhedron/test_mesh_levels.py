@@ -43,13 +43,33 @@ def _assert_closed_consistent_mesh(faces):
         assert (b, a) in counts, f"edge {a}->{b} has no reverse partner"
 
 
-def test_level_0_triangle_face_is_unchanged():
+def test_level_0_triangle_face_gets_centroid_fan_too():
+    # 2026-09-19, explicit user request: a plain triangle is otherwise
+    # perfectly rigid at the vertex level (3 points can only ever span
+    # one flat plane), so it now gets fanned around its own centroid
+    # into 3 sub-triangles at Level 0/1 too, same as any n>3 face
+    # already was -- see mesh_levels._TRIANGLE_FAN's own docstring.
     positions = _rng_positions(TETRAHEDRON_FACES)
     faces, new_positions, edge_length, face_of_fine = subdivide_once(
         TETRAHEDRON_FACES, positions, EDGE_LENGTH, list(range(len(TETRAHEDRON_FACES))), level=0)
-    assert [tuple(f) for f in faces] == [tuple(f) for f in TETRAHEDRON_FACES]
-    assert set(new_positions) == set(positions)
-    assert face_of_fine == [0, 1, 2, 3]
+    assert len(faces) == 3 * len(TETRAHEDRON_FACES)  # centroid fan: one triangle per side
+    assert face_of_fine == [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
+    new_ids = set(new_positions) - set(positions)
+    assert len(new_ids) == len(TETRAHEDRON_FACES)  # one fresh centroid per original face
+    # every original vertex survives at its exact original position
+    for v, p in positions.items():
+        assert np.array_equal(new_positions[v], p)
+    # each fresh centroid sits at its own face's corner mean, and every
+    # spoke gets the exact circumradius of a unit equilateral triangle
+    expected_spoke = EDGE_LENGTH / (2 * math.sin(math.pi / 3))
+    for face_idx, face in enumerate(TETRAHEDRON_FACES):
+        expected_centroid = np.mean([positions[v] for v in face], axis=0)
+        matches = [v for v in new_ids if np.allclose(new_positions[v], expected_centroid)]
+        assert len(matches) == 1, f"face {face_idx} should have exactly one matching centroid"
+        centroid_id = matches[0]
+        for corner in face:
+            key = tuple(sorted((corner, centroid_id)))
+            assert edge_length[key] == pytest.approx(expected_spoke)
 
 
 def test_level_0_to_1_square_face_adds_centroid_with_exact_spoke_length():

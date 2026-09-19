@@ -1,10 +1,14 @@
 """Interactive, in-app nested mesh subdivision for inflate_polyhedron_app's
 "Subdivide" button. Level 0 is a stretchy net's own (possibly
-non-triangular) base faces; level 1 triangulates every face via the same
-centroid-fan pattern utils.subdivisions.polygon_subdivisions.SUBDIVISIONS
-uses (a triangular face is left unchanged, matching SUBDIVISIONS[3]);
-each level after that quarters every triangle from the level before, by
-connecting edge midpoints (the "triforce" split), up to MAX_LEVEL.
+non-triangular) base faces; level 1 triangulates every face via a
+centroid fan -- for an n>3 face, the same pattern utils.subdivisions.
+polygon_subdivisions.SUBDIVISIONS uses; for an ALREADY-triangular face
+too (2026-09-19, explicit user request, see _TRIANGLE_FAN's own comment
+for why -- this is a LOCAL override, not a change to SUBDIVISIONS[3]
+itself, which stays the identity for utils.subdivisions' own unrelated
+2D-preview consumers). Each level after that quarters every triangle
+from the level before, by connecting edge midpoints (the "triforce"
+split), up to MAX_LEVEL.
 
 Unlike utils.subdivisions (which builds a mesh from scratch at one
 absolute resolution, purely as a 2D preview), this operates
@@ -32,6 +36,23 @@ from utils.subdivisions.polygon_subdivisions import SUBDIVISIONS, MAX_LEVEL
 
 __all__ = ["MAX_LEVEL", "subdivide_once", "base_rest_lengths"]
 
+# _fan_level_0_to_1's own LOCAL override for a 3-gon, in place of
+# SUBDIVISIONS[3] (the identity -- utils.subdivisions.polygon_
+# subdivisions' own, used by the unrelated 2D-preview app, deliberately
+# left untouched: n=3 needs no centroid there since a triangle is
+# already the finest mesh cell). Here, though, a PLAIN triangle face is
+# otherwise perfectly rigid at the vertex level -- 3 points can only
+# ever span one flat plane, so pressure has literally nothing to act on
+# there until a LATER Subdivide's own quartering gives it real degrees
+# of freedom (2026-09-19, explicit user request: "triangles should be
+# subdivided too ... that way the face will be able to inflate a bit
+# even at level 1"). Fanning it around its own centroid into 3
+# sub-triangles -- same shape as SUBDIVISIONS[n] for n>3, just with n=3
+# -- gives every triangular face the SAME spoke-based freedom to dome
+# outward under pressure that a quad/pentagon/etc. face already had from
+# Level 0/1 onward, rather than leaving it flat until Level 2.
+_TRIANGLE_FAN = [(0, 1, "C"), (1, 2, "C"), (2, 0, "C")]
+
 
 def base_rest_lengths(faces, edge_length):
     """faces: base vertex-loop faces; edge_length: uniform rest length.
@@ -58,11 +79,13 @@ def _spoke_rest_length(n, edge_length):
 def _fan_level_0_to_1(faces, positions, rest_lengths, face_of_fine, edge_length):
     """faces: base vertex-loop faces (level 0); positions: {vertex_id:
     np.ndarray(3,)}; rest_lengths: base_rest_lengths' result; face_of_fine:
-    identity list at level 0. Triangulates every face via SUBDIVISIONS
-    (unchanged for an already-triangular face); a new centroid's position
-    is its own face's corner mean, its spoke rest length the exact
-    circumradius (_spoke_rest_length) -- rim edges are untouched, so their
-    rest lengths carry over unchanged. Returns (new_faces, new_positions,
+    identity list at level 0. Triangulates every face via a centroid fan
+    -- SUBDIVISIONS for n>3, or _TRIANGLE_FAN (this module's own local
+    override, see its own comment for why) for an ALREADY-triangular
+    face; a new centroid's position is its own face's corner mean, its
+    spoke rest length the exact circumradius (_spoke_rest_length, valid
+    for any n including 3) -- rim edges are untouched, so their rest
+    lengths carry over unchanged. Returns (new_faces, new_positions,
     new_rest_lengths, new_face_of_fine)."""
     next_id = 1 + max(positions)
     new_positions = dict(positions)
@@ -74,8 +97,8 @@ def _fan_level_0_to_1(faces, positions, rest_lengths, face_of_fine, edge_length)
         if n not in SUBDIVISIONS:
             raise ValueError(f"no hardcoded subdivision for a {n}-gon")
         centroid_id = None
-        spoke_len = _spoke_rest_length(n, edge_length) if n > 3 else None
-        for tri in SUBDIVISIONS[n]:
+        spoke_len = _spoke_rest_length(n, edge_length)
+        for tri in (_TRIANGLE_FAN if n == 3 else SUBDIVISIONS[n]):
             ids = []
             for ref in tri:
                 if ref == "C":

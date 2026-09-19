@@ -1021,7 +1021,26 @@ def random_initial_positions(faces, spread=INITIAL_RANDOM_SPREAD, seed=0):
 # broader 5-net check (cube/hippo/octahedron/dodecahedron/three_squares)
 # at gtol=1e-3 with the kick enabled converges cleanly for every one of
 # them at this value.
-LEVEL0_STEP_MAX_MULTIPLIER = 0.2
+#
+# Lowered again, 0.2 -> 0.1 (2026-09-19, explicit user request), once
+# mesh_levels._TRIANGLE_FAN started fanning every triangular face around
+# its own centroid at Level 0/1 too: a high-valence "joint" vertex
+# shared by many triangles (data/input/stretchy_nets/
+# composite_spider_leg.poly's own vertices 0/5, each touching 8 base
+# faces) now picks up one extra spoke spring per incident triangle --
+# a large, localized jump in effective local stiffness right at that
+# vertex, which diverged explosively (position norms reaching ~1e83
+# within the very first CONVERGENCE_CHECK_INTERVAL) under the OLD fixed
+# 0.2 step for this explicit, non-adaptive integrator (see this
+# constant's own "no adaptive step-shrink" design note). 0.1 verified
+# directly to keep composite_spider_leg stable (800 steps to converge)
+# while every previously-working net (pinched_tri_hex, two_triangles,
+# cube, hippo, dodecahedron, three_squares) still converges cleanly too
+# -- slower (e.g. hippo: 3,400 -> 8,600 steps) but not by an amount that
+# matters at this project's scale; smaller multipliers tried (0.05,
+# 0.02, 0.01) bought no further stability benefit, just more steps
+# everywhere, so 0.1 is the smallest change that fixes the regression.
+LEVEL0_STEP_MAX_MULTIPLIER = 0.1
 
 
 def _spring_only_force(pts, edge_ai, edge_bi, edge_length):

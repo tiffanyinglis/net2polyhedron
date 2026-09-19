@@ -1537,6 +1537,27 @@ class InflatePolyhedronApp:
         # subdivide to). Only the current frontier level's button is
         # ever enabled.
         self.level_action_buttons = {}
+        # Debug-mode-only replay scrubber, one per level with an
+        # Inflate/Subdivide button (levels 1..MAX_LEVEL -- Level 0's own
+        # Relax has no captured frames to scrub, see on_relax_clicked's
+        # own docstring: relax_initial_configuration doesn't support
+        # capture_frames at all). 2026-09-19, explicit user request:
+        # "add a slider ... to control the replay ... the user can use
+        # the slider to replay the inflation" -- lets a user manually
+        # inspect ANY point in a level's own last-captured Inflate
+        # trajectory, not just the live end state or the one-shot
+        # auto-played animation. self._level_frames[level] is that
+        # level's own captured (positions, steps_taken) list, kept even
+        # after Subdividing past that level so an OLDER level stays
+        # scrubbable; self._level_scrub_index[level], when both it and
+        # frames exist, OVERRIDES what draw() shows for that level's own
+        # panel (see draw()'s own comment) -- self.positions/
+        # level_snapshots themselves are NEVER touched by scrubbing, so
+        # the next real action (Inflate/Subdivide) always continues from
+        # the TRUE state regardless of wherever the slider is sitting.
+        self._level_frames = {}
+        self._level_scrub_index = {}
+        self.level_replay_sliders = {}
         for level in range(0, MAX_LEVEL + 1):
             level_frame = ttk.Frame(panels_row)
             # No fill/expand -- see panels_row's own comment on why
@@ -1545,6 +1566,17 @@ class InflatePolyhedronApp:
             self.level_frames[level] = level_frame
             button = ttk.Button(level_frame, text="Relax" if level == 0 else "Inflate")
             self.level_action_buttons[level] = button
+            if level > 0:
+                # Packed FIRST among this frame's own BOTTOM-side widgets
+                # (Tk stacks additional bottom-packed siblings upward from
+                # the true bottom edge in packing order), so it lands
+                # BELOW the button once that's packed next -- "under the
+                # subdivide/inflate button[s]", per the request.
+                slider = ttk.Scale(level_frame, from_=0, to=0, orient=tk.HORIZONTAL,
+                                    command=lambda v, lvl=level: self._on_replay_slider_moved(lvl, v))
+                slider.state(["disabled"])
+                self.level_replay_sliders[level] = slider
+                slider.pack(side=tk.BOTTOM, in_=level_frame)
             # Button packed BEFORE the panel widget, at BOTTOM -- packing
             # it AFTER an expand=True widget would starve it of space,
             # since that widget (packed first) would already have
@@ -1804,6 +1836,12 @@ class InflatePolyhedronApp:
         if self.debug_mode:
             self.mode_row.pack(fill=tk.X, pady=(8, 0))
             self.status_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
+            # Sliders packed BEFORE their own level's button (so they
+            # land below it, same bottom-stacking order __init__ used --
+            # see its own comment) -- both debug-only, same as the
+            # buttons themselves.
+            for level, slider in self.level_replay_sliders.items():
+                slider.pack(side=tk.BOTTOM, in_=self.level_frames[level])
             for button in self.level_action_buttons.values():
                 button.pack(side=tk.BOTTOM)
         else:
@@ -1834,6 +1872,8 @@ class InflatePolyhedronApp:
             # would call, so it's unaffected by these being unpacked.
             for button in self.level_action_buttons.values():
                 button.pack_forget()
+            for slider in self.level_replay_sliders.values():
+                slider.pack_forget()
 
     def _refit_window_height(self):
         """Re-fits the window's own HEIGHT to whatever's actually visible
@@ -2652,6 +2692,14 @@ class InflatePolyhedronApp:
         self.level_snapshots = {}
         self.history_tree.delete(*self.history_tree.get_children())
         self.stop_event = None
+        # A freshly-loaded net's own levels have no captured Inflate
+        # frames yet -- clears every level's replay slider back to
+        # disabled/empty rather than leaving the PREVIOUS net's own
+        # trajectory scrubbable here.
+        self._level_frames = {}
+        self._level_scrub_index = {}
+        for level in self.level_replay_sliders:
+            self._update_replay_slider(level)
         # A fresh net starts over cleanly -- an Auto sequence from the
         # PREVIOUS net (the combo/other controls it would need are
         # disabled during a run anyway, so this can only really happen
@@ -2878,6 +2926,15 @@ class InflatePolyhedronApp:
 
         self.history_tree.delete(*self.history_tree.get_children())
         self.stop_event = None
+        # A loaded session carries no captured Inflate frames of its own
+        # (never part of SessionStateModel -- see _level_frames' own
+        # comment in __init__) -- clears every level's replay slider
+        # rather than leaving some OTHER net's own trajectory scrubbable
+        # here.
+        self._level_frames = {}
+        self._level_scrub_index = {}
+        for level in self.level_replay_sliders:
+            self._update_replay_slider(level)
         self._auto_active = False
         self._auto_attempted_level = None
         self._apply_mode_visibility()
@@ -3629,6 +3686,15 @@ class InflatePolyhedronApp:
                             "pressure_found": pressure_found}
         self._record_level_history()
         final_result = (new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged)
+        # Made available for manual scrubbing (see this level's own
+        # replay slider, built in __init__) right away, defaulted to the
+        # true final frame -- not gated on the auto-played animation
+        # below actually finishing, so the slider is already usable the
+        # instant a result exists, even while that animation is still
+        # playing.
+        self._level_frames[self.subdivision_level] = frames
+        self._level_scrub_index[self.subdivision_level] = len(frames) - 1
+        self._update_replay_slider(self.subdivision_level)
         self._start_frame_replay(frames, final_result, base_iteration_count)
 
     # Target frames per second during a replay (see _start_frame_replay)
@@ -3765,6 +3831,56 @@ class InflatePolyhedronApp:
         self._set_level_message(self.subdivision_level, "")
         self.draw()
         self._finish_inflate()
+
+    def _update_replay_slider(self, level):
+        """Configures level `level`'s own replay scrubber (built in
+        __init__) to match self._level_frames[level] -- the slider's own
+        range spans every captured frame index, enabled iff at least 2
+        frames exist (a single frame has nothing to scrub between). Also
+        re-syncs the slider's own displayed position to self._level_
+        scrub_index[level] (set by whoever populated the frames -- see
+        _on_pressure_calibrated) -- `ttk.Scale.set` DOES fire `command`
+        (verified directly), so this harmlessly re-triggers
+        _on_replay_slider_moved with the SAME index it was already at --
+        idempotent (redraws the same already-current frame), not a real
+        scrub action."""
+        slider = self.level_replay_sliders.get(level)
+        if slider is None:
+            return
+        frames = self._level_frames.get(level)
+        if not frames or len(frames) < 2:
+            slider.configure(to=0)
+            slider.set(0)
+            slider.state(["disabled"])
+            return
+        slider.configure(from_=0, to=len(frames) - 1)
+        slider.state(["!disabled"])
+        slider.set(self._level_scrub_index.get(level, len(frames) - 1))
+
+    def _on_replay_slider_moved(self, level, value):
+        """`command` callback for level `level`'s own replay scrubber --
+        `value` is ttk.Scale's own string-formatted float; rounded to the
+        nearest captured frame index (clamped, since a Scale can report a
+        value fractionally past its own `to` during a fast drag). Purely
+        a DISPLAY override: updates self._level_scrub_index[level] (read
+        by draw(), see its own comment) and redraws just this one panel
+        directly, without touching self.positions/self.level_snapshots
+        at all -- scrubbing an OLDER level, or scrubbing away from the
+        frontier level's own true final frame, never affects what the
+        next real Inflate/Subdivide click actually continues from."""
+        frames = self._level_frames.get(level)
+        if not frames:
+            return
+        idx = max(0, min(int(round(float(value))), len(frames) - 1))
+        self._level_scrub_index[level] = idx
+        if level == self.subdivision_level:
+            faces, face_of_fine = self.faces, self.face_of_fine
+        elif level in self.level_snapshots:
+            snap = self.level_snapshots[level]
+            faces, face_of_fine = snap["faces"], snap["face_of_fine"]
+        else:
+            return
+        self._draw_level_panel(level, faces, frames[idx][0], face_of_fine)
 
     def _set_level_action_button_running(self, running):
         """Neither mode has a separate Stop button -- instead, the
@@ -4520,18 +4636,34 @@ class InflatePolyhedronApp:
         (see _draw_level_panel). Every level panel shares ONE camera
         orientation (self.level_rotation, see __init__'s Design notes)
         -- nothing further to sync here, since _draw_level_panel already
-        renders every panel from that same shared state on every call."""
+        renders every panel from that same shared state on every call.
+
+        A level with an ACTIVE replay-slider scrub (self._level_frames/
+        _level_scrub_index both set for it, see _update_replay_slider's
+        own docstring) shows that captured frame's own positions
+        INSTEAD of its live/frozen ones -- faces/face_of_fine are still
+        whichever of the two above apply (a captured trajectory never
+        changes a level's own topology, only its positions over time),
+        so this only ever substitutes positions, and only for a level
+        that's actually been reached (faces is not None) -- self.
+        positions/level_snapshots themselves are left untouched either
+        way, so this is purely a display override."""
         theme = self._apply_plot_theme()
         self._draw_target_faces(theme)
         for level in self.level_plotters:
             if level == self.subdivision_level:
-                self._draw_level_panel(level, self.faces, self.positions, self.face_of_fine)
+                faces, positions, face_of_fine = self.faces, self.positions, self.face_of_fine
             elif level in self.level_snapshots:
                 snap = self.level_snapshots[level]
-                self._draw_level_panel(level, snap["faces"], snap["positions"],
-                                        snap["face_of_fine"])
+                faces, positions, face_of_fine = (snap["faces"], snap["positions"],
+                                                    snap["face_of_fine"])
             else:
-                self._draw_level_panel(level, None, None, None)
+                faces = positions = face_of_fine = None
+            frames = self._level_frames.get(level)
+            scrub_idx = self._level_scrub_index.get(level)
+            if faces is not None and frames and scrub_idx is not None:
+                positions = frames[scrub_idx][0]
+            self._draw_level_panel(level, faces, positions, face_of_fine)
         self._draw_idle_all()
 
 

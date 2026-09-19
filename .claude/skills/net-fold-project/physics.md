@@ -27,7 +27,12 @@ an edge with no reverse partner is a valid open boundary (mesh need not be close
 - **Level 0** (`_spring_only_force`): plain Hooke, `f = stretch`. Deliberately NOT hardening —
   no pressure to resist there, hardening's smaller tuned step size only slowed it down and,
   combined with the kick mechanism, caused false "stuck" jiggling. Own step constant
-  `LEVEL0_STEP_MAX_MULTIPLIER = 0.2`.
+  `LEVEL0_STEP_MAX_MULTIPLIER = 0.1` (0.2 -> 0.1, 2026-09-19, explicit user request — a
+  high-valence "joint" vertex shared by many triangles, e.g. composite_spider_leg.poly's vertex 0/5
+  each touching 8 base faces, gained one extra spoke spring per incident triangle once every
+  triangular face started getting fanned too (see mesh_levels._TRIANGLE_FAN below) — enough local
+  stiffness increase to diverge explosively under the old fixed 0.2 step; 0.1 keeps it stable, still
+  converges cleanly on every previously-working net, just somewhat slower).
 - **Level 1+** (`_relax_force`): HARDENING spring, `f = stretch + c*stretch^3`,
   `c = HARDENING_CUBIC_COEFFICIENT = 0.5`. Added because plain linear can't hold pressure past a
   critical value (pressure push ~area~length^2, linear spring pull only ~length) — real rubber
@@ -152,7 +157,7 @@ never divides by anything.
 - `DEFAULT_TOLERANCE = 1e-4` (app's Tolerance spinner default)
 - `CONVERGENCE_GTOL = 1e-4` (module default when no gtol passed)
 - `INFLATE_SAFETY_STEP_CAP = 50000` (app, hard per-attempt step cap)
-- `HARDENING_CUBIC_COEFFICIENT = 0.5`, `STEP_MAX_MULTIPLIER = 0.05`, `LEVEL0_STEP_MAX_MULTIPLIER = 0.2`
+- `HARDENING_CUBIC_COEFFICIENT = 0.5`, `STEP_MAX_MULTIPLIER = 0.05`, `LEVEL0_STEP_MAX_MULTIPLIER = 0.1`
 - `CONVERGENCE_CHECK_INTERVAL = 200`
 
 ## Auto (app)
