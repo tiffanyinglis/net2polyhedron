@@ -1420,10 +1420,17 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                 on_progress(trial_base + steps_taken)
         need_progress = capture_frames or on_progress is not None
         try:
-            result = relax_once(positions, faces, edge_length, pressure,
-                                 max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
-                                 rng=rng, on_progress=_relax_progress if need_progress else None,
-                                 edges=edges)
+            # A trial pressure far outside the sane range is EXPECTED to
+            # blow the integrator up toward NaN/Inf before the
+            # LinAlgError below catches it -- silence the resulting
+            # float overflow warnings for this deliberately-tried bad
+            # trial only; overflow/invalid warnings anywhere else in the
+            # codebase (a real bug) still surface normally.
+            with np.errstate(over='ignore', invalid='ignore'):
+                result = relax_once(positions, faces, edge_length, pressure,
+                                     max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
+                                     rng=rng, on_progress=_relax_progress if need_progress else None,
+                                     edges=edges)
             _, trial_steps, _, rms_stretch, _, _ = result
         except np.linalg.LinAlgError:
             # A pathological trial (e.g. a pressure far outside any sane
