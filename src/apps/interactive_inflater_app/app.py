@@ -175,6 +175,36 @@ LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}
 # rather than imported (this app never imports that module -- see its own docstring).
 SAFETY_STEP_CAP = 50000
 
+# Diff Inflate's own looser acceptance tolerance (vs. estimate_pressure_for_target_stretch's own
+# default tol_pct=1.0) when seeding its pressure search from the last successful inflate's own
+# converged pressure (2026-09-19, explicit: "If it results in more than 5% different from the
+# target stretch, then you can do another guess" -- i.e. within 5% needs no second guess at
+# all). Only the Diff Inflate paths pass this; Full Inflate keeps the function's own default.
+DIFF_PRESSURE_GUESS_TOL_PCT = 5.0
+
+# Polygon-edge line width in the 3D panel (2026-09-19, explicit: "the edges in the 3d view
+# should be drawn thicker" -- was 1.5, then 3.0). The yellow hover highlight stays visually
+# thicker still (HOVER_HIGHLIGHT_LINE_WIDTH) so it always reads as distinct from the ordinary
+# edges.
+POLYGON_EDGE_LINE_WIDTH = 5.0
+# The back/inside rim's own width, a bit thicker than the front's -- the two add_lines calls
+# originally passed the SAME width, but the back segments still visually read as thinner
+# (2026-09-19, explicit: "the backside rims seem a bit thinner than the frontside rims") --
+# most likely the darker backside fill color underneath a same-width, similarly-toned line
+# reads as lower-contrast/thinner than the front's lighter fill; compensated here rather than
+# by fighting color contrast. Was 4.0 when POLYGON_EDGE_LINE_WIDTH was 3.0 (2026-09-19,
+# explicit: "make the widths 5 for frontside and 6 for backside").
+POLYGON_EDGE_LINE_WIDTH_BACK = 6.0
+HOVER_HIGHLIGHT_LINE_WIDTH = 7.0
+
+# The polygon-rim overlay's own back/inside weight (front stays a plain 50/50 _midpoint_color)
+# -- 75% the backside (already-darkened) fill color/25% white -- tried 80/20 then 90/10, settled
+# back on 75/25 (2026-09-19, explicit: "no no, for the rim it should be 0.75... this is all for
+# the backside") -- see _group_boundary_lines_by_side/_render's own front_rim/back_rim split.
+# BACK_EDGE_WEIGHT (the FINE subdivision wireframe's own backside weight, a separate constant)
+# settled at 0.85, same explicit message.
+POLYGON_RIM_BACK_WEIGHT = 0.75
+
 # Smaller than inflate_polyhedron_app's own Level-1..3 panels would suggest (LEVEL_PANEL_WIDTH_
 # LEVELS_1_3 x LEVEL_PANEL_HEIGHT there) would be too cramped for a SINGLE panel carrying all the
 # detail 4 panels normally split -- this sits between that and this app's earlier, too-large
@@ -213,6 +243,30 @@ def _midpoint_color(color_a, color_b):
 def _darken_color(color, factor=INSIDE_FACE_DARKEN_FACTOR):
     """`color` scaled toward black by `factor`, as an (r, g, b) tuple in [0, 1]."""
     return tuple(np.array(mcolors.to_rgb(color)) * factor)
+
+
+def _weighted_color(color, weight, other="white"):
+    """`weight` fraction `color` blended with `(1 - weight)` fraction `other`, as an (r, g, b)
+    tuple in [0, 1] -- e.g. _weighted_color(face_color, 0.75) is 75% face_color/25% white."""
+    a, b = np.array(mcolors.to_rgb(color)), np.array(mcolors.to_rgb(other))
+    return tuple(weight * a + (1 - weight) * b)
+
+
+# The FINE subdivision mesh's own wireframe -- much fainter than the bold polygon-outline
+# overlay (POLYGON_EDGE_LINE_WIDTH, a 50/50 blend -- also front/back split, see
+# _group_boundary_lines_by_side) it sits underneath, and thinner too. Separate front/back
+# weights (2026-09-19, explicit: first "for the front faces, use 85/15... for the back faces,
+# use 95/5", then "make backside lines 85/15 as well", then "backside lines should be 85%
+# backside face color and 15% white", then "try back_edge_weight=0.9") -- FRONT_EDGE_WEIGHT
+# blends the outward-facing `color` against white; BACK_EDGE_WEIGHT blends the actor's OWN
+# (already-darkened) inside fill color against white too (not black -- an earlier attempt
+# blended toward black, reverted the same day). Two SEPARATE weights/actors (not one shared),
+# because VTK ties edge color to the ACTOR, not to front/back orientation, so a single actor
+# can't give front and back independent edge colors -- see _render's own two-actor culling
+# setup.
+FRONT_EDGE_WEIGHT = 0.85
+BACK_EDGE_WEIGHT = 0.9
+SUBDIVISION_EDGE_LINE_WIDTH = 0.75
 
 
 def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
@@ -394,6 +448,100 @@ class BuilderPane(InteractiveBuilderApp):
                                     for wv in self._shape_world_vertices(shape)]
                 flat = [coord for point in screen_vertices for coord in point]
                 self.canvas.create_polygon(flat, outline="yellow", fill="", width=3)
+
+    # Read-only lock (2026-09-19, explicit) -- another class attribute for the same
+    # before-__init__-finishes reason as on_change/_hover_shape_id above. True for the whole
+    # duration of ANY running inflate (InflaterPane._set_running wires this via set_locked),
+    # so a mid-computation edit can never invalidate the mesh the background thread is
+    # actively working from. Move/rotate/pan/zoom stay allowed throughout -- none of them are
+    # guarded below, and none of them affect the exported mesh at all (classify_change ignores
+    # cx/cy/rotation entirely) -- only actions that ADD/REMOVE a shape or connection, or an
+    # UNDO/REDO/LOAD that could do either, are blocked.
+    _locked = False
+
+    def set_locked(self, locked):
+        """Called by InflaterPane._set_running. Locking forces the tool mode back to "move"
+        (Join/Fold's own click-click gesture is blocked at the tool-mode level below, but
+        forcing back to "move" immediately also stops a Join/Fold selection from sitting there
+        looking active while it can't be completed) and swaps the bottom status line to a
+        fixed explanatory message -- unlocking hands the status line back to the ordinary
+        vertex-merge-error display (_refresh_vme_state, which every edit already keeps
+        current)."""
+        if locked == self._locked:
+            return
+        self._locked = locked
+        if locked:
+            self._set_tool_mode("move")
+            self.status_label.config(text="Model is not editable until inflation is complete.",
+                                      foreground=PLOT_THEME["fg"])
+        else:
+            self._refresh_vme_state()
+        self._redraw()
+
+    def _on_palette_clicked(self, n):
+        if self._locked:
+            return
+        super()._on_palette_clicked(n)
+
+    def _set_tool_mode(self, mode):
+        # Blocks switching INTO Join/Polygon Fold while locked (their own click-click gesture
+        # is what creates/edits a connection) -- "move" itself is always allowed, since that's
+        # exactly the plain select/drag/rotate/pan gesture set the net stays read-only-but-
+        # interactive for.
+        if self._locked and mode != "move":
+            return
+        super()._set_tool_mode(mode)
+
+    def _on_delete_key(self, _event):
+        if self._locked:
+            return
+        super()._on_delete_key(_event)
+
+    def _flip_selected_shapes(self, axis):
+        # Flip changes a shape's own "flipped" field, which classify_change DOES compare (see
+        # its own docstring) -- unlike a plain move/rotate, this is a real topology-relevant
+        # edit, so it's blocked while locked too.
+        if self._locked:
+            return
+        super()._flip_selected_shapes(axis)
+
+    def on_copy_key(self, _event=None):
+        if self._locked:
+            return
+        super().on_copy_key(_event)
+
+    def on_paste_key(self, _event=None):
+        if self._locked:
+            return
+        super().on_paste_key(_event)
+
+    def on_undo_key(self, _event=None):
+        if self._locked:
+            return
+        super().on_undo_key(_event)
+
+    def on_redo_key(self, _event=None):
+        if self._locked:
+            return
+        super().on_redo_key(_event)
+
+    # Same before-__init__-finishes reasoning as on_change/_hover_shape_id/_locked above --
+    # wired to InflaterPane.on_load_success once both panes exist (CombinedApp.__init__).
+    on_load_success = None
+
+    def on_load_clicked(self):
+        if self._locked:
+            return
+        shapes_before = self.shapes
+        super().on_load_clicked()
+        # _load_faces (the inherited method a successful Load funnels through) always
+        # REASSIGNS self.shapes to a fresh list (`self.shapes = []`, then appended into) --
+        # never mutates the old one in place -- so an identity change here means the load
+        # actually went through, as opposed to a failed one (a bad file shows its own error
+        # box and returns with self.shapes untouched). 2026-09-19, explicit: "as soon as i
+        # load a file, it should also inflate" (when Auto Inflate is checked).
+        if self.shapes is not shapes_before and self.on_load_success is not None:
+            self.on_load_success()
 
     def _refresh_vme_state(self):
         """Runs InteractiveBuilderApp's own vertex-merge-error check unchanged, then notifies
@@ -691,6 +839,12 @@ class InflaterPane:
         # positions by STABLE root identity instead of raw (edit-shiftable) vertex id -- see
         # InflaterPane._diff_reexport_and_relax.
         self.last_root_to_vertex_id = None
+        # The Level-3 pressure the last successful inflate converged at -- seeds Diff Inflate's
+        # own next pressure search (see _run_inflate_step's own initial_pressure_guess/tol_pct
+        # params and DIFF_PRESSURE_GUESS_TOL_PCT) instead of that search's generic area-based
+        # guess, since a Diff Inflate's mesh is usually only a small perturbation of the one
+        # that converged at this pressure (2026-09-19, explicit).
+        self.last_pressure = None
         # Staged by whichever pipeline path is currently running (on_full_inflate_clicked/
         # _diff_add_face/_diff_remove_face) -- _record_inflate_success adopts it as the new
         # self.last_source_polygon_id once that path reaches a clean Level-3 "Done", but
@@ -781,6 +935,13 @@ class InflaterPane:
             button_row, text="Diff Inflate", command=self.on_diff_inflate_clicked)
         self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
         self.diff_inflate_button.state(["disabled"])
+        # Default checked (2026-09-19, explicit) -- whenever refresh_diff_eligibility finds a
+        # single-face/connection add/remove since the last completed inflate (the SAME
+        # DIFF_ELIGIBLE_KINDS check the button's own enabled state uses), it fires Diff Inflate
+        # automatically instead of just enabling the button.
+        self.auto_inflate_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(button_row, text="Auto Inflate", variable=self.auto_inflate_var).pack(
+            side=tk.LEFT, padx=(8, 0))
 
         self.status_label = ttk.Label(self.root, anchor="w", padding=(8, 3))
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
@@ -842,7 +1003,11 @@ class InflaterPane:
         button switches to "Stop" (still enabled, now wired to _on_stop_clicked), the OTHER one
         disables. running=False: both buttons return to their normal text/command
         (2026-09-19, explicit: "After Diff Inflate or Full Inflate are clicked, they should
-        change to Stop so that the user can stop the simulation")."""
+        change to Stop so that the user can stop the simulation"). Either way, also locks/
+        unlocks the LEFT pane (BuilderPane.set_locked) -- while an inflate of any kind is
+        running, the net stays read-only (move/rotate/pan/the 3D camera still work; add/
+        delete/connect don't) so a mid-computation edit can never invalidate the mesh the
+        background thread is actively working on (2026-09-19, explicit)."""
         self._running = running
         if running:
             self._active_button = active
@@ -856,6 +1021,8 @@ class InflaterPane:
             self.full_inflate_button.config(text="Full Inflate", command=self.on_full_inflate_clicked)
             self.full_inflate_button.state(["!disabled"])
             self.diff_inflate_button.config(text="Diff Inflate", command=self.on_diff_inflate_clicked)
+        self.builder_getter().set_locked(running)
+        if not running:
             self.refresh_diff_eligibility()
 
     def _on_stop_clicked(self):
@@ -925,20 +1092,36 @@ class InflaterPane:
 
     DIFF_ELIGIBLE_KINDS = ("add_face", "remove_face", "add_connection", "remove_connection")
 
+    def on_load_success(self):
+        """Wired from BuilderPane.on_load_success (CombinedApp.__init__) -- fires right after a
+        Load actually replaces the net. Always a Full Inflate, never Diff (a freshly-loaded net
+        has no relation to whatever self.last_shapes_snapshot/last_pressure/etc. were from
+        before, if anything). A no-op if Auto Inflate is unchecked or something's already
+        running (2026-09-19, explicit: "as soon as i load a file, it should also inflate")."""
+        if self.auto_inflate_var.get() and not self._running:
+            self.on_full_inflate_clicked()
+
     def refresh_diff_eligibility(self):
         """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
         current net differs from that completed state by exactly one added/removed shape or
         connection (BuilderPane.classify_change, DIFF_ELIGIBLE_KINDS) -- called after every
         completed Inflate click (via _set_running) and after every builder edit
         (BuilderPane.on_change, wired from CombinedApp) so the button's enabled state always
-        reflects the LIVE net, not just whatever it was the last time Inflate ran."""
+        reflects the LIVE net, not just whatever it was the last time Inflate ran. When Auto
+        Inflate is checked (default on, 2026-09-19, explicit), an eligible change fires
+        Diff Inflate immediately instead of just enabling the button -- "every time there is a
+        [topological] change to the model... it automatically does a Diff Inflate" (a plain
+        move/rotate never reaches here as anything but "none", since classify_change already
+        ignores cx/cy/rotation entirely -- see its own docstring)."""
         if self._running or self.last_shapes_snapshot is None:
             self.diff_inflate_button.state(["disabled"])
             return
         kind, _extra = self.builder_getter().classify_change(
             self.last_shapes_snapshot, self.last_connections_snapshot)
-        self.diff_inflate_button.state(
-            ["!disabled"] if kind in self.DIFF_ELIGIBLE_KINDS else ["disabled"])
+        eligible = kind in self.DIFF_ELIGIBLE_KINDS
+        self.diff_inflate_button.state(["!disabled"] if eligible else ["disabled"])
+        if eligible and self.auto_inflate_var.get():
+            self.on_diff_inflate_clicked()
 
     def _on_panel_configure(self, event):
         """Keeps the off-screen plotter's own render resolution matched to panel_label's real,
@@ -1086,8 +1269,8 @@ class InflaterPane:
             self.plotter.remove_actor(self._hover_actor)
             self._hover_actor = None
         if group is not None:
-            self._hover_actor = self.plotter.add_lines(
-                self._group_boundary_lines(group), color="yellow", width=4)
+            self._hover_actor = self._add_rounded_lines(
+                self._group_boundary_lines(group), "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
         self.plotter.render()
         image = self.plotter.screenshot(return_img=True)
         self._photo = ImageTk.PhotoImage(Image.fromarray(image))
@@ -1100,6 +1283,20 @@ class InflaterPane:
         self.builder_getter().set_hover_shape(shape_id)
 
     # ---- rendering ----
+
+    def _add_rounded_lines(self, segments, color, width):
+        """add_lines, but with rounded caps/joins at every segment end (2026-09-19, explicit:
+        "make all the line ends rounded") -- add_lines has no render_lines_as_tubes parameter
+        of its own (unlike add_mesh, which does), so this sets it on the returned actor's own
+        Property afterward instead. Used for every line-primitive actor this pane draws (the
+        polygon-rim overlay, front and back, and the yellow hover highlight). NOT used for the
+        FINE subdivision wireframe (add_mesh's own show_edges, in _render) -- PyVista silently
+        drops show_edges entirely whenever render_lines_as_tubes is also requested on the same
+        add_mesh call, which would delete that wireframe outright rather than just rounding its
+        caps, so it keeps VTK's default flat line ends."""
+        actor = self.plotter.add_lines(segments, color=color, width=width)
+        actor.prop.render_lines_as_tubes = True
+        return actor
 
     def _group_boundary_lines(self, group):
         """The ORIGINAL polygon's own rim, at its CURRENT (possibly already-inflated) 3D
@@ -1133,6 +1330,46 @@ class InflaterPane:
             segments[2 * i + 1] = self.positions[v]
         return segments
 
+    def _group_boundary_lines_by_side(self, group):
+        """Same rim-finding as _group_boundary_lines, but splits the result into (front_segs,
+        back_segs) by whether the ONE triangle owning each boundary edge currently faces toward
+        or away from the camera -- lets the always-drawn polygon-outline overlay use the SAME
+        front/outside vs. back/inside color split the fill/subdivision-edge actors already do
+        (2026-09-19, explicit: "the polygon edge colours inside should be 50% backside face
+        color and 50% white"). Exact, not an approximation: the panel's camera is orthographic
+        (parallel_scale, set in _apply_camera), so there's ONE view direction for the whole
+        scene, the same test VTK's own backface culling uses for the mesh actors (see
+        _render's own front/back culled-actor pair) -- comparing every triangle's normal
+        against that SAME global direction is therefore exact, not per-point/perspective-
+        dependent. Faces are wound CCW from outside (project-wide convention), so
+        cross(b-a, c-a) is an OUTWARD normal; a positive dot with the camera direction (which
+        points from scene center OUT toward the camera) means this triangle faces the camera."""
+        edge_owner = {}
+        for face, bf in zip(self.faces, self.face_of_fine):
+            if bf != group:
+                continue
+            a, b, c = face
+            for u, v in ((a, b), (b, c), (c, a)):
+                key = (u, v) if u < v else (v, u)
+                edge_owner.setdefault(key, []).append(face)
+        boundary = [(edge, tris[0]) for edge, tris in edge_owner.items() if len(tris) == 1]
+        view_direction = self._camera["rotation"].apply([1.0, 0.0, 0.0])
+        front_pairs, back_pairs = [], []
+        for (u, v), (ta, tb, tc) in boundary:
+            pa, pb, pc = self.positions[ta], self.positions[tb], self.positions[tc]
+            normal = np.cross(pb - pa, pc - pa)
+            bucket = front_pairs if np.dot(normal, view_direction) > 0 else back_pairs
+            bucket.append((self.positions[u], self.positions[v]))
+
+        def to_segments(pairs):
+            segments = np.empty((2 * len(pairs), 3))
+            for i, (p, q) in enumerate(pairs):
+                segments[2 * i] = p
+                segments[2 * i + 1] = q
+            return segments
+
+        return to_segments(front_pairs), to_segments(back_pairs)
+
     def _render(self):
         """Redraws the single panel from whatever self.faces/self.positions/self.face_of_fine
         currently hold -- colored per ORIGINAL base face (face_of_fine) by POLYGON_COLORS[n]
@@ -1143,12 +1380,25 @@ class InflaterPane:
         explicit: "should use the same colours as the left side"). Camera framing/rotation/
         pan/zoom come from self._camera (see _apply_camera/the drag/pan/scroll handlers below)
         instead of a fresh "iso" + reset_camera() every redraw, so a user's view survives
-        across Inflate steps. Each face's own fill mesh is drawn with show_edges=False (the fine
-        subdivision triangles read as a smooth-ish shaded surface, not a wireframe) plus a
-        SEPARATE add_lines call for just that polygon's own outline (_group_boundary_lines).
-        Rebuilds self._actor_to_group ({vtk actor: group index}, for hover picking) and
-        re-applies the current hover highlight (self._hover_group), since plotter.clear() just
-        destroyed the previous highlight actor along with everything else."""
+        across Inflate steps. Each face's own fill mesh is drawn as TWO separate, culled actors
+        sharing the same PolyData -- an OUTSIDE one (culling="back", so only outward-facing
+        triangles render) with its FINE subdivision wireframe faintly visible (show_edges=True,
+        FRONT_EDGE_WEIGHT/SUBDIVISION_EDGE_LINE_WIDTH -- 85% face color/15% white, much
+        fainter/thinner than the bold polygon-outline overlay drawn on top of it), and an
+        INSIDE one (culling="front", only inward-facing triangles) with its own edge_color
+        blended 85% ITS OWN (darkened inside) fill color/15% BLACK (BACK_EDGE_WEIGHT) instead of
+        against white. TWO actors, not one with backface_params, because VTK's edge
+        color/visibility belongs to the ACTOR (its
+        mapper), not to front vs. back faces -- backface_params's own edge_color is silently
+        ignored, so a single actor always drew every edge (inside or outside) in the OUTSIDE
+        color regardless (2026-09-19, explicit bug report, confirmed via a screenshot: "the
+        inside lines still look lighter than the face colours"). Plus a SEPARATE add_lines call
+        for just that polygon's own outline (_group_boundary_lines). Rebuilds
+        self._actor_to_group ({vtk actor: group index}, for hover picking -- both the outside
+        and inside actor map to the same group) and re-applies the current hover highlight
+        (self._hover_group), since
+        plotter.clear() just destroyed the previous highlight actor along with everything
+        else."""
         plotter = self.plotter
         plotter.clear()
         self._actor_to_group = {}
@@ -1165,16 +1415,59 @@ class InflaterPane:
                     continue
                 n = len(self.base_faces[group])
                 color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
+                inside_color = _darken_color(color)
                 face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
                 mesh = pv.PolyData(points, face_conn)
-                actor = plotter.add_mesh(mesh, color=color, show_edges=False,
-                                          backface_params=dict(color=_darken_color(color)))
-                self._actor_to_group[actor] = group
-                plotter.add_lines(self._group_boundary_lines(group),
-                                   color=_midpoint_color("white", color), width=1.5)
+                # TWO actors sharing the same mesh, not one with backface_params -- VTK's edge
+                # color/visibility is a property of the ACTOR (its mapper), not of front vs.
+                # back faces, so backface_params's own edge_color is silently ignored and every
+                # edge -- inside or outside -- used to come out looking like the OUTSIDE one
+                # regardless (2026-09-19, explicit bug report: "the inside lines still look
+                # lighter than the face colours" -- confirmed via a screenshot). culling='back'
+                # keeps only front-facing (outward) triangles+edges in one actor;
+                # culling='front' keeps only back-facing (inward, seen through a gap) ones in
+                # the other, each getting its own genuinely independent edge_color this way.
+                # NOT render_lines_as_tubes here -- PyVista silently drops show_edges entirely
+                # whenever render_lines_as_tubes is also set ("`show_edges=True` not supported
+                # when `render_lines_as_tubes=True`. Ignoring `show_edges`", caught testing this
+                # change), which would delete the fine subdivision wireframe outright rather
+                # than just squaring its line caps. The rim overlay/hover highlight below
+                # (plain add_lines actors, not a show_edges mesh) don't have this conflict, so
+                # those get rounded ends (2026-09-19, explicit: "make all the line ends
+                # rounded") via _add_rounded_lines; the subdivision wireframe's own line ends
+                # stay as VTK's default flat caps.
+                outside_actor = plotter.add_mesh(
+                    mesh, color=color, show_edges=True,
+                    edge_color=_weighted_color(color, FRONT_EDGE_WEIGHT),
+                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back")
+                inside_actor = plotter.add_mesh(
+                    mesh, color=inside_color, show_edges=True,
+                    # Blended from inside_color (the actor's OWN fill color) toward WHITE --
+                    # same idea as the outside edges, just off the darker inside fill color
+                    # instead of the bright outward one (2026-09-19, explicit: "backside lines
+                    # should be 85% backside face color and 15% white").
+                    edge_color=_weighted_color(inside_color, BACK_EDGE_WEIGHT),
+                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front")
+                self._actor_to_group[outside_actor] = group
+                self._actor_to_group[inside_actor] = group
+                # The bold rim overlay ALSO splits front/back (2026-09-19, explicit, most
+                # recently "for the polygon rim on the inside, use 75% backside face color, 25%
+                # white") -- POLYGON_RIM_BACK_WEIGHT against inside_color for whichever rim
+                # segments currently face away from the camera; front segments keep the plain
+                # 50/50 _midpoint_color they always used. _add_rounded_lines (not a plain
+                # add_lines) rounds every segment's caps/joins (2026-09-19, explicit: "make all
+                # the line ends rounded").
+                front_rim, back_rim = self._group_boundary_lines_by_side(group)
+                if len(front_rim):
+                    self._add_rounded_lines(front_rim, _midpoint_color("white", color),
+                                             POLYGON_EDGE_LINE_WIDTH)
+                if len(back_rim):
+                    self._add_rounded_lines(
+                        back_rim, _weighted_color(inside_color, POLYGON_RIM_BACK_WEIGHT),
+                        POLYGON_EDGE_LINE_WIDTH_BACK)
             if self._hover_group in groups_present:
-                self._hover_actor = plotter.add_lines(
-                    self._group_boundary_lines(self._hover_group), color="yellow", width=4)
+                self._hover_actor = self._add_rounded_lines(
+                    self._group_boundary_lines(self._hover_group), "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
             lo, hi = points.min(axis=0), points.max(axis=0)
             self._center = (lo + hi) / 2
             self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
@@ -1256,9 +1549,25 @@ class InflaterPane:
             f"Level 0 relaxed (RMS {rms_stretch:.1f}%). Inflating Level 1...", "info")
         self._run_inflate_step()
 
-    def _run_inflate_step(self):
+    def _run_inflate_step(self, initial_pressure_guess=None, tol_pct=None):
+        """`initial_pressure_guess`/`tol_pct`, if given (only ever by the Diff Inflate paths --
+        see _diff_remove_face/_diff_reexport_and_relax), let estimate_pressure_for_target_
+        stretch start its search from a pressure ALREADY KNOWN to converge near this same
+        target (the last successful inflate's own pressure -- a Diff Inflate's mesh is mostly
+        unchanged from that point, so it's usually still a good guess) instead of its own
+        generic area-based one, and accept a looser match before trying another guess
+        (2026-09-19, explicit: "use the previous pressure as a starting point... If it results
+        in more than 5% different from the target stretch, then you can do another guess...
+        speed up Diff Inflate" -- fewer/no extra bracket-search trials needed when the first
+        guess already lands close). Full Inflate never passes either -- each of its levels is
+        a genuinely fresh target, not a small perturbation of an already-converged one."""
         target_rms_pct = self.target_rms_vars[self.subdivision_level].get()
         tolerance = self._get_tolerance()
+        extra = {}
+        if initial_pressure_guess is not None:
+            extra["initial_pressure_guess"] = initial_pressure_guess
+        if tol_pct is not None:
+            extra["tol_pct"] = tol_pct
         self._run_background(
             lambda queue_progress: estimate_pressure_for_target_stretch(
                 self.positions, self.faces, self.edge_length,
@@ -1269,7 +1578,7 @@ class InflaterPane:
                 # target_stretch's own internal bracket/bisect search (2026-09-19, explicit:
                 # "50000 is for one trial, not for all trials combined") -- its default
                 # (5000) is smaller, so this must be passed explicitly.
-                max_nfev_per_trial=SAFETY_STEP_CAP, stop_event=self._stop_event),
+                max_nfev_per_trial=SAFETY_STEP_CAP, stop_event=self._stop_event, **extra),
             self._on_inflate_step_done,
             on_progress=lambda steps: self._set_status(
                 f"Level {self.subdivision_level}: calibrating pressure toward "
@@ -1304,6 +1613,7 @@ class InflaterPane:
         self.positions = new_positions
         self._render()
         if self.subdivision_level >= MAX_LEVEL:
+            self.last_pressure = pressure
             self._record_inflate_success()
             self._pre_click_snapshot = None
             self._stop_event = None
@@ -1415,7 +1725,8 @@ class InflaterPane:
         self._set_running(True, active="diff")
         self._set_status(
             f"Diff Inflate: removed a face, calibrating pressure at Level {MAX_LEVEL}...", "info")
-        self._run_inflate_step()
+        self._run_inflate_step(initial_pressure_guess=self.last_pressure,
+                                tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
 
     def _diff_add_face(self, _shape_id):
         """A new shape's own added-and-connected face(s) -- handled by the same general
@@ -1494,7 +1805,8 @@ class InflaterPane:
         # time, so the old portion's already-correct geometry is respected from the very first
         # trial.
         self._set_status(f"{status_verb_phrase}, calibrating pressure at Level {MAX_LEVEL}...", "info")
-        self._run_inflate_step()
+        self._run_inflate_step(initial_pressure_guess=self.last_pressure,
+                                tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
 
     # ---- background thread/progress-poll pattern (same idea as both sibling apps' own
     # _run_background) ----
@@ -1597,6 +1909,10 @@ class CombinedApp:
         # builder edit (BuilderPane._refresh_vme_state's own hook), not just re-checked when
         # Inflate is clicked.
         self.builder.on_change = self.inflater.refresh_diff_eligibility
+        # 2026-09-19, explicit: "if auto inflate is enabled, as soon as i load a file, it
+        # should also inflate" -- a fresh Load has no relation to whatever was inflated before
+        # (if anything), so this always means a FULL Inflate, never a diff.
+        self.builder.on_load_success = self.inflater.on_load_success
 
     def _build_menu(self, root):
         """A File menu with just Load... (no New/Save/Save As -- this app has no window-level
