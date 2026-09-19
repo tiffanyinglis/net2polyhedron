@@ -1349,14 +1349,42 @@ class NetValidationError(ValueError):
 
 
 def _validate_shapes_connections(shapes, connections):
-    """shapes/connections: as _vertex_roots. As _vertex_roots unions
-    connected corners together, two checks can fail: a face's own two
-    (different) corners ending up merged into the same vertex (a VERTEX
-    MERGE ERROR), or two different edges both resolving to the same
-    directed vertex pair (a duplicate-directed-edge conflict -- the same
-    rule load_stretchy_mesh itself enforces on load). Raises
-    a NetValidationError (see its own docstring) phrased in terms of the
-    LIVE "vSHAPE.CORNER" vertex identity _draw_debug_vertex_label
+    """shapes/connections: as _vertex_roots. Two checks can fail: a
+    face's own two (different) corners ending up merged into the same
+    vertex (a VERTEX MERGE ERROR -- a face's own edge would have to run
+    from a point to itself, a genuine structural impossibility), or a
+    single edge slot being claimed by more than one connection (already
+    prevented live by _hit_test_any_edge_handle excluding an
+    already-joined handle from being clickable -- checked again here
+    too, since this function is meant to be the authoritative,
+    from-scratch check right before a file is written, not something
+    that trusts the live UI alone).
+
+    Two DIFFERENT, otherwise-unrelated edges resolving to the same
+    directed (or reversed) vertex pair is deliberately NOT checked here
+    -- see stretchy_mesh.py's module docstring's WINDING CONVENTION
+    section and interactive_builder_app's own "net JSON import/export"
+    section for why: vertex dedup can legitimately merge enough corners
+    that two edges that were never explicitly connected to EACH OTHER
+    (each already fully accounted for by its own connection, or each its
+    own free/boundary edge) end up sharing a vertex-id pair by pure
+    coincidence -- e.g. two faces glued along a pair of opposite edges
+    merges all their OTHER corners pairwise too, so their remaining free
+    edges land on the same pair; or a fan of shapes glued opposite each
+    other around a shared hub does the same to two of their already-glued
+    spokes. Neither case is an actual conflict: each edge is still shared
+    by (at most) its own 2 faces, they just happen to run between the
+    same two (now-merged) points as some unrelated edge -- exactly like
+    two independent springs between the same two points, not one edge
+    being claimed twice. Rejecting that coincidence outright (an earlier
+    version of this check did) blocks perfectly buildable nets for no
+    real structural reason. A genuine problem -- the SAME edge slot
+    actually being asked to serve two different connections -- is caught
+    by the slot-reuse check above instead, which doesn't depend on
+    vertex-id coincidence at all.
+
+    Raises a NetValidationError (see its own docstring) phrased in terms
+    of the LIVE "vSHAPE.CORNER" vertex identity _draw_debug_vertex_label
     already shows a user while editing (the root slot from
     _vertex_roots), never in terms of the fresh sequential integers
     _faces_from_shapes would assign these same vertices at export time.
@@ -1368,18 +1396,19 @@ def _validate_shapes_connections(shapes, connections):
     always phrased in terms of the corners the user actually placed and
     connected.
 
-    Neither conflict is ever caused by a single connection considered on
-    its own -- see _connection_chain's own docstring -- so every problem
-    message also names the SPECIFIC chain of existing connections whose
-    transitive merge (via _vertex_roots) is what actually ties the
-    conflicting corners together, e.g. because a face otherwise
-    untouched by whatever was just connected can still end up implicated
-    if its own two corners were already, separately, drawn into the
-    same larger group some other connection elsewhere set up. Read
-    literally: "shape 9's corners 2 and 3 already come out to the same
-    vertex once you trace shape 9 edge 1 -> shape 4 edge 0 -> shape 4
-    edge 2 -> shape 9 edge 3" -- exactly the reasoning a user would have
-    to redo by hand with debug mode alone, spelled out for them instead."""
+    A vertex merge error is never caused by a single connection
+    considered on its own -- see _connection_chain's own docstring -- so
+    its problem message also names the SPECIFIC chain of existing
+    connections whose transitive merge (via _vertex_roots) is what
+    actually ties the conflicting corners together, e.g. because a face
+    otherwise untouched by whatever was just connected can still end up
+    implicated if its own two corners were already, separately, drawn
+    into the same larger group some other connection elsewhere set up.
+    Read literally: "shape 9's corners 2 and 3 already come out to the
+    same vertex once you trace shape 9 edge 1 -> shape 4 edge 0 -> shape
+    4 edge 2 -> shape 9 edge 3" -- exactly the reasoning a user would
+    have to redo by hand with debug mode alone, spelled out for them
+    instead."""
     roots = _vertex_roots(shapes, connections)
 
     def vlabel(root_slot):
@@ -1395,7 +1424,6 @@ def _validate_shapes_connections(shapes, connections):
 
     problems = []
     vertex_merge_error_slots = set()
-    counts = {}
     for shape in shapes:
         n, sid = shape["n"], shape["id"]
         for i in range(n):
@@ -1412,15 +1440,16 @@ def _validate_shapes_connections(shapes, connections):
                     f"already merges to the same vertex {vlabel(v)}{chain_text(slot_v, slot_w)}")
                 vertex_merge_error_slots.add(slot_v)
                 vertex_merge_error_slots.add(slot_w)
-            counts.setdefault((v, w), []).append((sid, i, slot_v))
-    for (v, w), edges in counts.items():
-        if len(edges) > 1:
-            where = ", ".join(f"shape {sid} edge {i}" for sid, i, _ in edges)
-            first_slot = edges[0][2]
-            second_slot = edges[1][2]
-            problems.append(
-                f"edge {vlabel(v)}->{vlabel(w)} appears {len(edges)} times "
-                f"({where}); need at most once{chain_text(first_slot, second_slot)}")
+
+    slot_owner = {}
+    for conn in connections:
+        for slot in ((conn["a_shape"], conn["a_edge"]), (conn["b_shape"], conn["b_edge"])):
+            if slot in slot_owner:
+                problems.append(
+                    f"shape {slot[0]} edge {slot[1]} is joined by more than one connection")
+            else:
+                slot_owner[slot] = conn
+
     if problems:
         raise NetValidationError(
             "Not a valid net, refusing to save:\n  " + "\n  ".join(problems), vertex_merge_error_slots)

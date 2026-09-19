@@ -291,20 +291,36 @@ work for anyone who wants one.
      _validate_mesh's own docstring for the reasoning that originally
      surfaced the distinction -- Level 0's random positions vs. Level
      1's relaxed ones giving different answers for the SAME unchanged
-     `faces`). That question is still answerable live via "Show normals"
-     below instead.
-   - "Show normals" (self.show_normals_var) draws each triangle's own
-     outward normal as a line segment from its centroid, in
-     NORMAL_COLOR, on every populated "Level N" panel (_draw_level_panel)
-     -- an inward-pointing one is then immediately obvious on sight; this
-     is now the ONLY way this app answers "does the CURRENT embedding
-     look inside-out", since Validate Mesh no longer does (see above).
-     Each segment is scaled to NORMAL_LENGTH_FRACTION (0.5) of that
-     triangle's own mean CURRENT edge length (not rest length), so it
-     always reads as roughly "half an edge long" relative to whatever's
-     on screen (a full edge length, tried first, read too long against a
-     dense mesh), regardless of overall mesh scale or how far from rest
-     it's currently stretched.
+     `faces`). That question is still answerable live via "Show face
+     normals" below instead.
+   - "Show face normals" (self.show_normals_var, renamed 2026-09-19 from
+     "Show normals" once "Show vertex normals" below was added alongside
+     it) draws each triangle's own outward normal as a line segment from
+     its centroid, in NORMAL_COLOR, on every populated "Level N" panel
+     (_draw_level_panel) -- an inward-pointing one is then immediately
+     obvious on sight; this is now the ONLY way this app answers "does
+     the CURRENT embedding look inside-out", since Validate Mesh no
+     longer does (see above). Each segment is scaled to
+     NORMAL_LENGTH_FRACTION (0.5) of that triangle's own mean CURRENT
+     edge length (not rest length), so it always reads as roughly "half
+     an edge long" relative to whatever's on screen (a full edge length,
+     tried first, read too long against a dense mesh), regardless of
+     overall mesh scale or how far from rest it's currently stretched.
+   - "Show vertex normals" (self.show_vertex_normals_var, 2026-09-19,
+     explicit user request while diagnosing self-intersecting/"writhing"
+     motion during an Inflate replay where the face normals alone looked
+     fine) draws each VERTEX's own normal instead -- the normalized
+     average of every incident face's own unit normal (see
+     _vertex_normals) -- as a line segment from that vertex's own
+     position, in VERTEX_NORMAL_COLOR, independent of "Show face
+     normals" (either, both, or neither can be on at once). A vertex
+     whose incident faces disagree sharply in orientation (a fold,
+     or a genuinely inconsistent local winding a per-face check alone
+     doesn't surface) shows up as a normal pointing somewhere unexpected,
+     even when every individual face's own normal looks locally
+     reasonable. Scaled to NORMAL_LENGTH_FRACTION of that vertex's own
+     mean incident-edge length, same "reads as about half an edge"
+     convention as face normals.
 8. "Auto" (on_auto_clicked/_auto_step; visible and usable in BOTH modes,
    unlike debug mode's own diagnostics above) runs the WHOLE pipeline
    unattended, from wherever it currently is: Relax at Level 0, then
@@ -388,7 +404,7 @@ DEFAULT_NET_BASENAME = "cube"
 # The app's own backronym (2026-09-16, explicit user request) -- used as
 # the window title (_apply_mode_visibility); ".hippo" (SESSION_FILE_
 # EXTENSION, below) was named first, this is what it stands for.
-APP_TITLE = "HIPPO — Hierarchical Inflatable Phabric Polyhedron Optimizer"
+APP_TITLE = "HIPPO — Hierarchical Inflatable Phabric Polyhedron Optimizer [BUILD-CHECK-2026-09-19-B]"
 
 # File > Save/Load's own default directory for a whole SESSION (see
 # on_save_session_clicked/on_load_session_clicked) -- deliberately NOT
@@ -420,6 +436,49 @@ def _midpoint_color(color_a, color_b):
     edges regardless of its own color)."""
     a, b = np.array(mcolors.to_rgb(color_a)), np.array(mcolors.to_rgb(color_b))
     return tuple((a + b) / 2)
+
+
+def _vertex_normals(faces, positions):
+    """faces: triangle vertex-id loops; positions: {vertex_id: pos}.
+    Returns {vertex_id: (unit_normal, mean_incident_edge_length)} for
+    "Show vertex normals" (_draw_level_panel) -- every vertex touched by
+    at least one non-degenerate (nonzero-area) face. `unit_normal` is
+    the NORMALIZED SUM of every incident face's own unit normal, each
+    face weighted EQUALLY rather than by area: this is meant to show
+    "which way do MY OWN faces agree this vertex points" (useful for
+    spotting a fold or an inconsistency a per-face check alone won't
+    surface), not to approximate a smooth continuous surface normal the
+    way a render-time area/angle-weighted average would.
+    `mean_incident_edge_length` is the average length of every edge (of
+    any incident face) touching this vertex -- scales its own drawn
+    segment the same "about half an edge" way face normals already are.
+    A vertex whose own incident faces exactly cancel (sum to the zero
+    vector) or that has no non-degenerate incident face at all is
+    omitted -- no meaningful direction to draw."""
+    normal_sums = {}
+    edge_len_sums = {}
+    edge_len_counts = {}
+    for a, b, c in faces:
+        pa, pb, pc = positions[a], positions[b], positions[c]
+        normal = np.cross(pb - pa, pc - pa)
+        normal_len = np.linalg.norm(normal)
+        if normal_len < 1e-12:
+            continue
+        unit_normal = normal / normal_len
+        for v in (a, b, c):
+            normal_sums[v] = normal_sums.get(v, np.zeros(3)) + unit_normal
+        for u, w in ((a, b), (b, c), (c, a)):
+            length = np.linalg.norm(positions[w] - positions[u])
+            for v in (u, w):
+                edge_len_sums[v] = edge_len_sums.get(v, 0.0) + length
+                edge_len_counts[v] = edge_len_counts.get(v, 0) + 1
+    result = {}
+    for v, total in normal_sums.items():
+        total_len = np.linalg.norm(total)
+        if total_len < 1e-12:
+            continue
+        result[v] = (total / total_len, edge_len_sums[v] / edge_len_counts[v])
+    return result
 
 # The Net panel's own bezier connection curves (self.target_connections,
 # see _draw_target_faces) -- interactive_builder_app's own gluing between
@@ -637,9 +696,17 @@ LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}
 # mesh scale) -- distinct from every FACE_COLORS entry and from
 # PLOT_THEME's own fg/edge color, so it reads clearly against either.
 NORMAL_COLOR = "yellow"
+# "Show vertex normals" toggle's own color (2026-09-19) -- distinct from
+# NORMAL_COLOR so a face normal and a vertex normal drawn on the same
+# panel (both toggles can be on at once) are never mistaken for each
+# other.
+VERTEX_NORMAL_COLOR = "cyan"
 # How long each normal segment is drawn, as a fraction of its own
 # triangle's mean edge length -- 1.0 (a full edge length) read too long
-# against a dense/fine mesh per a user request; halved.
+# against a dense/fine mesh per a user request; halved. Shared by both
+# "Show face normals" and "Show vertex normals" for the same reason (a
+# vertex normal is scaled by ITS OWN mean incident-edge length instead
+# of a triangle's, but the same fraction of it).
 NORMAL_LENGTH_FRACTION = 0.5
 
 # Hard stop for "iterate until convergence" mode in case a mesh/pressure
@@ -1166,10 +1233,23 @@ class InflatePolyhedronApp:
                                            command=self.on_validate_mesh_clicked)
         self.validate_button.pack(side=tk.LEFT, padx=(0, 18))
         self.show_normals_var = tk.BooleanVar(value=False)
-        self.show_normals_check = ttk.Checkbutton(self.mode_row, text="Show normals",
+        self.show_normals_check = ttk.Checkbutton(self.mode_row, text="Show face normals",
                                                     variable=self.show_normals_var,
                                                     command=self.draw)
         self.show_normals_check.pack(side=tk.LEFT)
+        # Per-VERTEX normals (2026-09-19, explicit user request, added
+        # while diagnosing self-intersecting/"writhing" replay motion on
+        # pinched_tri_hex -- face normals alone looked correct, but a
+        # vertex sitting between inconsistently-angled faces can still
+        # have a badly-behaved AVERAGE direction worth seeing directly).
+        # Separate toggle/color from "Show face normals" -- either can be
+        # on independently, so a face-normal problem and a vertex-normal
+        # one are never visually conflated.
+        self.show_vertex_normals_var = tk.BooleanVar(value=False)
+        self.show_vertex_normals_check = ttk.Checkbutton(
+            self.mode_row, text="Show vertex normals",
+            variable=self.show_vertex_normals_var, command=self.draw)
+        self.show_vertex_normals_check.pack(side=tk.LEFT)
 
         # ---- Status: debug-mode-only now (2026-09-16, explicit user
         # request -- "in release mode, don't show warning/error/progress
@@ -1729,10 +1809,15 @@ class InflatePolyhedronApp:
         else:
             self.mode_row.pack_forget()
             self.iterate_mode_var.set("convergence")
+            redraw_needed = False
             if self.show_normals_var.get():
                 self.show_normals_var.set(False)
-                if self.faces is not None:  # nothing to redraw before a net's ever been loaded
-                    self.draw()
+                redraw_needed = True
+            if self.show_vertex_normals_var.get():
+                self.show_vertex_normals_var.set(False)
+                redraw_needed = True
+            if redraw_needed and self.faces is not None:  # nothing to redraw before a net's ever loaded
+                self.draw()
             # The whole status frame, not just its text -- 2026-09-16,
             # explicit user request ("in release mode, don't show
             # warning/error/progress message").
@@ -2151,6 +2236,17 @@ class InflatePolyhedronApp:
                     segment_points[0::2] = starts
                     segment_points[1::2] = ends
                     plotter.add_lines(segment_points, color=NORMAL_COLOR, width=2.0)
+
+            if self.show_vertex_normals_var.get():
+                starts, ends = [], []
+                for v, (unit_normal, mean_edge_len) in _vertex_normals(faces, positions).items():
+                    starts.append(positions[v])
+                    ends.append(positions[v] + unit_normal * mean_edge_len * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=VERTEX_NORMAL_COLOR, width=2.0)
 
             # Each level fills its OWN panel to 90% from its OWN current
             # bounding box (2026-09-18, explicit user request, superseding
@@ -2942,6 +3038,19 @@ class InflatePolyhedronApp:
             # their own comment in __init__ for when each is set/reset.
             "precomp_time_s": self._current_precomp_time_s,
             "sim_time_s": self._current_sim_time_s,
+            # False only for a level whose pressure calibration gave up
+            # WITHOUT finding a usable pressure (see
+            # estimate_pressure_for_target_stretch's own docstring on
+            # `pressure_found` -- e.g. a mesh whose faces exactly cancel
+            # under pressure until a later Subdivide gives it real degrees
+            # of freedom). Defaults True for Level 0 (no pressure
+            # calibration there at all) and for a row recorded before this
+            # field existed, so _guess_pressure_from_history's own filter
+            # (below) doesn't spuriously exclude either.
+            "pressure_found": self.last_stats.get("pressure_found", True),
+            # TEMPORARY diagnostic (2026-09-19) -- see on_inflate_clicked's
+            # own comment on self._debug_initial_pressure_guess.
+            "debug_initial_pressure_guess": getattr(self, "_debug_initial_pressure_guess", None),
         }
         self._refresh_history_table()
 
@@ -3268,35 +3377,60 @@ class InflatePolyhedronApp:
     def _guess_pressure_from_history(self, target_rms_pct):
         """Estimates the pressure to hand estimate_pressure_for_target_
         stretch as its OWN starting guess (`initial_pressure_guess`),
-        extrapolating from an already-calibrated PRIOR level's own history
+        drawing on already-calibrated PRIOR levels' own history
         (self.level_history) instead of always falling back to that
-        function's generic per-solid-derived constant -- per explicit user
-        observation: each Subdivide level roughly DOUBLES resolution
-        (quarters every triangle, ~halving edge length), and empirically
-        needs roughly 2x the pressure to reach the SAME target RMS stretch
-        % there. Scales the nearest usable prior level's own (pressure,
-        achieved rms_stretch_pct) pair by the ratio to the NEW target
-        (assuming the same near-linear pressure-vs-stretch response
-        estimate_pressure_for_target_stretch's own generic guess already
-        assumes) and by 2 per level of resolution difference. Walks
-        backward from the level just below the current frontier so a
-        recently-Subdivided level (which hasn't been Inflated yet, so has
-        no usable row of its own) still finds the nearest level that DOES.
+        function's generic per-solid-derived constant. Looks at EVERY
+        prior level's own (pressure, achieved rms_stretch_pct) pair and
+        picks whichever one's OWN achieved stretch landed CLOSEST to the
+        NEW target (not necessarily the nearest level) -- scaling just
+        THAT record's own pressure by 2 per level of resolution
+        difference (each Subdivide level roughly doubles resolution --
+        quarters every triangle, ~halves edge length -- and empirically
+        needs roughly 2x the pressure for the same target RMS stretch %).
 
-        Returns None (falling back to the generic guess) if no prior level
-        has a usable recorded pressure/stretch pair yet -- e.g. still at
-        Level 1, with nothing calibrated before it."""
-        for level in range(self.subdivision_level - 1, 0, -1):
-            record = self.level_history.get(level)
-            if not record:
+        Deliberately NOT a `target_rms_pct / achieved` rescale any more
+        (2026-09-19, explicit user request): that ratio explodes when a
+        level's own achieved stretch happens to be ~0 (pressure genuinely
+        had no effect there -- e.g. a mesh whose faces cancel out under
+        pressure until a later Subdivide gives it real degrees of
+        freedom -- see mesh_levels.subdivide_once's own docstring on
+        rim-edge disambiguation for how such a mesh can even be built at
+        all), producing an absurd guess for the NEXT level that overflows
+        the solver before it ever gets a chance to find the shape that's
+        now actually reachable. Picking the closest-achieved record
+        instead never divides by anything -- a near-zero achieved value
+        just makes that particular record a poor (but bounded) candidate,
+        not a search-breaking one.
+
+        A level whose own record has `pressure_found` False (see
+        estimate_pressure_for_target_stretch's own docstring) is skipped
+        entirely, not just deprioritized -- its own "pressure" never came
+        from a real calibration in the first place (the search gave up
+        because the mesh was completely unresponsive to pressure at that
+        level), so it's not a usable data point for extrapolation at all,
+        regardless of how close its achieved stretch happens to read.
+
+        Returns None (falling back to the generic guess) if no level
+        below the current frontier has a usable recorded pressure/stretch
+        pair yet -- e.g. still at Level 1, with nothing calibrated
+        before it."""
+        best = None
+        for level, record in self.level_history.items():
+            if level >= self.subdivision_level or not record:
+                continue
+            if not record.get("pressure_found", True):
                 continue
             prior_pressure = record.get("pressure")
             prior_rms = record.get("rms_stretch_pct")
-            if not prior_pressure or not prior_rms:
+            if not prior_pressure or prior_rms is None:
                 continue
-            level_diff = self.subdivision_level - level
-            return prior_pressure * (target_rms_pct / prior_rms) * (2 ** level_diff)
-        return None
+            error = abs(prior_rms - target_rms_pct)
+            if best is None or error < best[0]:
+                best = (error, level, prior_pressure)
+        if best is None:
+            return None
+        _, level, prior_pressure = best
+        return prior_pressure * (2 ** (self.subdivision_level - level))
 
     def on_inflate_clicked(self):
         """Calibrates a pressure for the current "Target RMS stretch"
@@ -3352,6 +3486,12 @@ class InflatePolyhedronApp:
         self._current_target_rms_pct = target_rms_pct
         tolerance = self._get_tolerance()
         initial_pressure_guess = self._guess_pressure_from_history(target_rms_pct)
+        # TEMPORARY diagnostic (2026-09-19) -- recorded into level_history/
+        # the saved session so a live run's actual starting guess can be
+        # inspected after the fact, without needing to reproduce it
+        # separately. Remove once the pressure_found/history-guess
+        # investigation is closed out.
+        self._debug_initial_pressure_guess = initial_pressure_guess
         self.stop_event = threading.Event()
         # Marks the start of the "Precomp time" column's own phase -- see
         # its own comment in __init__. Consumed (turned into
@@ -3453,7 +3593,7 @@ class InflatePolyhedronApp:
             self._auto_step()  # no-op unless Auto is what actually drove this run
             return
         (pressure, new_positions, steps_taken, max_stretch, rms_stretch,
-         optimality, converged, frames) = result
+         optimality, converged, frames, pressure_found) = result
         self.pressure_value = pressure
         # "Precomp time" (see __init__): calibration has no progress
         # callback of its own to update this live, so it's set ONCE here,
@@ -3494,7 +3634,8 @@ class InflatePolyhedronApp:
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged,
                             "gtol": self._current_gtol,
-                            "target_rms_pct": self._current_target_rms_pct}
+                            "target_rms_pct": self._current_target_rms_pct,
+                            "pressure_found": pressure_found}
         self._record_level_history()
         final_result = (new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged)
         self._start_frame_replay(frames, final_result, base_iteration_count)
@@ -3621,7 +3762,12 @@ class InflatePolyhedronApp:
         self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
                             "optimality": optimality, "converged": converged,
                             "gtol": self._current_gtol,
-                            "target_rms_pct": self._current_target_rms_pct}
+                            "target_rms_pct": self._current_target_rms_pct,
+                            # Already set by _on_pressure_calibrated, before
+                            # replay even started (see this dict's own
+                            # comment above) -- carried over rather than
+                            # dropped by this redundant reassignment.
+                            "pressure_found": self.last_stats.get("pressure_found", True)}
         self._record_level_history()
         # "once replay is done, message disappears" -- explicit user
         # request.
@@ -4105,6 +4251,7 @@ class InflatePolyhedronApp:
         for widget in (self.combo, self.tolerance_spin,
                        self.steps_radio, self.convergence_radio,
                        self.validate_button, self.show_normals_check,
+                       self.show_vertex_normals_check,
                        self.auto_button, *self.target_rms_spins.values()):
             widget.state(state)
         if enabled:

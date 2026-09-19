@@ -191,34 +191,6 @@ class TestVertexMergeErrorOnFlip:
         assert excinfo.value.vertex_merge_error_slots, "expected a genuine vertex merge error"
 
 
-# ---- two DIFFERENT shapes sharing 2 edges (a real "bend") ----
-
-class TestTwoShapeBend:
-    """Two hexagons sharing TWO adjacent edges each (a genuine bend --
-    see the crochet photo this was reported against) needs a shape-level
-    flip on one of them, with NO vertex merge error involved at all (a
-    pure duplicate-directed-edge conflict)."""
-
-    SHAPES = [shape(1, 6), shape(6, 6)]
-    CONNECTIONS = [conn(1, 1, 0, 6, 3), conn(2, 1, 5, 6, 2)]
-
-    def test_fails_unflipped_with_a_pure_duplicate_edge_conflict_no_vertex_merge_error(self):
-        try:
-            builder_app._validate_shapes_connections(self.SHAPES, self.CONNECTIONS)
-            pytest.fail("expected a NetValidationError")
-        except NetValidationError as e:
-            assert not e.vertex_merge_error_slots, "this failure must be a pure duplicate-edge conflict"
-
-    def test_validates_once_one_hexagon_is_flipped(self):
-        trial_shapes = [dict(s, flipped=(s["id"] == 6)) for s in self.SHAPES]
-        builder_app._validate_shapes_connections(trial_shapes, self.CONNECTIONS)
-        faces = builder_app._faces_from_shapes(trial_shapes, self.CONNECTIONS)
-        assert is_valid_net(faces)
-        # the two hexagons should share exactly 3 vertices (2 edges' worth)
-        shared = set(faces[0]) & set(faces[1])
-        assert len(shared) == 3, faces
-
-
 # ---- two SEPARATE, already-internally-connected groups, one needing a
 # ---- whole-group flip once they're first connected to each other ----
 
@@ -375,16 +347,3 @@ class TestDedupVertexGrouping:
             frozenset({(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (4, 0), (4, 1), (4, 2)}),
         })
 
-    def test_two_shape_bend_has_3_shared_pairs_once_one_hexagon_is_flipped(self):
-        """TestTwoShapeBend's own net -- two hexagons sharing 2 edges (3
-        vertices' worth), each of those 3 vertices its own 2-corner
-        group; the other 6 corners (3 per hexagon) stay singletons."""
-        trial_shapes = [dict(s, flipped=(s["id"] == 6)) for s in TestTwoShapeBend.SHAPES]
-        groups = dedup_groups(trial_shapes, TestTwoShapeBend.CONNECTIONS)
-        assert groups == frozenset({
-            frozenset({(1, 0), (6, 3)}),
-            frozenset({(1, 1), (6, 4)}),
-            frozenset({(1, 5), (6, 2)}),
-            frozenset({(1, 2)}), frozenset({(1, 3)}), frozenset({(1, 4)}),
-            frozenset({(6, 0)}), frozenset({(6, 1)}), frozenset({(6, 5)}),
-        })

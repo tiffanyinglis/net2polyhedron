@@ -35,11 +35,19 @@ v -> w and the other's contains it as w -> v -- never the same direction
 twice. An edge referenced by only ONE face (no partner at all) is a free
 BOUNDARY edge -- perfectly valid, and simply not shared with anything;
 this is what lets a net stay open rather than requiring a full closed
-2-manifold. load_stretchy_mesh only rejects a directed edge that appears
-MORE than once (the one case that's always a genuine error, since two
-faces would then be claiming to own the same directed edge, or a face
-would be self-intersecting along it) -- raising a clear error naming the
-offending edge(s) if that happens.
+2-manifold. load_stretchy_mesh rejects a directed edge that appears MORE
+than once -- UNLESS the file carries its own "face_edge_ids" (see
+mesh_edges' own docstring and interactive_builder_app's "net JSON
+import/export" section): vertex dedup can legitimately merge enough
+OTHER corners together that two edges never explicitly connected to
+EACH OTHER end up sharing a directed vertex pair by pure coincidence
+(each is still shared by at most its own 2 faces -- they just happen to
+run between the same two now-merged points as some unrelated edge, like
+two independent springs, not one edge claimed twice); "face_edge_ids"
+is what lets a legitimate coincidence like that be told apart from an
+actual authoring mistake. A file with no "face_edge_ids" has no such
+information, so it keeps the strict check as a sanity guard, raising a
+clear error naming the offending edge(s) if a directed edge repeats.
 
 That check alone can't catch every possible mistake, though: flipping
 EVERY face at once (a full mirror image) is just as valid a loop
@@ -212,7 +220,23 @@ def _load_stretchy_mesh_spec(path):
     load_stretchy_mesh_edges -- reads and winding-validates `path` once,
     returning (faces, spec) so each public function only picks its own
     fields out of the same parsed JSON, rather than duplicating the
-    parse/validation."""
+    parse/validation.
+
+    The "no directed edge appears more than once" check below is SKIPPED
+    when the file has its own "face_edge_ids" field. That field only
+    ever comes from interactive_builder_app._face_edge_ids_from_shapes,
+    which is written on every Save -- meaning this exact net already
+    passed _validate_shapes_connections there, whose own docstring
+    explains why two DIFFERENT edges (each already fully accounted for
+    by its own connection, or its own free/boundary edge) can
+    legitimately land on the same directed vertex pair by coincidence
+    once vertex dedup merges enough OTHER corners together: neither is
+    actually claimed twice, they just happen to run between the same
+    two (now-merged) points as some unrelated edge. A file with no
+    "face_edge_ids" (hand-authored, or predating this field) has no such
+    guarantee behind it, so it keeps the strict check as a sanity/typo
+    guard -- there's no connection graph to tell a genuine authoring
+    mistake apart from a legitimate coincidence for a file like that."""
     with open(path) as f:
         spec = json.load(f)
 
@@ -223,15 +247,16 @@ def _load_stretchy_mesh_spec(path):
         if len(face) < 3:
             raise ValueError(f"{path}: a face needs at least 3 vertices, got {face}")
 
-    directed = [e for face in faces for e in _face_edges(face)]
-    counts = {}
-    for e in directed:
-        counts[e] = counts.get(e, 0) + 1
-    problems = [f"edge {v}->{w} appears {c} times (need exactly once)"
-                for (v, w), c in counts.items() if c > 1]
-    if problems:
-        raise ValueError(f"{path}: not a consistently-oriented mesh:\n  " +
-                          "\n  ".join(problems))
+    if not spec.get("face_edge_ids"):
+        directed = [e for face in faces for e in _face_edges(face)]
+        counts = {}
+        for e in directed:
+            counts[e] = counts.get(e, 0) + 1
+        problems = [f"edge {v}->{w} appears {c} times (need exactly once)"
+                    for (v, w), c in counts.items() if c > 1]
+        if problems:
+            raise ValueError(f"{path}: not a consistently-oriented mesh:\n  " +
+                              "\n  ".join(problems))
 
     return faces, spec
 
@@ -1159,6 +1184,29 @@ _INSANE_STRETCH_TARGET_MULTIPLE = 5.0
 # explicit user request -- "just 1x", no multiplier).
 _DIVERGED_SENTINEL_STRETCH_PCT = 1e6
 
+# How many consecutive trials, still in the pure-rescale phase (no
+# lo/hi bracket established yet -- see estimate_pressure_for_target_
+# stretch's own docstring), with essentially NO change in achieved
+# stretch despite pressure being rescaled (up to the 5x ceiling each
+# time), before giving up on finding a real pressure at this level
+# rather than escalating pressure without bound. A mesh that's
+# genuinely unresponsive to pressure here (e.g. every face's pressure
+# force exactly cancels against an identical-vertex-set, opposite-wound
+# partner face -- see interactive_builder_app._edges_from_shapes' own
+# docstring for how such a net can arise) can never be rescaled into
+# responding; only more resolution (a Subdivide, which can split those
+# faces apart into distinct sub-triangles) gives it real degrees of
+# freedom. 2026-09-19, explicit user request, after this exact case
+# escalated pressure to ~600000 over a full max_iterations budget with
+# achieved stretch stuck at ~1e-10 the whole time.
+_STALL_TRIAL_LIMIT = 2
+# "Essentially no change" between consecutive rescale-phase trials --
+# deliberately tiny and NOT tied to tol_pct (which is about being close
+# to the TARGET, a different question): this only needs to catch a
+# trial that moved by a genuinely negligible amount, not one that's
+# merely still far from target but actually responding to pressure.
+_STALL_DELTA_PCT = 1e-6
+
 
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           target_rms_pct=DEFAULT_TARGET_RMS_STRETCH_PCT,
@@ -1233,10 +1281,34 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     a target it's moving away from; this is unchanged from the original
     algorithm, and this net's own existing test coverage still passes
     with the bracket/bisect logic added. Returns (pressure, new_positions,
-    steps_taken, max_stretch_pct, rms_stretch_pct, optimality, converged)
-    -- the last five exactly as relax_once's own return, from whichever
-    trial this settled on (if every single trial was insane, the LAST
-    one anyway, so this never raises for an irrecoverably bad target).
+    steps_taken, max_stretch_pct, rms_stretch_pct, optimality, converged,
+    pressure_found) -- the middle five exactly as relax_once's own
+    return, from whichever trial this settled on (if every single trial
+    was insane, the LAST one anyway, so this never raises for an
+    irrecoverably bad target).
+
+    `pressure_found` (2026-09-19, explicit user request) is True unless
+    this gave up WITHOUT ever finding a usable pressure: either every
+    trial was insane, or -- the case this was actually added for -- the
+    mesh turned out completely UNRESPONSIVE to pressure at this level
+    (still in the pure-rescale phase, `_STALL_TRIAL_LIMIT` consecutive
+    trials all landing within `_STALL_DELTA_PCT` of each other despite
+    pressure being rescaled by up to 5x each time). A ravioli-paired mesh
+    (two faces sharing the exact same vertex set, opposite-wound -- see
+    interactive_builder_app._edges_from_shapes' own docstring for how
+    dedup can produce one) is the concrete example: its pressure forces
+    cancel EXACTLY, at every pressure, so `converged` still comes back
+    True (a real force-equilibrium WAS found, honestly) while
+    `pressure_found` is False (that equilibrium is nowhere near the
+    target -- no pressure could ever get it there at this level). This
+    stops the search from escalating pressure without bound chasing a
+    response that will never come (previously observed reaching ~600000
+    over a full `max_iterations` budget, stretch stuck at ~1e-10 the
+    whole time), and gives a caller (inflate_polyhedron_app's own
+    `_guess_pressure_from_history`) a clean signal to exclude this
+    level's own returned `pressure` from any later level's starting
+    guess, rather than extrapolating from a number that was never a real
+    calibration in the first place.
 
     The WINNING trial, if it hasn't actually converged yet (it only ran
     `max_nfev_per_trial` steps, a search-time budget, not a real
@@ -1307,6 +1379,9 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     result = None
     trial_frames = None
     cumulative_steps = 0
+    pressure_found = True
+    stalled_trials = 0
+    prev_rescale_rms = None
     for _ in range(max_iterations):
         # `(positions, 0)` -- this trial's own starting point at step 0
         # (the same starting `positions` for every trial) -- is the very
@@ -1367,11 +1442,35 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
             # one shows up (then the branch above takes over).
             pressure = hi_pressure / 2
         elif rms_stretch > 0:
+            # Stall check FIRST, before rescaling further: if this
+            # trial's own achieved stretch is essentially identical to
+            # the previous rescale-phase trial's (see _STALL_DELTA_PCT's
+            # own comment), rescaling pressure again is very unlikely to
+            # help -- a genuinely responsive mesh's stretch moves
+            # noticeably when pressure is rescaled by up to 5x. Two such
+            # trials in a row (_STALL_TRIAL_LIMIT) means the mesh is
+            # unresponsive to pressure at this level entirely (not just
+            # slow), so give up rather than keep escalating pressure
+            # without bound.
+            if prev_rescale_rms is not None and abs(rms_stretch - prev_rescale_rms) < _STALL_DELTA_PCT:
+                stalled_trials += 1
+            else:
+                stalled_trials = 0
+            prev_rescale_rms = rms_stretch
+            if stalled_trials >= _STALL_TRIAL_LIMIT:
+                pressure_found = False
+                break
             ratio = target_rms_pct / rms_stretch
             ratio = min(max(ratio, _PRESSURE_RATIO_CLAMP[0]), _PRESSURE_RATIO_CLAMP[1])
             pressure *= ratio
         else:
-            break  # degenerate reading (zero stretch) with nothing to bracket against yet
+            # Degenerate reading (zero stretch) with nothing to bracket
+            # against yet -- a single sane-at-zero trial isn't itself
+            # proof of unresponsiveness (the very first guess could just
+            # be too low), but there's no ratio to rescale by either;
+            # _STALL_TRIAL_LIMIT only ever triggers above once a SECOND
+            # such (near-)zero trial actually confirms it.
+            break
     stopped = stop_event is not None and stop_event.is_set()
     if best_result is None:
         # Every trial was insane -- no sane candidate exists at all
@@ -1380,6 +1479,7 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
         # (always returns SOMETHING derived from an actual relax_once
         # call). Not a real trial worth topping up to convergence.
         best_pressure, best_result, best_frames = pressure, result, trial_frames
+        pressure_found = False
     else:
         new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = best_result
         if not converged and not stopped:
@@ -1426,5 +1526,6 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = best_result
     if capture_frames:
         return (best_pressure, new_positions, steps_taken, max_stretch, rms_stretch,
-                optimality, converged, best_frames or [])
-    return best_pressure, new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
+                optimality, converged, best_frames or [], pressure_found)
+    return (best_pressure, new_positions, steps_taken, max_stretch, rms_stretch, optimality,
+            converged, pressure_found)

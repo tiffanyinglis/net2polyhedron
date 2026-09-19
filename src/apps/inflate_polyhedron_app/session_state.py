@@ -97,6 +97,23 @@ class LevelHistoryRecordModel(BaseModel):
     target_rms_pct: Optional[float] = None
     precomp_time_s: Optional[float] = None
     sim_time_s: Optional[float] = None
+    # False only for a level whose pressure calibration gave up WITHOUT
+    # finding a usable pressure (see stretchy_mesh.
+    # estimate_pressure_for_target_stretch's own docstring) -- excluded
+    # by _guess_pressure_from_history's own filter so a LATER level's
+    # calibration doesn't extrapolate from a number that was never a
+    # real calibration in the first place. Default True (not saved
+    # before this field existed) matches that filter's own default for
+    # a record with no such flag at all -- same "field predates this,
+    # don't silently drop it on save/load" fix as precomp_time_s/
+    # sim_time_s above, added after the exact same failure mode: a
+    # session saved then reloaded between levels lost this flag, letting
+    # a later level's guess wrongly inherit an already-abandoned pressure.
+    pressure_found: bool = True
+    # TEMPORARY diagnostic (2026-09-19, see app.py's on_inflate_clicked/
+    # _record_level_history) -- remove once the pressure_found/history-
+    # guess investigation is closed out.
+    debug_initial_pressure_guess: Optional[float] = None
 
 
 class LastStatsModel(BaseModel):

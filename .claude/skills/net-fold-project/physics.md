@@ -133,15 +133,19 @@ takes an `initial_pressure_guess` param that, when given, is used AS the trial-s
 pressure instead of the generic `_PRESSURE_AREA_PRODUCT_ESTIMATE`-derived one (which only scales
 with `target_pct`, NOT with subdivision level, since `total_rest_area` is level-invariant by
 design — so on its own it under-guesses every level past the first). `inflate_polyhedron_app`'s
-`_guess_pressure_from_history` computes this from the nearest PRIOR level with a usable recorded
-`(pressure, rms_stretch_pct)` pair in `self.level_history`: `prior_pressure * (new_target /
-prior_achieved) * 2^(level difference)` — the `2^` term is the user's own empirical observation
-that each Subdivide level (quarters every triangle, ~halves edge length) needs roughly DOUBLE the
-pressure to reach the SAME target RMS stretch % there. Verified directly on `hippo.poly`: Level 2
-(target 40%, from a converged Level 1 at pressure 0.725/81.46% RMS) took 8 relax_once calls to
-calibrate from the generic guess vs. 5 from the history-based one (`0.725 * (40/81.46) * 2 ≈
-0.712`), landing at essentially the same final pressure/accuracy either way (~0.87, ~40.5% RMS)
-— fewer trials for the same answer, not a different one.
+`_guess_pressure_from_history` computes this from whichever PRIOR level's own recorded
+`(pressure, rms_stretch_pct)` pair in `self.level_history` landed CLOSEST to the new target —
+not necessarily the nearest level — scaled by `2^(level difference)`: the `2^` term is the
+user's own empirical observation that each Subdivide level (quarters every triangle, ~halves
+edge length) needs roughly DOUBLE the pressure to reach the SAME target RMS stretch % there.
+**No longer a `new_target / prior_achieved` rescale** (2026-09-19, explicit user request,
+replacing the original 2026-09-16 version described above by then) — that ratio explodes when a
+prior level's own achieved stretch is ~0 (pressure genuinely had no effect there, e.g. a mesh
+whose faces exactly cancel under pressure until a later Subdivide gives it real degrees of
+freedom — see mesh_levels.py's rim-edge disambiguation for how such a mesh can even be saved/
+loaded at all now), handing the NEXT level an absurd guess that overflows the solver before it
+ever finds the shape that's actually reachable there. Picking the closest-achieved record instead
+never divides by anything.
 
 ## Defaults (current)
 - `LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}` (app, per-level spinner default)
