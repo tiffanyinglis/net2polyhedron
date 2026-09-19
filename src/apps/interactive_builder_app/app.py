@@ -2881,7 +2881,23 @@ class InteractiveBuilderApp:
         the same-numbered one. Net validity (`_refresh_vme_state`) is
         therefore unaffected by a flip either way: no physical gluing
         actually changed, only which local index each shape happens to
-        call it by."""
+        call it by.
+
+        A touched connection's own bezier handle (2026-09-19, explicit
+        user request) also gets its "t" component NEGATED (the "n"
+        component is left alone) -- verified directly (comparing against
+        genuinely mirroring the handle's own WORLD point, for n=3..6,
+        several rotations, both flipped states, both axes): mirroring
+        reverses which physical direction "corner k -> corner k+1"
+        actually points along a given edge (the same handedness reversal
+        the edge-index remap above exists for), so a "t" (tangent-axis)
+        offset must flip sign to keep the control point at its own
+        correctly-mirrored world position, while "n" (the normal-axis
+        offset, "how far outward from centroid") is a handedness-
+        independent distance that a mirror doesn't touch at all. Without
+        this, a curve's own shape would silently distort (not just
+        relocate) every time either endpoint's shape got flipped, even
+        though the edges themselves stayed correctly glued."""
         if not self.selected_ids:
             return
         self._push_undo()
@@ -2920,8 +2936,10 @@ class InteractiveBuilderApp:
         for conn in self.connections:
             if conn["a_shape"] in edge_maps:
                 conn["a_edge"] = edge_maps[conn["a_shape"]][conn["a_edge"]]
+                conn["a_handle"]["t"] = -conn["a_handle"]["t"]
             if conn["b_shape"] in edge_maps:
                 conn["b_edge"] = edge_maps[conn["b_shape"]][conn["b_edge"]]
+                conn["b_handle"]["t"] = -conn["b_handle"]["t"]
 
         self._redraw()
 
