@@ -83,6 +83,21 @@ naturally a single pass whenever self.subdivision_level == MAX_LEVEL going in). 
 (a moved/flipped/multi-shape change, an edited connection) is "complex" -- Diff Inflate stays
 disabled and only Full Inflate can run. Eligibility re-checks after every builder edit
 (BuilderPane.on_change, wired from CombinedApp) and after every completed Inflate click.
+
+Stop/revert (2026-09-19, explicit): whichever button (Full/Diff Inflate) starts a run switches
+to "Stop" (InflaterPane._set_running); clicking it, a single trial not converging within
+SAFETY_STEP_CAP=50000 steps (relax_once's own PER-TRIAL cap, NOT summed across
+estimate_pressure_for_target_stretch's own internal multi-trial search -- see
+_run_inflate_step's own max_nfev_per_trial=SAFETY_STEP_CAP), a pressure search that never found
+a workable pressure at all, or a background-thread exception, all funnel into the same
+_revert_run: discards whatever was computed and restores the mesh EXACTLY as it was right
+before the click (self._pre_click_snapshot, taken by every pipeline entry point before it
+touches self.faces/positions/etc.). Nothing is ever rendered mid-computation before a real
+convergence checkpoint (on_full_inflate_clicked/_diff_remove_face/_diff_reexport_and_relax all
+skip their own pre-computation self._render() calls) -- a non-converging run (e.g. a face left
+floppy/loosely-attached by a net edit) used to redraw a visibly wrong intermediate state and
+sometimes crash the renderer on it; now it simply reverts, with a popup for a genuine non-
+convergence/divergence outcome (not for a plain user-requested Stop, which doesn't need one).
 """
 import re
 import sys
@@ -106,6 +121,10 @@ import matplotlib.colors as mcolors
 import numpy as np
 from PIL import Image, ImageTk
 import pyvista as pv
+# vtkmodules.* (the same sub-package pyvista itself imports from), not the monolithic `vtk`
+# package -- `import vtk` eagerly loads every VTK module and is dramatically slower (order of
+# a minute here) than pulling just the one class needed for picking.
+from vtkmodules.vtkRenderingCore import vtkCellPicker
 from scipy.spatial.transform import Rotation
 import sv_ttk
 
@@ -126,7 +145,8 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 from interactive_builder_app.app import (
     ICON_SIZE, MENU_ACTIVE_BG, MENU_BG, MENU_DISABLED_FG, MENU_FG, NetValidationError,
     POLYGON_COLORS, POLYGON_NS, InteractiveBuilderApp, _ICON_VERTICES, _rasterize_polygon,
-    _enable_windows_dpi_awareness,
+    _enable_windows_dpi_awareness, _expand_folded_shapes, _shape_face_corner_order,
+    _vertex_roots,
 )
 
 INFLATER_APP_DIR = Path(__file__).resolve().parent
@@ -243,6 +263,43 @@ def _subdivide_combined_to_level3(base_faces, face_edge_ids, seed_positions):
     return faces, positions, edge_length, face_of_fine
 
 
+def _seed_unknown_by_bfs(faces, seed, rng):
+    """faces: base vertex-loop faces; seed: {vertex_id: np.ndarray(3,)}, MUTATED IN PLACE to
+    add an entry for every vertex `faces` references that isn't already a key. Fills each
+    missing one by BFS along mesh_edges(faces) from whatever's already known -- takes the first
+    found KNOWN neighbor's position plus a small random jitter (so two vertices that used to be
+    the exact same point, e.g. a just-removed connection's two newly-separated corners, don't
+    start EXACTLY coincident -- a zero-length edge risks a divide-by-zero direction vector). A
+    vertex with no known neighbor reachable at all (every neighbor is ALSO unknown, e.g. a
+    freshly added, entirely unconnected new shape) falls back to the overall known centroid (or
+    the origin if nothing is known yet), so it's at least somewhere plausible for the very
+    first relax step to pull from -- used by InflaterPane._diff_reexport_and_relax for any
+    single add/remove-connection or add-face diff (see BuilderPane.classify_change), not just
+    the "one clearly new shape" case _diff_add_face used to special-case."""
+    adjacency = {}
+    for a, b in mesh_edges(faces):
+        adjacency.setdefault(a, []).append(b)
+        adjacency.setdefault(b, []).append(a)
+    unknown = {v for f in faces for v in f} - set(seed)
+    fallback_center = np.mean(list(seed.values()), axis=0) if seed else np.zeros(3)
+    while unknown:
+        progressed = []
+        for v in unknown:
+            for neighbor in adjacency.get(v, ()):
+                if neighbor in seed:
+                    seed[v] = seed[neighbor] + rng.uniform(-0.05, 0.05, size=3)
+                    progressed.append(v)
+                    break
+        if not progressed:
+            # Nothing left in `unknown` is adjacent to anything known yet -- seed the rest near
+            # the overall fallback center instead of looping forever.
+            for v in unknown:
+                seed[v] = fallback_center + rng.uniform(-0.5, 0.5, size=3)
+            break
+        unknown -= set(progressed)
+    return seed
+
+
 def _fan_level_edges(faces, base_edges):
     """Level 0/1's own explicit spring-edge override -- same construction as
     inflate_polyhedron_app's own _fan_level_edges (duplicated, see module docstring).
@@ -306,6 +363,38 @@ class BuilderPane(InteractiveBuilderApp):
     # InflaterPane.refresh_diff_eligibility once both panes exist (see CombinedApp.__init__).
     on_change = None
 
+    # Same idea as on_change -- a class attribute so it exists before the inherited
+    # InteractiveBuilderApp.__init__ makes its own first _redraw() call. Which shape (if any)
+    # InflaterPane's own hover-picking currently wants outlined in yellow on this canvas (see
+    # set_hover_shape/the overridden _redraw below).
+    _hover_shape_id = None
+
+    def set_hover_shape(self, shape_id):
+        """Called by InflaterPane._set_hover_group whenever the mouse moves over a different
+        face of the 3D panel (or leaves it, shape_id=None) -- 2026-09-19, explicit: "that face
+        should be outlined in yellow in both the 2d view and the 3d view". A no-op if
+        `shape_id` is already the current hover, matching InflaterPane's own such-events-aren't-
+        worth-a-redraw guard."""
+        if shape_id == self._hover_shape_id:
+            return
+        self._hover_shape_id = shape_id
+        self._redraw()
+
+    def _redraw(self):
+        """Runs InteractiveBuilderApp's own full redraw unchanged, then draws the hover
+        highlight (if any) on top -- _redraw's own canvas.delete("all") wipes everything first,
+        so this can't be done as a one-time canvas item; it has to be re-added after every
+        single redraw, from whatever edit triggered it (drag/rotate/connect/etc.), not just
+        from set_hover_shape's own calls."""
+        super()._redraw()
+        if self._hover_shape_id is not None:
+            shape = self._shape_by_id(self._hover_shape_id)
+            if shape is not None:
+                screen_vertices = [self._world_to_screen(*wv)
+                                    for wv in self._shape_world_vertices(shape)]
+                flat = [coord for point in screen_vertices for coord in point]
+                self.canvas.create_polygon(flat, outline="yellow", fill="", width=3)
+
     def _refresh_vme_state(self):
         """Runs InteractiveBuilderApp's own vertex-merge-error check unchanged, then notifies
         the right pane (self.on_change, if wired) that the net may have changed -- this is the
@@ -326,11 +415,14 @@ class BuilderPane(InteractiveBuilderApp):
 
     def classify_change(self, old_shapes, old_connections):
         """old_shapes/old_connections: a prior snapshot_state() result (or None, meaning
-        "never inflated yet"). Returns (kind, shape_id) where kind is "none" (no topology
-        change), "add_face"/"remove_face" (EXACTLY one shape added/removed and nothing else
-        about the surviving net's topology changed -- shape_id is that one shape's id), or
-        "complex" (anything else -- a moved/flipped/multi-shape change, an edited connection,
-        etc.), shape_id is None except for add_face/remove_face.
+        "never inflated yet"). Returns (kind, extra) where kind is "none" (no topology change),
+        "add_face"/"remove_face" (EXACTLY one shape added/removed and nothing else about the
+        surviving net's topology changed -- extra is that one shape's id), "add_connection"/
+        "remove_connection" (same shape SET, but exactly one connection added/removed and no
+        shape's own n/flipped changed -- extra is that connection's own conn_key, unused by the
+        caller but handy for debugging), or "complex" (anything else -- a moved/flipped/multi-
+        shape change, more than one connection edited at once, etc.), extra is None for "none"/
+        "complex".
 
         A shape's cx/cy/rotation never affect the exported mesh at all (only n/flipped and the
         connection graph do -- _faces_from_shapes/_edges_from_shapes never read position), so
@@ -369,8 +461,13 @@ class BuilderPane(InteractiveBuilderApp):
             if conn_added or any(not touches(k, removed_id) for k in conn_removed):
                 return "complex", None
             return "remove_face", removed_id
-        if not added and not removed and not conn_added and not conn_removed:
-            return "none", None
+        if not added and not removed:
+            if not conn_added and not conn_removed:
+                return "none", None
+            if len(conn_added) == 1 and not conn_removed:
+                return "add_connection", next(iter(conn_added))
+            if len(conn_removed) == 1 and not conn_added:
+                return "remove_connection", next(iter(conn_removed))
         return "complex", None
 
     def _scale_ui_fonts(self):
@@ -486,6 +583,32 @@ class BuilderPane(InteractiveBuilderApp):
                 "face_edge_ids": face_edge_ids, "source_polygon_id": source_polygon_id}
         return mesh, None
 
+    def root_to_vertex_id(self):
+        """Returns {root_slot: vertex_id} in the SAME numbering export_mesh_dict's own
+        _faces_from_shapes (run inside the inherited _export_faces_and_layout) assigns --
+        root_slot a (shape_id, corner_index) tuple from interactive_builder_app._vertex_roots,
+        run over the EXPANDED (post-_expand_folded_shapes) shapes/connections to match what's
+        actually exported. A root slot is STABLE across an edit that doesn't touch its own
+        group (see _vertex_roots' own docstring) -- unlike the raw integer id, which shifts
+        under an edit that merges/splits vertex groups (a connection add/remove), NOT just a
+        plain shape append/removal. Lets InflaterPane match a vertex across two different
+        exports by this stable identity instead of by raw id (see
+        InflaterPane._diff_reexport_and_relax). This duplicates _faces_from_shapes' own
+        numbering loop (that function doesn't return the root map itself) rather than editing
+        it -- interactive_builder_app/app.py is read-only from here."""
+        if not self.shapes:
+            return {}
+        expanded_shapes, expanded_connections, _source_polygon_id = \
+            _expand_folded_shapes(self.shapes, self.connections)
+        roots = _vertex_roots(expanded_shapes, expanded_connections)
+        vertex_ids = {}
+        for shape in expanded_shapes:
+            for corner in _shape_face_corner_order(shape):
+                root = roots[(shape["id"], corner)]
+                if root not in vertex_ids:
+                    vertex_ids[root] = len(vertex_ids)
+        return vertex_ids
+
 
 class _PaneRoot(ttk.Frame):
     """Stands in for InteractiveBuilderApp's own `root` parameter inside this app's left pane --
@@ -537,6 +660,24 @@ class InflaterPane:
         self.subdivision_level = 0
         self._running = False
 
+        # Stop/revert state (2026-09-19, explicit: "never redraw anything" mid-computation
+        # before real convergence; Inflate becomes a Stop button while running; a stop or a
+        # trial that doesn't converge within its own step cap reverts to the mesh state from
+        # right before the click, discarding whatever was computed). self._pre_click_snapshot
+        # is a _snapshot_mesh_state() result taken at the top of on_full_inflate_clicked/
+        # _diff_remove_face/_diff_reexport_and_relax, None whenever nothing is running.
+        # self._stop_event is a fresh threading.Event() per run, forwarded as every relax/
+        # calibration call's own stop_event= so a Stop click can actually interrupt mid-trial
+        # (see stretchy_mesh.relax_once's own docstring). self._stop_requested short-circuits
+        # every on_done callback straight into a revert once set, instead of processing
+        # whatever partial result the interrupted call returned. self._active_button records
+        # which button ("full"/"diff") is currently showing "Stop", so _set_running(False) can
+        # restore both buttons' normal text/command.
+        self._pre_click_snapshot = None
+        self._stop_event = None
+        self._stop_requested = False
+        self._active_button = None
+
         # The BUILDER's own shapes/connections at the moment of the last successfully-COMPLETED
         # inflate (Full or Diff) -- None until the first one finishes -- plus source_polygon_id
         # (parallel to self.base_faces) from that same mesh, so a later add/remove diff can find
@@ -545,10 +686,30 @@ class InflaterPane:
         self.last_shapes_snapshot = None
         self.last_connections_snapshot = None
         self.last_source_polygon_id = None
+        # {root_slot: vertex_id} from BuilderPane.root_to_vertex_id() at that same moment --
+        # lets a later add_connection/remove_connection/add_face diff seed its fresh mesh's
+        # positions by STABLE root identity instead of raw (edit-shiftable) vertex id -- see
+        # InflaterPane._diff_reexport_and_relax.
+        self.last_root_to_vertex_id = None
         # Staged by whichever pipeline path is currently running (on_full_inflate_clicked/
         # _diff_add_face/_diff_remove_face) -- _record_inflate_success adopts it as the new
-        # self.last_source_polygon_id only once that path reaches a clean Level-3 "Done".
+        # self.last_source_polygon_id once that path reaches a clean Level-3 "Done", but
+        # (see _record_inflate_success's own docstring) is never cleared, so it also always
+        # tracks "the source_polygon_id for whatever self.base_faces currently is".
         self._pending_source_polygon_id = None
+
+        # Hover-highlight state (2026-09-19, explicit: "when i mouse over a face in the 3d
+        # image, that face should be outlined in yellow in both the 2d view and the 3d view")
+        # -- self._actor_to_group is rebuilt every _render() ({vtk actor: base-face-group-index}
+        # for the group each add_mesh call belongs to); self._picker is one reused vtkCellPicker
+        # instance (cheap to reuse, no reason to build a fresh one per mouse-move);
+        # self._hover_group/_hover_actor track the CURRENTLY highlighted group and its yellow
+        # outline actor so _set_hover_group can cheaply add/remove just that one actor instead
+        # of re-running the whole _render().
+        self._actor_to_group = {}
+        self._picker = vtkCellPicker()
+        self._hover_group = None
+        self._hover_actor = None
 
         # The plotter's own render resolution -- starts at PANEL_SIZE but is kept in sync with
         # the panel_label's actual on-screen pixel size by _on_panel_configure below, so the
@@ -646,6 +807,8 @@ class InflaterPane:
         self.panel_label.bind("<MouseWheel>", self._on_scroll)
         self.panel_label.bind("<Button-4>", self._on_scroll)
         self.panel_label.bind("<Button-5>", self._on_scroll)
+        self.panel_label.bind("<Motion>", self._on_panel_hover_motion)
+        self.panel_label.bind("<Leave>", self._on_panel_hover_leave)
 
     def _register_numeric_entry(self, entry, allow_exponent, allow_decimal=True):
         vcmd = self.root.register(lambda proposed: _is_valid_numeric_partial(
@@ -674,28 +837,108 @@ class InflaterPane:
     def _set_status(self, text, kind="info"):
         self.status_label.config(text=text, foreground=STATUS_COLORS.get(kind, STATUS_COLORS["info"]))
 
-    def _set_running(self, running):
+    def _set_running(self, running, active=None):
+        """running=True: `active` ("full" or "diff") is whichever button was clicked -- that
+        button switches to "Stop" (still enabled, now wired to _on_stop_clicked), the OTHER one
+        disables. running=False: both buttons return to their normal text/command
+        (2026-09-19, explicit: "After Diff Inflate or Full Inflate are clicked, they should
+        change to Stop so that the user can stop the simulation")."""
         self._running = running
-        self.full_inflate_button.state(["disabled"] if running else ["!disabled"])
         if running:
-            self.diff_inflate_button.state(["disabled"])
+            self._active_button = active
+            active_btn = self.full_inflate_button if active == "full" else self.diff_inflate_button
+            other_btn = self.diff_inflate_button if active == "full" else self.full_inflate_button
+            active_btn.config(text="Stop", command=self._on_stop_clicked)
+            active_btn.state(["!disabled"])
+            other_btn.state(["disabled"])
         else:
+            self._active_button = None
+            self.full_inflate_button.config(text="Full Inflate", command=self.on_full_inflate_clicked)
+            self.full_inflate_button.state(["!disabled"])
+            self.diff_inflate_button.config(text="Diff Inflate", command=self.on_diff_inflate_clicked)
             self.refresh_diff_eligibility()
+
+    def _on_stop_clicked(self):
+        """Signals the running background computation to stop at its next checked point
+        (self._stop_event, forwarded as every relax/calibration call's own stop_event=) --
+        the actual revert happens once that call's on_done callback runs and sees
+        self._stop_requested (see _on_relax_done/_on_inflate_step_done), not here, since the
+        worker thread needs to actually unwind first."""
+        if not self._running or self._stop_requested:
+            return
+        self._stop_requested = True
+        if self._stop_event is not None:
+            self._stop_event.set()
+        self._set_status("Stopping...", "info")
+
+    def _snapshot_mesh_state(self):
+        """Every mutable mesh-related field, as of right now -- taken at the top of
+        on_full_inflate_clicked/_diff_remove_face/_diff_reexport_and_relax, before any of them
+        touch self.faces/positions/etc., so a Stop click or a non-converged trial can revert
+        to exactly the state the user had when they clicked Inflate (2026-09-19, explicit).
+        A plain shallow copy is safe: every pipeline step REASSIGNS these fields wholesale
+        (subdivide_once/relax_once/estimate_pressure_for_target_stretch all return fresh
+        list/dict objects) rather than mutating one in place, so the objects this snapshot
+        still points at never change out from under it."""
+        return {
+            "base_faces": self.base_faces, "base_edges": self.base_edges,
+            "base_face_edge_ids": self.base_face_edge_ids, "faces": self.faces,
+            "edge_length": self.edge_length, "face_of_fine": self.face_of_fine,
+            "edges": self.edges, "positions": self.positions,
+            "subdivision_level": self.subdivision_level,
+            "pending_source_polygon_id": self._pending_source_polygon_id,
+        }
+
+    def _restore_mesh_state(self, snapshot):
+        self.base_faces = snapshot["base_faces"]
+        self.base_edges = snapshot["base_edges"]
+        self.base_face_edge_ids = snapshot["base_face_edge_ids"]
+        self.faces = snapshot["faces"]
+        self.edge_length = snapshot["edge_length"]
+        self.face_of_fine = snapshot["face_of_fine"]
+        self.edges = snapshot["edges"]
+        self.positions = snapshot["positions"]
+        self.subdivision_level = snapshot["subdivision_level"]
+        self._pending_source_polygon_id = snapshot["pending_source_polygon_id"]
+
+    def _revert_run(self, status_text, popup_text=None):
+        """Discards whatever the current run computed and restores self._pre_click_snapshot --
+        shared by a user Stop click, a trial that didn't converge within its own step cap, a
+        pressure search that never found a workable pressure at all, and a background-thread
+        exception (2026-09-19, explicit: "just go back to the state you started with when you
+        pressed the button. discard anything that was computed" / "show a popup letting the
+        user know the configuration did not converge and prompt them to anchor any faces that
+        might be loosely attached and try again"). `popup_text`, if given, shows a
+        messagebox.showwarning in addition to the status line -- used for a genuine non-
+        convergence/divergence outcome, not a plain user-requested Stop (which doesn't need a
+        popup telling the user what they themselves just did)."""
+        if self._pre_click_snapshot is not None:
+            self._restore_mesh_state(self._pre_click_snapshot)
+        self._pre_click_snapshot = None
+        self._stop_event = None
+        self._stop_requested = False
+        self._render()
+        self._set_running(False)
+        self._set_status(status_text, "warn")
+        if popup_text is not None:
+            messagebox.showwarning("Inflate did not converge", popup_text)
+
+    DIFF_ELIGIBLE_KINDS = ("add_face", "remove_face", "add_connection", "remove_connection")
 
     def refresh_diff_eligibility(self):
         """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
-        current net differs from that completed state by exactly one added/removed shape
-        (BuilderPane.classify_change) -- called after every completed Inflate click (via
-        _set_running) and after every builder edit (BuilderPane.on_change, wired from
-        CombinedApp) so the button's enabled state always reflects the LIVE net, not just
-        whatever it was the last time Inflate ran."""
+        current net differs from that completed state by exactly one added/removed shape or
+        connection (BuilderPane.classify_change, DIFF_ELIGIBLE_KINDS) -- called after every
+        completed Inflate click (via _set_running) and after every builder edit
+        (BuilderPane.on_change, wired from CombinedApp) so the button's enabled state always
+        reflects the LIVE net, not just whatever it was the last time Inflate ran."""
         if self._running or self.last_shapes_snapshot is None:
             self.diff_inflate_button.state(["disabled"])
             return
-        kind, _shape_id = self.builder_getter().classify_change(
+        kind, _extra = self.builder_getter().classify_change(
             self.last_shapes_snapshot, self.last_connections_snapshot)
         self.diff_inflate_button.state(
-            ["!disabled"] if kind in ("add_face", "remove_face") else ["disabled"])
+            ["!disabled"] if kind in self.DIFF_ELIGIBLE_KINDS else ["disabled"])
 
     def _on_panel_configure(self, event):
         """Keeps the off-screen plotter's own render resolution matched to panel_label's real,
@@ -809,7 +1052,86 @@ class InflaterPane:
         self._camera["zoom"] = max(PANEL_ZOOM_MIN, min(PANEL_ZOOM_MAX, self._camera["zoom"] * factor))
         self._render()
 
+    # ---- hover highlight ----
+
+    def _on_panel_hover_motion(self, event):
+        """Plain mouse motion (no button held) over the panel -- picks whichever face's own
+        mesh actor is under the cursor (vtkCellPicker, against the SAME renderer/actors
+        _render() just built -- picking is pure ray-vs-geometry math, works identically
+        off-screen) and highlights its whole base-face group (_set_hover_group). A drag
+        (rotate/pan) fires its OWN motion events (<B1-Motion>/<B3-Motion>), never this plain
+        <Motion> one, so hover picking never fights the camera gestures."""
+        if not self._actor_to_group:
+            return
+        width, height = self.panel_size
+        # VTK's own pixel origin is bottom-left; Tk's (event.x/event.y) is top-left.
+        self._picker.Pick(event.x, height - 1 - event.y, 0, self.plotter.renderer)
+        group = self._actor_to_group.get(self._picker.GetActor())
+        self._set_hover_group(group)
+
+    def _on_panel_hover_leave(self, _event=None):
+        self._set_hover_group(None)
+
+    def _set_hover_group(self, group):
+        """Highlights base face `group`'s own polygon outline in yellow in BOTH this 3D panel
+        AND the left pane's flat 2D canvas (BuilderPane.set_hover_shape) -- `group is None`
+        clears it. A no-op if `group` is already the current hover (the common case -- most
+        mouse-move events land on the same face the previous one did), so a still cursor over
+        one face doesn't re-render on every motion tick. Cheap: only adds/removes the ONE
+        highlight actor (not a full _render()) for the 3D side."""
+        if group == self._hover_group:
+            return
+        self._hover_group = group
+        if self._hover_actor is not None:
+            self.plotter.remove_actor(self._hover_actor)
+            self._hover_actor = None
+        if group is not None:
+            self._hover_actor = self.plotter.add_lines(
+                self._group_boundary_lines(group), color="yellow", width=4)
+        self.plotter.render()
+        image = self.plotter.screenshot(return_img=True)
+        self._photo = ImageTk.PhotoImage(Image.fromarray(image))
+        self.panel_label.configure(image=self._photo, text="")
+
+        shape_id = None
+        if (group is not None and self._pending_source_polygon_id is not None
+                and group < len(self._pending_source_polygon_id)):
+            shape_id = self._pending_source_polygon_id[group]
+        self.builder_getter().set_hover_shape(shape_id)
+
     # ---- rendering ----
+
+    def _group_boundary_lines(self, group):
+        """The ORIGINAL polygon's own rim, at its CURRENT (possibly already-inflated) 3D
+        positions, traced through every FINE subdivision vertex that lies along it -- NOT a
+        straight chord between the two original corners, which would cut straight through the
+        inflated volume instead of following the actual (curved/faceted) surface (2026-09-19,
+        explicit: "you have to draw the subdivisions that make up those edges... they wouldn't
+        be on the surface" -- applies equally to the always-drawn polygon outline (_render) and
+        the yellow hover highlight (_set_hover_group), both of which call this).
+
+        Found by counting how many of `group`'s own fine triangles each of their edges belongs
+        to: a spoke/internal-to-the-fan edge is shared by exactly TWO triangles in this same
+        group (so it cancels out), while a rim edge (whether or not it's been quartered into
+        shorter segments by later subdivision levels) belongs to only ONE -- its other triangle
+        is in a DIFFERENT group, on the far side of that edge. The result is already every
+        SHORT segment making up the rim, in whatever order the count dict yields them --
+        add_lines doesn't need them connected into one ordered polyline, just paired up as
+        (start, end)."""
+        edge_count = {}
+        for face, bf in zip(self.faces, self.face_of_fine):
+            if bf != group:
+                continue
+            a, b, c = face
+            for u, v in ((a, b), (b, c), (c, a)):
+                key = (u, v) if u < v else (v, u)
+                edge_count[key] = edge_count.get(key, 0) + 1
+        boundary_edges = [e for e, count in edge_count.items() if count == 1]
+        segments = np.empty((2 * len(boundary_edges), 3))
+        for i, (u, v) in enumerate(boundary_edges):
+            segments[2 * i] = self.positions[u]
+            segments[2 * i + 1] = self.positions[v]
+        return segments
 
     def _render(self):
         """Redraws the single panel from whatever self.faces/self.positions/self.face_of_fine
@@ -821,15 +1143,23 @@ class InflaterPane:
         explicit: "should use the same colours as the left side"). Camera framing/rotation/
         pan/zoom come from self._camera (see _apply_camera/the drag/pan/scroll handlers below)
         instead of a fresh "iso" + reset_camera() every redraw, so a user's view survives
-        across Inflate steps."""
+        across Inflate steps. Each face's own fill mesh is drawn with show_edges=False (the fine
+        subdivision triangles read as a smooth-ish shaded surface, not a wireframe) plus a
+        SEPARATE add_lines call for just that polygon's own outline (_group_boundary_lines).
+        Rebuilds self._actor_to_group ({vtk actor: group index}, for hover picking) and
+        re-applies the current hover highlight (self._hover_group), since plotter.clear() just
+        destroyed the previous highlight actor along with everything else."""
         plotter = self.plotter
         plotter.clear()
+        self._actor_to_group = {}
+        self._hover_actor = None
         if self.faces and self.positions and self.base_faces:
             vertex_ids = sorted(self.positions)
             idx = {v: i for i, v in enumerate(vertex_ids)}
             points = np.array([self.positions[v] for v in vertex_ids])
             face_of_fine = self.face_of_fine or list(range(len(self.faces)))
-            for group in sorted(set(face_of_fine)):
+            groups_present = sorted(set(face_of_fine))
+            for group in groups_present:
                 group_faces = [f for f, bf in zip(self.faces, face_of_fine) if bf == group]
                 if not group_faces:
                     continue
@@ -837,9 +1167,14 @@ class InflaterPane:
                 color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
                 face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
                 mesh = pv.PolyData(points, face_conn)
-                plotter.add_mesh(mesh, color=color, show_edges=True,
-                                  edge_color=_midpoint_color("white", color), line_width=0.75,
-                                  backface_params=dict(color=_darken_color(color)))
+                actor = plotter.add_mesh(mesh, color=color, show_edges=False,
+                                          backface_params=dict(color=_darken_color(color)))
+                self._actor_to_group[actor] = group
+                plotter.add_lines(self._group_boundary_lines(group),
+                                   color=_midpoint_color("white", color), width=1.5)
+            if self._hover_group in groups_present:
+                self._hover_actor = plotter.add_lines(
+                    self._group_boundary_lines(self._hover_group), color="yellow", width=4)
             lo, hi = points.min(axis=0), points.max(axis=0)
             self._center = (lo + hi) / 2
             self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
@@ -874,6 +1209,9 @@ class InflaterPane:
         except ValueError as e:
             messagebox.showerror("Cannot inflate", str(e))
             return
+        self._pre_click_snapshot = self._snapshot_mesh_state()
+        self._stop_event = threading.Event()
+        self._stop_requested = False
         self.base_faces = faces
         self.base_edges = base_edges
         self.base_face_edge_ids = face_edge_ids
@@ -882,29 +1220,37 @@ class InflaterPane:
         self.edges = _fan_level_edges(self.faces, self.base_edges)
         self.subdivision_level = 0
         self.positions = random_initial_positions(self.faces, seed=0)
-        # Deliberately no self._render() here -- these are raw, unrelaxed random positions
-        # (2026-09-19, explicit: "don't draw un-finalized/unconverged simulations"). The first
-        # real redraw is _on_relax_done's, once Level 0 has actually settled.
-        self._set_running(True)
+        # Deliberately no self._render() here -- these are raw, unrelaxed random positions, not
+        # a converged state (2026-09-19, explicit: "never redraw anything" before real
+        # convergence). The first real redraw is _on_relax_done's, once Level 0 has actually
+        # settled -- or, if it never does, _revert_run puts the panel straight back to
+        # self._pre_click_snapshot without ever showing this or any other unconverged frame.
+        self._set_running(True, active="full")
         self._set_status("Level 0: relaxing...", "info")
         self._run_background(
             lambda queue_progress: relax_initial_configuration(
                 self.positions, self.faces, self.edge_length,
-                max_nfev=SAFETY_STEP_CAP, gtol=self._get_tolerance(),
-                rng=None, on_progress=None, edges=self.edges),
+                max_nfev=SAFETY_STEP_CAP, gtol=self._get_tolerance(), rng=None,
+                on_progress=None, edges=self.edges, stop_event=self._stop_event),
             self._on_relax_done)
 
     def _on_relax_done(self, result):
+        if self._stop_requested:
+            self._revert_run("Stopped -- reverted to the state before Inflate.")
+            return
         positions, _steps, max_stretch, rms_stretch, _optimality, converged = result
+        if not converged:
+            self._revert_run(
+                f"Level 0 relax didn't converge within {SAFETY_STEP_CAP} steps -- reverted to "
+                "the state before Inflate.",
+                popup_text=(
+                    f"The mesh didn't converge (max stretch {max_stretch:.1f}%, RMS "
+                    f"{rms_stretch:.1f}% after {SAFETY_STEP_CAP} steps) -- it may have a "
+                    "loosely-attached or floppy face. Try anchoring/reconnecting it and "
+                    "Inflate again."))
+            return
         self.positions = positions
         self._render()
-        if not converged:
-            self._set_running(False)
-            self._set_status(
-                f"Level 0 relax hit the step cap ({SAFETY_STEP_CAP}) without converging "
-                f"(max stretch {max_stretch:.2f}%, RMS {rms_stretch:.1f}%). Click Inflate to "
-                "try again from here.", "warn")
-            return
         self.subdivision_level = 1
         self._set_status(
             f"Level 0 relaxed (RMS {rms_stretch:.1f}%). Inflating Level 1...", "info")
@@ -918,33 +1264,49 @@ class InflaterPane:
                 self.positions, self.faces, self.edge_length,
                 target_rms_pct=target_rms_pct, gtol=tolerance, rng=None,
                 capture_frames=False, on_progress=queue_progress,
-                edges=self.edges if self.subdivision_level == 1 else None),
+                edges=self.edges if self.subdivision_level == 1 else None,
+                # SAFETY_STEP_CAP applies PER TRIAL, not summed across estimate_pressure_for_
+                # target_stretch's own internal bracket/bisect search (2026-09-19, explicit:
+                # "50000 is for one trial, not for all trials combined") -- its default
+                # (5000) is smaller, so this must be passed explicitly.
+                max_nfev_per_trial=SAFETY_STEP_CAP, stop_event=self._stop_event),
             self._on_inflate_step_done,
             on_progress=lambda steps: self._set_status(
                 f"Level {self.subdivision_level}: calibrating pressure toward "
                 f"{target_rms_pct:.0f}% RMS stretch ({steps} steps so far)...", "info"))
 
     def _on_inflate_step_done(self, result):
+        if self._stop_requested:
+            self._revert_run("Stopped -- reverted to the state before Inflate.")
+            return
         # capture_frames=False (see on_full_inflate_clicked's own call) -- 8 values, no frames list.
         (pressure, new_positions, _steps, max_stretch, rms_stretch,
          _optimality, converged, pressure_found) = result
-        self.positions = new_positions
-        self._render()
         if not pressure_found:
-            self._set_running(False)
-            self._set_status(
-                f"Level {self.subdivision_level}: mesh didn't respond to pressure -- stopping "
-                "here.", "warn")
+            self._revert_run(
+                f"Level {self.subdivision_level}: mesh didn't respond to pressure -- reverted "
+                "to the state before Inflate.",
+                popup_text=(
+                    "The mesh didn't respond to any pressure tried at Level "
+                    f"{self.subdivision_level} -- it may have a loosely-attached or floppy "
+                    "face. Try anchoring/reconnecting it and Inflate again."))
             return
         if not converged:
-            self._set_running(False)
-            self._set_status(
-                f"Level {self.subdivision_level}: pressure {pressure:.2f} reached the step cap "
-                f"without fully converging (RMS {rms_stretch:.1f}%, max stretch "
-                f"{max_stretch:.2f}%). Click Inflate again to continue.", "warn")
+            self._revert_run(
+                f"Level {self.subdivision_level}: pressure {pressure:.2f} didn't converge "
+                f"within {SAFETY_STEP_CAP} steps -- reverted to the state before Inflate.",
+                popup_text=(
+                    f"The mesh didn't converge at Level {self.subdivision_level} (pressure "
+                    f"{pressure:.2f}, max stretch {max_stretch:.1f}%, RMS {rms_stretch:.1f}% "
+                    f"after {SAFETY_STEP_CAP} steps) -- it may have a loosely-attached or "
+                    "floppy face. Try anchoring/reconnecting it and Inflate again."))
             return
+        self.positions = new_positions
+        self._render()
         if self.subdivision_level >= MAX_LEVEL:
             self._record_inflate_success()
+            self._pre_click_snapshot = None
+            self._stop_event = None
             self._set_running(False)
             self._set_status(
                 f"Done -- Level {MAX_LEVEL}, pressure {pressure:.2f}, RMS stretch "
@@ -967,22 +1329,31 @@ class InflaterPane:
         finish -- never a mid-pipeline stop/failure, so a warn/error outcome leaves Diff
         Inflate pointed at whatever the PREVIOUS successful result was) -- snapshots the
         builder's CURRENT shapes/connections as the new baseline a future Diff Inflate's
-        classify_change compares against, and adopts whichever pipeline path (Full Inflate/
-        _diff_add_face/_diff_remove_face) staged into self._pending_source_polygon_id as the
-        new self.last_source_polygon_id."""
+        classify_change compares against, adopts whichever pipeline path (Full Inflate/
+        _diff_add_face/_diff_remove_face/_diff_reexport_and_relax) staged into
+        self._pending_source_polygon_id as the new self.last_source_polygon_id, and
+        re-derives self.last_root_to_vertex_id FRESH from the builder's current state (cheap,
+        and always correct at this exact moment -- no need to thread it through the async
+        pipeline the way source_polygon_id is). Deliberately does NOT clear
+        self._pending_source_polygon_id afterward -- it doubles as "the source_polygon_id
+        parallel to self.base_faces RIGHT NOW" (every pipeline path sets both together, see
+        each one's own assignment), which hover picking (_set_hover_group) needs available
+        even for a mesh that's currently displayed but not yet (or never) successfully
+        recorded."""
         builder = self.builder_getter()
         self.last_shapes_snapshot, self.last_connections_snapshot = builder.snapshot_state()
         self.last_source_polygon_id = self._pending_source_polygon_id
-        self._pending_source_polygon_id = None
+        self.last_root_to_vertex_id = builder.root_to_vertex_id()
 
     # ---- diff inflate ----
 
     def on_diff_inflate_clicked(self):
         """Only meaningful once refresh_diff_eligibility has already enabled this button (an
-        "add_face"/"remove_face" change since the last completed inflate) -- re-classifies once
-        more here regardless, as a safety net against a stale enabled state (e.g. a builder
-        edit landing between the button's last refresh and this click), and tells the user to
-        use Full Inflate instead if that's no longer true. A no-op while already running."""
+        "add_face"/"remove_face"/"add_connection"/"remove_connection" change since the last
+        completed inflate -- see BuilderPane.classify_change) -- re-classifies once more here
+        regardless, as a safety net against a stale enabled state (e.g. a builder edit landing
+        between the button's last refresh and this click), and tells the user to use Full
+        Inflate instead if that's no longer true. A no-op while already running."""
         if self._running:
             return
         builder = self.builder_getter()
@@ -992,11 +1363,15 @@ class InflaterPane:
             self._diff_add_face(shape_id)
         elif kind == "remove_face":
             self._diff_remove_face(shape_id)
+        elif kind == "add_connection":
+            self._diff_connection_change("added a connection")
+        elif kind == "remove_connection":
+            self._diff_connection_change("removed a connection")
         else:
             messagebox.showerror(
                 "Cannot Diff Inflate",
-                "The net has changed by more than a single added/removed face since the last "
-                "Inflate -- use Full Inflate instead.")
+                "The net has changed by more than a single added/removed face or connection "
+                "since the last Inflate -- use Full Inflate instead.")
 
     def _diff_remove_face(self, shape_id):
         """Filters the STORED Level-3 mesh (self.faces/self.positions/self.face_of_fine) and
@@ -1014,6 +1389,10 @@ class InflaterPane:
             return
         old_to_new_base = {old_i: new_i for new_i, old_i in enumerate(keep_base_idxs)}
 
+        self._pre_click_snapshot = self._snapshot_mesh_state()
+        self._stop_event = threading.Event()
+        self._stop_requested = False
+
         self.base_faces = [self.base_faces[i] for i in keep_base_idxs]
         if self.base_face_edge_ids is not None:
             self.base_face_edge_ids = [self.base_face_edge_ids[i] for i in keep_base_idxs]
@@ -1029,30 +1408,39 @@ class InflaterPane:
         self.edges = None
         self.subdivision_level = MAX_LEVEL
         self._pending_source_polygon_id = pending_source_polygon_id
-        self._render()
-        self._set_running(True)
+        # Deliberately no self._render() here -- the mesh with the face just cut out hasn't
+        # been recalibrated yet, so it's not a state worth showing (2026-09-19, explicit:
+        # "never redraw anything" before real convergence) -- if it never converges,
+        # _revert_run puts the panel straight back to self._pre_click_snapshot instead.
+        self._set_running(True, active="diff")
         self._set_status(
             f"Diff Inflate: removed a face, calibrating pressure at Level {MAX_LEVEL}...", "info")
         self._run_inflate_step()
 
-    def _diff_add_face(self, shape_id):
-        """See module docstring's "Full Inflate vs. Diff Inflate" section for the full
-        algorithm. Re-exports the FULL current net -- the OLD faces are a stable, unchanged
-        PREFIX of that export (BuilderPane.classify_change already confirmed nothing else
-        changed; _faces_from_shapes' vertex-numbering-by-first-encounter means appending
-        exactly one new shape never renumbers an EXISTING vertex id, and removing one (a plain
-        order-preserving filter, see BuilderPane._remove_shape) never renumbers a SURVIVING
-        one either -- so a vertex id is stable across any sequence of single-shape add/remove
-        edits, regardless of how self.base_faces' own LIST ORDER has shifted from a previous
-        diff-remove's compaction (2026-09-19, fixed: an earlier version of this method compared
-        the fresh export against self.base_faces as a strict ordered PREFIX, which broke after
-        add -> remove -> undo -- the undo restores the ORIGINAL shape order, not the compacted
-        one a prior removal left self.base_faces in, so the prefix no longer lined up even
-        though every vertex id involved was still perfectly valid) -- seeds the new combined
-        base mesh's own Level-0 positions with whatever's ALREADY in self.positions for each
-        vertex id the fresh export uses (never pruned by _diff_remove_face, so a vertex from a
-        face that's round-tripped through a remove+undo often already has a good cached
-        position too), subdivides straight to Level 3 as pure interpolation
+    def _diff_add_face(self, _shape_id):
+        """A new shape's own added-and-connected face(s) -- handled by the same general
+        re-export-and-root-match-seed path as a connection add/remove (see
+        _diff_reexport_and_relax); the shape id itself isn't needed there (root-matching finds
+        automatically that this shape's own corners have no prior root, and BFS-seeds them near
+        whatever they got connected to)."""
+        self._diff_reexport_and_relax("Diff Inflate: added a face")
+
+    def _diff_connection_change(self, verb_phrase):
+        self._diff_reexport_and_relax(f"Diff Inflate: {verb_phrase}")
+
+    def _diff_reexport_and_relax(self, status_verb_phrase):
+        """Shared by _diff_add_face/_diff_connection_change (see module docstring's "Full
+        Inflate vs. Diff Inflate" section) -- re-exports the FULL current net, seeds the fresh
+        base mesh's own Level-0 positions by matching each vertex's STABLE root identity
+        (BuilderPane.root_to_vertex_id, comparable across exports even when a connection
+        add/remove has MERGED or SPLIT vertex groups and shifted raw integer ids -- unlike
+        appending one new shape, which never renumbers anything else, a connection edit can
+        renumber vertices anywhere after the affected group in traversal order, so a plain
+        `self.positions[v]` id lookup isn't safe here the way it was for _diff_remove_face's
+        pure filtering) against self.last_root_to_vertex_id (the SAME map from the last
+        completed inflate), falling back to a neighbor-BFS fill (_seed_unknown_by_bfs) for any
+        vertex with no matching old root (a genuinely new shape's own corners, or one half of a
+        just-split connection), subdivides straight to Level 3 as pure interpolation
         (_subdivide_combined_to_level3 -- no solving), then runs ONE pressure-calibration pass
         at Level 3."""
         builder = self.builder_getter()
@@ -1066,29 +1454,20 @@ class InflaterPane:
             messagebox.showerror("Cannot Diff Inflate", str(e))
             return
         source_polygon_id = mesh.get("source_polygon_id") or []
+        new_root_to_id = builder.root_to_vertex_id()
 
-        new_indices = [i for i, spid in enumerate(source_polygon_id) if spid == shape_id]
-        all_vertex_ids = {v for f in new_base_faces for v in f}
-        seed = {v: self.positions[v] for v in all_vertex_ids if v in self.positions}
-        old_face_vertex_ids = {v for i, f in enumerate(new_base_faces)
-                                if i not in new_indices for v in f}
-        missing = old_face_vertex_ids - set(seed)
-        if missing:
-            # Defensive fallback -- shouldn't happen given classify_change's own "add_face"
-            # verdict and the vertex-id stability argument above, but a wrong result here would
-            # be a silent correctness bug, not a crash, so this is checked explicitly.
-            messagebox.showerror(
-                "Cannot Diff Inflate",
-                "The net changed in a way Diff Inflate can't handle -- use Full Inflate instead.")
-            return
-        new_face_vertex_ids = {v for i in new_indices for v in new_base_faces[i]}
-        unknown = sorted(new_face_vertex_ids - set(seed))
-        if unknown:
-            known_nearby = [seed[v] for i in new_indices for v in new_base_faces[i] if v in seed]
-            center = np.mean(known_nearby, axis=0) if known_nearby else np.zeros(3)
-            rng = np.random.default_rng(0)
-            for v in unknown:
-                seed[v] = center + rng.uniform(-0.5, 0.5, size=3)
+        self._pre_click_snapshot = self._snapshot_mesh_state()
+        self._stop_event = threading.Event()
+        self._stop_requested = False
+
+        seed = {}
+        old_roots = self.last_root_to_vertex_id or {}
+        for root, new_id in new_root_to_id.items():
+            old_id = old_roots.get(root)
+            if old_id is not None and old_id in self.positions:
+                seed[new_id] = self.positions[old_id]
+        rng = np.random.default_rng(0)
+        _seed_unknown_by_bfs(new_base_faces, seed, rng)
 
         self.base_faces = new_base_faces
         self.base_edges = new_base_edges
@@ -1098,24 +1477,23 @@ class InflaterPane:
             _subdivide_combined_to_level3(new_base_faces, new_face_edge_ids, seed)
         self.edges = None
         self.subdivision_level = MAX_LEVEL
-        # Deliberately no self._render() here -- the new face's own vertices are still at their
-        # crude seeded guess (unknown ones jittered near a neighbor's centroid, see `unknown`
-        # above), not yet pulled into shape by calibration -- drawing it now showed a visibly
-        # wrong/"stiff" pose (2026-09-19, explicit: "don't draw un-finalized/unconverged
-        # simulations"). The panel keeps showing whatever it last had until the calibration
-        # pass below actually finishes.
-        self._set_running(True)
+        # Deliberately no self._render() here -- any freshly-seeded (as opposed to root-
+        # matched) vertex is still at its crude BFS/jitter guess, not yet pulled into shape by
+        # calibration -- drawing it now showed a visibly wrong/"stiff" pose (2026-09-19,
+        # explicit: "don't draw un-finalized/unconverged simulations"). The panel keeps showing
+        # whatever it last had until the calibration pass below actually finishes.
+        self._set_running(True, active="diff")
         # Straight to pressure calibration (_run_inflate_step), deliberately WITHOUT a
         # zero-pressure relax_initial_configuration pass first: that force law is pure Hooke's-
-        # law springs with NO pressure term, so run on the OLD portion (already stretched well
-        # past rest length by whatever pressure it converged at) it would just yank the
-        # already-correct old shape back toward rest length before the calibration below ever
-        # got to re-inflate it -- wasted work at best, a bad/slow-to-recover starting point at
-        # worst. estimate_pressure_for_target_stretch's own trials use relax_once (the REAL,
-        # pressure-inclusive force law) starting fresh from these seeded positions each time, so
-        # the old portion's already-correct geometry is respected from the very first trial.
-        self._set_status(
-            f"Diff Inflate: calibrating pressure at Level {MAX_LEVEL}...", "info")
+        # law springs with NO pressure term, so run on the OLD (root-matched) portion (already
+        # stretched well past rest length by whatever pressure it converged at) it would just
+        # yank the already-correct old shape back toward rest length before the calibration
+        # below ever got to re-inflate it -- wasted work at best, a bad/slow-to-recover starting
+        # point at worst. estimate_pressure_for_target_stretch's own trials use relax_once (the
+        # REAL, pressure-inclusive force law) starting fresh from these seeded positions each
+        # time, so the old portion's already-correct geometry is respected from the very first
+        # trial.
+        self._set_status(f"{status_verb_phrase}, calibrating pressure at Level {MAX_LEVEL}...", "info")
         self._run_inflate_step()
 
     # ---- background thread/progress-poll pattern (same idea as both sibling apps' own
@@ -1144,8 +1522,17 @@ class InflaterPane:
                             on_progress(payload)
                         continue
                     if kind == "error":
-                        self._set_running(False)
-                        self._set_status(f"Failed: {payload}", "error")
+                        # A crash mid-computation (2026-09-19, explicit: "sometimes it
+                        # crashes") -- reverts the same way a non-convergence does, rather than
+                        # leaving whatever partial/possibly-invalid state was on screen when it
+                        # blew up.
+                        self._revert_run(
+                            f"Reverted to the state before Inflate (error: {payload}).",
+                            popup_text=(
+                                f"Inflate hit an error and was reverted: {payload}\n\nIf this "
+                                "keeps happening, the mesh may have a loosely-attached or "
+                                "floppy face -- try anchoring/reconnecting it and Inflate "
+                                "again."))
                         return
                     on_done(payload)
                     return
