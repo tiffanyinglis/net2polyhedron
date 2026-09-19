@@ -339,7 +339,7 @@
       "gtol": 0.0001,
       "target_rms_pct": null,
       "precomp_time_s": null,
-      "sim_time_s": 0.1914489999981015,
+      "sim_time_s": 0.17501439999614377,
       "pressure_found": true
     },
     "1": {
@@ -351,7 +351,7 @@
       "converged": true,
       "gtol": 0.0001,
       "target_rms_pct": 80.0,
-      "precomp_time_s": 0.5909461999981431,
+      "precomp_time_s": 0.5620724000036716,
       "sim_time_s": null,
       "pressure_found": true
     },
@@ -364,7 +364,7 @@
       "converged": true,
       "gtol": 0.0001,
       "target_rms_pct": 40.0,
-      "precomp_time_s": 0.9334311999991769,
+      "precomp_time_s": 0.9756570999961696,
       "sim_time_s": null,
       "pressure_found": true
     },
@@ -377,7 +377,7 @@
       "converged": true,
       "gtol": 0.0001,
       "target_rms_pct": 10.0,
-      "precomp_time_s": 1.0692896999971708,
+      "precomp_time_s": 0.9732719999956316,
       "sim_time_s": null,
       "pressure_found": true
     }

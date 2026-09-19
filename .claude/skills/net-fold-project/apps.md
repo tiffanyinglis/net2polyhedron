@@ -264,6 +264,18 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   never its two handles (this panel is read-only). Net panel no longer shows a fine-mesh
   subdivision overlay (2026-09-16, explicit — "too busy"); just the plain base faces + connection
   curves.
+- **Coloring/grouping by `source_polygon_id` (2026-09-18, explicit — Polygon Fold, see
+  `interactive_builder_app`'s own section)**: `self.colors` (flat, per-base-face-index, as before)
+  is now built by `_face_colors_by_group`, keyed by `source_polygon_id[i]` when the loaded file has
+  one, else `i` itself (byte-identical to the old behavior for any file without it) — every base
+  face sharing a source polygon gets the SAME color. `self.color_by_group`/`self.group_of_base_face`
+  are the same grouping, keyed by group id instead of face index, for `_draw_level_panel`'s
+  per-group `add_mesh` grouping (below, now grouped by this instead of raw `face_of_fine`) and
+  `_draw_target_faces`'s own per-entry color lookup (`self.target_layout`'s own keys ARE group ids
+  now — see `_layout_from_net_layout`'s shape-id-keyed format, `interactive_builder_app`'s own
+  section). `_net_layout_is_new_format` gates whether a `net_layout` needs the old face-count-match
+  check (legacy) or is trusted unconditionally (new, shape-id-keyed, can legitimately have fewer
+  entries than `"faces"` once a fold exists) — both `on_select_net`/`on_load_session_clicked`.
 - **"Level N" panel wireframe edge color**: PER-BASE-FACE now (2026-09-16, explicit — "don't use
   white... use the color half way between white and the polygon color"), not one fixed
   `PLOT_THEME["fg"]` for every edge regardless of face. `_draw_level_panel` now does one
@@ -539,14 +551,40 @@ mode — dragging one is a single undo step, connection stays selected throughou
 
 **File > Save** writes the stretchy vertex-loop JSON format (as `.poly` now, `NET_FILE_EXTENSION`
 — 2026-09-16, explicit; still plain JSON content, and File > Load still ALSO accepts plain
-`.json`) + this app's own `net_layout`
-(`{cx,cy,rotation}` per face) and `view` (`{scale}`) extension fields — any other reader (incl.
-the solver) ignores the extra keys. Validation (self-loop / duplicate-directed-edge) runs ONLY
-at Save, never live while editing — an edge can only be joined once (enforced live), but
+`.json`) + this app's own `net_layout`/`builder_connections`/`view` extension fields — any other
+reader (incl. the solver) ignores the extra keys except `source_polygon_id` (below), which
+`inflate_polyhedron_app` reads for coloring. Validation (self-loop / duplicate-directed-edge) runs
+ONLY at Save, never live while editing — an edge can only be joined once (enforced live), but
 transitive vertex identity is only finalized at export. **File > Load** replays `net_layout`
 exactly if present; otherwise BFS-spanning-tree-lays-out fresh (same algorithm as
 `stretchy_net_layout.build_stretchy_net_layout`, reimplemented locally with a gap parameter that
 function doesn't have).
+
+**Polygon Fold tool (2026-09-18, explicit)**: third real toolbar mode (`[P]`, alongside Move/Join)
+— same click-click edge-handle gesture as Join, but restricted to two DIFFERENT EDGES OF THE SAME
+SHAPE (`_hit_test_any_edge_handle`'s `require_shape_id`/`exclude_edge_index` params) instead of two
+different shapes, modeling a polygon folded onto itself. A flat n-gon can't literally glue two of
+its own edges together (a face with a repeated vertex) — `_expand_folded_shapes` resolves this at
+Save/live-validation time by triangulating any shape with ≥1 such connection into `n` triangles
+fanned from a fresh centroid vertex (same winding as `mesh_levels._fan_level_0_to_1`'s own Level
+0→1 fan), rewriting every connection touching that shape's edge `i` onto triangle `i`'s own outer
+edge, and adding the `n` spoke connections gluing the fan together — the existing
+`_validate_shapes_connections`/`_faces_from_shapes`/`_edges_from_shapes`/`_face_edge_ids_from_shapes`
+needed NO changes, only feeding them this expanded form instead of the raw shapes. In the app
+itself, a folded shape's `n` triangles are never individually selectable/movable/deletable and
+their internal spoke edges are never exposed at all — purely a Save-time (and
+`_refresh_vme_state`-time) transformation.
+
+Since a folded shape's triangles no longer align 1:1 with placed shapes, `net_layout`/
+`builder_connections` are keyed by each shape's own stable id now (`"shape_id"`/`"a_shape_id"`/
+`"b_shape_id"`, plus `"n"` on each `net_layout` entry so a reader can reconstruct the original
+polygon's outline without stitching triangles back together) instead of by position/index into
+`"faces"` — a `net_layout` entry with no `"shape_id"` is legacy, index-aligned data (any file saved
+before this), handled as a fully separate branch in `_load_faces`/`inflate_polyhedron_app`'s
+`_layout_from_net_layout` (`_net_layout_is_new_format`). A new `"source_polygon_id"` list, parallel
+to `"faces"`, names the original placed shape each exported face came from (identical for every
+triangle of one fan) — a pure downstream display aid, never read by `stretchy_mesh.py`/
+`mesh_levels.py`.
 
 ## polygon_subdivision_app (`src/apps/polygon_subdivision_app/app.py`)
 Unrelated 2D-only demo: splits a regular n-gon into a fine triangular mesh, preview only, no

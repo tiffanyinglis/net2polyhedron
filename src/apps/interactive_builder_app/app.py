@@ -43,11 +43,27 @@ Interaction model:
     otherwise a clipboard from an EARLIER Move-mode copy would still be
     pasteable here, landing a shape nothing could then select, move, or
     connect to anything).
-  - **Polygon Fold [P]**: a reserved THIRD mode with no behavior
-    implemented yet -- its toolbar button is drawn dim
-    (`TOOLBAR_ICON_DISABLED_COLOR`) and never bound to a click at all,
-    so `self.tool_mode` can never actually become `"polygon_fold"` right
-    now.
+  - **Polygon Fold [P]**: the same click-click edge-handle gesture as
+    Join, but restricted to TWO DIFFERENT EDGES OF THE SAME SHAPE
+    instead of two different shapes -- models a polygon folded onto
+    itself (e.g. a pinched leg) rather than glued to a neighbor. Same
+    handle visibility/occupied-dot rules as Join (`_redraw`), and an
+    existing fold connection is selectable/deletable/bezier-draggable
+    exactly like any other connection. `_hit_test_any_edge_handle`'s
+    `require_shape_id`/`exclude_edge_index` params (used only from this
+    mode's own `_on_canvas_motion`/completion branch) are what restrict
+    the SECOND click's candidate set to "same shape, a different free
+    edge" -- the first click that arms a pending connection is
+    unrestricted, same as Join. A flat n-gon face can't literally glue
+    two of its own edges together (that's a face with a repeated
+    vertex, which `stretchy_mesh.py` disallows) -- see
+    `_expand_folded_shapes` for how this is resolved at Save time by
+    triangulating any shape with >=1 fold connection into `n` triangles
+    fanned from its own centroid, so the two folded edges become a
+    connection between two genuinely different (triangle) faces. No
+    special validation exists for what edges may fold (adjacent edges
+    included) -- exactly like Join, `_validate_shapes_connections` is
+    the sole arbiter, now run against that triangulated form.
   - **Flip Horizontal [H]** / **Flip Vertical [V]**: plain immediate
     ACTIONS on the current selection (`_flip_selected_shapes`), not
     modes -- clicking either never touches `self.tool_mode`. Mirrors the
@@ -567,12 +583,20 @@ def _draw_join_tool_icon(canvas, size, color):
 
 
 def _draw_polygon_fold_tool_icon(canvas, size, color):
-    """A pentagon with one vertex joined to a non-adjacent one by a
-    diagonal line -- "Polygon Fold" (disabled, see module docstring)."""
+    """A hexagon outline with a line joining the MIDPOINTS of two
+    OPPOSITE edges -- "Polygon Fold" (an edge-to-edge connection within
+    one shape, as opposed to Join's between-shapes edge connection)."""
     cx, cy = size / 2, size / 2
-    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(5, size * 0.34)]
+    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(6, size * 0.34)]
     canvas.create_polygon(verts, outline=color, fill="", width=1.5)
-    canvas.create_line(*verts[1], *verts[3], fill=color, width=1.5)
+    n = len(verts)
+
+    def edge_mid(i):
+        ax, ay = verts[i]
+        bx, by = verts[(i + 1) % n]
+        return (ax + bx) / 2, (ay + by) / 2
+
+    canvas.create_line(*edge_mid(0), *edge_mid(3), fill=color, width=1.5)
 
 
 def _draw_flip_horizontal_tool_icon(canvas, size, color):
@@ -662,11 +686,6 @@ MENU_DISABLED_FG = "#6e6e6e"
 # modes" section for what each button actually does.
 TOOLBAR_ICON_SIZE = 40
 TOOLBAR_ICON_COLOR = PLOT_THEME["fg"]
-# "Polygon Fold" has no behavior yet (see module docstring) -- its icon
-# is drawn in this dim color instead of TOOLBAR_ICON_COLOR, the same
-# "greyed out" idea as MENU_DISABLED_FG for a disabled File menu entry,
-# so it visibly reads as unavailable rather than identically clickable.
-TOOLBAR_ICON_DISABLED_COLOR = MENU_DISABLED_FG
 # The current tool's own icon gets this border (mirrors the palette's
 # own "armed" white border, _on_palette_clicked) -- plain PLOT_THEME["bg"]
 # (i.e. no visible border) otherwise.
@@ -859,17 +878,54 @@ def _rasterize_polygon(screen_vertices, fill_hex, outline_hex=None, outline_widt
 #
 # Written in the same "faces" vertex-loop format stretchy_mesh.py reads
 # (shared vertex ids ARE the adjacency -- see its own module docstring
-# for the full convention), plus "edges" (_edges_from_shapes) and two
-# extra top-level keys this app alone understands: "net_layout", a list
-# parallel to "faces" of each face's own {"cx", "cy", "rotation",
-# "flipped"} -- exactly the fields a shape already carries -- as it
-# looked on screen when saved; and "builder_connections", self.connections
-# translated from shape id to FACE INDEX (a fresh shape has no id yet at
-# load time), each entry now also carrying its own "a_handle"/"b_handle"
-# (the {"t", "n"} bezier control-point offsets -- module docstring's
-# "Bezier handles" section -- read back as-is, or defaulted via
-# _default_connection_handles for an older file's entry that predates
-# them).
+# for the full convention), plus "edges" (_edges_from_shapes), a new
+# "source_polygon_id" (see below), and two extra top-level keys this app
+# alone understands: "net_layout" and "builder_connections".
+#
+# Since Polygon Fold (module docstring's "Tool modes" section), a shape
+# with >=1 fold connection is exported as `n` TRIANGLES (see
+# _expand_folded_shapes), so "faces"/"edges"/"face_edge_ids"/
+# "source_polygon_id" are no longer necessarily one entry per PLACED
+# shape -- but "net_layout"/"builder_connections" still describe the
+# ORIGINAL placed shapes directly (this app never shows/edits individual
+# fan triangles), so they're keyed by SHAPE ID now, not by position/index
+# into "faces":
+#
+# - "net_layout": one entry per placed shape, each
+#   {"shape_id", "n", "cx", "cy", "rotation", "flipped"} -- exactly the
+#   fields a shape already carries, plus its own id, as it looked on
+#   screen when saved. "n" lets a reader reconstruct the ORIGINAL
+#   polygon's own outline even once it's been triangulated away in
+#   "faces" (see inflate_polyhedron_app's own _layout_from_net_layout).
+# - "builder_connections": self.connections translated to
+#   {"a_shape_id", "a_edge", "b_shape_id", "b_edge", "a_handle",
+#   "b_handle"} -- shape ids directly (a fresh shape has no id yet at
+#   load time, so these are remapped through a freshly-assigned id table
+#   on Load, same idea as before just no longer routed through a `faces`
+#   position at all). "a_handle"/"b_handle" (the {"t", "n"} bezier
+#   control-point offsets -- module docstring's "Bezier handles" section)
+#   are read back as-is, or defaulted via _default_connection_handles for
+#   an older file's entry that predates them.
+#
+# A "net_layout" entry with no "shape_id" (any file saved before Polygon
+# Fold existed) is legacy, index-aligned data -- back when every shape
+# was necessarily exactly one face, its own list position already WAS
+# its shape identity for this purpose, so _load_faces (interactive_
+# builder_app) and _layout_from_net_layout (inflate_polyhedron_app) both
+# fall back to that position as the shape id, and legacy
+# "builder_connections" entries keep their own original "a_face"/
+# "b_face" naming (also just an index into that same list) rather than
+# "a_shape_id"/"b_shape_id" -- every such file still loads exactly as it
+# always has, nothing about this app's own Polygon-Fold-free reading of
+# it changes.
+#
+# "source_polygon_id" is a NEW list parallel to "faces": the ORIGINAL
+# placed shape's own id that face came from -- identical for every one
+# of a folded polygon's `n` triangles, and for a face that's just an
+# ordinary, non-folded shape, it's simply that shape's own id too. This
+# is purely a downstream DISPLAY aid (inflate_polyhedron_app colors/
+# groups same-source-polygon triangles together) -- stretchy_mesh.py/
+# mesh_levels.py don't read it at all.
 #
 # "edges"/"face_edge_ids" are NOT this app's own private extension the
 # way "net_layout"/"builder_connections" are -- stretchy_mesh.py and
@@ -1264,6 +1320,88 @@ def _face_edge_ids_from_shapes(shapes, connections):
             ids_for_face.append(cid)
         face_edge_ids.append(ids_for_face)
     return face_edge_ids
+
+
+def _expand_folded_shapes(shapes, connections):
+    """Returns (expanded_shapes, expanded_connections, source_polygon_id)
+    -- the actual structure to validate/export (see
+    _validate_shapes_connections/_faces_from_shapes/_edges_from_shapes/
+    _face_edge_ids_from_shapes, all fed THIS rather than the raw
+    `shapes`/`connections`). A flat n-gon face can't have two of its own
+    edges glued directly (that's a face with a repeated vertex in its own
+    loop -- a structural impossibility the same way any other vertex
+    merge error is); a Polygon Fold connection (module docstring's "Tool
+    modes" section -- a connection with `a_shape == b_shape`) resolves
+    this by triangulating that WHOLE shape into `n` triangles fanned from
+    a new centroid vertex, exactly like mesh_levels._fan_level_0_to_1's
+    own Level 0->1 subdivision: triangle i is (corner i, corner i+1,
+    centroid), with true (`_true_edge_slots`, flip already baked in)
+    corner order [0, 1, 2] and RAW edge indices 0 (the one true OUTER
+    edge -- corner i -> corner i+1, i.e. the original polygon's own edge
+    i), 1 (corner i+1 -> centroid), 2 (centroid -> corner i). Every
+    triangle is given `flipped=False` -- there's nothing left to flip,
+    since flip was already resolved into which raw edge IS the true
+    outer edge before this ever runs.
+
+    Every connection (an ordinary inter-shape one, or a same-shape fold
+    one) that touches a folded shape's raw edge i is rewritten onto that
+    shape's triangle i's edge 0 -- both cases are just "a connection
+    touching this polygon's edge i", so no special-casing is needed
+    between them; a fold connection's two ends simply land on two
+    DIFFERENT triangles' edge 0, which is exactly what turns it into a
+    genuine two-different-faces connection the existing union-find
+    machinery already knows how to validate. Each folded shape's own `n`
+    spokes are added as new connections gluing consecutive triangles at
+    the shared centroid (triangle i's edge 1 <-> triangle (i+1)%n's edge
+    2) -- verified by hand: this unions triangle i's own corner 1 with
+    triangle (i+1)%n's corner 0 (the shared original corner i+1) AND both
+    triangles' own corner 2 (the shared centroid), exactly the sharing a
+    real fan of triangles has.
+
+    `source_polygon_id` is parallel to `expanded_shapes` (and, after
+    _faces_from_shapes, to the exported "faces"): the ORIGINAL shape's
+    own id, for every triangle from one fan and for every untouched shape
+    alike -- a pure downstream grouping/coloring aid (see
+    inflate_polyhedron_app), never read by stretchy_mesh.py/
+    mesh_levels.py. Non-folded shapes/connections pass through completely
+    unchanged, both in identity (same shape dict, same id) and position
+    in the returned lists."""
+    fold_shape_ids = {c["a_shape"] for c in connections if c["a_shape"] == c["b_shape"]}
+
+    expanded_shapes = []
+    source_polygon_id = []
+    for shape in shapes:
+        if shape["id"] in fold_shape_ids:
+            for i in range(shape["n"]):
+                expanded_shapes.append({"id": (shape["id"], i), "n": 3, "flipped": False})
+                source_polygon_id.append(shape["id"])
+        else:
+            expanded_shapes.append(shape)
+            source_polygon_id.append(shape["id"])
+
+    def _retarget(shape_id, edge):
+        if shape_id in fold_shape_ids:
+            return (shape_id, edge), 0
+        return shape_id, edge
+
+    expanded_connections = []
+    for conn in connections:
+        a_shape, a_edge = _retarget(conn["a_shape"], conn["a_edge"])
+        b_shape, b_edge = _retarget(conn["b_shape"], conn["b_edge"])
+        expanded_connections.append(
+            {"a_shape": a_shape, "a_edge": a_edge, "b_shape": b_shape, "b_edge": b_edge})
+
+    for shape in shapes:
+        if shape["id"] not in fold_shape_ids:
+            continue
+        n, pid = shape["n"], shape["id"]
+        for i in range(n):
+            expanded_connections.append({
+                "a_shape": (pid, i), "a_edge": 1,
+                "b_shape": (pid, (i + 1) % n), "b_edge": 2,
+            })
+
+    return expanded_shapes, expanded_connections, source_polygon_id
 
 
 def _degenerate_edge_faces(faces):
@@ -1703,6 +1841,7 @@ class InteractiveBuilderApp:
         self.root.bind_all("<KeyPress-f>", self._on_flip_key)
         self.root.bind_all("<KeyPress-m>", lambda _e: self._set_tool_mode("move"))
         self.root.bind_all("<KeyPress-j>", lambda _e: self._set_tool_mode("join"))
+        self.root.bind_all("<KeyPress-p>", lambda _e: self._set_tool_mode("fold"))
         self.root.bind_all("<KeyPress-h>", lambda _e: self._flip_selected_shapes("horizontal"))
         self.root.bind_all("<KeyPress-v>", lambda _e: self._flip_selected_shapes("vertical"))
         self.root.bind_all("<Control-c>", self.on_copy_key)
@@ -1758,17 +1897,15 @@ class InteractiveBuilderApp:
 
     def _build_toolbar(self, parent):
         """The right-side tool strip: one column of icon buttons,
-        Photoshop/Illustrator-style. "Move" and "Join" SELECT a tool
-        MODE (self.tool_mode, see _set_tool_mode) that gates what
-        clicking on the canvas does; "Polygon Fold" is a reserved third
-        mode with no behavior yet, so its button is drawn dim and never
-        bound to a click at all. "Flip Horizontal"/"Flip Vertical" are
+        Photoshop/Illustrator-style. "Move"/"Join"/"Polygon Fold" SELECT a
+        tool MODE (self.tool_mode, see _set_tool_mode) that gates what
+        clicking on the canvas does. "Flip Horizontal"/"Flip Vertical" are
         plain immediate ACTIONS on the current selection
         (_flip_selected_shapes) -- clicking either never changes
         self.tool_mode."""
         self._add_toolbar_mode_button(parent, "move", "Move [M]", _draw_move_tool_icon)
         self._add_toolbar_mode_button(parent, "join", "Join [J]", _draw_join_tool_icon)
-        self._add_toolbar_disabled_button(parent, "Polygon Fold [P]", _draw_polygon_fold_tool_icon)
+        self._add_toolbar_mode_button(parent, "fold", "Polygon Fold [P]", _draw_polygon_fold_tool_icon)
         self._add_toolbar_action_button(parent, "Flip Horizontal [H]", _draw_flip_horizontal_tool_icon,
                                          lambda: self._flip_selected_shapes("horizontal"))
         self._add_toolbar_action_button(parent, "Flip Vertical [V]", _draw_flip_vertical_tool_icon,
@@ -1793,10 +1930,6 @@ class InteractiveBuilderApp:
         icon = self._new_toolbar_icon(parent, draw_icon, TOOLBAR_ICON_COLOR)
         icon.bind("<Button-1>", lambda _e: action())
         Tooltip(icon, tooltip_text)
-
-    def _add_toolbar_disabled_button(self, parent, tooltip_text, draw_icon):
-        icon = self._new_toolbar_icon(parent, draw_icon, TOOLBAR_ICON_DISABLED_COLOR)
-        Tooltip(icon, f"{tooltip_text} (not implemented yet)")
 
     def _update_toolbar_highlight(self):
         """Rings whichever MODE button matches self.tool_mode in
@@ -1958,32 +2091,41 @@ class InteractiveBuilderApp:
             joined.add((conn["b_shape"], conn["b_edge"]))
         return joined
 
-    def _hit_test_any_edge_handle(self, screen_x, screen_y, exclude_shape_id=None):
+    def _hit_test_any_edge_handle(self, screen_x, screen_y, exclude_shape_id=None,
+                                   require_shape_id=None, exclude_edge_index=None):
         """Nearest edge handle belonging to any shape OTHER than
-        `exclude_shape_id`, within HANDLE_HIT_RADIUS screen pixels of the
-        given point, or None. Every placed shape's every UNJOINED edge
-        handle is clickable this way -- there's no "must be selected
-        first" gate (that WAS the rule at one point; dropped since it
-        took two clicks, select-the-shape then click-its-handle, to
-        start a connection at all -- see module docstring) -- but an
-        edge already the endpoint of a real connection (see
-        _joined_points) is EXCLUDED entirely, for both starting a new
-        connection from it and completing one onto it: an edge can only
-        ever be joined once, and allowing a second join is exactly what
-        corrupted hippo.json (see _joined_points' own docstring). Also
-        used, with `exclude_shape_id` set to a pending connection's own
-        origin shape, for both hover highlighting (_on_canvas_motion) and
-        deciding what a completing click actually connects to
-        (_complete_or_cancel_pending_connection just reads the hover
-        state this leaves behind, rather than re-running this itself) --
-        the two MUST agree, so nothing ever connects without having
-        first been visibly highlighted."""
+        `exclude_shape_id` (Join's own restriction -- inter-shape only),
+        or, if `require_shape_id` is given instead, belonging to ONLY
+        that shape and not its own `exclude_edge_index` (Polygon Fold's
+        restriction -- a different edge of the SAME shape, see module
+        docstring's "Tool modes" section), within HANDLE_HIT_RADIUS
+        screen pixels of the given point, or None. Every placed shape's
+        every UNJOINED edge handle is clickable this way -- there's no
+        "must be selected first" gate (that WAS the rule at one point;
+        dropped since it took two clicks, select-the-shape then
+        click-its-handle, to start a connection at all -- see module
+        docstring) -- but an edge already the endpoint of a real
+        connection (see _joined_points) is EXCLUDED entirely, for both
+        starting a new connection from it and completing one onto it: an
+        edge can only ever be joined once, and allowing a second join is
+        exactly what corrupted hippo.json (see _joined_points' own
+        docstring). Also used, with `exclude_shape_id`/`require_shape_id`
+        set from a pending connection's own origin, for both hover
+        highlighting (_on_canvas_motion) and deciding what a completing
+        click actually connects to (_complete_or_cancel_pending_connection
+        just reads the hover state this leaves behind, rather than
+        re-running this itself) -- the two MUST agree, so nothing ever
+        connects without having first been visibly highlighted."""
         joined = self._joined_points()
         best, best_dist = None, HANDLE_HIT_RADIUS
         for shape in self.shapes:
             if shape["id"] == exclude_shape_id:
                 continue
+            if require_shape_id is not None and shape["id"] != require_shape_id:
+                continue
             for edge_index, (mx, my) in enumerate(self._shape_edge_midpoints(shape)):
+                if edge_index == exclude_edge_index and shape["id"] == require_shape_id:
+                    continue
                 if (shape["id"], edge_index) in joined:
                     continue
                 sx, sy = self._world_to_screen(mx, my)
@@ -2198,9 +2340,16 @@ class InteractiveBuilderApp:
         concern (_draw_dedup_vertex_labels re-validates independently,
         live, on every redraw, to ring the specific ones red), not
         something this needs to compute or store for release mode,
-        which shows nothing more specific than the status bar text."""
+        which shows nothing more specific than the status bar text.
+        Validates the EXPANDED (post-_expand_folded_shapes) form, not
+        self.shapes/self.connections directly -- a Polygon Fold
+        connection only actually resolves into a real (in)validity
+        question once its shape is triangulated, see that function's own
+        docstring."""
         try:
-            _validate_shapes_connections(self.shapes, self.connections)
+            expanded_shapes, expanded_connections, _ = _expand_folded_shapes(
+                self.shapes, self.connections)
+            _validate_shapes_connections(expanded_shapes, expanded_connections)
         except NetValidationError:
             self._vme_active = True
         else:
@@ -2232,13 +2381,14 @@ class InteractiveBuilderApp:
         before letting New/quitting throw away unsaved work) check
         this."""
         try:
-            faces, edges, face_edge_ids, net_layout, builder_connections = \
+            faces, edges, face_edge_ids, source_polygon_id, net_layout, builder_connections = \
                 self._export_faces_and_layout()
         except (NetValidationError, ValueError) as e:
             messagebox.showerror("Save failed", str(e))
             return False
         spec = {"name": os.path.splitext(os.path.basename(path))[0], "faces": faces,
-                "edges": edges, "face_edge_ids": face_edge_ids, "net_layout": net_layout,
+                "edges": edges, "face_edge_ids": face_edge_ids,
+                "source_polygon_id": source_polygon_id, "net_layout": net_layout,
                 "builder_connections": builder_connections,
                 "view": {"scale": self.view_scale}}
         try:
@@ -2301,58 +2451,74 @@ class InteractiveBuilderApp:
         return self._save_to_path(self.current_save_path)
 
     def _export_faces_and_layout(self):
-        """Returns (faces, edges, face_edge_ids, net_layout,
-        builder_connections): `faces` is the vertex-loop list derived
-        from self.shapes/self.connections via _faces_from_shapes; `edges`
-        is the explicit mesh-edge list from _edges_from_shapes (see its
-        own docstring for why this can't just be re-derived from `faces`
-        alone downstream -- two coincidentally-same-vertex-pair free
-        edges are NOT the same edge); `face_edge_ids` is
-        _face_edge_ids_from_shapes' own per-face-edge disambiguation ids
-        (same reason, but for mesh_levels.subdivide_once's own Level
-        1->2 rim-edge splitting, which can't rely on `edges` alone since
-        it needs a per-FACE-EDGE, not per-mesh-edge, answer); `net_layout`
-        is each shape's own {"cx", "cy", "rotation", "flipped"}, in the
-        same order as `faces`; `builder_connections` is self.connections
-        translated from shape id to FACE INDEX (position in self.shapes,
-        matching position in `faces`) -- all four of `edges`/
-        `face_edge_ids`/`net_layout`/`builder_connections` are this
-        app's own extensions, see module docstring's "net JSON import/
-        export" section for why Load reconstructs shapes/connections
-        directly from `net_layout`/`builder_connections` (when present)
-        rather than re-deriving them from the plain vertex-loop `faces`
-        alone: re-deriving can only ever recover SOME valid flip/
-        connection assignment for the exported mesh, not necessarily the
-        exact one the user built (see _load_faces' own docstring for why
-        "flipped" specifically can't just be read back onto a re-derived
-        connection). Raises NetValidationError (a ValueError subclass,
-        from _validate_shapes_connections) if self.shapes' CURRENT
-        "flipped" bits (see module docstring's "Flip" section -- set
-        directly by the user, never inferred) don't produce a valid mesh
-        -- should be unreachable in normal use, since Save/Save As
-        already refuse to call this while self._vme_active
+        """Returns (faces, edges, face_edge_ids, source_polygon_id,
+        net_layout, builder_connections). `faces`/`edges`/`face_edge_ids`/
+        `source_polygon_id` are all derived from the EXPANDED (post-
+        _expand_folded_shapes) shapes/connections, not self.shapes/
+        self.connections directly -- see that function's own docstring
+        for why a Polygon Fold connection needs its whole shape
+        triangulated before the plain _faces_from_shapes/_edges_from_shapes/
+        _face_edge_ids_from_shapes machinery (which itself needs no
+        changes at all) can make sense of it. `faces` is the vertex-loop
+        list; `edges` is the explicit mesh-edge list from
+        _edges_from_shapes (see its own docstring for why this can't just
+        be re-derived from `faces` alone downstream -- two
+        coincidentally-same-vertex-pair free edges are NOT the same
+        edge); `face_edge_ids` is _face_edge_ids_from_shapes' own
+        per-face-edge disambiguation ids (same reason, but for
+        mesh_levels.subdivide_once's own Level 1->2 rim-edge splitting,
+        which can't rely on `edges` alone since it needs a per-FACE-EDGE,
+        not per-mesh-edge, answer); `source_polygon_id` is parallel to
+        `faces` -- the ORIGINAL placed shape's own id each face came from
+        (see _expand_folded_shapes), a pure downstream display/grouping
+        aid.
+
+        `net_layout`/`builder_connections`, in contrast, are built
+        straight from the ORIGINAL (un-expanded) self.shapes/
+        self.connections -- they describe the placed polygons themselves,
+        which this app never shows as individual fan triangles even once
+        Saved (module docstring's "Tool modes"/"net JSON import/export"
+        sections), so they're keyed by each shape's own stable id rather
+        than by any position into `faces` (which, once a fold exists, no
+        longer has one entry per placed shape at all): `net_layout` is
+        each shape's own {"shape_id", "n", "cx", "cy", "rotation",
+        "flipped"}; `builder_connections` is self.connections with shape
+        ids renamed to "a_shape_id"/"b_shape_id" (already exactly the ids
+        needed -- no translation table required any more). See module
+        docstring's "net JSON import/export" section for why Load
+        reconstructs shapes/connections directly from these two (when
+        present) rather than re-deriving them from the plain vertex-loop
+        `faces` alone: re-deriving can only ever recover SOME valid
+        flip/connection assignment for the exported mesh, not necessarily
+        the exact one the user built (see _load_faces' own docstring for
+        why "flipped" specifically can't just be read back onto a
+        re-derived connection).
+
+        Raises NetValidationError (a ValueError subclass, from
+        _validate_shapes_connections) if self.shapes' CURRENT "flipped"
+        bits (see module docstring's "Flip" section -- set directly by
+        the user, never inferred) don't produce a valid mesh once
+        expanded -- should be unreachable in normal use, since Save/Save
+        As already refuse to call this while self._vme_active
         (_refresh_vme_state re-runs the same check live after every edit
         -- see module docstring's "Edge connections" section), but kept
         here as the defensive, authoritative check right before a file
-        is actually written. Validated in "vSHAPE.CORNER" terms, the
-        same live identity debug mode shows, before _faces_from_shapes
-        ever renumbers anything for export, so a failed check's error
-        names corners the user can actually go find (and un-flip, if
-        that's the fix) on screen."""
-        _validate_shapes_connections(self.shapes, self.connections)
-        faces = _faces_from_shapes(self.shapes, self.connections)
-        edges = _edges_from_shapes(self.shapes, self.connections)
-        face_edge_ids = _face_edge_ids_from_shapes(self.shapes, self.connections)
-        net_layout = [{"cx": s["cx"], "cy": s["cy"], "rotation": s["rotation"],
-                       "flipped": s["flipped"]} for s in self.shapes]
-        face_index = {s["id"]: i for i, s in enumerate(self.shapes)}
+        is actually written."""
+        expanded_shapes, expanded_connections, source_polygon_id = \
+            _expand_folded_shapes(self.shapes, self.connections)
+        _validate_shapes_connections(expanded_shapes, expanded_connections)
+        faces = _faces_from_shapes(expanded_shapes, expanded_connections)
+        edges = _edges_from_shapes(expanded_shapes, expanded_connections)
+        face_edge_ids = _face_edge_ids_from_shapes(expanded_shapes, expanded_connections)
+        net_layout = [{"shape_id": s["id"], "n": s["n"], "cx": s["cx"], "cy": s["cy"],
+                       "rotation": s["rotation"], "flipped": s["flipped"]} for s in self.shapes]
         builder_connections = [
-            {"a_face": face_index[c["a_shape"]], "a_edge": c["a_edge"],
-             "b_face": face_index[c["b_shape"]], "b_edge": c["b_edge"],
+            {"a_shape_id": c["a_shape"], "a_edge": c["a_edge"],
+             "b_shape_id": c["b_shape"], "b_edge": c["b_edge"],
              "a_handle": dict(c["a_handle"]), "b_handle": dict(c["b_handle"])}
             for c in self.connections
         ]
-        return faces, edges, face_edge_ids, net_layout, builder_connections
+        return faces, edges, face_edge_ids, source_polygon_id, net_layout, builder_connections
 
     def on_load_clicked(self):
         path = filedialog.askopenfilename(
@@ -2391,25 +2557,71 @@ class InteractiveBuilderApp:
         except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
             messagebox.showerror("Load failed", str(e))
 
+    def _connections_from_builder_list(self, builder_connections, resolve_shape_id):
+        """Shared by every builder_connections reconstruction path below
+        (new shape-id-keyed format, legacy face-index-keyed format, and
+        the _infer_connections(faces) fallback, which returns the same
+        legacy "a_face"/"b_face" shape) -- only HOW a raw saved endpoint
+        id maps to a freshly-assigned live shape id differs between them,
+        which `resolve_shape_id(raw_id)` supplies. "a_handle"/"b_handle"
+        (this app's own bezier control points) are only present in an
+        entry saved by a version of this app that tracked them -- one
+        that has neither (an older file, or a hand-authored/inferred
+        one) gets the same straight-line default a freshly-made
+        connection would (_default_connection_handles), rather than
+        failing to load."""
+        connections = []
+        for c in builder_connections:
+            a_shape_id = resolve_shape_id(c["a_shape_id"] if "a_shape_id" in c else c["a_face"])
+            b_shape_id = resolve_shape_id(c["b_shape_id"] if "b_shape_id" in c else c["b_face"])
+            if "a_handle" in c and "b_handle" in c:
+                a_handle, b_handle = c["a_handle"], c["b_handle"]
+            else:
+                a_handle, b_handle = self._default_connection_handles(
+                    self._shape_by_id(a_shape_id), c["a_edge"],
+                    self._shape_by_id(b_shape_id), c["b_edge"])
+            connections.append({
+                "id": self._next_connection_id,
+                "a_shape": a_shape_id, "a_edge": c["a_edge"],
+                "b_shape": b_shape_id, "b_edge": c["b_edge"],
+                "a_handle": a_handle, "b_handle": b_handle,
+            })
+            self._next_connection_id += 1
+        return connections
+
     def _load_faces(self, faces, net_layout, view_scale=None, builder_connections=None):
-        """Replaces the whole canvas with `faces` (vertex-id loops).
-        `net_layout` (this app's own saved {"cx", "cy", "rotation",
-        "flipped"} per face, see module docstring), when present and the
-        right length, positions shapes exactly as they were when saved;
-        otherwise falls back to _layout_faces_with_gap, rooted at face 0.
+        """Replaces the whole canvas with either `net_layout` (preferred,
+        see below) or `faces` (vertex-id loops, the plain fallback).
         `view_scale` (this app's own saved "view"."scale", see module
         docstring), when present, restores the zoom level the net was
         saved at instead of resetting to the default 1.0.
 
-        `builder_connections` (this app's own saved
-        {"a_face","a_edge","b_face","b_edge"} list, face-INDEXED rather
-        than shape-id-keyed since ids don't exist yet at load time -- see
-        module docstring), when present ALONGSIDE a `net_layout` of the
-        right length, reconstructs self.connections DIRECTLY from it
-        (and each shape's "flipped" from that SAME net_layout entry)
-        instead of falling back to _infer_connections(faces) -- this is
-        the ONLY way to correctly restore a shape's "flipped" bit at all:
-        _faces_from_shapes already bakes each shape's TRUE (flip-
+        Two `net_layout` shapes are understood (module docstring's "net
+        JSON import/export" section):
+
+        - NEW format (`net_layout[i]` has its own "shape_id"/"n", written
+          by this app since Polygon Fold): one shape is reconstructed per
+          `net_layout` ENTRY directly (its own "n"/"cx"/"cy"/"rotation"/
+          "flipped"), completely independent of `faces`' own length/order
+          -- necessary since a folded shape's `n` triangles in `faces` no
+          longer correspond 1:1 with the ORIGINAL placed shapes at all.
+          `builder_connections` entries (keyed by "a_shape_id"/
+          "b_shape_id") are remapped through a fresh saved-id -> live-id
+          table built while placing those shapes.
+        - LEGACY format (no "shape_id" -- any file saved before Polygon
+          Fold existed, when 1 shape was always exactly 1 face): one
+          shape per FACE, positioned from `net_layout[i]` when its length
+          matches `faces`, else via _layout_faces_with_gap rooted at face
+          0. `builder_connections` entries (keyed by legacy "a_face"/
+          "b_face") are remapped through that same per-face shape-id
+          list.
+
+        Either way, `builder_connections`, when present alongside a
+        usable layout, reconstructs self.connections (and each shape's
+        "flipped", from the SAME per-shape layout entry) DIRECTLY from
+        it, instead of falling back to _infer_connections(faces) -- this
+        is the ONLY way to correctly restore a shape's "flipped" bit at
+        all: _faces_from_shapes already bakes each shape's TRUE (flip-
         adjusted) winding directly into its exported loop, so
         _infer_connections always derives a fully self-consistent set of
         connections treating EVERY shape as unflipped (this is exactly
@@ -2426,7 +2638,11 @@ class InteractiveBuilderApp:
         "flipped" is only safe together with the EXACT connections it
         was originally paired with, which is what `builder_connections`
         supplies -- there is no way to derive a correct substitute from
-        `faces` alone."""
+        `faces` alone. The legacy fallback (no usable `net_layout` at
+        all, e.g. any hand-authored net) never has fold-shaped `faces`
+        either, so it's never affected by any of the above -- one shape
+        per face, `_infer_connections`, every shape unflipped, exactly as
+        always."""
         if self.shapes or self.connections:
             self._push_undo()
         self.shapes = []
@@ -2442,70 +2658,59 @@ class InteractiveBuilderApp:
         self._marquee_start = None
         self._marquee_current = None
 
-        layout_ok = net_layout is not None and len(net_layout) == len(faces)
-        exact_connections_ok = layout_ok and builder_connections is not None
+        new_format = bool(net_layout) and "shape_id" in net_layout[0]
 
-        shape_ids = []
-        for i, face in enumerate(faces):
-            shape_id = self._next_shape_id
-            self._next_shape_id += 1
-            shape_ids.append(shape_id)
-            flipped = net_layout[i].get("flipped", False) if exact_connections_ok else False
-            self.shapes.append({"id": shape_id, "n": len(face), "cx": 0.0, "cy": 0.0,
-                                 "rotation": 0.0, "flipped": flipped})
-
-        if layout_ok:
-            for shape, layout in zip(self.shapes, net_layout):
-                shape["cx"], shape["cy"], shape["rotation"] = (
-                    layout["cx"], layout["cy"], layout["rotation"])
+        if new_format:
+            shape_id_map = {}
+            for entry in net_layout:
+                new_id = self._next_shape_id
+                self._next_shape_id += 1
+                shape_id_map[entry["shape_id"]] = new_id
+                self.shapes.append({"id": new_id, "n": entry["n"], "cx": entry["cx"],
+                                     "cy": entry["cy"], "rotation": entry["rotation"],
+                                     "flipped": entry.get("flipped", False)})
+            if builder_connections is not None:
+                self.connections = self._connections_from_builder_list(
+                    builder_connections, lambda raw: shape_id_map[raw])
+            # A NEW-format net_layout with no builder_connections at all
+            # can't happen from anything this app itself ever Saves (the
+            # two are always written together) -- left with no
+            # connections rather than guessing, sooner than crashing.
         else:
-            placed = _layout_faces_with_gap(faces, root=0, gap=GAP)
-            for i, (shape, face) in enumerate(zip(self.shapes, faces)):
-                if i in placed:
-                    shape["cx"], shape["cy"], shape["rotation"] = \
-                        _shape_from_placed_points(len(face), placed[i])
-                else:
-                    # A face BFS from face 0 never reached (a separate
-                    # connected component) -- just set it off to one
-                    # side rather than leaving it stacked on the origin.
-                    shape["cx"] = (i + 1) * DEFAULT_SHAPE_EDGE_LENGTH * 3
+            layout_ok = net_layout is not None and len(net_layout) == len(faces)
+            exact_connections_ok = layout_ok and builder_connections is not None
 
-        if exact_connections_ok:
-            for c in builder_connections:
-                a_shape_id, b_shape_id = shape_ids[c["a_face"]], shape_ids[c["b_face"]]
-                # "a_handle"/"b_handle" (this app's own bezier control
-                # points) are only present in a file saved by a version
-                # of this app that tracked them -- an older
-                # builder_connections entry (or a hand-authored one) has
-                # neither, so it gets the same straight-line default a
-                # freshly-made connection would (_default_connection_
-                # handles), rather than failing to load.
-                if "a_handle" in c and "b_handle" in c:
-                    a_handle, b_handle = c["a_handle"], c["b_handle"]
-                else:
-                    a_handle, b_handle = self._default_connection_handles(
-                        self._shape_by_id(a_shape_id), c["a_edge"],
-                        self._shape_by_id(b_shape_id), c["b_edge"])
-                self.connections.append({
-                    "id": self._next_connection_id,
-                    "a_shape": a_shape_id, "a_edge": c["a_edge"],
-                    "b_shape": b_shape_id, "b_edge": c["b_edge"],
-                    "a_handle": a_handle, "b_handle": b_handle,
-                })
-                self._next_connection_id += 1
-        else:
-            for conn in _infer_connections(faces):
-                a_shape_id, b_shape_id = shape_ids[conn["a_face"]], shape_ids[conn["b_face"]]
-                a_handle, b_handle = self._default_connection_handles(
-                    self._shape_by_id(a_shape_id), conn["a_edge"],
-                    self._shape_by_id(b_shape_id), conn["b_edge"])
-                self.connections.append({
-                    "id": self._next_connection_id,
-                    "a_shape": a_shape_id, "a_edge": conn["a_edge"],
-                    "b_shape": b_shape_id, "b_edge": conn["b_edge"],
-                    "a_handle": a_handle, "b_handle": b_handle,
-                })
-                self._next_connection_id += 1
+            shape_ids = []
+            for i, face in enumerate(faces):
+                shape_id = self._next_shape_id
+                self._next_shape_id += 1
+                shape_ids.append(shape_id)
+                flipped = net_layout[i].get("flipped", False) if exact_connections_ok else False
+                self.shapes.append({"id": shape_id, "n": len(face), "cx": 0.0, "cy": 0.0,
+                                     "rotation": 0.0, "flipped": flipped})
+
+            if layout_ok:
+                for shape, layout in zip(self.shapes, net_layout):
+                    shape["cx"], shape["cy"], shape["rotation"] = (
+                        layout["cx"], layout["cy"], layout["rotation"])
+            else:
+                placed = _layout_faces_with_gap(faces, root=0, gap=GAP)
+                for i, (shape, face) in enumerate(zip(self.shapes, faces)):
+                    if i in placed:
+                        shape["cx"], shape["cy"], shape["rotation"] = \
+                            _shape_from_placed_points(len(face), placed[i])
+                    else:
+                        # A face BFS from face 0 never reached (a separate
+                        # connected component) -- just set it off to one
+                        # side rather than leaving it stacked on the origin.
+                        shape["cx"] = (i + 1) * DEFAULT_SHAPE_EDGE_LENGTH * 3
+
+            if exact_connections_ok:
+                self.connections = self._connections_from_builder_list(
+                    builder_connections, lambda raw: shape_ids[raw])
+            else:
+                self.connections = self._connections_from_builder_list(
+                    _infer_connections(faces), lambda raw: shape_ids[raw])
 
         self._center_view_on_shapes(scale=view_scale if view_scale is not None else 1.0)
         self._redraw()
@@ -2546,8 +2751,14 @@ class InteractiveBuilderApp:
             # never dependent on what any OTHER connection happens to
             # imply about shared vertex identity -- see module docstring
             # on why that's deliberate).
-            target = self._hit_test_any_edge_handle(
-                event.x, event.y, exclude_shape_id=self._connection_pending["from_shape"])
+            if self.tool_mode == "fold":
+                target = self._hit_test_any_edge_handle(
+                    event.x, event.y,
+                    require_shape_id=self._connection_pending["from_shape"],
+                    exclude_edge_index=self._connection_pending["from_edge"])
+            else:
+                target = self._hit_test_any_edge_handle(
+                    event.x, event.y, exclude_shape_id=self._connection_pending["from_shape"])
             self._hover_shape_id = None if target is None else target["shape_id"]
             self._hover_edge_index = None if target is None else target["edge_index"]
         elif self.armed_n is not None:
@@ -2563,12 +2774,16 @@ class InteractiveBuilderApp:
     def _on_canvas_press(self, event):
         """Dispatches to whichever tool mode is current (see module
         docstring's "Tool modes" section) -- Move (drag/select/marquee
-        shapes; connections aren't editable at all) or Join (add/delete
-        connections; shapes aren't selectable, so a click can never
-        start a drag)."""
+        shapes; connections aren't editable at all) or Join/Polygon Fold
+        (add/delete connections; shapes aren't selectable, so a click can
+        never start a drag). Join and Polygon Fold share the exact same
+        press-handling (_on_canvas_press_join) -- the only difference
+        between them (which shape/edge a pending connection can complete
+        onto) lives entirely in _on_canvas_motion's hover computation,
+        which both branches read from."""
         if self.tool_mode == "move":
             self._on_canvas_press_move(event)
-        elif self.tool_mode == "join":
+        elif self.tool_mode in ("join", "fold"):
             self._on_canvas_press_join(event)
 
     def _on_canvas_press_move(self, event):
@@ -3364,9 +3579,9 @@ class InteractiveBuilderApp:
                 self._draw_connection_line(anchor, self._pending_cursor_screen, selected=True)
 
         # EVERY placed shape's EVERY edge gets a handle -- but ONLY in
-        # Join mode, since that's the only mode a handle is actually
-        # selectable in at all (see module docstring's "Tool modes"
-        # section) -- not just the selected one, so a connection can be
+        # Join/Polygon Fold mode, since those are the only modes a handle
+        # is actually selectable in at all (see module docstring's "Tool
+        # modes" section) -- not just the selected one, so a connection can be
         # started with a single click straight onto any handle, with no
         # "select the shape first" step. A handle lights up red if its
         # own shape is SELECTED (every one of that shape's edges, so any
@@ -3384,7 +3599,7 @@ class InteractiveBuilderApp:
         # shape-drawing loop above) at its normal, unselected look.
         # Otherwise a handle is filled white if some connection already
         # uses it, or an unfilled ring if not (see _draw_handle_circle).
-        if self.tool_mode == "join":
+        if self.tool_mode in ("join", "fold"):
             pending_point = (None if self._connection_pending is None else
                               (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
             hover_point = (None if self._hover_shape_id is None else
@@ -3418,12 +3633,12 @@ class InteractiveBuilderApp:
         # The selected connection's own two bezier control handles --
         # ONLY that one connection (never one merely highlighted via an
         # endpoint shape's selection, see module docstring's bezier
-        # section) and only in Join mode, the only mode a connection can
-        # even BE selected in (self.selected_connection_id is already
-        # always None otherwise -- see _set_tool_mode). Drawn last (on
-        # top of everything else drawn so far) so a handle is never
-        # occluded by a shape or another connection's own curve.
-        if self.tool_mode == "join" and self.selected_connection_id is not None:
+        # section) and only in Join/Polygon Fold mode, the only modes a
+        # connection can even BE selected in (self.selected_connection_id
+        # is already always None otherwise -- see _set_tool_mode). Drawn
+        # last (on top of everything else drawn so far) so a handle is
+        # never occluded by a shape or another connection's own curve.
+        if self.tool_mode in ("join", "fold") and self.selected_connection_id is not None:
             selected_conn = next(
                 (c for c in self.connections if c["id"] == self.selected_connection_id), None)
             if selected_conn is not None:

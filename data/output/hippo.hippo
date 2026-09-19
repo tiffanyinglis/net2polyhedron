@@ -2515,7 +2515,7 @@
       "gtol": 0.0001,
       "target_rms_pct": null,
       "precomp_time_s": null,
-      "sim_time_s": 2.0860346000044956,
+      "sim_time_s": 2.2857574000008754,
       "pressure_found": true
     },
     "1": {
@@ -2527,7 +2527,7 @@
       "converged": true,
       "gtol": 0.0001,
       "target_rms_pct": 80.0,
-      "precomp_time_s": 26.259585500003595,
+      "precomp_time_s": 26.326043600005505,
       "sim_time_s": null,
       "pressure_found": true
     },
@@ -2540,7 +2540,7 @@
       "converged": true,
       "gtol": 0.0001,
       "target_rms_pct": 40.0,
-      "precomp_time_s": 20.893615599998157,
+      "precomp_time_s": 22.79149409999809,
       "sim_time_s": null,
       "pressure_found": true
     },
@@ -2553,7 +2553,7 @@
       "converged": true,
       "gtol": 0.0001,
       "target_rms_pct": 10.0,
-      "precomp_time_s": 30.56727939999837,
+      "precomp_time_s": 30.4468515999979,
       "sim_time_s": null,
       "pressure_found": true
     }
@@ -72633,16 +72633,16 @@
       ]
     }
   },
-  "level_zoom": 1.3310000000000004,
+  "level_zoom": 1.610510000000001,
   "level_pan": [
-    -0.11570247933884298,
-    0.057777777777777775
+    0.03305785123966942,
+    0.09333333333333332
   ],
   "level_rotation": [
-    -0.014169486485901835,
-    -0.5867175621746614,
-    -0.5474571836784651,
-    0.5965336201149032
+    -0.033351772732979235,
+    -0.3535518630200553,
+    -0.6951221473240765,
+    0.6250551493349852
   ],
   "level0_zoom": 1.0,
   "level0_pan": [

@@ -46,7 +46,14 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   (2026-09-16, explicit), right-click-drag pan on Net panel + all "Level N" panels with
   middle-click reset (2026-09-16, explicit, still active), `NET_ZOOM_MIN` lowered from 0.2 to 0.1
   to match every "Level N" panel's own 10%..1000% range (2026-09-16, explicit), `refresh_net_list`
-  reading `*.poly` alongside `*.json` (2026-09-16, explicit, still active). See `apps.md`.
+  reading `*.poly` alongside `*.json` (2026-09-16, explicit, still active). Polygon Fold support
+  (2026-09-18, explicit — the feature's own description named this file's coloring behavior
+  directly): reads a new `"source_polygon_id"` field and colors/groups same-source-polygon fine
+  triangles as one unit (`_face_colors_by_group`, `_draw_level_panel`'s per-group `add_mesh`
+  grouping, `_draw_target_faces`'s `color_by_group` lookup); `_layout_from_net_layout` and both
+  `on_select_net`/`on_load_session_clicked` net_layout-length guards updated for
+  `interactive_builder_app`'s new shape-id-keyed `net_layout`/`builder_connections` format (see
+  `apps.md`'s own `interactive_builder_app` section) — still active. See `apps.md`.
 
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.

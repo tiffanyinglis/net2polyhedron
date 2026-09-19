@@ -26,11 +26,12 @@ itself checks (a vertex merge error -- two different corners of one face
 resolving to the same vertex -- AND a duplicate directed edge). See each
 test's own docstring for what was actually checked.
 
-Connecting a shape to one of its OWN (different) edges is not supported
-yet (planned for later -- _hit_test_any_edge_handle refuses a handle on
-the pending connection's own origin SHAPE, not just its origin edge), so
-there is deliberately no test coverage here for a_shape == b_shape --
-_connection_pairs is never called with one."""
+Connecting a shape to one of its own (different) edges (Polygon Fold, an
+`a_shape == b_shape` connection) is validated/exported differently from
+an ordinary connection -- see _expand_folded_shapes and its own test
+class below, TestExpandFoldedShapes -- since a flat polygon can't
+literally glue two of its own edges together without first being
+triangulated."""
 import glob
 import itertools
 import json
@@ -346,4 +347,111 @@ class TestDedupVertexGrouping:
             frozenset({(1, 0), (2, 0), (3, 0)}),
             frozenset({(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2), (4, 0), (4, 1), (4, 2)}),
         })
+
+
+# ---- Polygon Fold: _expand_folded_shapes (a_shape == b_shape connections) ----
+
+class TestExpandFoldedShapes:
+    """A Polygon Fold connection (module docstring's "Tool modes" section)
+    is a connection with `a_shape == b_shape` -- two different edges of
+    the SAME placed shape. _expand_folded_shapes triangulates any such
+    shape into `n` triangles fanned from a fresh centroid vertex before
+    the plain _validate_shapes_connections/_faces_from_shapes/
+    _edges_from_shapes machinery (unmodified, see that function's own
+    docstring) ever sees it. Every "VALID"/"INVALID" claim below was
+    verified directly against the real function (not hand-derived) for a
+    single hexagon with one fold connection at each of the 3 distinct
+    edge-separation cases a hexagon has (adjacent, one-apart, opposite)."""
+
+    def test_no_fold_connection_passes_through_unchanged(self):
+        shapes = [shape(1, 6), shape(2, 3)]
+        connections = [conn(1, 1, 0, 2, 0)]  # ordinary inter-shape connection
+        expanded_shapes, expanded_connections, source_polygon_id = \
+            builder_app._expand_folded_shapes(shapes, connections)
+        assert expanded_shapes == shapes
+        assert expanded_connections == [
+            {"a_shape": 1, "a_edge": 0, "b_shape": 2, "b_edge": 0}]
+        assert source_polygon_id == [1, 2]
+
+    def test_hexagon_fold_produces_six_triangles_one_per_source_polygon_id(self):
+        shapes = [shape(1, 6)]
+        connections = [{"a_shape": 1, "a_edge": 0, "b_shape": 1, "b_edge": 3}]
+        expanded_shapes, expanded_connections, source_polygon_id = \
+            builder_app._expand_folded_shapes(shapes, connections)
+        assert [s["id"] for s in expanded_shapes] == [(1, i) for i in range(6)]
+        assert all(s["n"] == 3 and s["flipped"] is False for s in expanded_shapes)
+        assert source_polygon_id == [1] * 6
+
+    def test_hexagon_fold_adds_n_spokes_plus_the_retargeted_fold_connection(self):
+        shapes = [shape(1, 6)]
+        connections = [{"a_shape": 1, "a_edge": 0, "b_shape": 1, "b_edge": 3}]
+        _, expanded_connections, _ = builder_app._expand_folded_shapes(shapes, connections)
+        assert len(expanded_connections) == 7  # 6 spokes + 1 retargeted fold
+        assert {"a_shape": (1, 0), "a_edge": 0, "b_shape": (1, 3), "b_edge": 0} \
+            in expanded_connections
+        spokes = {(c["a_shape"], c["a_edge"], c["b_shape"], c["b_edge"])
+                  for c in expanded_connections if c["a_edge"] == 1}
+        assert spokes == {((1, i), 1, (1, (i + 1) % 6), 2) for i in range(6)}
+
+    @pytest.mark.parametrize("a_edge,b_edge,should_be_valid", [
+        (0, 3, True),   # opposite edges
+        (0, 1, True),   # adjacent edges
+        (0, 2, False),  # one edge apart -- pinches the triangle between them
+    ])
+    def test_hexagon_fold_validity_by_edge_separation(self, a_edge, b_edge, should_be_valid):
+        # is_valid_net's own plain vertex-pair-count check doesn't apply
+        # to a triangulated fan's own "faces" output -- a centroid-fan
+        # mesh routinely reuses vertex ids across faces in ways that
+        # legitimately produce coincidentally-identical directed edges
+        # (see _edges_from_shapes' own docstring on exactly this); only
+        # _validate_shapes_connections' own genuine-conflict checks apply
+        # here.
+        shapes = [shape(1, 6)]
+        connections = [{"a_shape": 1, "a_edge": a_edge, "b_shape": 1, "b_edge": b_edge}]
+        expanded_shapes, expanded_connections, _ = \
+            builder_app._expand_folded_shapes(shapes, connections)
+        if should_be_valid:
+            builder_app._validate_shapes_connections(expanded_shapes, expanded_connections)  # no raise
+            faces = builder_app._faces_from_shapes(expanded_shapes, expanded_connections)
+            assert len(faces) == 6
+        else:
+            with pytest.raises(NetValidationError):
+                builder_app._validate_shapes_connections(expanded_shapes, expanded_connections)
+
+    def test_ordinary_connection_to_a_folded_shapes_edge_retargets_onto_its_triangle(self):
+        """A hexagon with both a fold connection (edges 0<->3) AND an
+        ordinary connection from one of its OTHER edges (4) to a
+        separate triangle -- both kinds of connection touching a folded
+        shape's edge are retargeted onto that edge's own triangle's edge
+        0 identically (_expand_folded_shapes' own docstring)."""
+        shapes = [shape(1, 6), shape(2, 3)]
+        connections = [
+            {"a_shape": 1, "a_edge": 0, "b_shape": 1, "b_edge": 3},
+            {"a_shape": 1, "a_edge": 4, "b_shape": 2, "b_edge": 0},
+        ]
+        expanded_shapes, expanded_connections, source_polygon_id = \
+            builder_app._expand_folded_shapes(shapes, connections)
+        assert [s["id"] for s in expanded_shapes] == [(1, i) for i in range(6)] + [2]
+        assert source_polygon_id == [1, 1, 1, 1, 1, 1, 2]
+        assert {"a_shape": (1, 4), "a_edge": 0, "b_shape": 2, "b_edge": 0} \
+            in expanded_connections
+        builder_app._validate_shapes_connections(expanded_shapes, expanded_connections)  # no raise
+        faces = builder_app._faces_from_shapes(expanded_shapes, expanded_connections)
+        assert len(faces) == 7
+    def test_triangulated_export_still_has_one_source_polygon_id_per_hexagon(self):
+        """What actually gets Saved for a folded hexagon: 6 triangle
+        faces in "faces", but "source_polygon_id" ties them back to one
+        shape -- this is the field inflate_polyhedron_app groups/colors
+        by (module docstring's "net JSON import/export" section). A full
+        Save > Load round-trip through the real Tk canvas is covered by
+        this plan's manual verification steps, not here -- this test
+        suite deliberately has no Tkinter dependency (see module
+        docstring)."""
+        shapes = [shape(1, 6)]
+        connections = [{"a_shape": 1, "a_edge": 0, "b_shape": 1, "b_edge": 3}]
+        expanded_shapes, expanded_connections, source_polygon_id = \
+            builder_app._expand_folded_shapes(shapes, connections)
+        faces = builder_app._faces_from_shapes(expanded_shapes, expanded_connections)
+        assert len(faces) == 6
+        assert source_polygon_id == [1] * len(faces)
 

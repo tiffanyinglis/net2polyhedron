@@ -801,21 +801,35 @@ _INTERACTIVE_BUILDER_EDGE_LENGTH = 70.0
 
 def _layout_from_net_layout(faces, net_layout):
     """faces: vertex-id loops; net_layout: interactive_builder_app's own
-    saved [{"cx", "cy", "rotation"}, ...], one entry per face, same
-    order as `faces` (its "Net JSON import/export" section). Returns
-    {face_idx: [2D point, ...]} -- the exact same shape
-    build_stretchy_net_layout returns -- by reproducing each face's
-    saved rigid transform directly, rather than re-deriving a layout
-    from scratch via a fresh BFS spanning tree. That matters because a
-    BFS can't reproduce an arrangement it wasn't given: it only follows
-    the FIRST shared edge it reaches an already-visited face through
-    (see build_stretchy_net_layout's own docstring), so any OTHER
+    saved list of per-ORIGINAL-PLACED-SHAPE placements (its "net JSON
+    import/export" section). Returns {key: [2D point, ...]} -- the exact
+    same shape build_stretchy_net_layout returns -- by reproducing each
+    shape's saved rigid transform directly, rather than re-deriving a
+    layout from scratch via a fresh BFS spanning tree. That matters
+    because a BFS can't reproduce an arrangement it wasn't given: it only
+    follows the FIRST shared edge it reaches an already-visited face
+    through (see build_stretchy_net_layout's own docstring), so any OTHER
     edge-sharing between two faces -- entirely normal for a stretchy
     mesh, see this module's own docstring -- is silently dropped from
     the picture; a net a user carefully arranged in the interactive
     builder (and re-derived exact connections for) deserves to show up
     here exactly as left, not re-flattened from just a spanning subset
     of its real adjacency.
+
+    Two `net_layout` shapes are understood, matching interactive_
+    builder_app's own _load_faces:
+
+    - NEW format (`net_layout[i]` has its own "shape_id"/"n", written
+      since Polygon Fold): `key` is that entry's own "shape_id" and the
+      polygon is built at its own "n" sides directly -- independent of
+      `faces`, which no longer has one entry per placed shape once a
+      folded polygon's `n` triangles are in it (see interactive_
+      builder_app's module docstring's "net JSON import/export"
+      section) -- so `faces` isn't even consulted for these entries.
+    - LEGACY format (no "shape_id" -- any file saved before Polygon Fold
+      existed, always exactly one face per shape): `key` is the entry's
+      own list position (`i`, matching `faces[i]`'s own position) and
+      "n" is `len(faces[i])`, reproducing today's behavior exactly.
 
     Rigid transforms (rotation + translation) are scale-covariant, so
     reproducing the same net at THIS app's own unit edge length (rather
@@ -838,14 +852,52 @@ def _layout_from_net_layout(faces, net_layout):
     what the user actually saw and built there. A user reported exactly
     this (the net loaded from a file appeared flipped vertically)."""
     placed = {}
-    for face_idx, (face, layout) in enumerate(zip(faces, net_layout)):
+    for i, layout in enumerate(net_layout):
+        key = layout.get("shape_id", i)
+        n = layout.get("n", len(faces[i]) if i < len(faces) else 3)
         theta = layout["rotation"]
         c, s = np.cos(theta), np.sin(theta)
         R = np.array([[c, -s], [s, c]])
         t = np.array([layout["cx"], layout["cy"]]) / _INTERACTIVE_BUILDER_EDGE_LENGTH
-        points = apply_rigid(regular_polygon_vertices(len(face)), R, t)
-        placed[face_idx] = [np.array([p[0], -p[1]]) for p in points]
+        points = apply_rigid(regular_polygon_vertices(n), R, t)
+        placed[key] = [np.array([p[0], -p[1]]) for p in points]
     return placed
+
+
+def _net_layout_is_new_format(net_layout):
+    """True iff `net_layout` (interactive_builder_app's own saved
+    section) is the post-Polygon-Fold, shape-id-keyed format rather than
+    the legacy face-index-aligned one -- see _layout_from_net_layout's
+    own docstring. This app is the sole writer of this format (from
+    interactive_builder_app), which always tags every entry the same
+    way, so checking just the first entry is enough."""
+    return bool(net_layout) and "shape_id" in net_layout[0]
+
+
+def _face_colors_by_group(n_faces, source_polygon_id):
+    """Returns (colors, color_by_group, group_of_face): `colors[i]` is
+    face `i`'s own color (a flat list, same length/indexing as
+    `base_faces` -- every existing per-base-face-index caller keeps
+    working unmodified); `group_of_face[i]` is which GROUP face `i`
+    belongs to -- `source_polygon_id[i]` (interactive_builder_app's own
+    Polygon-Fold grouping -- see its module docstring) when given, else
+    `i` itself, which reduces to today's plain per-face-index coloring
+    exactly for any file without it; `color_by_group` is the same colors
+    keyed by that group id instead of face index, for a caller (
+    _draw_level_panel) that needs to group several base faces sharing
+    one source polygon into a single draw call. Every face sharing a
+    group gets the SAME color -- first-seen group order picks which
+    FACE_COLORS entry each group gets, the same "i-th distinct thing
+    gets the i-th palette color" idea the old flat per-index list
+    already used."""
+    group_of_face = [source_polygon_id[i] if source_polygon_id else i for i in range(n_faces)]
+    color_by_group = {}
+    colors = []
+    for g in group_of_face:
+        if g not in color_by_group:
+            color_by_group[g] = FACE_COLORS[len(color_by_group) % len(FACE_COLORS)]
+        colors.append(color_by_group[g])
+    return colors, color_by_group, group_of_face
 
 
 # interactive_builder_app's own bezier connection curves (module
@@ -896,22 +948,27 @@ def _cubic_bezier_points(p0, p1, p2, p3, steps=24):
 def _connection_curve_points(target_layout, conn, steps=24):
     """The screen/world-space (this app's own unit scale, same as
     target_layout itself) points of one saved builder_connection's cubic
-    bezier -- None if either face it references isn't in `target_layout`
-    (e.g. a stale connection referencing a face index out of range,
-    which shouldn't happen from a file this app's own Save/
-    interactive_builder_app's Save ever produces, but isn't worth a
-    crash over). `conn["a_handle"]/["b_handle"]` are interactive_
-    builder_app's own {"t", "n"} PIXEL-scale (its DEFAULT_SHAPE_EDGE_
-    LENGTH-unit) offsets -- rescaled by _INTERACTIVE_BUILDER_EDGE_LENGTH
-    exactly like every cx/cy already is (_layout_from_net_layout), then
-    applied against the tangent/normal frame RECOMPUTED from this app's
-    own already-placed (rescaled + Y-flipped) points
-    (_placed_edge_frame) rather than transformed alongside the frame --
-    since that reflection is a linear map, applying an unchanged
-    coefficient to a frame recomputed after the transform lands on
-    exactly the same point as transforming the pre-image control point
-    would have."""
-    a_points, b_points = target_layout.get(conn["a_face"]), target_layout.get(conn["b_face"])
+    bezier -- None if either shape it references isn't in `target_layout`
+    (e.g. a stale connection referencing an id out of range, which
+    shouldn't happen from a file this app's own Save/interactive_
+    builder_app's Save ever produces, but isn't worth a crash over).
+    `conn["a_shape_id"]/["b_shape_id"]` (new format) or `conn["a_face"]/
+    ["b_face"]` (legacy, index-aligned -- see _layout_from_net_layout's
+    own docstring) key into `target_layout` the same way either format's
+    entries were placed into it. `conn["a_handle"]/["b_handle"]` are
+    interactive_builder_app's own {"t", "n"} PIXEL-scale (its
+    DEFAULT_SHAPE_EDGE_LENGTH-unit) offsets -- rescaled by
+    _INTERACTIVE_BUILDER_EDGE_LENGTH exactly like every cx/cy already is
+    (_layout_from_net_layout), then applied against the tangent/normal
+    frame RECOMPUTED from this app's own already-placed (rescaled +
+    Y-flipped) points (_placed_edge_frame) rather than transformed
+    alongside the frame -- since that reflection is a linear map,
+    applying an unchanged coefficient to a frame recomputed after the
+    transform lands on exactly the same point as transforming the
+    pre-image control point would have."""
+    a_key = conn["a_shape_id"] if "a_shape_id" in conn else conn["a_face"]
+    b_key = conn["b_shape_id"] if "b_shape_id" in conn else conn["b_face"]
+    a_points, b_points = target_layout.get(a_key), target_layout.get(b_key)
     if a_points is None or b_points is None:
         return None
     a_mid, a_tan, a_norm = _placed_edge_frame(a_points, conn["a_edge"])
@@ -2249,9 +2306,19 @@ class InflatePolyhedronApp:
             # (plotter.clear() above, not between these calls), so
             # occlusion across groups still works exactly like the old
             # single-call version did.
-            for base_face in sorted(set(face_of_fine)):
-                face_color = self.colors[base_face % len(self.colors)]
-                group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == base_face]
+            # Grouped by self.group_of_base_face, not raw base_face index
+            # directly -- every triangle from one Polygon-Fold-subdivided
+            # source polygon (interactive_builder_app's own
+            # "source_polygon_id", see _face_colors_by_group) shares both
+            # its color AND its own add_mesh call this way, so it reads
+            # as one uniformly-colored/outlined polygon at every
+            # subdivision level, same as an ordinary (non-folded) one
+            # always has.
+            groups_present = sorted(set(self.group_of_base_face[bf] for bf in set(face_of_fine)))
+            for group in groups_present:
+                face_color = self.color_by_group[group]
+                group_faces = [f for f, bf in zip(faces, face_of_fine)
+                               if self.group_of_base_face[bf] == group]
                 face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
                 mesh = pv.PolyData(points, face_conn)
                 plotter.add_mesh(mesh, color=face_color, show_edges=True,
@@ -2621,45 +2688,59 @@ class InflatePolyhedronApp:
         # no coarse_faces and its own "faces" already are level 0.
         legacy_coarse_faces, _, _ = load_fabric_spec(path)
         self.base_faces = legacy_coarse_faces if legacy_coarse_faces is not None else faces
-        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.base_faces))]
-        # base_edges/base_face_edge_ids (see _fan_level_edges/
-        # mesh_levels.subdivide_once's own docstrings) are keyed to the
-        # file's own "faces" vertex-id space -- only meaningful when
-        # self.base_faces IS that same "faces" (the ordinary, non-legacy
-        # case); a legacy fabric net's re-derived coarse_faces use a
-        # DIFFERENT vertex-id space entirely, so there's nothing to
-        # disambiguate against and this stays None (the always-safe
-        # plain-vertex-pair fallback every consumer already has).
-        if legacy_coarse_faces is not None:
-            base_edges = base_face_edge_ids = None
-        self.base_edges = base_edges
-        self.base_face_edge_ids = base_face_edge_ids
-
-        # Precomputed once per net selection: this panel's flat net
-        # layout doesn't change with subdivision level, only its
-        # overlay does. A file saved BY interactive_builder_app carries
-        # its own "net_layout" section (one {"cx", "cy", "rotation"} per
-        # face, same order as "faces") -- when present and the right
-        # length, reproduce THAT exact arrangement (_layout_from_
-        # net_layout) rather than a fresh one, so a net a user actually
-        # built and connected there shows up here exactly as left, not
-        # re-derived from scratch. Otherwise (any hand-authored net, or
-        # a legacy fabric net with no such section) fall back to
-        # build_stretchy_net_layout's own breadth-first spanning tree
-        # over shared edges, attaching each face to whichever neighbor
-        # discovers it first (see its own docstring) -- _draw_target_
-        # faces just reuses whichever of the two this is on every
-        # redraw, rather than recomputing either one every time. The raw
-        # parsed file is kept as self._net_file_json too -- not just its
-        # "net_layout" -- so on_save_session_clicked can embed a full
+        # The raw parsed file is kept as self._net_file_json -- read here,
+        # up front, rather than further down, since self.colors (below)
+        # already needs its own "source_polygon_id" section -- not just
+        # its "net_layout" -- so on_save_session_clicked can embed a full
         # copy of it (session_state.SessionStateModel's own "net_file"),
         # letting on_load_session_clicked reproduce this exact layout
         # decision later without the original file needing to still
         # exist on disk.
         with open(path) as f:
             self._net_file_json = json.load(f)
+        # base_edges/base_face_edge_ids (see _fan_level_edges/
+        # mesh_levels.subdivide_once's own docstrings) and
+        # "source_polygon_id" (interactive_builder_app's own Polygon-Fold
+        # grouping, see its module docstring) are all keyed to the file's
+        # own "faces" vertex-id/index space -- only meaningful when
+        # self.base_faces IS that same "faces" (the ordinary, non-legacy
+        # case); a legacy fabric net's re-derived coarse_faces use a
+        # DIFFERENT vertex-id space entirely, so there's nothing to
+        # disambiguate/group against and these stay None (the always-safe
+        # plain-vertex-pair/per-face-index fallbacks every consumer
+        # already has).
+        if legacy_coarse_faces is not None:
+            base_edges = base_face_edge_ids = None
+            source_polygon_id = None
+        else:
+            source_polygon_id = self._net_file_json.get("source_polygon_id")
+        self.base_edges = base_edges
+        self.base_face_edge_ids = base_face_edge_ids
+        self.colors, self.color_by_group, self.group_of_base_face = _face_colors_by_group(
+            len(self.base_faces), source_polygon_id)
+
+        # Precomputed once per net selection: this panel's flat net
+        # layout doesn't change with subdivision level, only its
+        # overlay does. A file saved BY interactive_builder_app carries
+        # its own "net_layout" section (one entry per ORIGINAL placed
+        # shape -- see _layout_from_net_layout's own docstring) -- when
+        # present, reproduce THAT exact arrangement rather than a fresh
+        # one, so a net a user actually built and connected there shows
+        # up here exactly as left, not re-derived from scratch.
+        # Otherwise (any hand-authored net, or a legacy fabric net with
+        # no such section) fall back to build_stretchy_net_layout's own
+        # breadth-first spanning tree over shared edges, attaching each
+        # face to whichever neighbor discovers it first (see its own
+        # docstring) -- _draw_target_faces just reuses whichever of the
+        # two this is on every redraw, rather than recomputing either one
+        # every time. A LEGACY net_layout (no per-entry "shape_id", see
+        # _net_layout_is_new_format) is still required to match `faces`'
+        # own length, exactly as before -- a NEW-format one never will
+        # (by design, once a fold exists), so that length check no longer
+        # applies to it at all.
         net_layout = self._net_file_json.get("net_layout")
-        if net_layout is not None and len(net_layout) == len(self.base_faces):
+        if net_layout is not None and (
+                _net_layout_is_new_format(net_layout) or len(net_layout) == len(self.base_faces)):
             self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
             # Only meaningful (and only ever present) alongside the exact
             # "net_layout" it was saved with -- see interactive_builder_
@@ -2822,23 +2903,28 @@ class InflatePolyhedronApp:
         self.current_path = None  # not tied to any file under STRETCHY_NETS_DIR
         self.base_faces = [list(face) for face in state.base_faces]
         self._net_file_json = state.net_file
-        self.colors = [FACE_COLORS[i % len(FACE_COLORS)] for i in range(len(self.base_faces))]
-        # Same "edges"/"face_edge_ids" disambiguation on_select_net reads
-        # from a fresh net file (see _fan_level_edges/mesh_levels.
-        # subdivide_once's own docstrings) -- only meaningful when this
+        # Same "edges"/"face_edge_ids"/"source_polygon_id" disambiguation/
+        # grouping on_select_net reads from a fresh net file (see
+        # _fan_level_edges/mesh_levels.subdivide_once's own docstrings,
+        # and _face_colors_by_group) -- only meaningful when this
         # session's own base_faces actually IS the net_file's "faces"
         # (the ordinary, non-legacy case; see on_select_net's own
         # comment), which a saved session has no direct record of, so
         # this checks the same way on_select_net does: length match. A
         # session with no net_file, or a mismatched one, just falls back
-        # to None (the always-safe plain-vertex-pair derivation).
+        # to None (the always-safe plain-vertex-pair/per-face-index
+        # derivations).
         net_file_faces = (self._net_file_json or {}).get("faces")
         if net_file_faces is not None and len(net_file_faces) == len(self.base_faces):
             self.base_edges = (self._net_file_json or {}).get("edges")
             self.base_face_edge_ids = (self._net_file_json or {}).get("face_edge_ids")
+            source_polygon_id = (self._net_file_json or {}).get("source_polygon_id")
         else:
             self.base_edges = None
             self.base_face_edge_ids = None
+            source_polygon_id = None
+        self.colors, self.color_by_group, self.group_of_base_face = _face_colors_by_group(
+            len(self.base_faces), source_polygon_id)
         # Same layout decision as on_select_net (see its own comment): a
         # net_file carrying its own "net_layout" (e.g. one built and
         # connected in interactive_builder_app) reproduces THAT exact
@@ -2846,7 +2932,8 @@ class InflatePolyhedronApp:
         # falling back to a fresh BFS layout that ignores how the user
         # actually arranged it.
         net_layout = (self._net_file_json or {}).get("net_layout")
-        if net_layout is not None and len(net_layout) == len(self.base_faces):
+        if net_layout is not None and (
+                _net_layout_is_new_format(net_layout) or len(net_layout) == len(self.base_faces)):
             self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
             self.target_connections = (self._net_file_json or {}).get("builder_connections")
         else:
@@ -4489,7 +4576,12 @@ class InflatePolyhedronApp:
         self._style_2d_axis(self.ax2d, theme)
         all_pts = []
         for face_idx in sorted(self.target_layout):
-            color = self.colors[face_idx % len(self.colors)]
+            # self.target_layout's own keys are already GROUP ids (each
+            # entry came from one net_layout/BFS entry directly -- see
+            # _layout_from_net_layout/_face_colors_by_group), so this
+            # looks color up the same way _draw_level_panel's per-group
+            # add_mesh calls do, not the flat self.colors list.
+            color = self.color_by_group[face_idx]
             placed = self.target_layout[face_idx]
             self.ax2d.add_patch(Polygon(placed, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
