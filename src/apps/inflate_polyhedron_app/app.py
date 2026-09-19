@@ -111,6 +111,19 @@ def _midpoint_color(color_a, color_b):
     return tuple((a + b) / 2)
 
 
+# A face's INSIDE (its backface, as seen through the mesh) is drawn this fraction darker than
+# its own outward-facing color (_draw_level_panel's own add_mesh backface_params) -- lets a
+# user tell outside from inside at a glance (2026-09-19, explicit: "i'd like the inside of the
+# polygon face to be a shade dark[er] than the outside").
+INSIDE_FACE_DARKEN_FACTOR = 0.65
+
+
+def _darken_color(color, factor=INSIDE_FACE_DARKEN_FACTOR):
+    """`color` scaled toward black by `factor` (an (r, g, b) tuple in [0, 1]) -- same
+    matplotlib-recognized-color handling as _midpoint_color."""
+    return tuple(np.array(mcolors.to_rgb(color)) * factor)
+
+
 def _vertex_normals(faces, positions):
     """faces: triangle vertex-id loops; positions: {vertex_id: pos}.
     Returns {vertex_id: (unit_normal, mean_incident_edge_length)} for "Show vertex normals"
@@ -1367,7 +1380,8 @@ class InflatePolyhedronApp:
                 mesh = pv.PolyData(points, face_conn)
                 plotter.add_mesh(mesh, color=face_color, show_edges=True,
                                   edge_color=_midpoint_color("white", face_color),
-                                  line_width=SUBDIVISION_EDGE_WIDTH)
+                                  line_width=SUBDIVISION_EDGE_WIDTH,
+                                  backface_params=dict(color=_darken_color(face_color)))
 
             if self.show_normals_var.get():
                 starts, ends = [], []

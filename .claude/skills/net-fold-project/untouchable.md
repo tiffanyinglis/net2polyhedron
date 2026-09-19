@@ -53,7 +53,11 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   grouping, `_draw_target_faces`'s `color_by_group` lookup); `_layout_from_net_layout` and both
   `on_select_net`/`on_load_session_clicked` net_layout-length guards updated for
   `interactive_builder_app`'s new shape-id-keyed `net_layout`/`builder_connections` format (see
-  `apps.md`'s own `interactive_builder_app` section) — still active. See `apps.md`.
+  `apps.md`'s own `interactive_builder_app` section) — still active. Each "Level N" panel's own
+  `add_mesh` call now also sets `backface_params=dict(color=_darken_color(face_color))` (new
+  `_darken_color`/`INSIDE_FACE_DARKEN_FACTOR=0.65`, alongside `_midpoint_color`) so a face's
+  INSIDE renders darker than its outside (2026-09-19, explicit, named this app by its
+  "polyhedron_inflater" nickname — still active). See `apps.md`.
 
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.

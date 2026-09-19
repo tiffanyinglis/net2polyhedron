@@ -58,6 +58,31 @@ app's own spec):
   debug mode (normals/mesh validation), no steps-vs-convergence radio.
 - Per-level target RMS %/tolerance entries and DEFAULT_TOLERANCE are
   adapted directly from inflate_polyhedron_app's own setup row.
+
+Full Inflate vs. Diff Inflate (2026-09-19, explicit): "Full Inflate" is the pipeline above,
+unchanged, always enabled. "Diff Inflate" instead reuses the LAST successfully-completed
+inflate's own Level-3 result as its starting point, when the net has changed by only ONE
+added or removed shape since then (BuilderPane.classify_change) -- it skips Levels 0-2's own
+(expensive) relax/calibrate passes entirely:
+- Remove: filters the stored Level-3 faces/positions down to whatever's left (no interpolation
+  needed at all -- see InflaterPane._diff_remove_face), then runs ONE pressure-calibration pass
+  at Level 3.
+- Add: seeds a FRESH combined (old+new) base mesh's own Level-0 positions with the OLD
+  faces' CURRENT (already-relaxed) 3D positions -- a base vertex id persists unchanged through
+  every subdivision level (see mesh_levels.py's own docstring), so interpolating from these
+  through the ordinary fan+quarter+quarter pipeline (_subdivide_combined_to_level3, pure
+  interpolation, no solving) reproduces the OLD portion's Level-3 geometry exactly; only the
+  NEW face's own region is actually unknown, seeded near its attachment point. A single relax
+  pass settles that region, then ONE pressure-calibration pass at Level 3 (see
+  InflaterPane._diff_add_face) -- deliberately NOT a vertex-id-preserving splice (subdivide_once's
+  own id numbering shifts under an appended face -- see mesh_levels.py -- so this reconstructs
+  fresh ids throughout instead of trying to reuse the old mesh's ones, which correctness doesn't
+  need: only the SEED POSITIONS need to be old-consistent, not the ids labeling them).
+Both paths share the ordinary _run_inflate_step/_on_inflate_step_done calibration call (already
+naturally a single pass whenever self.subdivision_level == MAX_LEVEL going in). Anything else
+(a moved/flipped/multi-shape change, an edited connection) is "complex" -- Diff Inflate stays
+disabled and only Full Inflate can run. Eligibility re-checks after every builder edit
+(BuilderPane.on_change, wired from CombinedApp) and after every completed Inflate click.
 """
 import re
 import sys
@@ -77,6 +102,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 import tkinter.font as tkfont
 
+import matplotlib.colors as mcolors
 import numpy as np
 from PIL import Image, ImageTk
 import pyvista as pv
@@ -148,6 +174,26 @@ PANEL_ZOOM_MIN = 0.3
 PANEL_ZOOM_MAX = 4.0
 PANEL_ZOOM_FILL = 0.9
 
+# A face's INSIDE (its backface) is drawn this fraction darker than its own outward-facing
+# color, and its wireframe edges halfway between white and that color -- same idea and same
+# INSIDE_FACE_DARKEN_FACTOR value as inflate_polyhedron_app's own _draw_level_panel (duplicated,
+# not imported -- see module docstring), so both apps' 3D panels read consistently
+# (2026-09-19, explicit: "the subdivision lines should be half way between white and the face
+# colour, like in polyhedron_inflater"; "the inside of the polygon face [should be] a shade
+# dark[er] than the outside... for both interactive_inflater and polyhedron_inflater").
+INSIDE_FACE_DARKEN_FACTOR = 0.65
+
+
+def _midpoint_color(color_a, color_b):
+    """RGB midpoint of two matplotlib-recognized colors, as an (r, g, b) tuple in [0, 1]."""
+    a, b = np.array(mcolors.to_rgb(color_a)), np.array(mcolors.to_rgb(color_b))
+    return tuple((a + b) / 2)
+
+
+def _darken_color(color, factor=INSIDE_FACE_DARKEN_FACTOR):
+    """`color` scaled toward black by `factor`, as an (r, g, b) tuple in [0, 1]."""
+    return tuple(np.array(mcolors.to_rgb(color)) * factor)
+
 
 def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
     """True if `proposed` is a full number or a prefix a user could still be typing toward one
@@ -169,6 +215,32 @@ def _build_level1_topology(base_faces):
     faces, _, edge_length, face_of_fine = subdivide_once(
         base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
     return faces, edge_length, face_of_fine
+
+
+def _subdivide_combined_to_level3(base_faces, face_edge_ids, seed_positions):
+    """Runs the SAME fan (Level 0->1) + quarter (1->2->3) pipeline on_full_inflate_clicked/
+    _on_inflate_step_done normally drive through 3 EXPENSIVE relax/calibrate passes, but as
+    PURE INTERPOLATION only (no solving) -- used by InflaterPane._diff_add_face to bring a
+    freshly combined (old+new) base mesh straight to Level-3 TOPOLOGY. `seed_positions` must
+    already place every OLD corner (any vertex id also present in the PREVIOUS base mesh) at
+    its CURRENT (already-relaxed) 3D position; interpolating from those recreates the OLD
+    portion's Level-3 geometry exactly (a base vertex id persists unchanged through every
+    subdivision level -- see mesh_levels.py's own docstring), so only the NEW face's own
+    (freshly seeded) region actually needs the relax/calibrate pass that follows -- this is
+    what lets Diff Inflate skip Levels 0-2's own solving (2026-09-19, explicit: "add that face
+    directly at level 3 subdivision"). Deliberately doesn't try to preserve the OLD mesh's own
+    vertex ids (subdivide_once's own numbering shifts once a face is appended -- see
+    mesh_levels.py's `next_id = 1 + max(positions)` -- so this reconstructs fresh ids
+    throughout instead); correctness only needs the SEED POSITIONS to be old-consistent, not
+    the integer ids labeling them. Returns (faces, positions, edge_length, face_of_fine) at
+    Level 3."""
+    faces, positions, edge_length = base_faces, dict(seed_positions), EDGE_LENGTH
+    face_of_fine = list(range(len(base_faces)))
+    for level in range(MAX_LEVEL):
+        faces, positions, edge_length, face_of_fine = subdivide_once(
+            faces, positions, edge_length, face_of_fine, level,
+            base_faces=base_faces, face_edge_ids=face_edge_ids)
+    return faces, positions, edge_length, face_of_fine
 
 
 def _fan_level_edges(faces, base_edges):
@@ -227,6 +299,79 @@ class BuilderPane(InteractiveBuilderApp):
     _build_menu/_update_title/_on_quit_request) make on self.root -- title()/geometry()/
     minsize()/protocol()/config(menu=...) -- none of which make sense for an embedded pane;
     see _PaneRoot below."""
+
+    # A class attribute (not set in an __init__ override) so it's already present the moment
+    # InteractiveBuilderApp.__init__ makes its own first _refresh_vme_state call, before
+    # CombinedApp has had a chance to assign the real callback -- wired to
+    # InflaterPane.refresh_diff_eligibility once both panes exist (see CombinedApp.__init__).
+    on_change = None
+
+    def _refresh_vme_state(self):
+        """Runs InteractiveBuilderApp's own vertex-merge-error check unchanged, then notifies
+        the right pane (self.on_change, if wired) that the net may have changed -- this is the
+        one call site EVERY state-changing edit (place/delete/connect/flip/undo/redo/load/drag-
+        release) already funnels through (see that class's own docstring), so it's the natural
+        hook for keeping Diff Inflate's enabled state live without a change-tracking mechanism
+        of this app's own."""
+        super()._refresh_vme_state()
+        if self.on_change is not None:
+            self.on_change()
+
+    def snapshot_state(self):
+        """Returns (shapes, connections) -- per-dict SHALLOW copies (shape/connection dicts are
+        flat; edits like flip/drag mutate them IN PLACE, so a plain list-of-references snapshot
+        would silently "change" along with the live state) of self.shapes/self.connections at
+        this exact moment, for a later classify_change call to diff against."""
+        return [dict(s) for s in self.shapes], [dict(c) for c in self.connections]
+
+    def classify_change(self, old_shapes, old_connections):
+        """old_shapes/old_connections: a prior snapshot_state() result (or None, meaning
+        "never inflated yet"). Returns (kind, shape_id) where kind is "none" (no topology
+        change), "add_face"/"remove_face" (EXACTLY one shape added/removed and nothing else
+        about the surviving net's topology changed -- shape_id is that one shape's id), or
+        "complex" (anything else -- a moved/flipped/multi-shape change, an edited connection,
+        etc.), shape_id is None except for add_face/remove_face.
+
+        A shape's cx/cy/rotation never affect the exported mesh at all (only n/flipped and the
+        connection graph do -- _faces_from_shapes/_edges_from_shapes never read position), so
+        those are deliberately ignored here: dragging a shape around never disables Diff
+        Inflate. Connections are compared by their (shape, edge) endpoints only (frozenset, so
+        a<->b/b<->a order doesn't matter) -- a connection's own bezier handles are a pure
+        drawing detail, never read by the exported mesh either."""
+        if old_shapes is None:
+            return "complex", None
+        old_by_id = {s["id"]: s for s in old_shapes}
+        new_by_id = {s["id"]: s for s in self.shapes}
+        old_ids, new_ids = set(old_by_id), set(new_by_id)
+        added, removed, common = new_ids - old_ids, old_ids - new_ids, old_ids & new_ids
+        for sid in common:
+            a, b = old_by_id[sid], new_by_id[sid]
+            if a["n"] != b["n"] or a.get("flipped", False) != b.get("flipped", False):
+                return "complex", None
+
+        def conn_key(c):
+            return frozenset([(c["a_shape"], c["a_edge"]), (c["b_shape"], c["b_edge"])])
+
+        def touches(key, shape_id):
+            return any(sid == shape_id for sid, _edge in key)
+
+        old_conns = {conn_key(c) for c in old_connections}
+        new_conns = {conn_key(c) for c in self.connections}
+        conn_added, conn_removed = new_conns - old_conns, old_conns - new_conns
+
+        if len(added) == 1 and not removed:
+            (new_id,) = added
+            if conn_removed or any(not touches(k, new_id) for k in conn_added):
+                return "complex", None
+            return "add_face", new_id
+        if len(removed) == 1 and not added:
+            (removed_id,) = removed
+            if conn_added or any(not touches(k, removed_id) for k in conn_removed):
+                return "complex", None
+            return "remove_face", removed_id
+        if not added and not removed and not conn_added and not conn_removed:
+            return "none", None
+        return "complex", None
 
     def _scale_ui_fonts(self):
         """No-op override -- the combined app scales every named font ONCE, centrally
@@ -392,6 +537,19 @@ class InflaterPane:
         self.subdivision_level = 0
         self._running = False
 
+        # The BUILDER's own shapes/connections at the moment of the last successfully-COMPLETED
+        # inflate (Full or Diff) -- None until the first one finishes -- plus source_polygon_id
+        # (parallel to self.base_faces) from that same mesh, so a later add/remove diff can find
+        # which base face(s) a given shape id owns. Set together, only on a clean "Done" (see
+        # _record_inflate_success), never on a mid-pipeline stop/failure.
+        self.last_shapes_snapshot = None
+        self.last_connections_snapshot = None
+        self.last_source_polygon_id = None
+        # Staged by whichever pipeline path is currently running (on_full_inflate_clicked/
+        # _diff_add_face/_diff_remove_face) -- _record_inflate_success adopts it as the new
+        # self.last_source_polygon_id only once that path reaches a clean Level-3 "Done".
+        self._pending_source_polygon_id = None
+
         # The plotter's own render resolution -- starts at PANEL_SIZE but is kept in sync with
         # the panel_label's actual on-screen pixel size by _on_panel_configure below, so the
         # mesh always renders at full native resolution for whatever space it's actually given
@@ -448,8 +606,20 @@ class InflaterPane:
         self._register_numeric_entry(self.tolerance_spin, allow_exponent=True)
         self.tolerance_spin.pack(side=tk.LEFT)
 
-        self.inflate_button = ttk.Button(setup, text="Inflate", command=self.on_inflate_clicked)
-        self.inflate_button.pack(side=tk.TOP, anchor=tk.W, pady=(8, 0))
+        # Two buttons instead of one "Inflate" (2026-09-19, explicit): "Full Inflate" always
+        # runs the complete Level 0-3 pipeline from scratch; "Diff Inflate" reuses the last
+        # completed inflate's own Level-3 result and is only enabled when the net has changed
+        # by exactly one added/removed shape since then (see refresh_diff_eligibility, module
+        # docstring's own "Full Inflate vs. Diff Inflate" section).
+        button_row = ttk.Frame(setup)
+        button_row.pack(side=tk.TOP, anchor=tk.W, pady=(8, 0))
+        self.full_inflate_button = ttk.Button(
+            button_row, text="Full Inflate", command=self.on_full_inflate_clicked)
+        self.full_inflate_button.pack(side=tk.LEFT)
+        self.diff_inflate_button = ttk.Button(
+            button_row, text="Diff Inflate", command=self.on_diff_inflate_clicked)
+        self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.diff_inflate_button.state(["disabled"])
 
         self.status_label = ttk.Label(self.root, anchor="w", padding=(8, 3))
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
@@ -506,7 +676,26 @@ class InflaterPane:
 
     def _set_running(self, running):
         self._running = running
-        self.inflate_button.state(["disabled"] if running else ["!disabled"])
+        self.full_inflate_button.state(["disabled"] if running else ["!disabled"])
+        if running:
+            self.diff_inflate_button.state(["disabled"])
+        else:
+            self.refresh_diff_eligibility()
+
+    def refresh_diff_eligibility(self):
+        """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
+        current net differs from that completed state by exactly one added/removed shape
+        (BuilderPane.classify_change) -- called after every completed Inflate click (via
+        _set_running) and after every builder edit (BuilderPane.on_change, wired from
+        CombinedApp) so the button's enabled state always reflects the LIVE net, not just
+        whatever it was the last time Inflate ran."""
+        if self._running or self.last_shapes_snapshot is None:
+            self.diff_inflate_button.state(["disabled"])
+            return
+        kind, _shape_id = self.builder_getter().classify_change(
+            self.last_shapes_snapshot, self.last_connections_snapshot)
+        self.diff_inflate_button.state(
+            ["!disabled"] if kind in ("add_face", "remove_face") else ["disabled"])
 
     def _on_panel_configure(self, event):
         """Keeps the off-screen plotter's own render resolution matched to panel_label's real,
@@ -648,7 +837,9 @@ class InflaterPane:
                 color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
                 face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
                 mesh = pv.PolyData(points, face_conn)
-                plotter.add_mesh(mesh, color=color, show_edges=True, edge_color="white", line_width=0.75)
+                plotter.add_mesh(mesh, color=color, show_edges=True,
+                                  edge_color=_midpoint_color("white", color), line_width=0.75,
+                                  backface_params=dict(color=_darken_color(color)))
             lo, hi = points.min(axis=0), points.max(axis=0)
             self._center = (lo + hi) / 2
             self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
@@ -663,12 +854,14 @@ class InflaterPane:
 
     # ---- pipeline ----
 
-    def on_inflate_clicked(self):
+    def on_full_inflate_clicked(self):
         """Reads the LEFT pane's current net, then runs the full Level 0->1->2->3 auto-pipeline
         (fan-triangulate -> Relax -> calibrate/Inflate to target RMS -> Subdivide -> repeat) --
         the same sequence inflate_polyhedron_app's "Run Simulation" runs, redrawing this ONE
-        panel in place at each step instead of four side-by-side panels. A no-op while already
-        running."""
+        panel in place at each step instead of four side-by-side panels. Always enabled, always
+        starts completely from scratch (2026-09-19, explicit) -- contrast Diff Inflate
+        (on_diff_inflate_clicked), which reuses the last completed inflate's own Level-3
+        result. A no-op while already running."""
         if self._running:
             return
         builder = self.builder_getter()
@@ -684,11 +877,14 @@ class InflaterPane:
         self.base_faces = faces
         self.base_edges = base_edges
         self.base_face_edge_ids = face_edge_ids
+        self._pending_source_polygon_id = mesh.get("source_polygon_id")
         self.faces, self.edge_length, self.face_of_fine = _build_level1_topology(self.base_faces)
         self.edges = _fan_level_edges(self.faces, self.base_edges)
         self.subdivision_level = 0
         self.positions = random_initial_positions(self.faces, seed=0)
-        self._render()
+        # Deliberately no self._render() here -- these are raw, unrelaxed random positions
+        # (2026-09-19, explicit: "don't draw un-finalized/unconverged simulations"). The first
+        # real redraw is _on_relax_done's, once Level 0 has actually settled.
         self._set_running(True)
         self._set_status("Level 0: relaxing...", "info")
         self._run_background(
@@ -729,7 +925,7 @@ class InflaterPane:
                 f"{target_rms_pct:.0f}% RMS stretch ({steps} steps so far)...", "info"))
 
     def _on_inflate_step_done(self, result):
-        # capture_frames=False (see on_inflate_clicked's own call) -- 8 values, no frames list.
+        # capture_frames=False (see on_full_inflate_clicked's own call) -- 8 values, no frames list.
         (pressure, new_positions, _steps, max_stretch, rms_stretch,
          _optimality, converged, pressure_found) = result
         self.positions = new_positions
@@ -748,6 +944,7 @@ class InflaterPane:
                 f"{max_stretch:.2f}%). Click Inflate again to continue.", "warn")
             return
         if self.subdivision_level >= MAX_LEVEL:
+            self._record_inflate_success()
             self._set_running(False)
             self._set_status(
                 f"Done -- Level {MAX_LEVEL}, pressure {pressure:.2f}, RMS stretch "
@@ -763,6 +960,162 @@ class InflaterPane:
         self._render()
         self._set_status(
             f"Subdivided to level {self.subdivision_level}. Inflating...", "info")
+        self._run_inflate_step()
+
+    def _record_inflate_success(self):
+        """Called only from _on_inflate_step_done's "Done" branch above (a clean Level-3
+        finish -- never a mid-pipeline stop/failure, so a warn/error outcome leaves Diff
+        Inflate pointed at whatever the PREVIOUS successful result was) -- snapshots the
+        builder's CURRENT shapes/connections as the new baseline a future Diff Inflate's
+        classify_change compares against, and adopts whichever pipeline path (Full Inflate/
+        _diff_add_face/_diff_remove_face) staged into self._pending_source_polygon_id as the
+        new self.last_source_polygon_id."""
+        builder = self.builder_getter()
+        self.last_shapes_snapshot, self.last_connections_snapshot = builder.snapshot_state()
+        self.last_source_polygon_id = self._pending_source_polygon_id
+        self._pending_source_polygon_id = None
+
+    # ---- diff inflate ----
+
+    def on_diff_inflate_clicked(self):
+        """Only meaningful once refresh_diff_eligibility has already enabled this button (an
+        "add_face"/"remove_face" change since the last completed inflate) -- re-classifies once
+        more here regardless, as a safety net against a stale enabled state (e.g. a builder
+        edit landing between the button's last refresh and this click), and tells the user to
+        use Full Inflate instead if that's no longer true. A no-op while already running."""
+        if self._running:
+            return
+        builder = self.builder_getter()
+        kind, shape_id = builder.classify_change(
+            self.last_shapes_snapshot, self.last_connections_snapshot)
+        if kind == "add_face":
+            self._diff_add_face(shape_id)
+        elif kind == "remove_face":
+            self._diff_remove_face(shape_id)
+        else:
+            messagebox.showerror(
+                "Cannot Diff Inflate",
+                "The net has changed by more than a single added/removed face since the last "
+                "Inflate -- use Full Inflate instead.")
+
+    def _diff_remove_face(self, shape_id):
+        """Filters the STORED Level-3 mesh (self.faces/self.positions/self.face_of_fine) and
+        the stored base mesh down to whatever's left once `shape_id`'s own base face(s) are
+        dropped -- pure filtering, no interpolation needed at all, since every SURVIVING vertex
+        is already exactly where it was left. positions/edge_length are left as-is (a few now-
+        orphaned entries are simply never read again -- relax/estimate_pressure derive their
+        own vertex/edge sets purely from `faces`, see stretchy_mesh._edge_setup). Then runs ONE
+        pressure-calibration pass at Level 3 (_run_inflate_step, already naturally a single
+        pass whenever self.subdivision_level == MAX_LEVEL going in)."""
+        removed_idxs = {i for i, spid in enumerate(self.last_source_polygon_id) if spid == shape_id}
+        keep_base_idxs = [i for i in range(len(self.base_faces)) if i not in removed_idxs]
+        if not keep_base_idxs:
+            messagebox.showerror("Cannot Diff Inflate", "That was the last face -- nothing left to inflate.")
+            return
+        old_to_new_base = {old_i: new_i for new_i, old_i in enumerate(keep_base_idxs)}
+
+        self.base_faces = [self.base_faces[i] for i in keep_base_idxs]
+        if self.base_face_edge_ids is not None:
+            self.base_face_edge_ids = [self.base_face_edge_ids[i] for i in keep_base_idxs]
+        pending_source_polygon_id = [self.last_source_polygon_id[i] for i in keep_base_idxs]
+        remaining_base_vertex_ids = {v for f in self.base_faces for v in f}
+        if self.base_edges is not None:
+            self.base_edges = [e for e in self.base_edges if e[0] in remaining_base_vertex_ids
+                                and e[1] in remaining_base_vertex_ids]
+
+        keep_fine = [i for i, bf in enumerate(self.face_of_fine) if bf not in removed_idxs]
+        self.faces = [self.faces[i] for i in keep_fine]
+        self.face_of_fine = [old_to_new_base[self.face_of_fine[i]] for i in keep_fine]
+        self.edges = None
+        self.subdivision_level = MAX_LEVEL
+        self._pending_source_polygon_id = pending_source_polygon_id
+        self._render()
+        self._set_running(True)
+        self._set_status(
+            f"Diff Inflate: removed a face, calibrating pressure at Level {MAX_LEVEL}...", "info")
+        self._run_inflate_step()
+
+    def _diff_add_face(self, shape_id):
+        """See module docstring's "Full Inflate vs. Diff Inflate" section for the full
+        algorithm. Re-exports the FULL current net -- the OLD faces are a stable, unchanged
+        PREFIX of that export (BuilderPane.classify_change already confirmed nothing else
+        changed; _faces_from_shapes' vertex-numbering-by-first-encounter means appending
+        exactly one new shape never renumbers an EXISTING vertex id, and removing one (a plain
+        order-preserving filter, see BuilderPane._remove_shape) never renumbers a SURVIVING
+        one either -- so a vertex id is stable across any sequence of single-shape add/remove
+        edits, regardless of how self.base_faces' own LIST ORDER has shifted from a previous
+        diff-remove's compaction (2026-09-19, fixed: an earlier version of this method compared
+        the fresh export against self.base_faces as a strict ordered PREFIX, which broke after
+        add -> remove -> undo -- the undo restores the ORIGINAL shape order, not the compacted
+        one a prior removal left self.base_faces in, so the prefix no longer lined up even
+        though every vertex id involved was still perfectly valid) -- seeds the new combined
+        base mesh's own Level-0 positions with whatever's ALREADY in self.positions for each
+        vertex id the fresh export uses (never pruned by _diff_remove_face, so a vertex from a
+        face that's round-tripped through a remove+undo often already has a good cached
+        position too), subdivides straight to Level 3 as pure interpolation
+        (_subdivide_combined_to_level3 -- no solving), then runs ONE pressure-calibration pass
+        at Level 3."""
+        builder = self.builder_getter()
+        mesh, err = builder.export_mesh_dict()
+        if err:
+            messagebox.showerror("Cannot Diff Inflate", err)
+            return
+        try:
+            new_base_faces, new_base_edges, new_face_edge_ids = _load_mesh_from_dict(mesh)
+        except ValueError as e:
+            messagebox.showerror("Cannot Diff Inflate", str(e))
+            return
+        source_polygon_id = mesh.get("source_polygon_id") or []
+
+        new_indices = [i for i, spid in enumerate(source_polygon_id) if spid == shape_id]
+        all_vertex_ids = {v for f in new_base_faces for v in f}
+        seed = {v: self.positions[v] for v in all_vertex_ids if v in self.positions}
+        old_face_vertex_ids = {v for i, f in enumerate(new_base_faces)
+                                if i not in new_indices for v in f}
+        missing = old_face_vertex_ids - set(seed)
+        if missing:
+            # Defensive fallback -- shouldn't happen given classify_change's own "add_face"
+            # verdict and the vertex-id stability argument above, but a wrong result here would
+            # be a silent correctness bug, not a crash, so this is checked explicitly.
+            messagebox.showerror(
+                "Cannot Diff Inflate",
+                "The net changed in a way Diff Inflate can't handle -- use Full Inflate instead.")
+            return
+        new_face_vertex_ids = {v for i in new_indices for v in new_base_faces[i]}
+        unknown = sorted(new_face_vertex_ids - set(seed))
+        if unknown:
+            known_nearby = [seed[v] for i in new_indices for v in new_base_faces[i] if v in seed]
+            center = np.mean(known_nearby, axis=0) if known_nearby else np.zeros(3)
+            rng = np.random.default_rng(0)
+            for v in unknown:
+                seed[v] = center + rng.uniform(-0.5, 0.5, size=3)
+
+        self.base_faces = new_base_faces
+        self.base_edges = new_base_edges
+        self.base_face_edge_ids = new_face_edge_ids
+        self._pending_source_polygon_id = source_polygon_id
+        self.faces, self.positions, self.edge_length, self.face_of_fine = \
+            _subdivide_combined_to_level3(new_base_faces, new_face_edge_ids, seed)
+        self.edges = None
+        self.subdivision_level = MAX_LEVEL
+        # Deliberately no self._render() here -- the new face's own vertices are still at their
+        # crude seeded guess (unknown ones jittered near a neighbor's centroid, see `unknown`
+        # above), not yet pulled into shape by calibration -- drawing it now showed a visibly
+        # wrong/"stiff" pose (2026-09-19, explicit: "don't draw un-finalized/unconverged
+        # simulations"). The panel keeps showing whatever it last had until the calibration
+        # pass below actually finishes.
+        self._set_running(True)
+        # Straight to pressure calibration (_run_inflate_step), deliberately WITHOUT a
+        # zero-pressure relax_initial_configuration pass first: that force law is pure Hooke's-
+        # law springs with NO pressure term, so run on the OLD portion (already stretched well
+        # past rest length by whatever pressure it converged at) it would just yank the
+        # already-correct old shape back toward rest length before the calibration below ever
+        # got to re-inflate it -- wasted work at best, a bad/slow-to-recover starting point at
+        # worst. estimate_pressure_for_target_stretch's own trials use relax_once (the REAL,
+        # pressure-inclusive force law) starting fresh from these seeded positions each time, so
+        # the old portion's already-correct geometry is respected from the very first trial.
+        self._set_status(
+            f"Diff Inflate: calibrating pressure at Level {MAX_LEVEL}...", "info")
         self._run_inflate_step()
 
     # ---- background thread/progress-poll pattern (same idea as both sibling apps' own
@@ -853,6 +1206,10 @@ class CombinedApp:
 
         self.builder = BuilderPane(left_root)
         self.inflater = InflaterPane(right_frame, lambda: self.builder)
+        # Wired AFTER both panes exist -- keeps Diff Inflate's enabled state live across every
+        # builder edit (BuilderPane._refresh_vme_state's own hook), not just re-checked when
+        # Inflate is clicked.
+        self.builder.on_change = self.inflater.refresh_diff_eligibility
 
     def _build_menu(self, root):
         """A File menu with just Load... (no New/Save/Save As -- this app has no window-level
