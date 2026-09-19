@@ -411,6 +411,20 @@ class BuilderPane(InteractiveBuilderApp):
     # set_hover_shape/the overridden _redraw below).
     _hover_shape_id = None
 
+    # Reverse direction (2026-09-19, explicit: "now make the opposite true") -- which shape (if
+    # any) THIS canvas's own mouse is currently over, forwarded to InflaterPane so it can
+    # highlight the matching 3D group(s) too. A separate attribute from _hover_shape_id above:
+    # that one is driven BY InflaterPane (3D->2D), this one drives IT (2D->3D) -- keeping them
+    # apart means a plain mouse-move over the 3D panel can never fight one over the 2D canvas.
+    _mouse_hover_shape_id = None
+
+    # `inflater_getter` mirrors InflaterPane's own `builder_getter` -- a zero-arg callable
+    # returning the current InflaterPane, wired by CombinedApp AFTER both panes exist (see
+    # CombinedApp.__init__). A class attribute (not an __init__ param) for the same
+    # before-both-panes-exist reason as on_change/_hover_shape_id above -- left None until then,
+    # in which case the 2D->3D hover direction below is simply not forwarded.
+    inflater_getter = None
+
     def set_hover_shape(self, shape_id):
         """Called by InflaterPane._set_hover_group whenever the mouse moves over a different
         face of the 3D panel (or leaves it, shape_id=None) -- 2026-09-19, explicit: "that face
@@ -422,15 +436,50 @@ class BuilderPane(InteractiveBuilderApp):
         self._hover_shape_id = shape_id
         self._redraw()
 
+    def _on_canvas_motion(self, event):
+        """Runs InteractiveBuilderApp's own motion handling unchanged, then (2026-09-19,
+        explicit: "now make the opposite true", mirroring InflaterPane's own 3D->2D
+        _on_panel_hover_motion) picks whichever shape is under the cursor and forwards it to
+        InflaterPane so it highlights the matching 3D group(s) too. Move-tool only, and only
+        when not about to drop an armed palette shape -- in Join/Fold mode (or while armed) the
+        cursor's proximity already means something else (a connection target / a placement
+        ghost), so it isn't repurposed as a highlight pick."""
+        super()._on_canvas_motion(event)
+        shape_id = None
+        if self.tool_mode == "move" and self.armed_n is None:
+            wx, wy = self._screen_to_world(event.x, event.y)
+            hit = self._hit_test(wx, wy)
+            shape_id = None if hit is None else hit["id"]
+        self._set_mouse_hover_shape(shape_id)
+
+    def _on_canvas_leave(self, event):
+        super()._on_canvas_leave(event)
+        self._set_mouse_hover_shape(None)
+
+    def _set_mouse_hover_shape(self, shape_id):
+        """A no-op if `shape_id` is already the current mouse hover (the common case -- most
+        mouse-move events land on the same shape the previous one did, or on the same empty
+        space)."""
+        if shape_id == self._mouse_hover_shape_id:
+            return
+        self._mouse_hover_shape_id = shape_id
+        self._redraw()
+        if self.inflater_getter is not None:
+            self.inflater_getter().set_hover_shape_from_builder(shape_id)
+
     def _redraw(self):
         """Runs InteractiveBuilderApp's own full redraw unchanged, then draws the hover
         highlight (if any) on top -- _redraw's own canvas.delete("all") wipes everything first,
         so this can't be done as a one-time canvas item; it has to be re-added after every
         single redraw, from whatever edit triggered it (drag/rotate/connect/etc.), not just
-        from set_hover_shape's own calls."""
+        from set_hover_shape's own calls. Outlines whichever shape(s) are hovered from EITHER
+        direction (3D->2D's _hover_shape_id, this canvas's own _mouse_hover_shape_id) -- a set,
+        deduplicated, since both are usually the same shape or one of them is None."""
         super()._redraw()
-        if self._hover_shape_id is not None:
-            shape = self._shape_by_id(self._hover_shape_id)
+        hover_ids = {sid for sid in (self._hover_shape_id, self._mouse_hover_shape_id)
+                     if sid is not None}
+        for shape_id in hover_ids:
+            shape = self._shape_by_id(shape_id)
             if shape is not None:
                 screen_vertices = [self._world_to_screen(*wv)
                                     for wv in self._shape_world_vertices(shape)]
@@ -849,17 +898,21 @@ class InflaterPane:
         self._pending_source_polygon_id = None
 
         # Hover-highlight state (2026-09-19, explicit: "when i mouse over a face in the 3d
-        # image, that face should be outlined in yellow in both the 2d view and the 3d view")
-        # -- self._actor_to_group is rebuilt every _render() ({vtk actor: base-face-group-index}
-        # for the group each add_mesh call belongs to); self._picker is one reused vtkCellPicker
-        # instance (cheap to reuse, no reason to build a fresh one per mouse-move);
-        # self._hover_group/_hover_actors track the CURRENTLY highlighted group and its yellow
-        # outline actors (a line actor plus a rounded-joint point-sprite actor, see
-        # _add_rounded_lines) so _set_hover_group can cheaply add/remove just those instead of
-        # re-running the whole _render().
+        # image, that face should be outlined in yellow in both the 2d view and the 3d view",
+        # then "now make the opposite true" -- 2D mouse hover on the left pane also highlights
+        # here) -- self._actor_to_group is rebuilt every _render() ({vtk actor: base-face-
+        # group-index} for the group each add_mesh call belongs to); self._picker is one reused
+        # vtkCellPicker instance (cheap to reuse, no reason to build a fresh one per mouse-move);
+        # self._hover_groups/_hover_actors track the CURRENTLY highlighted group(s) and their
+        # yellow outline actors (a line actor plus a rounded-joint point-sprite actor per group,
+        # see _add_rounded_lines) so _apply_hover_highlight can cheaply add/remove just those
+        # instead of re-running the whole _render(). A frozenset, not a single group, because a
+        # 2D shape hover (set_hover_shape_from_builder) can map onto SEVERAL 3D groups at once --
+        # a Polygon-Fold shape's triangles all share one source_polygon_id but are separate
+        # groups.
         self._actor_to_group = {}
         self._picker = vtkCellPicker()
-        self._hover_group = None
+        self._hover_groups = frozenset()
         self._hover_actors = []
 
         # The plotter's own render resolution -- starts at PANEL_SIZE but is kept in sync with
@@ -1286,32 +1339,55 @@ class InflaterPane:
         self._set_hover_group(None)
 
     def _set_hover_group(self, group):
-        """Highlights base face `group`'s own polygon outline in yellow in BOTH this 3D panel
-        AND the left pane's flat 2D canvas (BuilderPane.set_hover_shape) -- `group is None`
-        clears it. A no-op if `group` is already the current hover (the common case -- most
-        mouse-move events land on the same face the previous one did), so a still cursor over
-        one face doesn't re-render on every motion tick. Cheap: only adds/removes the couple of
-        highlight actors _add_rounded_lines makes (not a full _render()) for the 3D side. Draws
-        BOTH offset copies (_group_boundary_offset_lines), not just one, so the highlight shows
-        up whichever side of this face is currently being viewed."""
-        if group == self._hover_group:
-            return
-        self._hover_group = group
-        for actor in self._hover_actors:
-            self.plotter.remove_actor(actor)
-        self._hover_actors = []
-        if group is not None:
-            front_hl, back_hl = self._group_boundary_offset_lines(group)
-            self._hover_actors = (
-                self._add_rounded_lines(front_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
-                + self._add_rounded_lines(back_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH))
-        self._grab_frame()
-
+        """3D-mouse-over-a-face direction: highlights base face `group`'s own polygon outline
+        in yellow in BOTH this 3D panel AND the left pane's flat 2D canvas
+        (BuilderPane.set_hover_shape) -- `group is None` clears it. Looks up `group`'s own
+        source_polygon_id (the whole 2D shape it came from) and forwards THAT, not the raw
+        group index, since a Polygon-Fold shape's several triangle groups all belong to one 2D
+        shape."""
         shape_id = None
         if (group is not None and self._pending_source_polygon_id is not None
                 and group < len(self._pending_source_polygon_id)):
             shape_id = self._pending_source_polygon_id[group]
+        self._apply_hover_highlight(set() if group is None else {group})
         self.builder_getter().set_hover_shape(shape_id)
+
+    def set_hover_shape_from_builder(self, shape_id):
+        """2D-mouse-over-a-shape direction (2026-09-19, explicit: "now make the opposite
+        true") -- called by BuilderPane whenever the mouse moves over a different shape on its
+        flat canvas (or leaves it, shape_id=None). Highlights EVERY 3D group whose own
+        source_polygon_id matches `shape_id` (usually one, but a Polygon-Fold shape's triangles
+        are several groups sharing one source_polygon_id) -- does NOT call back into
+        BuilderPane.set_hover_shape, since the 2D side already knows what it's hovering and
+        highlights itself; this only drives the 3D side."""
+        groups = set()
+        if shape_id is not None and self._pending_source_polygon_id is not None:
+            groups = {g for g, sid in enumerate(self._pending_source_polygon_id)
+                       if sid == shape_id}
+        self._apply_hover_highlight(groups)
+
+    def _apply_hover_highlight(self, groups):
+        """Shared by both hover directions above -- swaps the current set of highlighted
+        groups' yellow outline actors for `groups`'s own. A no-op if `groups` already matches
+        the current hover (the common case -- most mouse-move events land on the same
+        face/shape the previous one did), so a still cursor doesn't re-render on every motion
+        tick. Cheap: only adds/removes the couple of highlight actors _add_rounded_lines makes
+        per group (not a full _render()). Draws BOTH offset copies
+        (_group_boundary_offset_lines) per group, not just one, so the highlight shows up
+        whichever side of that face is currently being viewed."""
+        groups = frozenset(groups)
+        if groups == self._hover_groups:
+            return
+        self._hover_groups = groups
+        for actor in self._hover_actors:
+            self.plotter.remove_actor(actor)
+        self._hover_actors = []
+        for group in groups:
+            front_hl, back_hl = self._group_boundary_offset_lines(group)
+            self._hover_actors += (
+                self._add_rounded_lines(front_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
+                + self._add_rounded_lines(back_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH))
+        self._grab_frame()
 
     # ---- rendering ----
 
@@ -1456,7 +1532,7 @@ class InflaterPane:
         for just that polygon's own outline (_group_boundary_lines). Rebuilds
         self._actor_to_group ({vtk actor: group index}, for hover picking -- both the outside
         and inside actor map to the same group) and re-applies the current hover highlight
-        (self._hover_group), since
+        (self._hover_groups), since
         plotter.clear() just destroyed the previous highlight actor along with everything
         else."""
         plotter = self.plotter
@@ -1520,9 +1596,10 @@ class InflaterPane:
                     self._add_rounded_lines(front_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
                 if len(back_rim):
                     self._add_rounded_lines(back_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
-            if self._hover_group in groups_present:
-                self._hover_actors = self._add_rounded_lines(
-                    self._group_boundary_lines(self._hover_group), "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
+            for group in self._hover_groups:
+                if group in groups_present:
+                    self._hover_actors += self._add_rounded_lines(
+                        self._group_boundary_lines(group), "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
             lo, hi = points.min(axis=0), points.max(axis=0)
             self._center = (lo + hi) / 2
             self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
@@ -2026,6 +2103,10 @@ class CombinedApp:
         # builder edit (BuilderPane._refresh_vme_state's own hook), not just re-checked when
         # Inflate is clicked.
         self.builder.on_change = self.inflater.refresh_diff_eligibility
+        # Reverse hover direction (2026-09-19, explicit) -- BuilderPane's own mouse hover
+        # forwards to InflaterPane.set_hover_shape_from_builder via this, mirroring
+        # InflaterPane's builder_getter above.
+        self.builder.inflater_getter = lambda: self.inflater
         # 2026-09-19, explicit: "if auto inflate is enabled, as soon as i load a file, it
         # should also inflate" -- a fresh Load has no relation to whatever was inflated before
         # (if anything), so this always means a FULL Inflate, never a diff.
