@@ -85,11 +85,12 @@ disabled and only Full Inflate can run. Eligibility re-checks after every builde
 (BuilderPane.on_change, wired from CombinedApp) and after every completed Inflate click.
 
 Stop/revert (2026-09-19, explicit): whichever button (Full/Diff Inflate) starts a run switches
-to "Stop" (InflaterPane._set_running); clicking it, a single trial not converging within
-SAFETY_STEP_CAP=50000 steps (relax_once's own PER-TRIAL cap, NOT summed across
-estimate_pressure_for_target_stretch's own internal multi-trial search -- see
-_run_inflate_step's own max_nfev_per_trial=SAFETY_STEP_CAP), a pressure search that never found
-a workable pressure at all, or a background-thread exception, all funnel into the same
+to "Stop" (InflaterPane._set_running); clicking it, Level 0's own relax not converging within
+SAFETY_STEP_CAP=50000 steps, a calibration trial that never converges (bounded by relax_once's
+own MAX_UNBOUNDED_STEPS runaway guard, not by this app -- see _run_inflate_step's own docstring
+for why SAFETY_STEP_CAP is deliberately NOT passed as estimate_pressure_for_target_stretch's own
+max_nfev_per_trial), a pressure search that never found a workable pressure at all, or a
+background-thread exception, all funnel into the same
 _revert_run: discards whatever was computed and restores the mesh EXACTLY as it was right
 before the click (self._pre_click_snapshot, taken by every pipeline entry point before it
 touches self.faces/positions/etc.). Nothing is ever rendered mid-computation before a real
@@ -182,28 +183,21 @@ SAFETY_STEP_CAP = 50000
 # all). Only the Diff Inflate paths pass this; Full Inflate keeps the function's own default.
 DIFF_PRESSURE_GUESS_TOL_PCT = 5.0
 
-# Polygon-edge line width in the 3D panel (2026-09-19, explicit: "the edges in the 3d view
-# should be drawn thicker" -- was 1.5, then 3.0). The yellow hover highlight stays visually
+# Polygon-edge line width in the 3D panel (2026-09-19, explicit, most recently "make the rim
+# edge 3 for both sides and highlight width 4"). The yellow hover highlight stays visually
 # thicker still (HOVER_HIGHLIGHT_LINE_WIDTH) so it always reads as distinct from the ordinary
 # edges.
-POLYGON_EDGE_LINE_WIDTH = 5.0
-# The back/inside rim's own width, a bit thicker than the front's -- the two add_lines calls
-# originally passed the SAME width, but the back segments still visually read as thinner
-# (2026-09-19, explicit: "the backside rims seem a bit thinner than the frontside rims") --
-# most likely the darker backside fill color underneath a same-width, similarly-toned line
-# reads as lower-contrast/thinner than the front's lighter fill; compensated here rather than
-# by fighting color contrast. Was 4.0 when POLYGON_EDGE_LINE_WIDTH was 3.0 (2026-09-19,
-# explicit: "make the widths 5 for frontside and 6 for backside").
-POLYGON_EDGE_LINE_WIDTH_BACK = 6.0
-HOVER_HIGHLIGHT_LINE_WIDTH = 7.0
+POLYGON_EDGE_LINE_WIDTH = 3.0
+HOVER_HIGHLIGHT_LINE_WIDTH = 4.0
 
-# The polygon-rim overlay's own back/inside weight (front stays a plain 50/50 _midpoint_color)
-# -- 75% the backside (already-darkened) fill color/25% white -- tried 80/20 then 90/10, settled
-# back on 75/25 (2026-09-19, explicit: "no no, for the rim it should be 0.75... this is all for
-# the backside") -- see _group_boundary_lines_by_side/_render's own front_rim/back_rim split.
-# BACK_EDGE_WEIGHT (the FINE subdivision wireframe's own backside weight, a separate constant)
-# settled at 0.85, same explicit message.
-POLYGON_RIM_BACK_WEIGHT = 0.75
+# The polygon-rim overlay's own color -- a single PLAIN light grey, not blended off the face's
+# own color at all, and the SAME for both offset copies now, not a front/back split (2026-09-19,
+# explicit: "the front/backside rims are super messy now [a ribbon-mesh attempt, see git
+# history] go back to how things are and just draw both front/back rims in light gray (80%
+# white)" -- since both copies read identically now, which one happens to be more visible at a
+# given angle no longer matters, sidestepping the whole front/back distinction rather than
+# solving it more precisely).
+RIM_COLOR = (0.8, 0.8, 0.8)
 
 # Smaller than inflate_polyhedron_app's own Level-1..3 panels would suggest (LEVEL_PANEL_WIDTH_
 # LEVELS_1_3 x LEVEL_PANEL_HEIGHT there) would be too cramped for a SINGLE panel carrying all the
@@ -234,12 +228,6 @@ PANEL_ZOOM_FILL = 0.9
 INSIDE_FACE_DARKEN_FACTOR = 0.65
 
 
-def _midpoint_color(color_a, color_b):
-    """RGB midpoint of two matplotlib-recognized colors, as an (r, g, b) tuple in [0, 1]."""
-    a, b = np.array(mcolors.to_rgb(color_a)), np.array(mcolors.to_rgb(color_b))
-    return tuple((a + b) / 2)
-
-
 def _darken_color(color, factor=INSIDE_FACE_DARKEN_FACTOR):
     """`color` scaled toward black by `factor`, as an (r, g, b) tuple in [0, 1]."""
     return tuple(np.array(mcolors.to_rgb(color)) * factor)
@@ -253,8 +241,8 @@ def _weighted_color(color, weight, other="white"):
 
 
 # The FINE subdivision mesh's own wireframe -- much fainter than the bold polygon-outline
-# overlay (POLYGON_EDGE_LINE_WIDTH, a 50/50 blend -- also front/back split, see
-# _group_boundary_lines_by_side) it sits underneath, and thinner too. Separate front/back
+# overlay (RIM_COLOR, see _group_boundary_offset_lines) it sits underneath, and thinner too.
+# Separate front/back
 # weights (2026-09-19, explicit: first "for the front faces, use 85/15... for the back faces,
 # use 95/5", then "make backside lines 85/15 as well", then "backside lines should be 85%
 # backside face color and 15% white", then "try back_edge_weight=0.9") -- FRONT_EDGE_WEIGHT
@@ -845,6 +833,14 @@ class InflaterPane:
         # guess, since a Diff Inflate's mesh is usually only a small perturbation of the one
         # that converged at this pressure (2026-09-19, explicit).
         self.last_pressure = None
+        # {level: {"pressure", "rms_stretch_pct", "pressure_found"}} for every level ALREADY
+        # completed within the CURRENT Full Inflate run -- reset fresh at the top of
+        # on_full_inflate_clicked, populated in _on_inflate_step_done right after each level's
+        # own calibration succeeds. Feeds _guess_pressure_from_history, which _run_inflate_step
+        # falls back to whenever a caller doesn't supply its own initial_pressure_guess (i.e.
+        # every Full Inflate level after the first -- Diff Inflate's own callers always supply
+        # self.last_pressure explicitly instead, bypassing this).
+        self.level_history = {}
         # Staged by whichever pipeline path is currently running (on_full_inflate_clicked/
         # _diff_add_face/_diff_remove_face) -- _record_inflate_success adopts it as the new
         # self.last_source_polygon_id once that path reaches a clean Level-3 "Done", but
@@ -857,13 +853,14 @@ class InflaterPane:
         # -- self._actor_to_group is rebuilt every _render() ({vtk actor: base-face-group-index}
         # for the group each add_mesh call belongs to); self._picker is one reused vtkCellPicker
         # instance (cheap to reuse, no reason to build a fresh one per mouse-move);
-        # self._hover_group/_hover_actor track the CURRENTLY highlighted group and its yellow
-        # outline actor so _set_hover_group can cheaply add/remove just that one actor instead
-        # of re-running the whole _render().
+        # self._hover_group/_hover_actors track the CURRENTLY highlighted group and its yellow
+        # outline actors (a line actor plus a rounded-joint point-sprite actor, see
+        # _add_rounded_lines) so _set_hover_group can cheaply add/remove just those instead of
+        # re-running the whole _render().
         self._actor_to_group = {}
         self._picker = vtkCellPicker()
         self._hover_group = None
-        self._hover_actor = None
+        self._hover_actors = []
 
         # The plotter's own render resolution -- starts at PANEL_SIZE but is kept in sync with
         # the panel_label's actual on-screen pixel size by _on_panel_configure below, so the
@@ -1181,6 +1178,39 @@ class InflaterPane:
                                   / PANEL_ZOOM_FILL / cam["zoom"])
         camera.SetWindowCenter(*cam["pan"])
 
+    def _grab_frame(self):
+        """Renders the plotter's CURRENT scene (whatever actors/camera it already has -- this
+        does no scene or camera work of its own) and blits it into panel_label -- the one
+        choke point every redraw path (_render's full rebuild, _refresh_view's camera-only
+        update, _set_hover_group's incremental highlight toggle) ends with."""
+        self.plotter.render()
+        image = self.plotter.screenshot(return_img=True)
+        self._photo = ImageTk.PhotoImage(Image.fromarray(image))
+        self.panel_label.configure(image=self._photo, text="")
+
+    def _refresh_view(self):
+        """Camera-only redraw -- repositions the camera (_apply_camera) and grabs a fresh
+        frame, WITHOUT rebuilding any mesh/wireframe/rim actor (contrast full _render(), a
+        complete plotter.clear() + rebuild of every actor: two culled mesh actors with
+        wireframe edge extraction, plus rounded/tube rim-line actors, PER base face). Used for
+        EVERY frame of a rotate/pan/zoom drag -- none of those change any actual geometry, only
+        where the SAME already-built scene is viewed from, so rebuilding it every frame was
+        pure waste (2026-09-19: "it's also much more laggy to rotate... is it because of the
+        face highlighting from mouse over?" -- no; hover's own update was already this cheap.
+        Every camera interaction, rotate/pan/zoom alike, was instead going through the full
+        rebuild on every single drag frame, which is what actually caused the lag).
+
+        This is fully correct for rotation too, not just pan/zoom, with no follow-up full
+        rebuild ever needed: the polygon-rim overlay's own two offset copies
+        (_group_boundary_offset_lines) are a fixed, purely geometric nudge along each edge's
+        own owning triangle's normal, resolved by ordinary Z-buffer depth testing at render
+        time, not by anything computed here against the camera. Rotating the camera never
+        invalidates it."""
+        if not (self.faces and self.positions and self.base_faces):
+            return
+        self._apply_camera()
+        self._grab_frame()
+
     def _on_drag_start(self, event):
         self._dragging = True
         self._last_xy = (event.x, event.y)
@@ -1198,7 +1228,7 @@ class InflaterPane:
         pitch = Rotation.from_rotvec(-dy * sensitivity * right)
         cam["rotation"] = pitch * yaw * cam["rotation"]
         self._last_xy = (event.x, event.y)
-        self._render()
+        self._refresh_view()
 
     def _on_drag_end(self, _event):
         self._dragging = False
@@ -1217,7 +1247,7 @@ class InflaterPane:
         self._camera["pan"] = self._camera["pan"] + np.array(
             [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
         self._pan_last_xy = (event.x, event.y)
-        self._render()
+        self._refresh_view()
 
     def _on_pan_end(self, _event):
         self._panning = False
@@ -1233,7 +1263,7 @@ class InflaterPane:
         else:
             factor = PANEL_ZOOM_STEP
         self._camera["zoom"] = max(PANEL_ZOOM_MIN, min(PANEL_ZOOM_MAX, self._camera["zoom"] * factor))
-        self._render()
+        self._refresh_view()
 
     # ---- hover highlight ----
 
@@ -1260,21 +1290,22 @@ class InflaterPane:
         AND the left pane's flat 2D canvas (BuilderPane.set_hover_shape) -- `group is None`
         clears it. A no-op if `group` is already the current hover (the common case -- most
         mouse-move events land on the same face the previous one did), so a still cursor over
-        one face doesn't re-render on every motion tick. Cheap: only adds/removes the ONE
-        highlight actor (not a full _render()) for the 3D side."""
+        one face doesn't re-render on every motion tick. Cheap: only adds/removes the couple of
+        highlight actors _add_rounded_lines makes (not a full _render()) for the 3D side. Draws
+        BOTH offset copies (_group_boundary_offset_lines), not just one, so the highlight shows
+        up whichever side of this face is currently being viewed."""
         if group == self._hover_group:
             return
         self._hover_group = group
-        if self._hover_actor is not None:
-            self.plotter.remove_actor(self._hover_actor)
-            self._hover_actor = None
+        for actor in self._hover_actors:
+            self.plotter.remove_actor(actor)
+        self._hover_actors = []
         if group is not None:
-            self._hover_actor = self._add_rounded_lines(
-                self._group_boundary_lines(group), "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
-        self.plotter.render()
-        image = self.plotter.screenshot(return_img=True)
-        self._photo = ImageTk.PhotoImage(Image.fromarray(image))
-        self.panel_label.configure(image=self._photo, text="")
+            front_hl, back_hl = self._group_boundary_offset_lines(group)
+            self._hover_actors = (
+                self._add_rounded_lines(front_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
+                + self._add_rounded_lines(back_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH))
+        self._grab_frame()
 
         shape_id = None
         if (group is not None and self._pending_source_polygon_id is not None
@@ -1285,18 +1316,32 @@ class InflaterPane:
     # ---- rendering ----
 
     def _add_rounded_lines(self, segments, color, width):
-        """add_lines, but with rounded caps/joins at every segment end (2026-09-19, explicit:
-        "make all the line ends rounded") -- add_lines has no render_lines_as_tubes parameter
-        of its own (unlike add_mesh, which does), so this sets it on the returned actor's own
-        Property afterward instead. Used for every line-primitive actor this pane draws (the
-        polygon-rim overlay, front and back, and the yellow hover highlight). NOT used for the
-        FINE subdivision wireframe (add_mesh's own show_edges, in _render) -- PyVista silently
-        drops show_edges entirely whenever render_lines_as_tubes is also requested on the same
-        add_mesh call, which would delete that wireframe outright rather than just rounding its
-        caps, so it keeps VTK's default flat line ends."""
-        actor = self.plotter.add_lines(segments, color=color, width=width)
-        actor.prop.render_lines_as_tubes = True
-        return actor
+        """add_lines, but with genuinely rounded caps/joins at every segment end -- returns a
+        LIST of the actors this creates (a caller doing its own incremental add/remove, like
+        _set_hover_group, needs to track/remove all of them, not just one).
+
+        render_lines_as_tubes alone (set on the line actor's own Property afterward -- add_lines
+        has no such parameter of its own, unlike add_mesh) only rounds each segment's CYLINDER
+        BODY -- VTK's tube filter still caps every segment with a flat disk, not a hemisphere,
+        so wherever two of these (disconnected, independently-capped) segments meet at a shared
+        vertex, two flat-capped cylinder ends meeting at an angle reads as a visible bevel/facet,
+        not a smooth round join (2026-09-19, explicit: "i don't think the line ends are
+        rounded... they still look beveled"). A small sphere point-sprite at every DISTINCT
+        vertex the segments use (render_points_as_spheres + point_size, no custom glyph geometry
+        needed) fills in exactly that gap, rounding off both the joints and the otherwise-flat
+        end caps. Used for every line-primitive actor this pane draws (the polygon-rim overlay,
+        front and back, and the yellow hover highlight). NOT used for the FINE subdivision
+        wireframe (add_mesh's own show_edges, in _render) -- PyVista silently drops show_edges
+        entirely whenever render_lines_as_tubes is also requested on the same add_mesh call,
+        which would delete that wireframe outright rather than just rounding its caps, so it
+        keeps VTK's default flat line ends."""
+        line_actor = self.plotter.add_lines(segments, color=color, width=width)
+        line_actor.prop.render_lines_as_tubes = True
+        unique_points = np.unique(segments.reshape(-1, 3), axis=0)
+        points_actor = self.plotter.add_mesh(
+            pv.PolyData(unique_points), color=color, style="points",
+            render_points_as_spheres=True, point_size=width)
+        return [line_actor, points_actor]
 
     def _group_boundary_lines(self, group):
         """The ORIGINAL polygon's own rim, at its CURRENT (possibly already-inflated) 3D
@@ -1330,20 +1375,13 @@ class InflaterPane:
             segments[2 * i + 1] = self.positions[v]
         return segments
 
-    def _group_boundary_lines_by_side(self, group):
-        """Same rim-finding as _group_boundary_lines, but splits the result into (front_segs,
-        back_segs) by whether the ONE triangle owning each boundary edge currently faces toward
-        or away from the camera -- lets the always-drawn polygon-outline overlay use the SAME
-        front/outside vs. back/inside color split the fill/subdivision-edge actors already do
-        (2026-09-19, explicit: "the polygon edge colours inside should be 50% backside face
-        color and 50% white"). Exact, not an approximation: the panel's camera is orthographic
-        (parallel_scale, set in _apply_camera), so there's ONE view direction for the whole
-        scene, the same test VTK's own backface culling uses for the mesh actors (see
-        _render's own front/back culled-actor pair) -- comparing every triangle's normal
-        against that SAME global direction is therefore exact, not per-point/perspective-
-        dependent. Faces are wound CCW from outside (project-wide convention), so
-        cross(b-a, c-a) is an OUTWARD normal; a positive dot with the camera direction (which
-        points from scene center OUT toward the camera) means this triangle faces the camera."""
+    def _group_boundary_owners(self, group):
+        """{(u, v) sorted: owning_face} for every boundary edge of `group` -- used by
+        _group_boundary_offset_lines, which needs each boundary edge's own OWNING triangle (see
+        _group_boundary_lines' own docstring for why an edge belongs to only one triangle
+        within its group: a spoke/internal-to-the-fan edge is shared by two triangles in the
+        SAME group and cancels out of this dict; only a true rim edge, whose other triangle is
+        in a DIFFERENT group, survives)."""
         edge_owner = {}
         for face, bf in zip(self.faces, self.face_of_fine):
             if bf != group:
@@ -1352,14 +1390,36 @@ class InflaterPane:
             for u, v in ((a, b), (b, c), (c, a)):
                 key = (u, v) if u < v else (v, u)
                 edge_owner.setdefault(key, []).append(face)
-        boundary = [(edge, tris[0]) for edge, tris in edge_owner.items() if len(tris) == 1]
-        view_direction = self._camera["rotation"].apply([1.0, 0.0, 0.0])
+        return [(edge, tris[0]) for edge, tris in edge_owner.items() if len(tris) == 1]
+
+    def _group_boundary_offset_lines(self, group):
+        """(front_segs, back_segs) -- every boundary edge of `group`, nudged a hair along its
+        own owning triangle's outward normal (front) or the opposite way (back), so the two
+        copies don't Z-fight when drawn co-located on the real surface. Used for BOTH the
+        ordinary polygon-rim overlay and the yellow hover highlight (_render/_set_hover_group)
+        -- a ribbon-mesh, exactly-culled version of the rim was tried in between (giving the
+        front/back copies genuinely distinct colors with no grazing-angle bleed at all), but
+        came out visibly messier overall (2026-09-19, explicit: "the front/backside rims are
+        super messy now... go back to how things are and just draw both front/back rims in
+        light gray (80% white)") -- reverted. Drawing BOTH copies in the SAME color (RIM_COLOR)
+        sidesteps the front/back distinction issue entirely: it no longer matters which copy is
+        more visible from a given angle, since they're indistinguishable either way."""
+        boundary = self._group_boundary_owners(group)
+        # A hair's width relative to the model's own overall size -- enough to resolve Z-
+        # fighting reliably, small enough that the rim still reads as sitting right on the
+        # surface rather than visibly floating off it.
+        nudge = self._half * 0.002
         front_pairs, back_pairs = [], []
         for (u, v), (ta, tb, tc) in boundary:
             pa, pb, pc = self.positions[ta], self.positions[tb], self.positions[tc]
             normal = np.cross(pb - pa, pc - pa)
-            bucket = front_pairs if np.dot(normal, view_direction) > 0 else back_pairs
-            bucket.append((self.positions[u], self.positions[v]))
+            length = np.linalg.norm(normal)
+            offset = (normal / length * nudge) if length > 1e-12 else np.zeros(3)
+            # NOT named `pv` -- that would shadow the module-level `pyvista as pv` import (bit
+            # us once already in the sibling ribbon method this replaced).
+            p_u, p_v = self.positions[u], self.positions[v]
+            front_pairs.append((p_u + offset, p_v + offset))
+            back_pairs.append((p_u - offset, p_v - offset))
 
         def to_segments(pairs):
             segments = np.empty((2 * len(pairs), 3))
@@ -1402,7 +1462,7 @@ class InflaterPane:
         plotter = self.plotter
         plotter.clear()
         self._actor_to_group = {}
-        self._hover_actor = None
+        self._hover_actors = []
         if self.faces and self.positions and self.base_faces:
             vertex_ids = sorted(self.positions)
             idx = {v: i for i, v in enumerate(vertex_ids)}
@@ -1450,32 +1510,24 @@ class InflaterPane:
                     line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front")
                 self._actor_to_group[outside_actor] = group
                 self._actor_to_group[inside_actor] = group
-                # The bold rim overlay ALSO splits front/back (2026-09-19, explicit, most
-                # recently "for the polygon rim on the inside, use 75% backside face color, 25%
-                # white") -- POLYGON_RIM_BACK_WEIGHT against inside_color for whichever rim
-                # segments currently face away from the camera; front segments keep the plain
-                # 50/50 _midpoint_color they always used. _add_rounded_lines (not a plain
-                # add_lines) rounds every segment's caps/joins (2026-09-19, explicit: "make all
-                # the line ends rounded").
-                front_rim, back_rim = self._group_boundary_lines_by_side(group)
+                # The bold rim overlay -- both offset copies (_group_boundary_offset_lines, see
+                # its own docstring for the front/back history) drawn in the SAME plain light
+                # grey (2026-09-19, explicit: "just draw both front/back rims in light gray (80%
+                # white)"). _add_rounded_lines (not a plain add_lines) rounds every segment's
+                # caps/joins (2026-09-19, explicit: "make all the line ends rounded").
+                front_rim, back_rim = self._group_boundary_offset_lines(group)
                 if len(front_rim):
-                    self._add_rounded_lines(front_rim, _midpoint_color("white", color),
-                                             POLYGON_EDGE_LINE_WIDTH)
+                    self._add_rounded_lines(front_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
                 if len(back_rim):
-                    self._add_rounded_lines(
-                        back_rim, _weighted_color(inside_color, POLYGON_RIM_BACK_WEIGHT),
-                        POLYGON_EDGE_LINE_WIDTH_BACK)
+                    self._add_rounded_lines(back_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
             if self._hover_group in groups_present:
-                self._hover_actor = self._add_rounded_lines(
+                self._hover_actors = self._add_rounded_lines(
                     self._group_boundary_lines(self._hover_group), "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
             lo, hi = points.min(axis=0), points.max(axis=0)
             self._center = (lo + hi) / 2
             self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
             self._apply_camera()
-            plotter.render()
-            image = plotter.screenshot(return_img=True)
-            self._photo = ImageTk.PhotoImage(Image.fromarray(image))
-            self.panel_label.configure(image=self._photo, text="")
+            self._grab_frame()
         else:
             self.panel_label.configure(image="", text="Build a net on the left, then click Inflate.",
                                         fg=PLOT_THEME["fg"])
@@ -1505,6 +1557,7 @@ class InflaterPane:
         self._pre_click_snapshot = self._snapshot_mesh_state()
         self._stop_event = threading.Event()
         self._stop_requested = False
+        self.level_history = {}
         self.base_faces = faces
         self.base_edges = base_edges
         self.base_face_edge_ids = face_edge_ids
@@ -1549,6 +1602,40 @@ class InflaterPane:
             f"Level 0 relaxed (RMS {rms_stretch:.1f}%). Inflating Level 1...", "info")
         self._run_inflate_step()
 
+    def _guess_pressure_from_history(self, target_rms_pct):
+        """Same algorithm as inflate_polyhedron_app's own _guess_pressure_from_history
+        (duplicated, not imported -- see module docstring): looks at every level ALREADY
+        completed this Full Inflate run (self.level_history) and picks whichever one's own
+        ACHIEVED RMS stretch landed closest to `target_rms_pct`, scaling that record's pressure
+        by 2 per level of resolution difference (each Subdivide roughly doubles resolution,
+        empirically needing ~2x the pressure for the same target RMS stretch %). Deliberately
+        not a `target_rms_pct / achieved` rescale -- that ratio explodes when a level's achieved
+        stretch is ~0. A level whose search never found a working pressure at all
+        (pressure_found False) is skipped -- not a usable extrapolation point. Returns None
+        (the caller then falls back to estimate_pressure_for_target_stretch's own generic
+        guess) if nothing usable is recorded yet -- e.g. Level 1, the very first calibration of
+        a run, which is exactly why Full Inflate used to skip straight to the generic guess at
+        EVERY level instead of just the first, needing far more total steps by Level 3
+        (2026-09-19, explicit: "when inflating hippo, in level 3, interactive_inflater took
+        34000 steps... but polyhedron_inflater only took ~7k")."""
+        best = None
+        for level, record in self.level_history.items():
+            if level >= self.subdivision_level or not record:
+                continue
+            if not record.get("pressure_found", True):
+                continue
+            prior_pressure = record.get("pressure")
+            prior_rms = record.get("rms_stretch_pct")
+            if not prior_pressure or prior_rms is None:
+                continue
+            error = abs(prior_rms - target_rms_pct)
+            if best is None or error < best[0]:
+                best = (error, level, prior_pressure)
+        if best is None:
+            return None
+        _, level, prior_pressure = best
+        return prior_pressure * (2 ** (self.subdivision_level - level))
+
     def _run_inflate_step(self, initial_pressure_guess=None, tol_pct=None):
         """`initial_pressure_guess`/`tol_pct`, if given (only ever by the Diff Inflate paths --
         see _diff_remove_face/_diff_reexport_and_relax), let estimate_pressure_for_target_
@@ -1559,10 +1646,15 @@ class InflaterPane:
         (2026-09-19, explicit: "use the previous pressure as a starting point... If it results
         in more than 5% different from the target stretch, then you can do another guess...
         speed up Diff Inflate" -- fewer/no extra bracket-search trials needed when the first
-        guess already lands close). Full Inflate never passes either -- each of its levels is
-        a genuinely fresh target, not a small perturbation of an already-converged one."""
+        guess already lands close). Full Inflate never passes either explicitly -- instead,
+        when `initial_pressure_guess` comes in None, this falls back to
+        self._guess_pressure_from_history (same idea, using THIS run's own earlier levels
+        instead of the last completed inflate), matching inflate_polyhedron_app's own behavior
+        at every level past the first."""
         target_rms_pct = self.target_rms_vars[self.subdivision_level].get()
         tolerance = self._get_tolerance()
+        if initial_pressure_guess is None:
+            initial_pressure_guess = self._guess_pressure_from_history(target_rms_pct)
         extra = {}
         if initial_pressure_guess is not None:
             extra["initial_pressure_guess"] = initial_pressure_guess
@@ -1574,11 +1666,24 @@ class InflaterPane:
                 target_rms_pct=target_rms_pct, gtol=tolerance, rng=None,
                 capture_frames=False, on_progress=queue_progress,
                 edges=self.edges if self.subdivision_level == 1 else None,
-                # SAFETY_STEP_CAP applies PER TRIAL, not summed across estimate_pressure_for_
-                # target_stretch's own internal bracket/bisect search (2026-09-19, explicit:
-                # "50000 is for one trial, not for all trials combined") -- its default
-                # (5000) is smaller, so this must be passed explicitly.
-                max_nfev_per_trial=SAFETY_STEP_CAP, stop_event=self._stop_event, **extra),
+                # Deliberately NOT max_nfev_per_trial=SAFETY_STEP_CAP here (an earlier version
+                # of this call passed it explicitly) -- inflate_polyhedron_app's own equivalent
+                # calibration call never overrides it either, leaving it at the function's own
+                # default (5000, one tenth of SAFETY_STEP_CAP), and that mismatch is exactly
+                # why the SAME net took far more total steps here than there (2026-09-19,
+                # explicit bug report: "in polyhedron_inflater, step 1 took ~45000 steps...
+                # while in interactive_inflater, it went over 100k"). A smaller per-trial cap
+                # doesn't risk worse final accuracy -- the WINNING trial always gets an
+                # UNCAPPED top-up to real convergence regardless of max_nfev_per_trial (capped
+                # only by relax_once's own MAX_UNBOUNDED_STEPS=200_000 runaway guard, see its
+                # docstring) -- it only makes the SEARCH abandon an unpromising pressure sooner
+                # instead of grinding on it for up to 10x longer before moving on.
+                # SAFETY_STEP_CAP stays the Level 0 relax's own cap (a single, non-search call,
+                # where inflate_polyhedron_app's own relax path uses the SAME 50000 value --
+                # see its own INFLATE_SAFETY_STEP_CAP) and the "stop/revert if a trial doesn't
+                # converge" ceiling _on_relax_done/_on_inflate_step_done quote in their own
+                # messages -- unaffected by this change.
+                stop_event=self._stop_event, **extra),
             self._on_inflate_step_done,
             on_progress=lambda steps: self._set_status(
                 f"Level {self.subdivision_level}: calibrating pressure toward "
@@ -1601,17 +1706,29 @@ class InflaterPane:
                     "face. Try anchoring/reconnecting it and Inflate again."))
             return
         if not converged:
+            # No step-count figure quoted here -- unlike Level 0's plain relax_initial_
+            # configuration call, this is a multi-trial SEARCH (estimate_pressure_for_target_
+            # stretch): the winning trial's own reported step count isn't capped by any single
+            # constant this app controls (its search-phase trials each cap at that function's
+            # own default of 5000, but the winner then gets an UNCAPPED top-up bounded only by
+            # relax_once's internal MAX_UNBOUNDED_STEPS=200_000 runaway guard) -- so a specific
+            # "didn't converge within N steps" number would just be wrong.
             self._revert_run(
-                f"Level {self.subdivision_level}: pressure {pressure:.2f} didn't converge "
-                f"within {SAFETY_STEP_CAP} steps -- reverted to the state before Inflate.",
+                f"Level {self.subdivision_level}: pressure {pressure:.2f} didn't converge -- "
+                "reverted to the state before Inflate.",
                 popup_text=(
                     f"The mesh didn't converge at Level {self.subdivision_level} (pressure "
-                    f"{pressure:.2f}, max stretch {max_stretch:.1f}%, RMS {rms_stretch:.1f}% "
-                    f"after {SAFETY_STEP_CAP} steps) -- it may have a loosely-attached or "
-                    "floppy face. Try anchoring/reconnecting it and Inflate again."))
+                    f"{pressure:.2f}, max stretch {max_stretch:.1f}%, RMS {rms_stretch:.1f}%) "
+                    "-- it may have a loosely-attached or floppy face. Try anchoring/"
+                    "reconnecting it and Inflate again."))
             return
         self.positions = new_positions
         self._render()
+        # Feeds _guess_pressure_from_history for whichever level runs next this SAME Full
+        # Inflate pass (harmless to also record during a Diff Inflate run -- nothing reads
+        # self.level_history there, since those callers pass their own explicit guess).
+        self.level_history[self.subdivision_level] = {
+            "pressure": pressure, "rms_stretch_pct": rms_stretch, "pressure_found": pressure_found}
         if self.subdivision_level >= MAX_LEVEL:
             self.last_pressure = pressure
             self._record_inflate_success()
