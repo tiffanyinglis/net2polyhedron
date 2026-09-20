@@ -587,15 +587,23 @@ class BuilderPane(InteractiveBuilderApp):
         does (InteractiveBuilderApp._complete_or_cancel_pending_connection's own made-connection
         branch, untouchable -- replicated here rather than factored out into that file) -- used
         by InflaterPane's own 3D drag-to-connect gesture (2026-09-19, explicit: "creating
-        connections in 3d... drag to connect to another edge midpoint"). A no-op while locked
-        (mirrors _on_canvas_press_join's own lock check for the 2D gesture) or if either shape
-        has since been deleted."""
+        connections in 3d... drag to connect to another edge midpoint"). A no-op (False) while
+        locked (mirrors _on_canvas_press_join's own lock check for the 2D gesture) or if either
+        shape has since been deleted.
+
+        Returns True on success, False if the connection would be ILLEGAL (a vertex-merge
+        conflict) -- automatically UNDONE via _undo_illegal_connection rather than leaving the
+        invalid net in place with just a warning (2026-09-19, explicit bug report: "when i try
+        to make an illegal join, the app does warn me... but it should then undo the illegal
+        move in both 2d and 3d") -- the caller (InflaterPane._finish_connection_drag) reads
+        this to decide whether to show its own "connection made" indicator at all."""
         if self._locked:
-            return
+            return False
         a_shape, b_shape = self._shape_by_id(a_shape_id), self._shape_by_id(b_shape_id)
         if a_shape is None or b_shape is None:
-            return
+            return False
         self._push_undo()
+        was_vme_active = self._vme_active  # _push_undo's own _refresh_vme_state just set this
         a_handle, b_handle = self._default_connection_handles(a_shape, a_edge, b_shape, b_edge)
         self.connections.append({
             "id": self._next_connection_id,
@@ -607,7 +615,35 @@ class BuilderPane(InteractiveBuilderApp):
         self.selected_ids = set()
         self.selected_connection_id = None
         self._refresh_vme_state()
+        if self._vme_active and not was_vme_active:
+            self._undo_illegal_connection()
+            return False
         self._redraw()
+        return True
+
+    def _undo_illegal_connection(self):
+        """Rolls back a just-made connection that turned the net invalid -- pops the SAME
+        undo-stack entry the caller's own _push_undo just recorded (the pre-connection state)
+        and restores it directly, rather than going through on_undo_key (which would also push
+        a REDO entry for something the user never asked to undo). Also tells InflaterPane to
+        tear down whatever it may have already shown for this now-undone connection (2026-09-19,
+        explicit bug report: "it should then undo the illegal move in both 2d and 3d. redraw if
+        needed") -- covers the 2D-driven path (set_pending_connection_from_builder's own red
+        highlights, still showing at the moment of rollback); the 3D-native drag path instead
+        reads create_connection's own False return to skip ever creating its "made" indicator
+        in the first place (see InflaterPane._finish_connection_drag)."""
+        if self._undo_stack:
+            self._restore_snapshot(self._undo_stack.pop())
+        self.selected_ids = set()
+        self.selected_connection_id = None
+        self._connection_pending = None
+        self._hover_shape_id = None
+        self._hover_edge_index = None
+        self._update_title()
+        self._refresh_vme_state()
+        self._redraw()
+        if self.inflater_getter is not None:
+            self.inflater_getter().undo_illegal_connection_from_builder()
 
     # Tracks the LAST selection (self.selected_ids, inherited from InteractiveBuilderApp) this
     # pane forwarded to InflaterPane -- self.selected_ids itself is mutated directly by a dozen+
@@ -870,6 +906,23 @@ class BuilderPane(InteractiveBuilderApp):
             self._on_canvas_motion(event)
             return
         super()._on_canvas_drag(event)
+
+    def _complete_or_cancel_pending_connection(self):
+        """Runs InteractiveBuilderApp's own click-click/drag-and-drop completion unchanged,
+        then UNDOES it if the connection it just made turns the net invalid (2026-09-19,
+        explicit bug report: "when i try to make an illegal join, the app does warn me... but
+        it should then undo the illegal move in both 2d and 3d") -- the base method's own
+        _push_undo (called right before appending) already recorded the pre-connection state;
+        _undo_illegal_connection pops that SAME entry back off rather than pushing a second,
+        user-never-asked-for undo step. self._on_canvas_release's own `len(self.connections) >
+        connections_before` check already reads the length AFTER this returns, so a rollback
+        here is invisible to it -- it correctly sees no NET change and skips showing the "made"
+        3D indicator."""
+        was_vme_active = self._vme_active
+        made = super()._complete_or_cancel_pending_connection()
+        if made and self._vme_active and not was_vme_active:
+            self._undo_illegal_connection()
+        return made
 
     def _on_canvas_release(self, event):
         """Completes (or cancels, if the drag never reached a valid target) a Join/Fold pending
@@ -1631,13 +1684,33 @@ class InflaterPane:
         might be loosely attached and try again"). `popup_text`, if given, shows a
         messagebox.showwarning in addition to the status line -- used for a genuine non-
         convergence/divergence outcome, not a plain user-requested Stop (which doesn't need a
-        popup telling the user what they themselves just did)."""
+        popup telling the user what they themselves just did).
+
+        A reverted DIFF run (self._active_button == "diff") ALSO undoes the single 2D edit
+        that made it eligible in the first place (2026-09-19, explicit: "if a simulation ends
+        up diverging or if the user stops it, it should also revert to the state before the
+        simulation (which means undoing one action when in auto mode)") -- Diff Inflate is, BY
+        DEFINITION (BuilderPane.classify_change/DIFF_ELIGIBLE_KINDS), only ever eligible when
+        the net differs from the last successful inflate by EXACTLY one added/removed face or
+        connection, so "the edit" is unambiguous: whatever's on top of the undo stack. Calls
+        InteractiveBuilderApp.on_undo_key DIRECTLY (the unbound base method, bypassing
+        BuilderPane's own `if self._locked: return` guard) rather than through
+        BuilderPane.on_undo_key -- this needs to run WHILE STILL LOCKED (self._set_running(False)
+        hasn't run yet), specifically so refresh_diff_eligibility's own early-out
+        (`if self._running: return`, still True here) suppresses its Auto-Inflate retrigger
+        until AFTER the net is back to the last known-good state -- undoing AFTER unlocking
+        would instead let that retrigger fire ONE MORE TIME against the still-broken edit,
+        immediately re-running (and re-failing) the exact same doomed calibration."""
         if self._pre_click_snapshot is not None:
             self._restore_mesh_state(self._pre_click_snapshot)
         self._pre_click_snapshot = None
         self._stop_event = None
         self._stop_requested = False
+        was_diff = self._active_button == "diff"
         self._render()
+        if was_diff:
+            InteractiveBuilderApp.on_undo_key(self.builder_getter())
+            status_text = f"{status_text} The change that caused it has been undone."
         self._set_running(False)
         self._set_status(status_text, "warn")
         if popup_text is not None:
@@ -2249,16 +2322,24 @@ class InflaterPane:
         last live pick point from _update_connection_drag (or, failing that, the target's own
         midpoint) if the release itself doesn't land on any surface. An incomplete drag (no
         target) is a plain cancel -- both edges' highlights are torn down, nothing persists,
-        same as InteractiveBuilderApp letting a click-click connection lapse."""
+        same as InteractiveBuilderApp letting a click-click connection lapse. An ILLEGAL
+        connection (a vertex-merge conflict) is ALSO effectively a cancel -- create_connection
+        returns False for one after already rolling it back and clearing this pane's own
+        transient highlights itself (via BuilderPane._undo_illegal_connection ->
+        undo_illegal_connection_from_builder, 2026-09-19 explicit bug report: "it should then
+        undo the illegal move in both 2d and 3d") -- so the "made" branch below is simply
+        skipped, nothing further to undo here."""
         drag, self._connection_drag = self._connection_drag, None
         self._line_end_screen_override = None
         self.builder_getter().set_pending_connection(None, None, None, None)
         origin = None if drag is None else self._open_edges.get(drag["origin_key"])
         target = (None if drag is None or drag["target_key"] is None
                   else self._open_edges.get(drag["target_key"]))
+        made = False
         if origin is not None and target is not None:
-            self.builder_getter().create_connection(
+            made = self.builder_getter().create_connection(
                 origin["shape_id"], origin["raw_edge"], target["shape_id"], target["raw_edge"])
+        if made:
             self._apply_hover_open_edge_highlight(None)  # clear the yellow hover on the target edge
             self._pending_made_connection_actors += self._edge_highlight_actors.pop("origin", [])
             self._pending_made_connection_actors += self._add_rounded_lines(
@@ -2270,7 +2351,10 @@ class InflaterPane:
             self._pending_made_connection_actors += self._add_rounded_lines(
                 np.array([origin_point, release_point]), "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
             self._rebuild_open_edges()
-        else:
+        elif origin is None or target is None:
+            # A plain cancel (no target found) -- an illegal connection already tore its own
+            # highlights down via undo_illegal_connection_from_builder, so only clean up here
+            # for the "never had a target" case.
             self._set_edge_highlight_actors("origin", None, "red")
             self._apply_hover_open_edge_highlight(None)
         self._grab_frame()
@@ -2324,6 +2408,19 @@ class InflaterPane:
         if was_dragging_connection:
             self._dragging = False
             self._last_xy = None
+        self._grab_frame()
+
+    def undo_illegal_connection_from_builder(self):
+        """Called by BuilderPane._undo_illegal_connection whenever it just auto-reverted a
+        just-made connection that turned the net invalid (2026-09-19, explicit bug report:
+        "when i try to make an illegal join, the app does warn me... but it should then undo
+        the illegal move in both 2d and 3d. redraw if needed") -- reuses
+        set_open_edge_drag_cancelled_from_builder's own cleanup (the transient hover/origin/
+        target/connecting-line highlights and any in-progress 3D drag it clears are exactly
+        what a just-reverted connection could have left showing) and then re-syncs
+        self._open_edges, since the two edges the now-undone connection used are open again."""
+        self.set_open_edge_drag_cancelled_from_builder()
+        self._rebuild_open_edges()
         self._grab_frame()
 
     def set_pending_connection_from_builder(self, from_shape, from_edge, to_shape, to_edge):
@@ -2388,6 +2485,26 @@ class InflaterPane:
             return set()
         return {g for g, sid in enumerate(self._pending_source_polygon_id) if sid in shape_ids}
 
+    def _groups_present(self):
+        """Every group index that actually exists in self.face_of_fine RIGHT NOW -- used to
+        filter out STALE group numbers before they reach _group_boundary_offset_lines/
+        _group_boundary_lines (2026-09-19, explicit crash report: deleting two faces from a
+        dodecahedron sometimes raised "Empty meshes cannot be plotted", then left hover
+        highlighting a different face than the one under the cursor). A diff pipeline path
+        (_diff_remove_face, _diff_reexport_and_relax) reassigns/renumbers self.face_of_fine
+        and self.base_faces BEFORE the next _render() -- deliberately, so "never redraw
+        anything before real convergence" holds -- but self._hover_target_groups is a plain
+        cache of raw group indices from whenever it was last set, with no way to know its own
+        numbers went stale the instant that reassignment happened. _render()'s own tail already
+        guards its group loops with `if group in groups_present`; _apply_hover_highlight/
+        _apply_selection_highlight (which run OUTSIDE _render(), e.g. via the selection-
+        forwarding cascade set_locked's own _redraw triggers) need the identical guard, since a
+        stale index otherwise either builds an actor from an EMPTY boundary (a group that no
+        longer exists at all -- the actual crash, in _add_rounded_lines' own add_mesh call) or,
+        worse, silently highlights whatever DIFFERENT face now happens to occupy that same
+        index in the renumbered mesh."""
+        return set(self.face_of_fine or ())
+
     def _apply_hover_highlight(self, groups):
         """Shared by both hover directions above -- swaps the current set of highlighted
         groups' yellow outline actors for `groups`'s own, MINUS whatever's currently selected
@@ -2400,9 +2517,13 @@ class InflaterPane:
         did), so a still cursor doesn't re-render on every motion tick. Cheap: only adds/
         removes the couple of highlight actors _add_rounded_lines makes per group (not a full
         _render()). Draws BOTH offset copies (_group_boundary_offset_lines) per group, not just
-        one, so the highlight shows up whichever side of that face is currently being viewed."""
+        one, so the highlight shows up whichever side of that face is currently being viewed.
+        Intersected with _groups_present() -- see its own docstring for why a stale group index
+        can otherwise reach here (a diff pipeline path renumbering self.face_of_fine out from
+        under a cached self._hover_target_groups)."""
         self._hover_target_groups = frozenset(groups)
-        effective = self._hover_target_groups - self._groups_for_shape_ids(self._selected_shape_ids)
+        effective = ((self._hover_target_groups & self._groups_present())
+                     - self._groups_for_shape_ids(self._selected_shape_ids))
         if effective == self._hover_groups:
             return
         self._hover_groups = effective
@@ -2567,11 +2688,16 @@ class InflaterPane:
         (same incremental add/remove convention as _apply_hover_highlight), then re-derives the
         hover highlight's EFFECTIVE set from its last raw target (self._hover_target_groups) --
         a shape that just became selected needs its yellow hover actors (if any) torn down, and
-        one that just got deselected while still under the cursor needs them back."""
+        one that just got deselected while still under the cursor needs them back. Intersected
+        with _groups_present() too, for the same "a diff pipeline path may have already
+        renumbered self.face_of_fine" reason _apply_hover_highlight guards against -- normally
+        redundant here (self._pending_source_polygon_id, which _groups_for_shape_ids reads, IS
+        kept in sync with every such renumbering), but cheap insurance against the two ever
+        being updated out of step."""
         for actor in self._selected_actors:
             self.plotter.remove_actor(actor)
         self._selected_actors = []
-        for group in self._groups_for_shape_ids(self._selected_shape_ids):
+        for group in self._groups_for_shape_ids(self._selected_shape_ids) & self._groups_present():
             front_sel, back_sel = self._group_boundary_offset_lines(group)
             self._selected_actors += (
                 self._add_rounded_lines(front_sel, "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
@@ -2600,7 +2726,13 @@ class InflaterPane:
         wireframe (add_mesh's own show_edges, in _render) -- PyVista silently drops show_edges
         entirely whenever render_lines_as_tubes is also requested on the same add_mesh call,
         which would delete that wireframe outright rather than just rounding its caps, so it
-        keeps VTK's default flat line ends."""
+        keeps VTK's default flat line ends. Returns [] for an empty `segments` (no group/edge
+        boundary to draw at all) instead of calling add_mesh on a zero-point PolyData, which
+        PyVista raises ValueError on (2026-09-19, explicit crash report: a stale group index --
+        see _apply_hover_highlight's own docstring on why that could happen -- reached here via
+        an empty _group_boundary_offset_lines result)."""
+        if len(segments) == 0:
+            return []
         line_actor = self.plotter.add_lines(segments, color=color, width=width)
         line_actor.prop.render_lines_as_tubes = True
         unique_points = np.unique(segments.reshape(-1, 3), axis=0)
