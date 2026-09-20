@@ -120,7 +120,7 @@ import tkinter.font as tkfont
 
 import matplotlib.colors as mcolors
 import numpy as np
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 import pyvista as pv
 # vtkmodules.* (the same sub-package pyvista itself imports from), not the monolithic `vtk`
 # package -- `import vtk` eagerly loads every VTK module and is dramatically slower (order of
@@ -144,10 +144,10 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 # import, src/apps/ already being on sys.path) rather than copied, so its ~3700 lines of net-
 # building logic are reused verbatim, not duplicated.
 from interactive_builder_app.app import (
-    ICON_SIZE, MENU_ACTIVE_BG, MENU_BG, MENU_DISABLED_FG, MENU_FG, NetValidationError,
-    POLYGON_COLORS, POLYGON_NS, InteractiveBuilderApp, _ICON_VERTICES, _rasterize_polygon,
-    _enable_windows_dpi_awareness, _expand_folded_shapes, _shape_face_corner_order,
-    _vertex_roots,
+    CONNECTION_SELECTED_WIDTH, ICON_SIZE, MENU_ACTIVE_BG, MENU_BG, MENU_DISABLED_FG, MENU_FG,
+    NetValidationError, POLYGON_COLORS, POLYGON_NS, InteractiveBuilderApp, _ICON_VERTICES,
+    _rasterize_polygon, _enable_windows_dpi_awareness, _expand_folded_shapes,
+    _shape_face_corner_order, _vertex_roots,
 )
 
 INFLATER_APP_DIR = Path(__file__).resolve().parent
@@ -189,6 +189,46 @@ DIFF_PRESSURE_GUESS_TOL_PCT = 5.0
 # edges.
 POLYGON_EDGE_LINE_WIDTH = 3.0
 HOVER_HIGHLIGHT_LINE_WIDTH = 4.0
+SELECTED_HIGHLIGHT_LINE_WIDTH = 4.0
+
+# How many pixels of ButtonPress-1-to-release movement still counts as a plain click (selects a
+# face) rather than a rotate-drag -- a real click's press/release coordinates are rarely bit-
+# for-bit identical (trackpad/mouse jitter), so 0 would misclassify most genuine clicks as tiny
+# drags.
+CLICK_MOVE_TOLERANCE_PX = 3
+
+# Join-mode 3D edge hover/click (2026-09-19, explicit: "hovering over the 3d edge highlights
+# the corresponding 2d connection") picks the nearest connection's glued seam to wherever the
+# cursor's pick ray actually HITS the mesh surface (there's no separate pickable line geometry
+# for each seam -- see _nearest_connection_at_position's own docstring) -- a fraction of the
+# model's own bounding-sphere radius (self._half), not a fixed world distance, so it scales with
+# the model regardless of zoom/subdivision level.
+CONNECTION_PICK_TOLERANCE_FRACTION = 0.06
+
+# Join-mode 3D drag-to-connect (2026-09-19, explicit: "hover over an open edge... drag to
+# connect to another edge midpoint") -- fraction-of-self._half distance for how close the
+# cursor's pick position must be to an open edge itself (proximity to the whole edge LINE, not
+# just its midpoint -- 2026-09-19, explicit: "hovering over open edges highlight them") to
+# reveal/target it.
+OPEN_EDGE_PICK_TOLERANCE_FRACTION = 0.10
+
+# Every part of the open-edge connect gesture is now REAL 3D geometry -- an edge highlighted
+# yellow on hover, red once pressed/confirmed, and a red line between two connected edges'
+# midpoints (2026-09-19, explicit: "let hovering over open edges highlight them in yellow...
+# the mouse press causes the edge to be selected and drawn in red... mouse release causes both
+# to be drawn in red with their midpoint connected in a thick red line (all drawn in 3d)") --
+# unlike a flat screen-space overlay, real geometry follows the edge's own actual (possibly
+# curved/subdivided) shape and persists correctly through camera rotate/pan/zoom for as long as
+# Diff/Full Inflate takes to converge in the background. The ONE remaining screen-space overlay
+# is the live drag's own rubber-band line to the cursor (2026-09-19, explicit: "the mouse drags
+# out a connection in screen space (thick line)") -- CONNECTION_OVERLAY_LINE_WIDTH_PX/_COLOR are
+# just for that. As thick as a SELECTED face/connection's own 3D highlight line (2026-09-19,
+# explicit: "the line joining two midpoints should be as thick as selected edges") --
+# SELECTED_HIGHLIGHT_LINE_WIDTH is a VTK actor line width (also effectively screen pixels),
+# reused here directly rather than picking an unrelated pixel value, so the two stay in sync if
+# that one ever changes.
+CONNECTION_OVERLAY_LINE_WIDTH_PX = int(SELECTED_HIGHLIGHT_LINE_WIDTH)
+CONNECTION_OVERLAY_LINE_COLOR = (220, 30, 30)
 
 # The polygon-rim overlay's own color -- a single PLAIN light grey, not blended off the face's
 # own color at all, and the SAME for both offset copies now, not a front/back split (2026-09-19,
@@ -238,6 +278,19 @@ def _weighted_color(color, weight, other="white"):
     tuple in [0, 1] -- e.g. _weighted_color(face_color, 0.75) is 75% face_color/25% white."""
     a, b = np.array(mcolors.to_rgb(color)), np.array(mcolors.to_rgb(other))
     return tuple(weight * a + (1 - weight) * b)
+
+
+def _point_segment_distance_3d(point, a, b):
+    """Shortest distance from `point` to the 3D line SEGMENT a->b (not the infinite line) --
+    the 3D counterpart of interactive_builder_app's own 2D _point_segment_distance, used to
+    hit-test the 3D panel's own Join-mode cursor ray against a connection's glued seam (a thin
+    line with no interior to pick a mesh face against)."""
+    ab = b - a
+    denom = np.dot(ab, ab)
+    if denom < 1e-18:
+        return float(np.linalg.norm(point - a))
+    t = max(0.0, min(1.0, np.dot(point - a, ab) / denom))
+    return float(np.linalg.norm(point - (a + t * ab)))
 
 
 # The FINE subdivision mesh's own wireframe -- much fainter than the bold polygon-outline
@@ -408,13 +461,19 @@ class BuilderPane(InteractiveBuilderApp):
     # Same idea as on_change -- a class attribute so it exists before the inherited
     # InteractiveBuilderApp.__init__ makes its own first _redraw() call. Which shape (if any)
     # InflaterPane's own hover-picking currently wants outlined in yellow on this canvas (see
-    # set_hover_shape/the overridden _redraw below).
-    _hover_shape_id = None
+    # set_hover_shape/the overridden _redraw below). Named _face_hover_shape_id, NOT
+    # _hover_shape_id -- InteractiveBuilderApp already has its OWN self._hover_shape_id/
+    # _hover_edge_index (the Join-mode edge-handle-proximity hover its _redraw draws a lit red
+    # circle for), a completely different meaning; reusing that exact name here would silently
+    # collide -- this class's own instance would still have only ONE such attribute, and OUR
+    # _redraw's face-outline code would then also fire whenever the BASE class's Join-mode
+    # gesture (or, deliberately, set_pending_connection below) sets ITS meaning of that name.
+    _face_hover_shape_id = None
 
     # Reverse direction (2026-09-19, explicit: "now make the opposite true") -- which shape (if
     # any) THIS canvas's own mouse is currently over, forwarded to InflaterPane so it can
-    # highlight the matching 3D group(s) too. A separate attribute from _hover_shape_id above:
-    # that one is driven BY InflaterPane (3D->2D), this one drives IT (2D->3D) -- keeping them
+    # highlight the matching 3D group(s) too. A separate attribute from _face_hover_shape_id
+    # above: that one is driven BY InflaterPane (3D->2D), this one drives IT (2D->3D) -- keeping them
     # apart means a plain mouse-move over the 3D panel can never fight one over the 2D canvas.
     _mouse_hover_shape_id = None
 
@@ -425,36 +484,225 @@ class BuilderPane(InteractiveBuilderApp):
     # in which case the 2D->3D hover direction below is simply not forwarded.
     inflater_getter = None
 
+    # Join-mode connection hover state (2026-09-19, explicit: "in Join[J] mode, hovering over a
+    # connection highlights it in yellow and the corresponding edge in 3d is also highlighted...
+    # hovering over the 3d edge highlights the corresponding 2d connection") -- same 3D->2D
+    # (_hover_connection_id) / 2D->3D (_mouse_hover_connection_id) split as the face-hover pair
+    # above, and for the same reason (keeping the two directions from fighting each other).
+    _hover_connection_id = None
+    _mouse_hover_connection_id = None
+
+    # Open-edge handle hover-reveal, mirrored with InflaterPane (2026-09-19, explicit: "if i
+    # hover over an edge and it shows the midpoint circle, the corresponding edge should also
+    # show its midpoint circle in 3d... conversely, when i hover over an open edge in 3d, its
+    # midpoint as a unfilled white circle should show up... same thing should happen in 2d").
+    # _mouse_hover_open_edge_key is THIS canvas's own reveal (2D->3D, forwarded in
+    # _set_mouse_hover_open_edge -- see its own docstring for why it doesn't also call
+    # self._redraw(), unlike the shape/connection pair above). _forced_hover_open_edge is
+    # InflaterPane's own reveal, mirrored the OTHER way (3D->2D, set_open_edge_hover below) --
+    # InteractiveBuilderApp's own _redraw has no field it reads for "reveal this ONE handle
+    # regardless of cursor proximity", so the overridden _redraw draws it separately, on top,
+    # the same way it already does for the yellow face/connection hover overlays.
+    _mouse_hover_open_edge_key = None
+    _forced_hover_open_edge = None
+
+    def set_open_edge_hover(self, shape_id, edge_index):
+        """Called by InflaterPane._set_hover_open_edge whenever ITS OWN mouse hover changes
+        (3D->2D direction, or leaves it, shape_id=None). A no-op if already showing this exact
+        edge (or already showing nothing, for a clear)."""
+        key = None if shape_id is None else (shape_id, edge_index)
+        if key == self._forced_hover_open_edge:
+            return
+        self._forced_hover_open_edge = key
+        self._redraw()
+
+    # Tracks the LAST self.selected_connection_id forwarded to InflaterPane -- same diff-on-
+    # redraw approach as _last_forwarded_selected_ids above, and for the same reason (a dozen+
+    # inherited methods mutate self.selected_connection_id directly, each already ending in its
+    # own self._redraw()). Set by InflaterPane.set_selected_connection (3D->2D direction) BEFORE
+    # it mutates self.selected_connection_id, so that direction's own _redraw doesn't bounce the
+    # same selection right back.
+    _last_forwarded_selected_connection_id = None
+
+    def set_selected_connection(self, conn_id):
+        """Called by InflaterPane._select_connection whenever a 3D click changes its own
+        connection selection (2026-09-19, explicit: "clicking on the connection selects it in
+        both 2d and 3d"). A no-op if `conn_id` already matches the current selection."""
+        if conn_id == self.selected_connection_id:
+            return
+        self.selected_connection_id = conn_id
+        self._last_forwarded_selected_connection_id = conn_id
+        self._redraw()
+
+    def set_hover_connection(self, conn_id):
+        """Called by InflaterPane._set_hover_connection whenever the mouse moves over a
+        different connection's seam in the 3D panel (Join mode only, or leaves it, conn_id=
+        None). A no-op if `conn_id` is already the current hover."""
+        if conn_id == self._hover_connection_id:
+            return
+        self._hover_connection_id = conn_id
+        self._redraw()
+
+    # Tracks the LAST (pending, hover_shape, hover_edge) tuple this pane forwarded to
+    # InflaterPane FROM a genuine 2D click-click Join gesture -- same diff-on-redraw approach as
+    # _last_forwarded_selected_ids, and for the same reason (self._connection_pending/
+    # _hover_shape_id/_hover_edge_index are all mutated directly by several inherited methods,
+    # each already ending in its own self._redraw()). Set by set_pending_connection (3D->2D
+    # direction) BEFORE it mutates those same three fields, so that direction's own _redraw
+    # doesn't bounce the same state right back out to InflaterPane.
+    _last_forwarded_pending = (None, None, None)
+
+    def set_pending_connection(self, from_shape, from_edge, to_shape, to_edge):
+        """Called by InflaterPane while its own 3D drag-to-connect gesture is active (2026-09-19,
+        explicit: "as i'm dragging out that connection [in 3d], the corresponding circle should
+        also show in 2d... when that connection reaches another circle, the corresponding circle
+        should also show in 2d"). Drives the SAME self._connection_pending/_hover_shape_id/
+        _hover_edge_index fields InteractiveBuilderApp's own 2D click-click Join gesture uses
+        (untouched, in the untouchable base class) -- its EXISTING _redraw already draws a lit
+        red handle circle for `_connection_pending`'s own origin and for
+        (_hover_shape_id, _hover_edge_index)'s target, plus the dashed preview line to
+        self._pending_cursor_screen, so nothing new needs drawing here at all. `from_shape=None`
+        clears everything (the drag ended, with or without a connection actually made).
+        `to_shape=None` (with `from_shape` set) means the drag has an origin but no target
+        under the cursor yet."""
+        pending = None if from_shape is None else (from_shape, from_edge)
+        current_pending = (None if self._connection_pending is None else
+                            (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
+        if (pending, to_shape, to_edge) == (current_pending, self._hover_shape_id, self._hover_edge_index):
+            return
+        self._connection_pending = None if pending is None else {"from_shape": pending[0], "from_edge": pending[1]}
+        self._hover_shape_id = to_shape
+        self._hover_edge_index = to_edge
+        self._last_forwarded_pending = (pending, to_shape, to_edge)
+        anchor_shape_id, anchor_edge = (to_shape, to_edge) if to_shape is not None else (from_shape, from_edge)
+        if anchor_shape_id is not None:
+            anchor_shape = self._shape_by_id(anchor_shape_id)
+            if anchor_shape is not None:
+                self._pending_cursor_screen = self._world_to_screen(
+                    *self._shape_edge_midpoints(anchor_shape)[anchor_edge])
+        self._redraw()
+
+    def create_connection(self, a_shape_id, a_edge, b_shape_id, b_edge):
+        """Creates a real connection exactly the way completing a 2D click-click Join gesture
+        does (InteractiveBuilderApp._complete_or_cancel_pending_connection's own made-connection
+        branch, untouchable -- replicated here rather than factored out into that file) -- used
+        by InflaterPane's own 3D drag-to-connect gesture (2026-09-19, explicit: "creating
+        connections in 3d... drag to connect to another edge midpoint"). A no-op while locked
+        (mirrors _on_canvas_press_join's own lock check for the 2D gesture) or if either shape
+        has since been deleted."""
+        if self._locked:
+            return
+        a_shape, b_shape = self._shape_by_id(a_shape_id), self._shape_by_id(b_shape_id)
+        if a_shape is None or b_shape is None:
+            return
+        self._push_undo()
+        a_handle, b_handle = self._default_connection_handles(a_shape, a_edge, b_shape, b_edge)
+        self.connections.append({
+            "id": self._next_connection_id,
+            "a_shape": a_shape_id, "a_edge": a_edge,
+            "b_shape": b_shape_id, "b_edge": b_edge,
+            "a_handle": a_handle, "b_handle": b_handle,
+        })
+        self._next_connection_id += 1
+        self.selected_ids = set()
+        self.selected_connection_id = None
+        self._refresh_vme_state()
+        self._redraw()
+
+    # Tracks the LAST selection (self.selected_ids, inherited from InteractiveBuilderApp) this
+    # pane forwarded to InflaterPane -- self.selected_ids itself is mutated directly by a dozen+
+    # inherited methods (click/ctrl-click/marquee/Delete/undo/redo/load/copy-paste), each already
+    # ending in its own self._redraw() call (see module docstring's "one call site EVERY state-
+    # changing edit... calls" note on _refresh_vme_state for the same pattern with on_change) --
+    # rather than hook every one of them, the overridden _redraw below just diffs against this
+    # every time and forwards only on an actual change. Set by InflaterPane.set_selected_shape_ids
+    # (3D->2D direction) BEFORE it mutates self.selected_ids, so that direction's own _redraw
+    # doesn't immediately bounce the same selection right back.
+    _last_forwarded_selected_ids = frozenset()
+
+    def set_selected_shape_ids(self, shape_ids):
+        """Called by InflaterPane._select_shape_ids whenever a 3D click changes its own
+        selection (2026-09-19, explicit: "clicking on a face in 3d should select it in both
+        views"). A no-op if `shape_ids` already matches the current selection."""
+        shape_ids = frozenset(shape_ids)
+        if shape_ids == frozenset(self.selected_ids):
+            return
+        self.selected_ids = set(shape_ids)
+        self._last_forwarded_selected_ids = shape_ids
+        self._redraw()
+
     def set_hover_shape(self, shape_id):
         """Called by InflaterPane._set_hover_group whenever the mouse moves over a different
         face of the 3D panel (or leaves it, shape_id=None) -- 2026-09-19, explicit: "that face
         should be outlined in yellow in both the 2d view and the 3d view". A no-op if
         `shape_id` is already the current hover, matching InflaterPane's own such-events-aren't-
         worth-a-redraw guard."""
-        if shape_id == self._hover_shape_id:
+        if shape_id == self._face_hover_shape_id:
             return
-        self._hover_shape_id = shape_id
+        self._face_hover_shape_id = shape_id
         self._redraw()
 
     def _on_canvas_motion(self, event):
         """Runs InteractiveBuilderApp's own motion handling unchanged, then (2026-09-19,
         explicit: "now make the opposite true", mirroring InflaterPane's own 3D->2D
-        _on_panel_hover_motion) picks whichever shape is under the cursor and forwards it to
-        InflaterPane so it highlights the matching 3D group(s) too. Move-tool only, and only
-        when not about to drop an armed palette shape -- in Join/Fold mode (or while armed) the
-        cursor's proximity already means something else (a connection target / a placement
-        ghost), so it isn't repurposed as a highlight pick."""
+        _on_panel_hover_motion) picks whichever shape/connection/open-edge-handle is under the
+        cursor and forwards it to InflaterPane so it highlights the matching 3D geometry too.
+        Move mode picks a whole shape (face selection is Move-only, 2026-09-19 explicit); Join
+        mode (idle, i.e. not currently dragging out a NEW pending connection) picks a connection
+        OR an open edge's own handle (mutually exclusive by construction -- an edge is always
+        exactly one or the other) -- in either OTHER case (Fold, or Join mid-drag) none of these
+        hovers apply, so all three are cleared. The open-edge pick reuses
+        InteractiveBuilderApp's own _hit_test_any_edge_handle with no exclude/require args --
+        EXACTLY the nearest-unjoined-handle-within-HANDLE_HIT_RADIUS lookup its own _redraw
+        already uses to decide what to reveal, so "visible in 2D" and "forwarded to 3D" can
+        never disagree (2026-09-19, explicit: "in 2d, i need to hover near the edge midpoint
+        for the midpoint to show" -- unchanged, this just ALSO mirrors that same rule's result)."""
         super()._on_canvas_motion(event)
         shape_id = None
+        conn_id = None
+        open_edge_key = None
         if self.tool_mode == "move" and self.armed_n is None:
             wx, wy = self._screen_to_world(event.x, event.y)
             hit = self._hit_test(wx, wy)
             shape_id = None if hit is None else hit["id"]
+        elif self.tool_mode == "join" and self._connection_pending is None:
+            conn_id = self._hit_test_connection(event.x, event.y)
+            handle = self._hit_test_any_edge_handle(event.x, event.y)
+            if handle is not None:
+                open_edge_key = (handle["shape_id"], handle["edge_index"])
         self._set_mouse_hover_shape(shape_id)
+        self._set_mouse_hover_connection(conn_id)
+        self._set_mouse_hover_open_edge(open_edge_key)
 
     def _on_canvas_leave(self, event):
         super()._on_canvas_leave(event)
         self._set_mouse_hover_shape(None)
+        self._set_mouse_hover_connection(None)
+        self._set_mouse_hover_open_edge(None)
+
+    def _set_mouse_hover_connection(self, conn_id):
+        """A no-op if `conn_id` is already the current mouse hover (the common case -- most
+        mouse-move events land on the same connection the previous one did, or on the same
+        empty space)."""
+        if conn_id == self._mouse_hover_connection_id:
+            return
+        self._mouse_hover_connection_id = conn_id
+        self._redraw()
+        if self.inflater_getter is not None:
+            self.inflater_getter().set_hover_connection_from_builder(conn_id)
+
+    def _set_mouse_hover_open_edge(self, key):
+        """A no-op if `key` already matches the current mouse hover. Unlike
+        _set_mouse_hover_shape/_set_mouse_hover_connection, this does NOT call self._redraw()
+        -- the reveal it's forwarding is already drawn by InteractiveBuilderApp's own base-class
+        _redraw (super()._on_canvas_motion, called just before this in _on_canvas_motion,
+        already redrew this exact frame), so a second redraw here would just be redundant."""
+        if key == self._mouse_hover_open_edge_key:
+            return
+        self._mouse_hover_open_edge_key = key
+        if self.inflater_getter is not None:
+            shape_id, edge_index = key if key is not None else (None, None)
+            self.inflater_getter().set_open_edge_hover_from_builder(shape_id, edge_index)
 
     def _set_mouse_hover_shape(self, shape_id):
         """A no-op if `shape_id` is already the current mouse hover (the common case -- most
@@ -468,16 +716,25 @@ class BuilderPane(InteractiveBuilderApp):
             self.inflater_getter().set_hover_shape_from_builder(shape_id)
 
     def _redraw(self):
-        """Runs InteractiveBuilderApp's own full redraw unchanged, then draws the hover
-        highlight (if any) on top -- _redraw's own canvas.delete("all") wipes everything first,
-        so this can't be done as a one-time canvas item; it has to be re-added after every
-        single redraw, from whatever edit triggered it (drag/rotate/connect/etc.), not just
-        from set_hover_shape's own calls. Outlines whichever shape(s) are hovered from EITHER
-        direction (3D->2D's _hover_shape_id, this canvas's own _mouse_hover_shape_id) -- a set,
-        deduplicated, since both are usually the same shape or one of them is None."""
+        """Runs InteractiveBuilderApp's own full redraw unchanged (which already draws its own
+        RED selection outline for self.selected_ids), then draws the yellow HOVER highlight (if
+        any) on top -- _redraw's own canvas.delete("all") wipes everything first, so this can't
+        be done as a one-time canvas item; it has to be re-added after every single redraw, from
+        whatever edit triggered it (drag/rotate/connect/etc.), not just from set_hover_shape's
+        own calls. Outlines whichever shape(s) are hovered from EITHER direction (3D->2D's
+        _face_hover_shape_id, this canvas's own _mouse_hover_shape_id) -- a set, deduplicated,
+        since both are usually the same shape or one of them is None -- EXCLUDING anything
+        already selected (2026-09-19, explicit: "when you hover then select, the face should go
+        from being highlighted (yellow) to being selected (red) [don't draw both]"): the base
+        class's own red selection outline already covers that case, so a second yellow one on
+        top would just be visual noise.
+
+        Also forwards self.selected_ids to InflaterPane whenever it's changed since the last
+        forward (see _last_forwarded_selected_ids' own docstring for why this diff-on-redraw
+        approach, rather than hooking every mutation site, is used)."""
         super()._redraw()
-        hover_ids = {sid for sid in (self._hover_shape_id, self._mouse_hover_shape_id)
-                     if sid is not None}
+        hover_ids = {sid for sid in (self._face_hover_shape_id, self._mouse_hover_shape_id)
+                     if sid is not None and sid not in self.selected_ids}
         for shape_id in hover_ids:
             shape = self._shape_by_id(shape_id)
             if shape is not None:
@@ -485,6 +742,64 @@ class BuilderPane(InteractiveBuilderApp):
                                     for wv in self._shape_world_vertices(shape)]
                 flat = [coord for point in screen_vertices for coord in point]
                 self.canvas.create_polygon(flat, outline="yellow", fill="", width=3)
+
+        current_selection = frozenset(self.selected_ids)
+        if current_selection != self._last_forwarded_selected_ids:
+            self._last_forwarded_selected_ids = current_selection
+            if self.inflater_getter is not None:
+                self.inflater_getter().set_selected_shape_ids_from_builder(current_selection)
+
+        # Connection hover (Join mode only) -- same either-direction/exclude-selected pattern as
+        # the shape outline above, drawn as an extra curve on top of the base class's own
+        # (grey/red) one rather than replacing it, same as _draw_connection_curve's own
+        # highlighted-vs-not convention.
+        hover_conn_ids = {cid for cid in (self._hover_connection_id, self._mouse_hover_connection_id)
+                           if cid is not None and cid != self.selected_connection_id}
+        for conn_id in hover_conn_ids:
+            conn = next((c for c in self.connections if c["id"] == conn_id), None)
+            if conn is not None:
+                curve = self._connection_screen_curve(conn)
+                if curve is not None:
+                    flat = [coord for point in curve for coord in point]
+                    self.canvas.create_line(*flat, fill="yellow", width=CONNECTION_SELECTED_WIDTH)
+
+        if self.selected_connection_id != self._last_forwarded_selected_connection_id:
+            self._last_forwarded_selected_connection_id = self.selected_connection_id
+            if self.inflater_getter is not None:
+                self.inflater_getter().set_selected_connection_from_builder(self.selected_connection_id)
+
+        # InflaterPane's own open-edge hover-reveal (3D->2D, see set_open_edge_hover) -- forces
+        # the SAME unfilled ring InteractiveBuilderApp's own _redraw already knows how to draw
+        # (_draw_handle_circle(lit=False, joined=False)) for this one edge, even if the 2D
+        # cursor itself isn't anywhere near it. Suppressed while a REAL pending connection is
+        # active (its own origin/target already draw a LIT circle for whichever edges matter;
+        # forcing an unfilled one on top would be redundant at best, wrong at worst) or outside
+        # Join mode (where this whole concept doesn't apply, and the shape it names may not even
+        # still exist as placed).
+        if (self._forced_hover_open_edge is not None and self.tool_mode == "join"
+                and self._connection_pending is None):
+            forced_shape_id, forced_edge_index = self._forced_hover_open_edge
+            forced_shape = self._shape_by_id(forced_shape_id)
+            if forced_shape is not None and forced_edge_index < forced_shape["n"]:
+                self._draw_handle_circle(forced_shape, forced_edge_index, lit=False, joined=False)
+
+        # A genuine 2D click-click Join gesture's own pending connection/hover target, forwarded
+        # to InflaterPane so it shows the matching lit marker(s) in 3D too (2026-09-19, explicit:
+        # "vice versa from 2d to 3d") -- self._connection_pending/_hover_shape_id/
+        # _hover_edge_index are InteractiveBuilderApp's OWN fields (untouchable base class); this
+        # doesn't touch them, just reads and diffs them the same way selected_ids/
+        # selected_connection_id are above. set_pending_connection (3D->2D direction) pre-sets
+        # _last_forwarded_pending before mutating these same three fields, so that direction's
+        # own call into _redraw doesn't bounce right back out here.
+        current_pending = (None if self._connection_pending is None else
+                           (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
+        current_forward = (current_pending, self._hover_shape_id, self._hover_edge_index)
+        if current_forward != self._last_forwarded_pending:
+            self._last_forwarded_pending = current_forward
+            if self.inflater_getter is not None:
+                from_shape, from_edge = current_pending if current_pending is not None else (None, None)
+                self.inflater_getter().set_pending_connection_from_builder(
+                    from_shape, from_edge, self._hover_shape_id, self._hover_edge_index)
 
     # Read-only lock (2026-09-19, explicit) -- another class attribute for the same
     # before-__init__-finishes reason as on_change/_hover_shape_id above. True for the whole
@@ -497,18 +812,20 @@ class BuilderPane(InteractiveBuilderApp):
     _locked = False
 
     def set_locked(self, locked):
-        """Called by InflaterPane._set_running. Locking forces the tool mode back to "move"
-        (Join/Fold's own click-click gesture is blocked at the tool-mode level below, but
-        forcing back to "move" immediately also stops a Join/Fold selection from sitting there
-        looking active while it can't be completed) and swaps the bottom status line to a
-        fixed explanatory message -- unlocking hands the status line back to the ordinary
+        """Called by InflaterPane._set_running. Does NOT force the tool mode back to "move"
+        (2026-09-19, explicit: "after deleting a connection, it went back to Move mode. It
+        should remain in the same mode" -- deleting a connection while in Join mode is exactly
+        what triggers the auto-Diff-Inflate that locks the pane) -- staying in Join/Fold while
+        locked is safe on its own, since their own click-click connection gesture is blocked
+        directly, at the gesture level (_on_canvas_press_join below), not by kicking the user
+        out of the mode that gesture lives in. Swaps the bottom status line to a fixed
+        explanatory message -- unlocking hands the status line back to the ordinary
         vertex-merge-error display (_refresh_vme_state, which every edit already keeps
         current)."""
         if locked == self._locked:
             return
         self._locked = locked
         if locked:
-            self._set_tool_mode("move")
             self.status_label.config(text="Model is not editable until inflation is complete.",
                                       foreground=PLOT_THEME["fg"])
         else:
@@ -520,13 +837,114 @@ class BuilderPane(InteractiveBuilderApp):
             return
         super()._on_palette_clicked(n)
 
-    def _set_tool_mode(self, mode):
-        # Blocks switching INTO Join/Polygon Fold while locked (their own click-click gesture
-        # is what creates/edits a connection) -- "move" itself is always allowed, since that's
-        # exactly the plain select/drag/rotate/pan gesture set the net stays read-only-but-
-        # interactive for.
-        if self._locked and mode != "move":
+    def _on_canvas_press_join(self, event):
+        # Blocks Join/Polygon Fold's own click-click gesture while locked -- it's the one
+        # remaining way those modes could still create/edit a connection (hover/selection
+        # there stay read-only and are left alone). Since set_locked no longer forces the tool
+        # mode back to "move", this is now the ONLY thing standing between a mid-computation
+        # click and a corrupted mesh the background thread is actively working from.
+        if self._locked:
             return
+        # InteractiveBuilderApp's own press handling still ARMS a pending connection from
+        # whichever handle was clicked (unchanged) -- the actual behavior change (2026-09-19,
+        # explicit: "let's use drag-and-drop to connect midpoints... right now it's
+        # click-and-click in 2d") lives entirely in _on_canvas_drag/_on_canvas_release below,
+        # which resolve that pending connection at RELEASE instead of waiting for a SEPARATE
+        # second click. Its "complete a pending connection" branch (a genuine second click,
+        # with the mouse button not held since the first) is dead in practice now -- release
+        # always already cleared self._connection_pending by the time any later press could
+        # reach it -- but left alone rather than touching this untouchable base method's own
+        # call.
+        super()._on_canvas_press_join(event)
+
+    def _on_canvas_drag(self, event):
+        """Runs InteractiveBuilderApp's own drag handling (shape-move/bezier-handle-drag/
+        marquee) UNCHANGED for everything except an active Join/Fold pending connection
+        (2026-09-19, explicit: drag-and-drop, see _on_canvas_press_join above) -- for that one
+        case, calls its own _on_canvas_motion instead, which is what recomputes
+        _hover_shape_id/_hover_edge_index/_pending_cursor_screen for a pending connection
+        (bound to plain <Motion>, which never fires while a button is held -- this is what
+        turns "arm, release the mouse, move normally, click again" into "arm, keep the button
+        held, drag, release")."""
+        if self._connection_pending is not None:
+            self._on_canvas_motion(event)
+            return
+        super()._on_canvas_drag(event)
+
+    def _on_canvas_release(self, event):
+        """Completes (or cancels, if the drag never reached a valid target) a Join/Fold pending
+        connection the instant the mouse is released (2026-09-19, explicit: drag-and-drop, see
+        _on_canvas_press_join above) -- InteractiveBuilderApp's own
+        _complete_or_cancel_pending_connection already does exactly this job for the old
+        click-click gesture's second click; reused verbatim here, just triggered by
+        ButtonRelease-1 instead of a second Button-1. A successful completion also tells
+        InflaterPane to show its own persistent 3D red-edges-plus-connecting-line indicator for
+        the new connection (2026-09-19, explicit: "mouse release causes both to be drawn in
+        red..." -- applies whichever side actually made it, not just a 3D-native drag).
+
+        Both endpoints' CURRENT self._open_edges info (segments/midpoint) is snapshotted from
+        InflaterPane BEFORE completing -- _complete_or_cancel_pending_connection's own
+        _refresh_vme_state call fires BuilderPane.on_change (InflaterPane.
+        refresh_diff_eligibility), which immediately rebuilds THAT cache to exclude the two
+        edges a successful connection just used, so looking them up AFTER completing would
+        always find nothing."""
+        if self._connection_pending is not None:
+            origin_info, target_info = None, None
+            if self.inflater_getter is not None:
+                inflater = self.inflater_getter()
+                origin_info = inflater._open_edges.get(
+                    (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
+                if self._hover_shape_id is not None:
+                    target_info = inflater._open_edges.get((self._hover_shape_id, self._hover_edge_index))
+            connections_before = len(self.connections)
+            self._complete_or_cancel_pending_connection()
+            self._redraw()
+            if (len(self.connections) > connections_before and self.inflater_getter is not None
+                    and origin_info is not None and target_info is not None):
+                self.inflater_getter().add_pending_made_connection_from_builder(origin_info, target_info)
+            return
+        super()._on_canvas_release(event)
+
+    def _on_escape_key(self, _event=None):
+        """Runs InteractiveBuilderApp's own Esc handling (cancels a 2D-originated pending
+        connection) unchanged, then ALSO tells InflaterPane to abort any 3D-originated
+        drag-to-connect of its own (2026-09-19, explicit: "pressing esc should remove any
+        in-progress connection in both 2d and 3d") -- set_open_edge_drag_cancelled_from_builder
+        is the same cleanup a tool-mode switch already uses, and is a no-op if no 3D drag is
+        actually in progress, so this covers both directions unconditionally regardless of
+        which one (if either) is actually active."""
+        super()._on_escape_key(_event)
+        if self.inflater_getter is not None:
+            self.inflater_getter().set_open_edge_drag_cancelled_from_builder()
+
+    def _set_tool_mode(self, mode):
+        # Blocks switching INTO Join/Polygon Fold while locked -- their own click-click
+        # gesture is blocked directly (_on_canvas_press_join above), but a user who wasn't
+        # already in one of those modes when the lock kicked in still shouldn't be able to
+        # enter one now (there'd be nothing useful to do there anyway). A user who WAS already
+        # there stays there -- this only blocks the transition INTO Join/Fold, not staying put.
+        if self._locked and mode != "move" and mode != self.tool_mode:
+            return
+        # 2026-09-19, explicit: "when switching between modes, everything is deselected" --
+        # super()._set_tool_mode already clears self.selected_ids/selected_connection_id (its
+        # own _redraw, called at the end, diff-forwards those to InflaterPane -- see
+        # _last_forwarded_selected_ids/_last_forwarded_selected_connection_id), but the HOVER
+        # attributes below aren't covered by that diff (hover isn't "state", just a transient
+        # highlight) and aren't reset by the base class at all, so they're cleared here
+        # explicitly, both this pane's own copies and InflaterPane's.
+        if mode != self.tool_mode:
+            self._mouse_hover_shape_id = None
+            self._face_hover_shape_id = None
+            self._mouse_hover_connection_id = None
+            self._hover_connection_id = None
+            self._mouse_hover_open_edge_key = None
+            self._forced_hover_open_edge = None
+            if self.inflater_getter is not None:
+                inflater = self.inflater_getter()
+                inflater.set_hover_shape_from_builder(None)
+                inflater.set_hover_connection_from_builder(None)
+                inflater.set_open_edge_hover_from_builder(None, None)
+                inflater.set_open_edge_drag_cancelled_from_builder()
         super()._set_tool_mode(mode)
 
     def _on_delete_key(self, _event):
@@ -601,12 +1019,17 @@ class BuilderPane(InteractiveBuilderApp):
     def classify_change(self, old_shapes, old_connections):
         """old_shapes/old_connections: a prior snapshot_state() result (or None, meaning
         "never inflated yet"). Returns (kind, extra) where kind is "none" (no topology change),
-        "add_face"/"remove_face" (EXACTLY one shape added/removed and nothing else about the
-        surviving net's topology changed -- extra is that one shape's id), "add_connection"/
+        "add_face" (EXACTLY one shape added and nothing else about the surviving net's topology
+        changed -- extra is that one shape's id), "remove_face" (ONE OR MORE shapes removed at
+        once and nothing else about the surviving net's topology changed -- 2026-09-19, explicit:
+        "if multiple faces are deleted at once, let that qualify for diff inflate/auto inflate"
+        -- extra is the SET of removed shape ids; adding is still capped at exactly one, since
+        InflaterPane._diff_add_face's interpolation only ever seeds ONE new shape's fresh
+        vertices from its own connection(s) to the surviving mesh), "add_connection"/
         "remove_connection" (same shape SET, but exactly one connection added/removed and no
         shape's own n/flipped changed -- extra is that connection's own conn_key, unused by the
         caller but handy for debugging), or "complex" (anything else -- a moved/flipped/multi-
-        shape change, more than one connection edited at once, etc.), extra is None for "none"/
+        shape ADD, more than one connection edited at once, etc.), extra is None for "none"/
         "complex".
 
         A shape's cx/cy/rotation never affect the exported mesh at all (only n/flipped and the
@@ -632,6 +1055,9 @@ class BuilderPane(InteractiveBuilderApp):
         def touches(key, shape_id):
             return any(sid == shape_id for sid, _edge in key)
 
+        def touches_any(key, shape_ids):
+            return any(sid in shape_ids for sid, _edge in key)
+
         old_conns = {conn_key(c) for c in old_connections}
         new_conns = {conn_key(c) for c in self.connections}
         conn_added, conn_removed = new_conns - old_conns, old_conns - new_conns
@@ -641,11 +1067,10 @@ class BuilderPane(InteractiveBuilderApp):
             if conn_removed or any(not touches(k, new_id) for k in conn_added):
                 return "complex", None
             return "add_face", new_id
-        if len(removed) == 1 and not added:
-            (removed_id,) = removed
-            if conn_added or any(not touches(k, removed_id) for k in conn_removed):
+        if removed and not added:
+            if conn_added or any(not touches_any(k, removed) for k in conn_removed):
                 return "complex", None
-            return "remove_face", removed_id
+            return "remove_face", frozenset(removed)
         if not added and not removed:
             if not conn_added and not conn_removed:
                 return "none", None
@@ -912,8 +1337,86 @@ class InflaterPane:
         # groups.
         self._actor_to_group = {}
         self._picker = vtkCellPicker()
+        # self._hover_target_groups is the RAW request from whichever direction last drove
+        # hover (a 3D pick or a 2D shape) -- self._hover_groups is that minus whatever's
+        # currently SELECTED (below), i.e. what's actually got yellow actors right now. Kept
+        # separate so a selection change can recompute the effective set without needing to
+        # know which direction last asked for hover.
+        self._hover_target_groups = frozenset()
         self._hover_groups = frozenset()
         self._hover_actors = []
+
+        # Click-to-select state (2026-09-19, explicit: "clicking on a face in 3d should select
+        # it in both views... multiselect by holding down ctrl", "when you hover then select,
+        # the face should go from being highlighted (yellow) to being selected (red)"). Selected
+        # shapes are tracked by BUILDER shape_id (self._selected_shape_ids), same identity
+        # BuilderPane.selected_ids already uses -- a group index alone can't be the shared
+        # identity since a Polygon-Fold shape's several triangle groups all need to select/
+        # deselect together as one shape. self._selected_actors are this panel's own red outline
+        # actors, same add/remove-just-these-on-change convention as _hover_actors.
+        self._selected_shape_ids = set()
+        self._selected_actors = []
+        # Set by _on_drag_start/_on_drag_motion/_on_drag_end below to tell a genuine
+        # rotate-drag apart from a plain click (a press+release with no meaningful motion
+        # between them) -- a rotate-drag must never ALSO select whatever's under the cursor.
+        self._drag_moved = False
+
+        # Join-mode connection hover/select (2026-09-19, explicit: "in Join[J] mode, hovering
+        # over a connection highlights it in yellow and the corresponding edge in 3d is also
+        # highlighted... clicking on the connection selects it in both 2d and 3d... similarly,
+        # hovering over the 3d edge highlights the corresponding 2d connection and clicking
+        # selects both. multiselect is not available in this mode") -- tracked by BUILDER
+        # connection id (self.builder_getter().connections' own "id"), the shared identity both
+        # panes already key off of. self._connection_edge_cache ({conn_id: segments}, rebuilt
+        # every _render() from _connection_edge_segments) is what both the 3D nearest-edge pick
+        # (_nearest_connection_at_position) and the highlight actors read from, so it's computed
+        # once per render rather than per mouse-move tick.
+        self._connection_edge_cache = {}
+        self._hover_connection_id = None
+        self._hover_connection_actors = []
+        self._selected_connection_id = None
+        self._selected_connection_actors = []
+
+        # Join-mode 3D connect-by-dragging-edges (2026-09-19, explicit: "let hovering over open
+        # edges highlight them in yellow. then you can click down on them... the mouse drags out
+        # a connection in screen space (thick line), then it can hover over another edge (which
+        # will highlight in yellow), and mouse release causes both to be drawn in red with their
+        # midpoint connected in a thick red line (all drawn in 3d). all this persists until
+        # simulation converges and redraws"). self._open_edges ({(shape_id, raw_edge): {
+        # "shape_id", "raw_edge", "midpoint", "segments"}}) is rebuilt by _rebuild_open_edges --
+        # from _render() (a fresh mesh) AND right after a successful create_connection (the mesh
+        # itself doesn't change until a later Diff/Full Inflate, but the just-used edge must
+        # stop offering itself immediately) -- from the CURRENTLY DISPLAYED mesh's own shape
+        # groups crossed with the builder's CURRENT connections (an edge already used by ANY
+        # connection is never "open", even one the mesh hasn't visually caught up to yet).
+        # "segments" (from _base_edge_vertex_chain, see _open_edge_geometry) is the edge's own
+        # ACTUAL (possibly subdivided/curved) boundary, the same geometry every highlight below
+        # draws -- not a straight chord between its two corners.
+        #
+        # EVERY highlight this gesture draws -- the hovered/target edge (yellow), the pressed/
+        # confirmed edge(s) (red), and the final midpoint-to-midpoint connecting line -- is now
+        # REAL 3D geometry (_edge_highlight_actors, a role-keyed {"hover"/"origin"/"target"/
+        # "connecting_line": [actor, ...]} dict, same incremental swap convention as
+        # _hover_actors/_selected_actors elsewhere in this file), not a 2D overlay: it follows
+        # the edge's own true shape and persists correctly through camera rotate/pan/zoom for as
+        # long as Diff/Full Inflate takes to converge in the background -- something a
+        # per-frame-repainted 2D overlay isn't designed for. The ONE remaining 2D overlay is the
+        # live 3D-native drag's own rubber-band line to the raw cursor position
+        # (self._line_end_screen_override, a PANEL-PIXEL point, drawn by _draw_connection_
+        # overlays -- 2026-09-19, explicit: "the mouse drags out a connection in screen space").
+        self._open_edges = {}
+        self._hover_open_edge_key = None
+        self._connection_drag = None
+        self._edge_highlight_actors = {}
+        self._line_end_screen_override = None
+
+        # Every edge highlight + connecting line PROMOTED here once a connection is actually
+        # made (2026-09-19, explicit: "all this persists until simulation converges and
+        # redraws") -- a plain growing list of actors, since several connections could be made
+        # in a row before any Inflate runs; plotter.clear() (the top of every _render()) destroys
+        # them wholesale the instant the mesh itself catches up, so this list is just reset to
+        # [] alongside that, never pruned actor-by-actor.
+        self._pending_made_connection_actors = []
 
         # The plotter's own render resolution -- starts at PANEL_SIZE but is kept in sync with
         # the panel_label's actual on-screen pixel size by _on_panel_configure below, so the
@@ -1163,6 +1666,12 @@ class InflaterPane:
         [topological] change to the model... it automatically does a Diff Inflate" (a plain
         move/rotate never reaches here as anything but "none", since classify_change already
         ignores cx/cy/rotation entirely -- see its own docstring)."""
+        # Keeps self._open_edges in sync with the LIVE net on every edit, not just after the
+        # next full _render() (which only happens once an Inflate actually runs) -- otherwise a
+        # just-made-or-broken connection could keep offering/hiding its own edges' 3D
+        # drag-to-connect handles a beat too long (2026-09-19 feature, "creating connections in
+        # 3d").
+        self._rebuild_open_edges()
         if self._running or self.last_shapes_snapshot is None:
             self.diff_inflate_button.state(["disabled"])
             return
@@ -1235,11 +1744,48 @@ class InflaterPane:
         """Renders the plotter's CURRENT scene (whatever actors/camera it already has -- this
         does no scene or camera work of its own) and blits it into panel_label -- the one
         choke point every redraw path (_render's full rebuild, _refresh_view's camera-only
-        update, _set_hover_group's incremental highlight toggle) ends with."""
+        update, _set_hover_group's incremental highlight toggle) ends with. Also where the
+        open-edge hover/drag gesture's own flat 2D overlay gets drawn (see
+        _draw_connection_overlays's own docstring for why it's a 2D image overlay, not 3D
+        geometry at all)."""
         self.plotter.render()
         image = self.plotter.screenshot(return_img=True)
-        self._photo = ImageTk.PhotoImage(Image.fromarray(image))
+        pil_image = Image.fromarray(image)
+        self._draw_connection_overlays(pil_image)
+        self._photo = ImageTk.PhotoImage(pil_image)
         self.panel_label.configure(image=self._photo, text="")
+
+    def _world_to_display(self, point):
+        """World-space 3D point -> (x, y) panel PIXEL coordinates, Tk's own top-left-origin
+        convention (matching event.x/event.y and the PIL image _grab_frame draws onto) -- the
+        OPPOSITE conversion from _pick_world_position's own pixel-to-world pick, using the
+        renderer's WorldToDisplay transform against whatever camera is CURRENTLY applied."""
+        renderer = self.plotter.renderer
+        renderer.SetWorldPoint(float(point[0]), float(point[1]), float(point[2]), 1.0)
+        renderer.WorldToDisplay()
+        x, y, _z = renderer.GetDisplayPoint()
+        height = self.panel_size[1]
+        return x, height - 1 - y
+
+    def _draw_connection_overlays(self, pil_image):
+        """Draws ONLY the live 3D-native drag's own screen-space rubber-band line -- from the
+        drag's own PINNED starting point (wherever the press actually landed, see
+        _start_connection_drag -- 2026-09-19, explicit: "that connection should start at where
+        you clicked, not the midpoint of that edge") to the ACTUAL cursor position (2026-09-19,
+        explicit: "the mouse drags out a connection in screen space (thick line)"). Every OTHER
+        part of this gesture -- the hovered/target edge's yellow highlight, the pressed/
+        confirmed edge(s)' red highlight, and the final connecting line -- is real 3D geometry
+        now (self._edge_highlight_actors/_pending_made_connection_actors), not a 2D overlay, so
+        it isn't drawn here at all."""
+        if self._connection_drag is None or self._line_end_screen_override is None:
+            return
+        origin_point = self._connection_drag.get("origin_point")
+        if origin_point is None:
+            return
+        origin_screen = self._world_to_display(origin_point)
+        ImageDraw.Draw(pil_image).line(
+            [origin_screen, self._line_end_screen_override], fill=CONNECTION_OVERLAY_LINE_COLOR,
+            width=CONNECTION_OVERLAY_LINE_WIDTH_PX)
 
     def _refresh_view(self):
         """Camera-only redraw -- repositions the camera (_apply_camera) and grabs a fresh
@@ -1267,13 +1813,28 @@ class InflaterPane:
     def _on_drag_start(self, event):
         self._dragging = True
         self._last_xy = (event.x, event.y)
+        self._drag_moved = False
+        # A ButtonPress-1 landing while an open edge is currently revealed (Join mode's own
+        # hover-reveal, see _set_hover_open_edge) starts a drag-to-connect instead of a camera
+        # rotate-drag (2026-09-19, explicit: "hover over an open edge... drag to connect to
+        # another edge midpoint... clicking is distinct from press-drag-release, which is used
+        # for rotation" -- the same distinction, extended to a second drag-triggering gesture).
+        if self.builder_getter().tool_mode == "join" and self._hover_open_edge_key is not None:
+            self._start_connection_drag(event)
 
     def _on_drag_motion(self, event):
+        if self._connection_drag is not None:
+            self._update_connection_drag(event)
+            return
         if not self._dragging or self._last_xy is None:
             return
         cam = self._camera
         last_x, last_y = self._last_xy
         dx, dy = event.x - last_x, event.y - last_y
+        # Anything past a couple pixels of actual movement means this is a rotate-drag, not a
+        # click -- _on_drag_end reads this to decide whether to select instead.
+        if abs(dx) > CLICK_MOVE_TOLERANCE_PX or abs(dy) > CLICK_MOVE_TOLERANCE_PX:
+            self._drag_moved = True
         up = cam["rotation"].apply([0.0, 0.0, 1.0])
         right = cam["rotation"].apply([0.0, 1.0, 0.0])
         sensitivity = np.radians(PANEL_DRAG_SENSITIVITY)
@@ -1283,9 +1844,22 @@ class InflaterPane:
         self._last_xy = (event.x, event.y)
         self._refresh_view()
 
-    def _on_drag_end(self, _event):
+    def _on_drag_end(self, event):
+        """A press+release with no meaningful motion in between (self._drag_moved never set --
+        see CLICK_MOVE_TOLERANCE_PX above) is a plain CLICK, not a rotate-drag -- selects
+        whatever face/connection is under the cursor (2026-09-19, explicit: "clicking on a face
+        in 3d should select it in both views... clicking is distinct from press-drag-release,
+        which is used for rotation"). A connection-drag started at press time (above) is a
+        THIRD gesture, checked first -- it ends here regardless of how far the mouse moved
+        (dragging a bare few pixels onto an adjacent edge's own handle is a completely
+        reasonable connection, not a "click")."""
+        was_dragging, moved, was_connecting = self._dragging, self._drag_moved, self._connection_drag is not None
         self._dragging = False
         self._last_xy = None
+        if was_connecting:
+            self._finish_connection_drag(event)
+        elif was_dragging and not moved:
+            self._on_panel_click(event)
 
     def _on_pan_start(self, event):
         self._panning = True
@@ -1321,22 +1895,463 @@ class InflaterPane:
     # ---- hover highlight ----
 
     def _on_panel_hover_motion(self, event):
-        """Plain mouse motion (no button held) over the panel -- picks whichever face's own
-        mesh actor is under the cursor (vtkCellPicker, against the SAME renderer/actors
-        _render() just built -- picking is pure ray-vs-geometry math, works identically
-        off-screen) and highlights its whole base-face group (_set_hover_group). A drag
-        (rotate/pan) fires its OWN motion events (<B1-Motion>/<B3-Motion>), never this plain
-        <Motion> one, so hover picking never fights the camera gestures."""
+        """Plain mouse motion (no button held) over the panel -- a drag (rotate/pan) fires its
+        OWN motion events (<B1-Motion>/<B3-Motion>), never this plain <Motion> one, so hover
+        picking never fights the camera gestures. Dispatches by the LEFT pane's own tool mode
+        (2026-09-19, explicit: "select faces... should only be possible in Move[M] mode... in
+        Join[J] mode, hovering over the 3d edge highlights the corresponding 2d connection") --
+        Move picks a whole face (_set_hover_group); Join picks the nearest connection seam
+        (_hover_edge_at); any other mode (Fold) clears both, since neither gesture applies
+        there."""
         if not self._actor_to_group:
             return
-        width, height = self.panel_size
-        # VTK's own pixel origin is bottom-left; Tk's (event.x/event.y) is top-left.
-        self._picker.Pick(event.x, height - 1 - event.y, 0, self.plotter.renderer)
-        group = self._actor_to_group.get(self._picker.GetActor())
-        self._set_hover_group(group)
+        mode = self.builder_getter().tool_mode
+        if mode == "move":
+            width, height = self.panel_size
+            # VTK's own pixel origin is bottom-left; Tk's (event.x/event.y) is top-left.
+            self._picker.Pick(event.x, height - 1 - event.y, 0, self.plotter.renderer)
+            group = self._actor_to_group.get(self._picker.GetActor())
+            self._set_hover_group(group)
+        elif mode == "join":
+            self._hover_edge_at(event)
+        else:
+            self._set_hover_group(None)
+            self._set_hover_connection(None)
 
     def _on_panel_hover_leave(self, _event=None):
         self._set_hover_group(None)
+        self._set_hover_connection(None)
+        self._set_hover_open_edge(None)
+
+    def _pick_world_position(self, event):
+        """The world-space point where the cursor's pick ray hits the CURRENTLY displayed mesh
+        surface, or None if it misses everything -- shared by Join mode's edge hover/click
+        (there's no separate pickable line geometry per connection, see
+        _nearest_connection_at_position's own docstring) with Move mode's own face pick, just
+        reading GetPickPosition() instead of GetActor()."""
+        if not self._actor_to_group:
+            return None
+        width, height = self.panel_size
+        if not self._picker.Pick(event.x, height - 1 - event.y, 0, self.plotter.renderer):
+            return None
+        return np.array(self._picker.GetPickPosition())
+
+    def _nearest_connection_at_position(self, pos):
+        """The builder connection id whose cached 3D seam segments
+        (self._connection_edge_cache) come closest to world point `pos`, within
+        CONNECTION_PICK_TOLERANCE_FRACTION * self._half -- or None if nothing's close enough
+        (including simply because `pos` is None, no surface under the cursor at all). There's
+        no dedicated pickable actor per connection (unlike a base face's own mesh actor,
+        _actor_to_group) -- a connection's seam is a thin line lying exactly on the already-
+        picked surface, not a separate 3D object of its own, so proximity-to-the-pick-point
+        is used instead of a second vtkCellPicker pass."""
+        if pos is None or not self._connection_edge_cache:
+            return None
+        tolerance = CONNECTION_PICK_TOLERANCE_FRACTION * self._half
+        best_id, best_dist = None, tolerance
+        for conn_id, segments in self._connection_edge_cache.items():
+            for i in range(0, len(segments), 2):
+                dist = _point_segment_distance_3d(pos, segments[i], segments[i + 1])
+                if dist < best_dist:
+                    best_id, best_dist = conn_id, dist
+        return best_id
+
+    def _nearest_open_edge_at_position(self, pos, exclude_shape_id=None):
+        """The (shape_id, raw_edge) key in self._open_edges whose own segments come closest to
+        world point `pos`, within OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half -- or None if
+        nothing's close enough (including `pos is None`). Point-to-SEGMENT distance against the
+        edge's own actual (possibly subdivided) geometry, not just its midpoint -- matches
+        "hovering over open edges" being the trigger (2026-09-19, explicit), not just their
+        midpoint specifically; same convention _nearest_connection_at_position already uses for
+        an EXISTING connection's own seam. `exclude_shape_id` drops one shape's own edges from
+        consideration -- used while dragging OUT of a shape's edge, since Join mode never
+        connects a shape to itself (that's Fold's job)."""
+        if pos is None or not self._open_edges:
+            return None
+        tolerance = OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half
+        best_key, best_dist = None, tolerance
+        for key, info in self._open_edges.items():
+            if exclude_shape_id is not None and info["shape_id"] == exclude_shape_id:
+                continue
+            segments = info["segments"]
+            for i in range(0, len(segments), 2):
+                dist = _point_segment_distance_3d(pos, segments[i], segments[i + 1])
+                if dist < best_dist:
+                    best_key, best_dist = key, dist
+        return best_key
+
+    def _rebuild_open_edges(self):
+        """Rebuilds self._open_edges -- see its own docstring in __init__. Deliberately reads
+        the builder's CURRENT shapes/connections (not the possibly-stale last-inflated
+        snapshot), since "is this edge already used" is a pure 2D-data-model question that
+        should update the instant a connection is made, even before the 3D mesh itself catches
+        up at the next Diff/Full Inflate."""
+        self._open_edges = {}
+        if not self.base_faces or self.positions is None or self._pending_source_polygon_id is None:
+            return
+        builder = self.builder_getter()
+        used = set()
+        for conn in builder.connections:
+            used.add((conn["a_shape"], conn["a_edge"]))
+            used.add((conn["b_shape"], conn["b_edge"]))
+        shapes_by_id = {s["id"]: s for s in builder.shapes}
+        for group, shape_id in enumerate(self._pending_source_polygon_id):
+            if group >= len(self.base_faces):
+                continue
+            face = self.base_faces[group]
+            shape = shapes_by_id.get(shape_id)
+            # A deleted shape, or one whose group is actually several Polygon-Fold triangles
+            # (len(face) == 3 always, regardless of the original shape's own side count) --
+            # either way there's no reliable raw-edge<->loop-position mapping to offer a handle
+            # through, so this shape's edges are simply never made available here (a Polygon-
+            # Fold self-connection stays a 2D-only, Fold-mode-only gesture, same limitation as
+            # _connection_edge_segments' own).
+            if shape is None or len(face) != shape["n"]:
+                continue
+            n = shape["n"]
+            flipped = shape.get("flipped", False)
+            for raw_edge in range(n):
+                if (shape_id, raw_edge) in used:
+                    continue
+                # raw_edge_for_loop_position (interactive_builder_app._face_edge_ids_from_shapes,
+                # untouchable) is its own inverse for this formula, so the same expression maps
+                # loop position -> raw edge and back.
+                k = raw_edge if not flipped else (n - 2 - raw_edge) % n
+                u, v = face[k], face[(k + 1) % n]
+                if u not in self.positions or v not in self.positions:
+                    continue
+                midpoint, segments = self._open_edge_geometry(group, u, v)
+                self._open_edges[(shape_id, raw_edge)] = {
+                    "shape_id": shape_id, "raw_edge": raw_edge, "midpoint": midpoint,
+                    "segments": segments,
+                }
+
+    def _base_edge_vertex_chain(self, group, u, v):
+        """Ordered fine-mesh vertex ids from corner `u` to corner `v` along THIS ONE base edge
+        of `group`'s own rim -- NOT just [u, v] (2026-09-19, explicit bug report: "when i hover
+        over an edge midpoint... you're drawing a circle halfway between two vertices rather
+        than actually on the edge (which is not straight so you need to look at the
+        subdivisions)"): mesh_levels._fan_level_0_to_1 leaves a rim edge alone at Level 1 (still
+        literally [u, v]), but _quarter_triangles inserts a real midpoint vertex on it at every
+        subsequent level (2 segments at Level 2, 4 at Level 3) -- for an inflated/relaxed shape
+        those aren't at the straight average of u and v's own positions any more, so the actual
+        chain has to be walked, not assumed.
+
+        self._group_boundary_edge_set(group) gives every rim SEGMENT of the group as an
+        unordered {(a, b), ...} set (see its own docstring) -- within it, every vertex has
+        exactly degree 2 (it's one closed loop around the whole polygon), so `u` has exactly
+        two neighbors: one starts the short chain toward `v` (this one edge, possibly
+        subdivided), the other starts off around the REST of the polygon's other edges instead.
+        The two directions can't be told apart by which one reaches `v` sooner (a heavily-
+        subdivided target edge can easily have MORE segments than the rest of a small polygon's
+        other edges combined, and vice versa) -- instead, each of `u`'s two neighbors is tried
+        as a walk (always stepping to whichever neighbor isn't where it just came from) that
+        stops the instant it reaches EITHER `v` (success) OR any OTHER of this group's ORIGINAL
+        corners (self.base_faces[group], failure -- a genuine subdivision midpoint is never one
+        of those, only ever a newly-created vertex id, so hitting one means this direction
+        wandered onto a DIFFERENT base edge instead). Falls back to the plain [u, v] pair if
+        neither direction ever reaches `v` (shouldn't happen for a genuine edge of this group,
+        but stays safe if it ever doesn't)."""
+        original_corners = set(self.base_faces[group])
+        neighbors = {}
+        for a, b in self._group_boundary_edge_set(group):
+            neighbors.setdefault(a, []).append(b)
+            neighbors.setdefault(b, []).append(a)
+        for first_step in neighbors.get(u, []):
+            chain = [u, first_step]
+            prev, cur = u, first_step
+            while cur != v and cur not in original_corners:
+                options = [n for n in neighbors.get(cur, []) if n != prev]
+                if not options:
+                    break
+                prev, cur = cur, options[0]
+                chain.append(cur)
+            if cur == v:
+                return chain
+        return [u, v]
+
+    def _open_edge_geometry(self, group, u, v):
+        """(midpoint, segments) for base edge (u, v) of `group`'s own rim, AT THE CURRENT
+        subdivision level, both derived from ONE _base_edge_vertex_chain walk. `midpoint` is
+        the middle vertex of that chain (an odd-length chain, Level 2+, has one -- e.g.
+        [u, m, v] at Level 2), or the plain average of the two middle ones for an even-length
+        chain (Level 0/1's own un-subdivided [u, v], where this is just the ordinary
+        straight-line midpoint). `segments` is the whole chain as consecutive (start, end)
+        pairs -- the edge's own ACTUAL (possibly curved/subdivided) geometry, what every
+        highlight in this file draws instead of a straight chord between the two corners
+        (2026-09-19, explicit bug report: "the edge... is not straight so you need to look at
+        the subdivisions")."""
+        chain = self._base_edge_vertex_chain(group, u, v)
+        points = [self.positions[vid] for vid in chain if vid in self.positions]
+        if len(points) < 2:
+            p_u, p_v = self.positions[u], self.positions[v]
+            return (p_u + p_v) / 2, np.array([p_u, p_v])
+        mid = len(points) // 2
+        midpoint = points[mid] if len(points) % 2 == 1 else (points[mid - 1] + points[mid]) / 2
+        segments = np.empty((2 * (len(points) - 1), 3))
+        for i in range(len(points) - 1):
+            segments[2 * i] = points[i]
+            segments[2 * i + 1] = points[i + 1]
+        return midpoint, segments
+
+    def _set_edge_highlight_actors(self, role, key, color):
+        """Swaps out `role`'s own actors ("hover"/"origin"/"target"/"connecting_line" in
+        self._edge_highlight_actors) for a fresh highlight of `key`'s own edge segments, or
+        removes them entirely if `key` is None -- same incremental swap convention as
+        _apply_hover_highlight/_apply_selection_highlight elsewhere in this file. `color`
+        picks the line width too (yellow = hover, HOVER_HIGHLIGHT_LINE_WIDTH; anything else =
+        confirmed/pressed, SELECTED_HIGHLIGHT_LINE_WIDTH, 2026-09-19 explicit: "the line joining
+        two midpoints should be as thick as selected edges" -- applied to every RED highlight
+        here, not just the connecting line)."""
+        for actor in self._edge_highlight_actors.pop(role, []):
+            self.plotter.remove_actor(actor)
+        info = None if key is None else self._open_edges.get(key)
+        if info is not None:
+            width = HOVER_HIGHLIGHT_LINE_WIDTH if color == "yellow" else SELECTED_HIGHLIGHT_LINE_WIDTH
+            self._edge_highlight_actors[role] = self._add_rounded_lines(info["segments"], color, width)
+
+    def _apply_hover_open_edge_highlight(self, key):
+        """Highlight-only half of the open-edge hover-reveal -- a real 3D yellow line along
+        `key`'s own edge segments (2026-09-19, explicit: "let hovering over open edges
+        highlight them in yellow"), or none at all for `key=None`. Shared by both directions
+        (_set_hover_open_edge, 3D-native, which also forwards to BuilderPane; and
+        set_open_edge_hover_from_builder, 2D-driven, which must NOT forward back), and by
+        _update_connection_drag's own live target search (which does NOT forward either -- see
+        its own docstring). A no-op if `key` already matches the current hover."""
+        if key == self._hover_open_edge_key:
+            return
+        self._hover_open_edge_key = key
+        self._set_edge_highlight_actors("hover", key, "yellow")
+        self._grab_frame()
+
+    def _set_hover_open_edge(self, key):
+        """3D-mouse-over-an-open-edge direction: the plain reveal-on-proximity state (not yet
+        dragging) -- forwards to BuilderPane.set_open_edge_hover so the SAME yellow highlight
+        shows in 2D too (2026-09-19, explicit: "if i hover over an edge [in 2d]... the
+        corresponding edge should also show... in 3d" -- applied symmetrically to this, the
+        reverse direction)."""
+        changed = key != self._hover_open_edge_key
+        self._apply_hover_open_edge_highlight(key)
+        if changed:
+            info = None if key is None else self._open_edges.get(key)
+            self.builder_getter().set_open_edge_hover(
+                None if info is None else info["shape_id"], None if info is None else info["raw_edge"])
+
+    def set_open_edge_hover_from_builder(self, shape_id, raw_edge):
+        """2D-mouse-over-an-open-edge direction -- called by BuilderPane whenever ITS OWN plain
+        proximity-reveal (InteractiveBuilderApp's _hit_test_any_edge_handle, read fresh every
+        <Motion>, see BuilderPane._on_canvas_motion) changes, or clears (shape_id=None). Does
+        NOT call back into BuilderPane.set_open_edge_hover, since the 2D side already shows its
+        own reveal via its base class's own _redraw; this only drives the 3D side. Ignored
+        entirely while a 3D-originated drag is active (self._connection_drag) -- its own
+        origin/target highlights own the hover-reveal's own visual slot instead while
+        dragging."""
+        if self._connection_drag is not None:
+            return
+        key = None if shape_id is None else (shape_id, raw_edge)
+        self._apply_hover_open_edge_highlight(key)
+
+    def _hover_edge_at(self, event):
+        """Join-mode 3D hover: an in-progress drag reads its own live target instead
+        (_update_connection_drag); otherwise picks whichever's closer between an EXISTING
+        connection's seam (for selecting it, _nearest_connection_at_position) and an OPEN
+        edge (for starting a NEW one, _nearest_open_edge_at_position) -- an edge is always
+        exactly one or the other, never both, so there's no real ambiguity, just two
+        independent lookups against the same pick position. Locked (an inflate is running)
+        suppresses the open-edge side entirely, matching _on_canvas_press_join's own lock check
+        on the 2D side -- both are how this app blocks starting a NEW connection mid-computation
+        (an EXISTING connection's hover/select stays read-only and harmless throughout)."""
+        if self._connection_drag is not None:
+            self._update_connection_drag(event)
+            return
+        pos = self._pick_world_position(event)
+        self._set_hover_connection(self._nearest_connection_at_position(pos))
+        if self.builder_getter()._locked:
+            self._set_hover_open_edge(None)
+        else:
+            self._set_hover_open_edge(self._nearest_open_edge_at_position(pos))
+
+    def _start_connection_drag(self, event):
+        """Called from _on_drag_start when a ButtonPress-1 lands while an open edge is
+        currently revealed (self._hover_open_edge_key) in Join mode -- switches that yellow
+        hover highlight into the drag's own RED "origin" highlight (2026-09-19, explicit: "the
+        mouse press causes the edge to be selected and drawn in red"), and mirrors the origin
+        into 2D via BuilderPane.set_pending_connection (already-existing behavior, unchanged).
+        Also pins down the connection's own ACTUAL starting point (self._connection_drag's own
+        "origin_point") to wherever the press itself landed on the mesh surface, not the edge's
+        midpoint (2026-09-19, explicit: "that connection should start at where you clicked, not
+        the midpoint of that edge") -- falls back to the midpoint only if the press somehow
+        didn't land on any surface at all (shouldn't happen, since _on_drag_start only reaches
+        here while an edge is already revealed, meaning the picker just found something)."""
+        origin_key = self._hover_open_edge_key
+        origin = self._open_edges.get(origin_key)
+        if origin is None:
+            self._connection_drag = None
+            return
+        click_point = self._pick_world_position(event)
+        if click_point is None:
+            click_point = origin["midpoint"]
+        self._connection_drag = {
+            "origin_key": origin_key, "target_key": None,
+            "origin_point": click_point, "last_pick_point": click_point,
+        }
+        self._apply_hover_open_edge_highlight(None)
+        self._set_edge_highlight_actors("origin", origin_key, "red")
+        self._line_end_screen_override = None
+        self.builder_getter().set_pending_connection(origin["shape_id"], origin["raw_edge"], None, None)
+        self._grab_frame()
+
+    def _update_connection_drag(self, event):
+        """Re-picks the nearest OPEN edge (excluding the origin's own shape -- Join mode never
+        connects a shape to itself) to wherever the drag ray currently hits the mesh surface --
+        highlights it yellow the same way plain hovering does (2026-09-19, explicit: "then it
+        can hover over another edge (which will highlight in yellow)"), WITHOUT forwarding to
+        BuilderPane's own hover-reveal (that would show a confusing second, passive highlight
+        alongside the 2D side's own ACTIVE red pending-connection visual, which
+        set_pending_connection below already drives) -- and mirrors a CHANGED target into 2D
+        via that same call. The connecting line's own screen-space endpoint
+        (self._line_end_screen_override) is updated on EVERY call regardless of whether the
+        target changed -- it always follows the raw cursor position (2026-09-19, explicit: "the
+        mouse drags out a connection in screen space"), which moves every tick even when the
+        nearest-target result doesn't. self._connection_drag's own "last_pick_point" is kept in
+        sync the same way, so _finish_connection_drag has a last-known 3D point to fall back on
+        if the release itself doesn't land on any surface."""
+        drag = self._connection_drag
+        origin = self._open_edges.get(drag["origin_key"])
+        if origin is None:
+            return
+        self._line_end_screen_override = (event.x, event.y)
+        pos = self._pick_world_position(event)
+        if pos is not None:
+            drag["last_pick_point"] = pos
+        target_key = self._nearest_open_edge_at_position(pos, exclude_shape_id=origin["shape_id"])
+        self._apply_hover_open_edge_highlight(target_key)
+        if target_key != drag["target_key"]:
+            drag["target_key"] = target_key
+            target = None if target_key is None else self._open_edges.get(target_key)
+            self.builder_getter().set_pending_connection(
+                origin["shape_id"], origin["raw_edge"],
+                None if target is None else target["shape_id"],
+                None if target is None else target["raw_edge"])
+        self._grab_frame()
+
+    def _finish_connection_drag(self, event):
+        """Ends the drag (ButtonRelease-1) -- on a valid target, creates the real connection and
+        PROMOTES both edges' highlights (origin already red; target's current yellow hover
+        swapped to red) plus a red connecting line into self._pending_made_connection_actors, a
+        PERSISTENT list that survives until the mesh itself catches up (2026-09-19, explicit:
+        "mouse release causes both to be drawn in red with their midpoint connected in a thick
+        red line (all drawn in 3d)... this persists until simulation converges and redraws").
+        The connecting line runs from the drag's own PINNED starting point (wherever the press
+        actually landed, see _start_connection_drag) to wherever THIS release itself lands --
+        not either edge's midpoint (2026-09-19, explicit: "where that connection ends should be
+        where your mouse released, not the midpoint of the second edge"); falls back to the
+        last live pick point from _update_connection_drag (or, failing that, the target's own
+        midpoint) if the release itself doesn't land on any surface. An incomplete drag (no
+        target) is a plain cancel -- both edges' highlights are torn down, nothing persists,
+        same as InteractiveBuilderApp letting a click-click connection lapse."""
+        drag, self._connection_drag = self._connection_drag, None
+        self._line_end_screen_override = None
+        self.builder_getter().set_pending_connection(None, None, None, None)
+        origin = None if drag is None else self._open_edges.get(drag["origin_key"])
+        target = (None if drag is None or drag["target_key"] is None
+                  else self._open_edges.get(drag["target_key"]))
+        if origin is not None and target is not None:
+            self.builder_getter().create_connection(
+                origin["shape_id"], origin["raw_edge"], target["shape_id"], target["raw_edge"])
+            self._apply_hover_open_edge_highlight(None)  # clear the yellow hover on the target edge
+            self._pending_made_connection_actors += self._edge_highlight_actors.pop("origin", [])
+            self._pending_made_connection_actors += self._add_rounded_lines(
+                target["segments"], "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+            release_point = self._pick_world_position(event)
+            if release_point is None:
+                release_point = drag.get("last_pick_point", target["midpoint"])
+            origin_point = drag.get("origin_point", origin["midpoint"])
+            self._pending_made_connection_actors += self._add_rounded_lines(
+                np.array([origin_point, release_point]), "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+            self._rebuild_open_edges()
+        else:
+            self._set_edge_highlight_actors("origin", None, "red")
+            self._apply_hover_open_edge_highlight(None)
+        self._grab_frame()
+
+    def add_pending_made_connection_from_builder(self, origin_info, target_info):
+        """Called by BuilderPane._on_canvas_release whenever its own 2D Join gesture (click-
+        click or drag-and-drop) successfully creates a NEW connection -- the same persistent 3D
+        indicator applies regardless of which side the connection was actually made on
+        (2026-09-19, explicit: "mouse release causes both to be drawn in red with their
+        midpoint connected in a thick red line... this persists until simulation converges and
+        redraws"). `origin_info`/`target_info` are the two endpoints' OWN self._open_edges
+        dicts (with "segments"/"midpoint"), ALREADY resolved by the caller -- BuilderPane's own
+        lookup has to happen BEFORE the connection completes, since completing immediately
+        rebuilds that cache to exclude the two now-used edges (see _on_canvas_release's own
+        docstring)."""
+        self._pending_made_connection_actors += self._add_rounded_lines(
+            origin_info["segments"], "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+        self._pending_made_connection_actors += self._add_rounded_lines(
+            target_info["segments"], "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+        self._pending_made_connection_actors += self._add_rounded_lines(
+            np.array([origin_info["midpoint"], target_info["midpoint"]]), "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+        self._grab_frame()
+
+    def set_open_edge_drag_cancelled_from_builder(self):
+        """Called by BuilderPane._set_tool_mode (a tool-mode switch, "when switching between
+        modes, everything is deselected") and BuilderPane._on_escape_key (2026-09-19, explicit:
+        "pressing esc should remove any in-progress connection in both 2d and 3d") whenever
+        either could be interrupting an in-progress 3D drag -- clears the drag and its own
+        TRANSIENT highlight state (hover/origin/target/connecting_line) without creating a
+        connection, and without calling back into BuilderPane (whose own
+        _set_tool_mode/_on_escape_key is what triggered this in the first place -- it already
+        knows/shows its own cleared pending state). Never touches
+        self._pending_made_connection_actors -- an already-successful connection's own
+        persistent highlight is not what's being cancelled here.
+
+        Also resets self._dragging/_last_xy IFF a connection-drag was actually active -- left
+        alone otherwise, so this never disturbs an UNRELATED plain camera rotate-drag that
+        happens to be in progress when a tool-mode switch or Esc fires. Without this, Esc
+        pressed while the mouse button is still physically held down would cancel the
+        connection but leave _dragging True with a now-STALE _last_xy, so the very next
+        <B1-Motion> tick would jump the camera by whatever distance the cursor moved since the
+        drag started, read as an abrupt, unexplained camera snap."""
+        was_dragging_connection = self._connection_drag is not None
+        if not was_dragging_connection and not self._edge_highlight_actors and self._hover_open_edge_key is None:
+            return
+        self._connection_drag = None
+        self._hover_open_edge_key = None
+        for role in list(self._edge_highlight_actors):
+            self._set_edge_highlight_actors(role, None, "red")
+        self._line_end_screen_override = None
+        if was_dragging_connection:
+            self._dragging = False
+            self._last_xy = None
+        self._grab_frame()
+
+    def set_pending_connection_from_builder(self, from_shape, from_edge, to_shape, to_edge):
+        """2D-drag-a-connection direction (2026-09-19, explicit: "vice versa from 2d to 3d") --
+        called by BuilderPane whenever its own click-click/drag-and-drop Join gesture's pending
+        connection or hover target changes. Mirrors the origin/target as this panel's own RED
+        edge highlights, plus a red connecting line between their midpoints once both resolve
+        (there's no 3D-panel cursor position for a 2D-originated drag, so unlike the 3D-native
+        rubber band this is real 3D geometry, not a screen overlay -- it just runs straight
+        between the two known points). Silently shows nothing for an edge whose shape isn't
+        currently a plain, non-folded group in the displayed mesh (the same documented
+        limitation _open_edges itself has). Ignored entirely while a 3D-originated drag of its
+        own is active (self._connection_drag) -- the two directions can't really overlap (one
+        mouse), but this keeps one from clobbering the other's highlights if they somehow did."""
+        if self._connection_drag is not None:
+            return
+        origin_key = None if from_shape is None else (from_shape, from_edge)
+        target_key = None if to_shape is None else (to_shape, to_edge)
+        self._set_edge_highlight_actors("origin", origin_key, "red")
+        self._set_edge_highlight_actors("target", target_key, "red")
+        origin = None if origin_key is None else self._open_edges.get(origin_key)
+        target = None if target_key is None else self._open_edges.get(target_key)
+        for actor in self._edge_highlight_actors.pop("connecting_line", []):
+            self.plotter.remove_actor(actor)
+        if origin is not None and target is not None:
+            self._edge_highlight_actors["connecting_line"] = self._add_rounded_lines(
+                np.array([origin["midpoint"], target["midpoint"]]), "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+        self._grab_frame()
 
     def _set_hover_group(self, group):
         """3D-mouse-over-a-face direction: highlights base face `group`'s own polygon outline
@@ -1345,10 +2360,7 @@ class InflaterPane:
         source_polygon_id (the whole 2D shape it came from) and forwards THAT, not the raw
         group index, since a Polygon-Fold shape's several triangle groups all belong to one 2D
         shape."""
-        shape_id = None
-        if (group is not None and self._pending_source_polygon_id is not None
-                and group < len(self._pending_source_polygon_id)):
-            shape_id = self._pending_source_polygon_id[group]
+        shape_id = self._shape_id_of_group(group)
         self._apply_hover_highlight(set() if group is None else {group})
         self.builder_getter().set_hover_shape(shape_id)
 
@@ -1360,33 +2372,211 @@ class InflaterPane:
         are several groups sharing one source_polygon_id) -- does NOT call back into
         BuilderPane.set_hover_shape, since the 2D side already knows what it's hovering and
         highlights itself; this only drives the 3D side."""
-        groups = set()
-        if shape_id is not None and self._pending_source_polygon_id is not None:
-            groups = {g for g, sid in enumerate(self._pending_source_polygon_id)
-                       if sid == shape_id}
-        self._apply_hover_highlight(groups)
+        self._apply_hover_highlight(self._groups_for_shape_ids({shape_id} if shape_id is not None else set()))
+
+    def _shape_id_of_group(self, group):
+        if (group is not None and self._pending_source_polygon_id is not None
+                and group < len(self._pending_source_polygon_id)):
+            return self._pending_source_polygon_id[group]
+        return None
+
+    def _groups_for_shape_ids(self, shape_ids):
+        """Every 3D group whose own source_polygon_id is one of `shape_ids` -- usually one
+        group per shape_id, but a Polygon-Fold shape's several triangle groups all share one
+        source_polygon_id, so this can return more entries than `shape_ids` has."""
+        if not shape_ids or self._pending_source_polygon_id is None:
+            return set()
+        return {g for g, sid in enumerate(self._pending_source_polygon_id) if sid in shape_ids}
 
     def _apply_hover_highlight(self, groups):
         """Shared by both hover directions above -- swaps the current set of highlighted
-        groups' yellow outline actors for `groups`'s own. A no-op if `groups` already matches
-        the current hover (the common case -- most mouse-move events land on the same
-        face/shape the previous one did), so a still cursor doesn't re-render on every motion
-        tick. Cheap: only adds/removes the couple of highlight actors _add_rounded_lines makes
-        per group (not a full _render()). Draws BOTH offset copies
-        (_group_boundary_offset_lines) per group, not just one, so the highlight shows up
-        whichever side of that face is currently being viewed."""
-        groups = frozenset(groups)
-        if groups == self._hover_groups:
+        groups' yellow outline actors for `groups`'s own, MINUS whatever's currently selected
+        (2026-09-19, explicit: "when you hover then select, the face should go from being
+        highlighted (yellow) to being selected (red) [don't draw both]") -- `groups` itself is
+        stashed unfiltered in self._hover_target_groups so _apply_selection_highlight can
+        recompute the effective set from scratch whenever the selection (not the hover target)
+        is what changed. A no-op if the EFFECTIVE set already matches the current hover (the
+        common case -- most mouse-move events land on the same face/shape the previous one
+        did), so a still cursor doesn't re-render on every motion tick. Cheap: only adds/
+        removes the couple of highlight actors _add_rounded_lines makes per group (not a full
+        _render()). Draws BOTH offset copies (_group_boundary_offset_lines) per group, not just
+        one, so the highlight shows up whichever side of that face is currently being viewed."""
+        self._hover_target_groups = frozenset(groups)
+        effective = self._hover_target_groups - self._groups_for_shape_ids(self._selected_shape_ids)
+        if effective == self._hover_groups:
             return
-        self._hover_groups = groups
+        self._hover_groups = effective
         for actor in self._hover_actors:
             self.plotter.remove_actor(actor)
         self._hover_actors = []
-        for group in groups:
+        for group in effective:
             front_hl, back_hl = self._group_boundary_offset_lines(group)
             self._hover_actors += (
                 self._add_rounded_lines(front_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
                 + self._add_rounded_lines(back_hl, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH))
+        self._grab_frame()
+
+    def _rebuild_hover_connection_actors(self):
+        """Swaps self._hover_connection_actors for whatever self._hover_connection_id now
+        needs -- shared by both hover directions AND _apply_connection_selection_highlight
+        (whenever the SELECTED connection changes, the hovered one's own actors may need to
+        appear/disappear too, even though the hover target itself didn't change). Excludes the
+        currently selected connection so hovering it never redraws a redundant yellow line on
+        top of its own red one (2026-09-19, explicit: "when you hover then select, the face
+        should go from being highlighted (yellow) to being selected (red) [don't draw both]" --
+        the same rule applies to connections)."""
+        for actor in self._hover_connection_actors:
+            self.plotter.remove_actor(actor)
+        self._hover_connection_actors = []
+        segments = self._connection_edge_cache.get(self._hover_connection_id)
+        if (segments is not None and len(segments)
+                and self._hover_connection_id != self._selected_connection_id):
+            self._hover_connection_actors = self._add_rounded_lines(
+                segments, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
+
+    def _set_hover_connection(self, conn_id):
+        """3D-mouse-over-an-edge direction (Join mode only, see _on_panel_hover_motion):
+        highlights connection `conn_id`'s own glued seam in yellow in BOTH this 3D panel AND
+        the left pane's flat 2D canvas (BuilderPane.set_hover_connection) -- `conn_id is None`
+        clears it. A no-op if `conn_id` already matches the current hover."""
+        if conn_id == self._hover_connection_id:
+            return
+        self._hover_connection_id = conn_id
+        self._rebuild_hover_connection_actors()
+        self._grab_frame()
+        self.builder_getter().set_hover_connection(conn_id)
+
+    def set_hover_connection_from_builder(self, conn_id):
+        """2D-mouse-over-a-connection direction -- called by BuilderPane whenever the mouse
+        moves over a different connection on its flat canvas in Join mode (or leaves one,
+        conn_id=None). Does NOT call back into BuilderPane.set_hover_connection, since the 2D
+        side already knows/shows its own hover; this only drives the 3D side."""
+        if conn_id == self._hover_connection_id:
+            return
+        self._hover_connection_id = conn_id
+        self._rebuild_hover_connection_actors()
+        self._grab_frame()
+
+    def _select_connection(self, conn_id):
+        if conn_id == self._selected_connection_id:
+            return
+        self._selected_connection_id = conn_id
+        self._apply_connection_selection_highlight()
+        self.builder_getter().set_selected_connection(conn_id)
+
+    def set_selected_connection_from_builder(self, conn_id):
+        """2D-select-a-connection direction -- called by BuilderPane whenever its own
+        self.selected_connection_id changes (click/Delete/undo/redo/mode-switch on the 2D
+        canvas). Does NOT call back into BuilderPane.set_selected_connection, since the 2D side
+        already knows/shows its own selection; this only drives the 3D side."""
+        if conn_id == self._selected_connection_id:
+            return
+        self._selected_connection_id = conn_id
+        self._apply_connection_selection_highlight()
+
+    def _apply_connection_selection_highlight(self):
+        """Rebuilds this panel's own red connection-selection outline actor from
+        self._selected_connection_id, then re-derives the hover highlight
+        (_rebuild_hover_connection_actors) -- a connection that just became selected needs its
+        own yellow hover actor (if any) torn down, and one that just got deselected while still
+        hovered needs it back. Never forwards anything to BuilderPane -- both callers
+        (_select_connection/set_selected_connection_from_builder) already handle their own
+        forwarding (or deliberately don't), so doing it here too would risk a redundant round
+        trip."""
+        for actor in self._selected_connection_actors:
+            self.plotter.remove_actor(actor)
+        self._selected_connection_actors = []
+        segments = self._connection_edge_cache.get(self._selected_connection_id)
+        if segments is not None and len(segments):
+            self._selected_connection_actors = self._add_rounded_lines(
+                segments, "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+        self._rebuild_hover_connection_actors()
+        self._grab_frame()
+
+    # ---- click-to-select ----
+
+    def _on_panel_click(self, event):
+        """A plain click (press+release with no meaningful motion -- see _on_drag_end) on the
+        3D panel. Dispatches by the LEFT pane's own tool mode (2026-09-19, explicit: "select
+        faces... should only be possible in Move[M] mode... clicking on the [3d] connection
+        selects it in both 2d and 3d"): Move selects a whole face (_click_select_face); Join
+        selects the nearest connection seam (_click_select_edge); any other mode (Fold) does
+        nothing here, since neither gesture applies there."""
+        if not self._actor_to_group:
+            return
+        mode = self.builder_getter().tool_mode
+        if mode == "move":
+            self._click_select_face(event)
+        elif mode == "join":
+            self._click_select_edge(event)
+
+    def _click_select_face(self, event):
+        """Selects whichever face is under the cursor, deselecting any other previously
+        selected face unless Ctrl is held (2026-09-19, explicit: "selecting in 3d should
+        deselect any other previously selected faces" / "multiselect by holding down ctrl and
+        clicking on multiple faces"). Clicking empty space (no actor under the cursor) clears
+        the selection, same as BuilderPane's own empty-space click; Ctrl+click on empty space is
+        a no-op (mirrors BuilderPane's own "leaves the existing selection alone" rule for that
+        case, minus the marquee this panel has no equivalent of)."""
+        width, height = self.panel_size
+        # VTK's own pixel origin is bottom-left; Tk's (event.x/event.y) is top-left.
+        self._picker.Pick(event.x, height - 1 - event.y, 0, self.plotter.renderer)
+        group = self._actor_to_group.get(self._picker.GetActor())
+        shape_id = self._shape_id_of_group(group)
+        ctrl_held = bool(event.state & 0x0004)
+        if shape_id is None:
+            if ctrl_held:
+                return
+            new_ids = set()
+        elif ctrl_held:
+            new_ids = set(self._selected_shape_ids)
+            new_ids.symmetric_difference_update({shape_id})
+        else:
+            new_ids = {shape_id}
+        self._select_shape_ids(new_ids)
+
+    def _click_select_edge(self, event):
+        """Selects whichever connection's seam is nearest the cursor (2026-09-19, explicit:
+        "multiselect is not available in this mode" -- always REPLACES the selection, no Ctrl-
+        toggle at all, unlike face selection in Move mode). Clicking somewhere with no seam
+        within CONNECTION_PICK_TOLERANCE_FRACTION clears the selection, same as clicking empty
+        space in Move mode."""
+        self._select_connection(self._nearest_connection_at_position(self._pick_world_position(event)))
+
+    def _select_shape_ids(self, shape_ids):
+        shape_ids = set(shape_ids)
+        if shape_ids == self._selected_shape_ids:
+            return
+        self._selected_shape_ids = shape_ids
+        self._apply_selection_highlight()
+        self.builder_getter().set_selected_shape_ids(shape_ids)
+
+    def set_selected_shape_ids_from_builder(self, shape_ids):
+        """2D-select-a-shape direction -- called by BuilderPane whenever its own
+        self.selected_ids changes (click/ctrl-click/marquee/Delete/undo/redo/load on the 2D
+        canvas). Does NOT call back into BuilderPane.set_selected_shape_ids, since the 2D side
+        already knows/shows its own selection; this only drives the 3D side."""
+        shape_ids = set(shape_ids)
+        if shape_ids == self._selected_shape_ids:
+            return
+        self._selected_shape_ids = shape_ids
+        self._apply_selection_highlight()
+
+    def _apply_selection_highlight(self):
+        """Rebuilds this panel's own red selection outline actors from self._selected_shape_ids
+        (same incremental add/remove convention as _apply_hover_highlight), then re-derives the
+        hover highlight's EFFECTIVE set from its last raw target (self._hover_target_groups) --
+        a shape that just became selected needs its yellow hover actors (if any) torn down, and
+        one that just got deselected while still under the cursor needs them back."""
+        for actor in self._selected_actors:
+            self.plotter.remove_actor(actor)
+        self._selected_actors = []
+        for group in self._groups_for_shape_ids(self._selected_shape_ids):
+            front_sel, back_sel = self._group_boundary_offset_lines(group)
+            self._selected_actors += (
+                self._add_rounded_lines(front_sel, "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+                + self._add_rounded_lines(back_sel, "red", SELECTED_HIGHLIGHT_LINE_WIDTH))
+        self._apply_hover_highlight(self._hover_target_groups)
         self._grab_frame()
 
     # ---- rendering ----
@@ -1436,6 +2626,18 @@ class InflaterPane:
         SHORT segment making up the rim, in whatever order the count dict yields them --
         add_lines doesn't need them connected into one ordered polyline, just paired up as
         (start, end)."""
+        boundary_edges = self._group_boundary_edge_set(group)
+        segments = np.empty((2 * len(boundary_edges), 3))
+        for i, (u, v) in enumerate(boundary_edges):
+            segments[2 * i] = self.positions[u]
+            segments[2 * i + 1] = self.positions[v]
+        return segments
+
+    def _group_boundary_edge_set(self, group):
+        """{(u, v), ...} (sorted vertex-id pairs, u < v) for every boundary edge of `group` --
+        the identity half of _group_boundary_lines (see its own docstring for the counting
+        rule), split out so _connection_edge_segments can intersect two groups' own boundary
+        sets to find their SHARED seam without caring about actual positions."""
         edge_count = {}
         for face, bf in zip(self.faces, self.face_of_fine):
             if bf != group:
@@ -1444,9 +2646,30 @@ class InflaterPane:
             for u, v in ((a, b), (b, c), (c, a)):
                 key = (u, v) if u < v else (v, u)
                 edge_count[key] = edge_count.get(key, 0) + 1
-        boundary_edges = [e for e, count in edge_count.items() if count == 1]
-        segments = np.empty((2 * len(boundary_edges), 3))
-        for i, (u, v) in enumerate(boundary_edges):
+        return {e for e, count in edge_count.items() if count == 1}
+
+    def _connection_edge_segments(self, a_shape_id, b_shape_id):
+        """Best-effort 3D geometry for a Join-mode connection between shapes `a_shape_id` and
+        `b_shape_id`: every fine-mesh segment that's a boundary edge of BOTH shapes' own 3D
+        group(s) at once, i.e. wherever the two shapes' currently-displayed patches are glued
+        together. Empty (no 3D highlight, 2D still works fine on its own) when: `a_shape_id ==
+        b_shape_id` (a Polygon-Fold self-connection glues two edges of the SAME shape, so a
+        boundary-intersection can't tell its seam apart from that shape's own ordinary outer
+        rim -- out of scope here); either shape isn't currently in the displayed mesh at all
+        (net edited since the last Inflate); or -- a known limitation -- there's more than one
+        connection between this exact pair of shapes, in which case every one of their shared
+        seams comes back together, undistinguished, since this only looks at the SHAPE pair,
+        not which specific edge a particular connection glues."""
+        if a_shape_id is None or b_shape_id is None or a_shape_id == b_shape_id:
+            return np.empty((0, 3))
+        a_edges, b_edges = set(), set()
+        for group in self._groups_for_shape_ids({a_shape_id}):
+            a_edges |= self._group_boundary_edge_set(group)
+        for group in self._groups_for_shape_ids({b_shape_id}):
+            b_edges |= self._group_boundary_edge_set(group)
+        shared = a_edges & b_edges
+        segments = np.empty((2 * len(shared), 3))
+        for i, (u, v) in enumerate(shared):
             segments[2 * i] = self.positions[u]
             segments[2 * i + 1] = self.positions[v]
         return segments
@@ -1530,15 +2753,33 @@ class InflaterPane:
         color regardless (2026-09-19, explicit bug report, confirmed via a screenshot: "the
         inside lines still look lighter than the face colours"). Plus a SEPARATE add_lines call
         for just that polygon's own outline (_group_boundary_lines). Rebuilds
-        self._actor_to_group ({vtk actor: group index}, for hover picking -- both the outside
-        and inside actor map to the same group) and re-applies the current hover highlight
-        (self._hover_groups), since
-        plotter.clear() just destroyed the previous highlight actor along with everything
-        else."""
+        self._actor_to_group ({vtk actor: group index}, for hover/click picking -- both the
+        outside and inside actor map to the same group) and re-applies the current hover
+        highlight (self._hover_groups) and selection highlight (self._selected_shape_ids), since
+        plotter.clear() just destroyed the previous highlight actors along with everything else.
+        Also rebuilds self._connection_edge_cache (see its own docstring) fresh from the
+        builder's CURRENT connections and this new mesh -- a stale cache would misreport a
+        connection's own 3D seam as gone (or reuse a coincidentally-matching but now-wrong one)
+        after any edit."""
         plotter = self.plotter
         plotter.clear()
         self._actor_to_group = {}
         self._hover_actors = []
+        self._selected_actors = []
+        self._hover_connection_actors = []
+        self._selected_connection_actors = []
+        # A freshly-rebuilt mesh means any open-edge hover/drag highlight AND any just-made
+        # connection's own persistent red highlight are either now REAL mesh geometry (a
+        # converged inflate) or the attempt reverted -- either way, plotter.clear() just
+        # destroyed all of these actors along with everything else, so the tracking dicts/lists
+        # are reset too.
+        self._edge_highlight_actors = {}
+        self._pending_made_connection_actors = []
+        self._connection_edge_cache = {
+            conn["id"]: self._connection_edge_segments(conn["a_shape"], conn["b_shape"])
+            for conn in self.builder_getter().connections
+        }
+        self._rebuild_open_edges()
         if self.faces and self.positions and self.base_faces:
             vertex_ids = sorted(self.positions)
             idx = {v: i for i, v in enumerate(vertex_ids)}
@@ -1600,6 +2841,18 @@ class InflaterPane:
                 if group in groups_present:
                     self._hover_actors += self._add_rounded_lines(
                         self._group_boundary_lines(group), "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
+            for group in self._groups_for_shape_ids(self._selected_shape_ids):
+                if group in groups_present:
+                    self._selected_actors += self._add_rounded_lines(
+                        self._group_boundary_lines(group), "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
+            hover_conn_segments = self._connection_edge_cache.get(self._hover_connection_id)
+            if hover_conn_segments is not None and len(hover_conn_segments):
+                self._hover_connection_actors = self._add_rounded_lines(
+                    hover_conn_segments, "yellow", HOVER_HIGHLIGHT_LINE_WIDTH)
+            selected_conn_segments = self._connection_edge_cache.get(self._selected_connection_id)
+            if selected_conn_segments is not None and len(selected_conn_segments):
+                self._selected_connection_actors = self._add_rounded_lines(
+                    selected_conn_segments, "red", SELECTED_HIGHLIGHT_LINE_WIDTH)
             lo, hi = points.min(axis=0), points.max(axis=0)
             self._center = (lo + hi) / 2
             self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
@@ -1861,12 +3114,12 @@ class InflaterPane:
         if self._running:
             return
         builder = self.builder_getter()
-        kind, shape_id = builder.classify_change(
+        kind, extra = builder.classify_change(
             self.last_shapes_snapshot, self.last_connections_snapshot)
         if kind == "add_face":
-            self._diff_add_face(shape_id)
+            self._diff_add_face(extra)
         elif kind == "remove_face":
-            self._diff_remove_face(shape_id)
+            self._diff_remove_face(extra)
         elif kind == "add_connection":
             self._diff_connection_change("added a connection")
         elif kind == "remove_connection":
@@ -1874,19 +3127,25 @@ class InflaterPane:
         else:
             messagebox.showerror(
                 "Cannot Diff Inflate",
-                "The net has changed by more than a single added/removed face or connection "
-                "since the last Inflate -- use Full Inflate instead.")
+                "The net has changed by more than a single added face/connection, or more than "
+                "one removed face/connection, since the last Inflate -- use Full Inflate "
+                "instead.")
 
-    def _diff_remove_face(self, shape_id):
+    def _diff_remove_face(self, shape_ids):
         """Filters the STORED Level-3 mesh (self.faces/self.positions/self.face_of_fine) and
-        the stored base mesh down to whatever's left once `shape_id`'s own base face(s) are
-        dropped -- pure filtering, no interpolation needed at all, since every SURVIVING vertex
-        is already exactly where it was left. positions/edge_length are left as-is (a few now-
-        orphaned entries are simply never read again -- relax/estimate_pressure derive their
-        own vertex/edge sets purely from `faces`, see stretchy_mesh._edge_setup). Then runs ONE
-        pressure-calibration pass at Level 3 (_run_inflate_step, already naturally a single
-        pass whenever self.subdivision_level == MAX_LEVEL going in)."""
-        removed_idxs = {i for i, spid in enumerate(self.last_source_polygon_id) if spid == shape_id}
+        the stored base mesh down to whatever's left once EVERY shape in `shape_ids`' own base
+        face(s) are dropped -- pure filtering, no interpolation needed at all, since every
+        SURVIVING vertex is already exactly where it was left. `shape_ids` can be more than one
+        shape (2026-09-19, explicit: "if multiple faces are deleted at once, let that qualify
+        for diff inflate/auto inflate") -- classify_change already guarantees no OTHER topology
+        change (an added shape/connection, or a connection removed that didn't touch one of
+        these shapes) rides along, so dropping them all in one filtering pass is exactly as safe
+        as dropping the single-shape case always was. positions/edge_length are left as-is (a
+        few now-orphaned entries are simply never read again -- relax/estimate_pressure derive
+        their own vertex/edge sets purely from `faces`, see stretchy_mesh._edge_setup). Then
+        runs ONE pressure-calibration pass at Level 3 (_run_inflate_step, already naturally a
+        single pass whenever self.subdivision_level == MAX_LEVEL going in)."""
+        removed_idxs = {i for i, spid in enumerate(self.last_source_polygon_id) if spid in shape_ids}
         keep_base_idxs = [i for i in range(len(self.base_faces)) if i not in removed_idxs]
         if not keep_base_idxs:
             messagebox.showerror("Cannot Diff Inflate", "That was the last face -- nothing left to inflate.")
@@ -1917,8 +3176,9 @@ class InflaterPane:
         # "never redraw anything" before real convergence) -- if it never converges,
         # _revert_run puts the panel straight back to self._pre_click_snapshot instead.
         self._set_running(True, active="diff")
+        face_word = "a face" if len(shape_ids) == 1 else f"{len(shape_ids)} faces"
         self._set_status(
-            f"Diff Inflate: removed a face, calibrating pressure at Level {MAX_LEVEL}...", "info")
+            f"Diff Inflate: removed {face_word}, calibrating pressure at Level {MAX_LEVEL}...", "info")
         self._run_inflate_step(initial_pressure_guess=self.last_pressure,
                                 tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
 
