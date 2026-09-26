@@ -100,6 +100,7 @@ floppy/loosely-attached by a net edit) used to redraw a visibly wrong intermedia
 sometimes crash the renderer on it; now it simply reverts, with a popup for a genuine non-
 convergence/divergence outcome (not for a plain user-requested Stop, which doesn't need one).
 """
+import math
 import re
 import sys
 import tempfile
@@ -115,7 +116,7 @@ import json
 import os
 import queue
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import tkinter.font as tkfont
 
 import matplotlib.colors as mcolors
@@ -130,7 +131,15 @@ from scipy.spatial.transform import Rotation
 import sv_ttk
 
 import common.paths  # noqa: F401 -- side effect: puts src/ and src/apps/ on sys.path
+from common.paths import DATA_DIR
 from common.ui_theme import FACE_COLORS, PLOT_THEME, STATUS_COLORS
+
+# inflate_polyhedron_app/session_state.py is a plain pydantic module with no Tkinter/app-object
+# dependency (see its own module docstring) -- safe to import cross-app to read the SAME .hippo
+# session format that app's own File > Save writes, rather than re-declaring an equivalent schema
+# here (2026-09-26, explicit: "you need to implement loading of .hippo files").
+from inflate_polyhedron_app.session_state import LevelStateModel, SessionStateModel
+from interactive_inflater_app.session_state import InflaterSessionStateModel
 
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.inflate_polyhedron.stretchy_mesh import (
@@ -145,9 +154,10 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 # building logic are reused verbatim, not duplicated.
 from interactive_builder_app.app import (
     CONNECTION_SELECTED_WIDTH, ICON_SIZE, MENU_ACTIVE_BG, MENU_BG, MENU_DISABLED_FG, MENU_FG,
-    NetValidationError, POLYGON_COLORS, POLYGON_NS, InteractiveBuilderApp, _ICON_VERTICES,
-    _rasterize_polygon, _enable_windows_dpi_awareness, _expand_folded_shapes,
-    _shape_face_corner_order, _vertex_roots,
+    NetValidationError, POLYGON_COLORS, POLYGON_NS, SELECTION_OUTLINE_COLOR, InteractiveBuilderApp,
+    _ICON_VERTICES, _rasterize_polygon, _enable_windows_dpi_awareness, _expand_folded_shapes,
+    _shape_face_corner_order, _vertex_roots, _edges_from_shapes, _face_edge_ids_from_shapes,
+    _faces_from_shapes, _validate_shapes_connections,
 )
 
 INFLATER_APP_DIR = Path(__file__).resolve().parent
@@ -171,6 +181,19 @@ INFLATER_ICON_SIZE = 48
 
 DEFAULT_TOLERANCE = 1e-4
 LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}
+
+# Where inflate_polyhedron_app's own .hippo session saves (and this app's own .hippie saves) live
+# -- same directory that app's SESSION_OUTPUT_DIR points at (DATA_DIR / "output"), duplicated
+# rather than imported (this app never imports that app's own app.py -- see module docstring;
+# session_state.py, imported above, is a plain schema module with no such constant).
+SESSION_OUTPUT_DIR = DATA_DIR / "output"
+
+# This app's own session-file extension (2026-09-26, explicit) -- ".hippie" rather than
+# inflate_polyhedron_app's own ".hippo", since the two formats aren't interchangeable: a .hippie
+# may describe more than one connected piece (net_fold_project's own untouchable.md now forbids
+# that everywhere else -- see BuilderPane.export_full_net_dict's own docstring) and carries an
+# anchor_shape_id a .hippo file has no concept of at all.
+SESSION_FILE_EXTENSION = ".hippie"
 # Hard per-attempt step cap (Relax and each Inflate calibration trial's own convergence top-up)
 # -- same constant/value as inflate_polyhedron_app's own INFLATE_SAFETY_STEP_CAP, duplicated
 # rather than imported (this app never imports that module -- see its own docstring).
@@ -196,6 +219,102 @@ SELECTED_HIGHLIGHT_LINE_WIDTH = 4.0
 # for-bit identical (trackpad/mouse jitter), so 0 would misclassify most genuine clicks as tiny
 # drags.
 CLICK_MOVE_TOLERANCE_PX = 3
+
+# The "central object" anchor's own on-canvas marker color -- white (2026-09-26, explicit: "make
+# the anchor white instead of red"), same as the Anchor TOOLBAR icon's own TOOLBAR_ICON_COLOR
+# (white/PLOT_THEME["fg"]), so the tool and what it marks now read as the same color throughout.
+ANCHOR_MARKER_COLOR = "white"
+# The actual glyph drawn (2026-09-26, explicit: "use this ⚓︎") -- U+2693 ANCHOR, plus
+# the U+FE0E "text presentation" variation selector so a font/platform that would otherwise
+# prefer a colorful emoji-style glyph renders the plain monochrome symbol instead (matching every
+# other single-color toolbar icon here).
+ANCHOR_SYMBOL_CHAR = "⚓︎"
+# The on-canvas anchor marker's own size, in fixed SCREEN pixels (not world units) -- so it reads
+# as a consistent-size marker regardless of the anchor shape's polygon type or the canvas's
+# current zoom level, unlike everything else BuilderPane draws in world space.
+ANCHOR_MARKER_RADIUS_PX = 13
+
+# A shape not part of the live central object is dimmed to this fraction of its own color (the
+# rest blended toward the canvas background -- see _draw_shape) and gets a dashed outline instead
+# of a solid one (2026-09-26, explicit: "add back the transparency... make the orphaned pieces
+# 50% opacity").
+DISCONNECTED_OPACITY = 0.5
+# PLOT_THEME["fg"] rather than a hardcoded color so the outline reads as a neutral "not part of
+# the model yet" marker, distinct from SELECTION_OUTLINE_COLOR (red) and the yellow hover
+# highlight (both plain solid lines).
+DISCONNECTED_OUTLINE_COLOR = PLOT_THEME["fg"]
+# "Thick" is NOT a wider `width=` on a single line -- Tk-on-Windows only honors a custom dash
+# PATTERN precisely at hairline width=1; anything wider silently snaps the pattern to the
+# nearest of a small set of built-in pen styles (2026-09-26, explicit bug reports: "your changes
+# aren't working" at width=2, then "the red/thick version reverted back to dots" at width=3).
+# Instead, thickness is simulated by drawing DISCONNECTED_OUTLINE_LINE_COUNT (unselected, 2026-
+# 09-26 explicit: "make the white outline on orphaned pieces slightly thicker. like thickness 2")
+# or DISCONNECTED_SELECTED_OUTLINE_LINE_COUNT (selected) separate width=1 dashed lines side by
+# side, offset a pixel apart PERPENDICULAR to each edge (_draw_dashed_edge) -- each individual
+# line keeps its dash pattern crisp, and together they read as one thicker dashed line.
+DISCONNECTED_OUTLINE_DASH = (5, 5)
+DISCONNECTED_OUTLINE_LINE_COUNT = 2
+# A SELECTED orphan's own outline (2026-09-26, explicit: "when an orphaned piece is selected,
+# the white dashed outline should be replaced with a thick red dashed outline") -- SELECTION_
+# OUTLINE_COLOR (imported below) for the color, same dash pattern as the unselected outline.
+DISCONNECTED_SELECTED_OUTLINE_DASH = (5, 5)
+DISCONNECTED_SELECTED_OUTLINE_LINE_COUNT = 3
+
+
+def _draw_anchor_symbol(canvas, cx, cy, radius, color):
+    """The anchor glyph ANCHOR_SYMBOL_CHAR ("⚓︎"), rendered as text centered at
+    (cx, cy) -- shared by the Anchor toolbar icon and the on-canvas anchor marker
+    (_draw_anchor_tool_icon/BuilderPane._redraw) so both draw the exact same glyph, just at
+    different sizes/colors (2026-09-26, explicit: "use this ⚓︎" -- replaces an earlier
+    hand-drawn ring/shaft/crossbar glyph, which itself replaced a plain 5-point star). Font size
+    scaled off `radius` the same way the earlier hand-drawn version's proportions were, so both
+    call sites (a small on-canvas marker, a toolbar icon roughly toolbar-icon-sized) need no
+    changes of their own.
+
+    No explicit font FAMILY (2026-09-26, explicit bug report: "the tool button is not displaying
+    properly" -- a literal "Segoe UI Symbol" isn't guaranteed present under that exact name on
+    every Windows version, and Tk doesn't substitute a different family on its own when the named
+    one is missing or lacks the glyph, unlike relying on the empty-family/default font, which
+    goes through the platform's own font-linking/fallback for a missing glyph). `anchor="center"`
+    centers create_text's FONT-METRICS bounding box, not the glyph's own visible ink -- a symbol
+    glyph is rarely vertically centered within its own font metrics, so the caller (2026-09-26,
+    explicit bug report: "anchor symbol is not centred in the polygon") re-centers the item on
+    its ACTUAL rendered ink bbox afterward via canvas.move, which works regardless of whatever
+    font ends up actually being used."""
+    item = canvas.create_text(cx, cy, text=ANCHOR_SYMBOL_CHAR, fill=color,
+                               font=("", max(1, round(radius * 1.6))), anchor="center")
+    bbox = canvas.bbox(item)
+    if bbox is not None:
+        left, top, right, bottom = bbox
+        canvas.move(item, cx - (left + right) / 2, cy - (top + bottom) / 2)
+
+
+def _draw_dashed_edge(canvas, x1, y1, x2, y2, color, dash, line_count):
+    """Draws a dashed segment from (x1, y1) to (x2, y2) as `line_count` separate width=1
+    create_line calls, each offset one pixel further PERPENDICULAR to the edge than the last,
+    centered on the true edge -- a "thick" dashed line built from several thin ones instead of
+    one wide one (see DISCONNECTED_SELECTED_OUTLINE_LINE_COUNT's own comment for why: Tk-on-
+    Windows only renders a custom `dash` pattern precisely at width=1). `line_count=1` draws a
+    single ordinary width=1 dashed line, no offset."""
+    dx, dy = x2 - x1, y2 - y1
+    length = math.hypot(dx, dy)
+    perp_x, perp_y = (0.0, 0.0) if length < 1e-9 else (-dy / length, dx / length)
+    for i in range(line_count):
+        offset = i - (line_count - 1) / 2
+        ox, oy = perp_x * offset, perp_y * offset
+        canvas.create_line(x1 + ox, y1 + oy, x2 + ox, y2 + oy, fill=color, width=1, dash=dash)
+
+
+def _draw_anchor_tool_icon(canvas, size, color):
+    """"Anchor" tool icon -- an anchor glyph in the ordinary TOOLBAR_ICON_COLOR (white/
+    PLOT_THEME["fg"]), the same `color` every other mode icon is drawn in (2026-09-26, explicit:
+    "the tool symbol should change to a white anchor" -- the on-canvas marker itself, drawn by
+    BuilderPane._redraw, stays red; only the tool button is white now). `size * 0.4 * 0.7`
+    (2026-09-26, explicit: "the toolbar icon is a bit big. make it about 70% of what it is
+    currently") -- only this call site's own radius shrinks; the on-canvas marker's own size
+    (ANCHOR_MARKER_RADIUS_PX) is independent and unaffected."""
+    cx, cy = size / 2, size / 2
+    _draw_anchor_symbol(canvas, cx, cy, size * 0.4 * 0.7, color)
 
 # Join-mode 3D edge hover/click (2026-09-19, explicit: "hovering over the 3d edge highlights
 # the corresponding 2d connection") picks the nearest connection's glued seam to wherever the
@@ -438,6 +557,59 @@ def _load_mesh_from_dict(mesh_dict):
     return faces, base_edges, face_edge_ids
 
 
+# "Central object" concept (2026-09-26, explicit: "if i add polygon and its not attached to
+# anything, things go haywire" -- a shape/component with no connection at all into the rest of
+# the net still passed export_mesh_dict's own validation (that function's docstring already
+# names "disconnected net" as something a caller should handle, but nothing actually rejected
+# it), so it got exported and solved as one MULTI-COMPONENT mesh -- stretchy_mesh's relax/
+# pressure-calibration pipeline has no notion of "more than one rigid piece" and produces
+# garbage (the reported "haywire") once positions/forces from unrelated components mix into the
+# same convergence check. Fix: exactly one shape is the ANCHOR at any time
+# (BuilderPane._anchor_shape_id -- 2026-09-26, explicit correction: "central" is NOT the largest
+# connected component, it's whichever piece the user started from, permanently, no matter how
+# large a disconnected side-blob grows) -- the "central object" is whichever connected component
+# CURRENTLY CONTAINS the anchor, recomputed fresh from the live shapes/connections on every call.
+# It alone is exported/inflated/shown in the 3D pane (BuilderPane.export_mesh_dict/
+# root_to_vertex_id); every other shape is drawn at reduced opacity in the 2D pane instead
+# (BuilderPane._draw_shape) so it's still visible to attach later. See BuilderPane's own anchor-
+# lifecycle methods (_refresh_vme_state's anchor-assignment branch, _on_delete_key's anchor
+# delete-guard, the "Anchor [A]" tool mode) for how the anchor itself moves/persists.
+def _shape_connected_components(shapes, connections):
+    """shapes: list of shape dicts with an "id"; connections: list of connection dicts with
+    "a_shape"/"b_shape". Returns a list of sets of shape ids, one per connected component
+    (union-find over the connection graph -- a shape with no connection at all is its own
+    singleton component)."""
+    parent = {shape["id"]: shape["id"] for shape in shapes}
+
+    def find(x):
+        while parent[x] != x:
+            x = parent[x]
+        return x
+
+    for conn in connections:
+        a, b = find(conn["a_shape"]), find(conn["b_shape"])
+        if a != b:
+            parent[a] = b
+
+    components = {}
+    for shape in shapes:
+        root = find(shape["id"])
+        components.setdefault(root, set()).add(shape["id"])
+    return list(components.values())
+
+
+def _central_shape_ids(shapes, connections, anchor_shape_id):
+    """The "central object" (see above) among `shapes`/`connections`: the connected component
+    containing `anchor_shape_id`. Empty frozenset if `shapes` is empty or `anchor_shape_id` isn't
+    (or is no longer) one of `shapes`' own ids -- callers needing a fallback (e.g. a freshly
+    loaded net whose anchor hasn't been assigned yet) handle that themselves, see
+    BuilderPane._refresh_vme_state."""
+    for component in _shape_connected_components(shapes, connections):
+        if anchor_shape_id in component:
+            return frozenset(component)
+    return frozenset()
+
+
 # ---- left pane ----
 
 class BuilderPane(InteractiveBuilderApp):
@@ -457,6 +629,21 @@ class BuilderPane(InteractiveBuilderApp):
     # CombinedApp has had a chance to assign the real callback -- wired to
     # InflaterPane.refresh_diff_eligibility once both panes exist (see CombinedApp.__init__).
     on_change = None
+
+    # The "central object" concept's own anchor (2026-09-26, explicit) -- which shape id the red
+    # star marks; central_shape_ids() is the connected component currently containing this id.
+    # None only when self.shapes is empty; _refresh_vme_state (the one call site every state-
+    # changing edit funnels through, see its own docstring) keeps this assigned to SOME surviving
+    # shape whenever shapes exist -- the very first shape placed on an empty canvas, or (a freshly
+    # loaded net with no anchor of its own, e.g. any pre-existing .poly/.hippo file) the first
+    # shape of the loaded net -- rather than hooking every individual creation site. A class
+    # attribute for the same before-__init__-finishes reason as on_change above.
+    _anchor_shape_id = None
+
+    # Snapshot of _anchor_shape_id taken the moment Anchor mode ([A]) is entered (_set_tool_mode
+    # below) -- compared against the (possibly moved) anchor when the user leaves Anchor mode, to
+    # decide whether a confirm-and-re-inflate popup is needed (see _set_tool_mode's own docstring).
+    _anchor_before_anchor_mode = None
 
     # Same idea as on_change -- a class attribute so it exists before the inherited
     # InteractiveBuilderApp.__init__ makes its own first _redraw() call. Which shape (if any)
@@ -602,6 +789,9 @@ class BuilderPane(InteractiveBuilderApp):
         a_shape, b_shape = self._shape_by_id(a_shape_id), self._shape_by_id(b_shape_id)
         if a_shape is None or b_shape is None:
             return False
+        if self._is_orphan_to_orphan_join(a_shape_id, b_shape_id):
+            self._show_orphan_join_error()
+            return False
         self._push_undo()
         was_vme_active = self._vme_active  # _push_undo's own _refresh_vme_state just set this
         a_handle, b_handle = self._default_connection_handles(a_shape, a_edge, b_shape, b_edge)
@@ -620,6 +810,27 @@ class BuilderPane(InteractiveBuilderApp):
             return False
         self._redraw()
         return True
+
+    def _is_orphan_to_orphan_join(self, a_shape_id, b_shape_id):
+        """True iff `a_shape_id`/`b_shape_id` are two DIFFERENT shapes, NEITHER of which is
+        currently part of the live central object (2026-09-26, explicit: "it's permitted for
+        there to be more than one unconnected piece, BUT they cannot be connected to one
+        another. they can only be connected to the main group"). A Polygon Fold connection
+        (`a_shape_id == b_shape_id`, folding one shape onto itself) is never affected -- it can't
+        change which PIECES are connected to which at all, so it's excluded outright rather than
+        risk a same-shape false positive (a non-central shape folding onto itself would otherwise
+        look like "both endpoints are the same non-central piece")."""
+        if a_shape_id == b_shape_id:
+            return False
+        central_ids = self.central_shape_ids()
+        return a_shape_id not in central_ids and b_shape_id not in central_ids
+
+    def _show_orphan_join_error(self):
+        messagebox.showerror(
+            "Cannot connect two disconnected pieces",
+            "Neither of these pieces is connected to the central object yet -- a piece that "
+            "isn't connected to the central object can only be joined TO the central object, "
+            "not to another disconnected piece.")
 
     def _undo_illegal_connection(self):
         """Rolls back a just-made connection that turned the net invalid -- pops the SAME
@@ -751,13 +962,49 @@ class BuilderPane(InteractiveBuilderApp):
         if self.inflater_getter is not None:
             self.inflater_getter().set_hover_shape_from_builder(shape_id)
 
+    # Which shape (by index into self.shapes) the NEXT _draw_shape override call corresponds to
+    # -- see that method's own docstring for why this index-counting trick is needed at all. A
+    # class attribute for the same before-__init__-finishes reason as on_change/
+    # _face_hover_shape_id above.
+    _draw_shape_index = 0
+
+    def _draw_shape(self, screen_vertices, fill_hex, selected, hatched=False):
+        """For a shape NOT part of the live central object: dims its fill to
+        DISCONNECTED_OPACITY (2026-09-26, explicit: "add back the transparency... make the
+        orphaned pieces 50% opacity" -- blended toward the canvas's own background color,
+        _weighted_color(fill_hex, DISCONNECTED_OPACITY, other=PLOT_THEME["bg"]), same "weight =
+        fraction of the shape's own color" convention this module's other _weighted_color calls
+        use), AND suppresses InteractiveBuilderApp's own solid-red selection outline (2026-09-26,
+        explicit: "when an orphaned piece is selected, the white dashed outline should be
+        replaced with a thick red dashed outline") -- _redraw's own dashed-outline overlay (drawn
+        after this returns) is the ONLY outline an orphan shape ever gets, white when unselected
+        or thick red when selected; the solid baked-in red rectangle `selected=True` would
+        otherwise draw here is turned off (forced to False) so it doesn't show through that
+        dashed overlay's own gaps.
+
+        InteractiveBuilderApp's own _redraw (untouchable, called via super()._redraw() below)
+        calls this once per self.shapes entry, IN ORDER, with no shape id in the call itself --
+        self._draw_shape_index (reset to 0 by the overridden _redraw just before calling super())
+        exploits that fixed calling order: the Nth call this pass is self.shapes[N]. The one
+        OTHER call site (the armed palette shape about to be dropped, drawn AFTER that loop, not
+        yet a real placed shape at all) falls past the range and is left alone."""
+        if self._draw_shape_index < len(self.shapes):
+            shape = self.shapes[self._draw_shape_index]
+            if shape["id"] not in self.central_shape_ids():
+                selected = False
+                fill_hex = mcolors.to_hex(
+                    _weighted_color(fill_hex, DISCONNECTED_OPACITY, other=PLOT_THEME["bg"]))
+        self._draw_shape_index += 1
+        super()._draw_shape(screen_vertices, fill_hex, selected, hatched=hatched)
+
     def _redraw(self):
         """Runs InteractiveBuilderApp's own full redraw unchanged (which already draws its own
-        RED selection outline for self.selected_ids), then draws the yellow HOVER highlight (if
-        any) on top -- _redraw's own canvas.delete("all") wipes everything first, so this can't
-        be done as a one-time canvas item; it has to be re-added after every single redraw, from
-        whatever edit triggered it (drag/rotate/connect/etc.), not just from set_hover_shape's
-        own calls. Outlines whichever shape(s) are hovered from EITHER direction (3D->2D's
+        RED selection outline for self.selected_ids -- suppressed for an orphan shape, see
+        _draw_shape above), then draws the yellow HOVER highlight (if any) on top -- _redraw's
+        own canvas.delete("all") wipes everything first, so this can't be done as a one-time
+        canvas item; it has to be re-added after every single redraw, from whatever edit
+        triggered it (drag/rotate/connect/etc.), not just from set_hover_shape's own calls.
+        Outlines whichever shape(s) are hovered from EITHER direction (3D->2D's
         _face_hover_shape_id, this canvas's own _mouse_hover_shape_id) -- a set, deduplicated,
         since both are usually the same shape or one of them is None -- EXCLUDING anything
         already selected (2026-09-19, explicit: "when you hover then select, the face should go
@@ -768,7 +1015,48 @@ class BuilderPane(InteractiveBuilderApp):
         Also forwards self.selected_ids to InflaterPane whenever it's changed since the last
         forward (see _last_forwarded_selected_ids' own docstring for why this diff-on-redraw
         approach, rather than hooking every mutation site, is used)."""
+        self._draw_shape_index = 0
         super()._redraw()
+
+        # The anchor's own red anchor-symbol marker (2026-09-26, explicit) -- centered on the
+        # anchor shape's own world position, drawn in SCREEN-FIXED size (not scaled by the
+        # shape's own size/zoom) so it stays a clear, legible marker regardless of polygon type
+        # or zoom level -- same glyph the Anchor toolbar icon uses (_draw_anchor_symbol), just
+        # red here instead of the toolbar's white, and placed in world space instead of icon
+        # space.
+        if self._anchor_shape_id is not None:
+            anchor_shape = self._shape_by_id(self._anchor_shape_id)
+            if anchor_shape is not None:
+                sx, sy = self._world_to_screen(anchor_shape["cx"], anchor_shape["cy"])
+                _draw_anchor_symbol(self.canvas, sx, sy, ANCHOR_MARKER_RADIUS_PX, ANCHOR_MARKER_COLOR)
+
+        # Dashed outline for every shape NOT part of the live central object (2026-09-26,
+        # explicit: "instead of having it a bit transparent, give it a dotted outline"; then "the
+        # dashes don't look right. they should look like the selection box" -- a single
+        # create_polygon(..., dash=...) resets tk's dash phase at every vertex, which reads as a
+        # ring of small dots rather than clean dashes running along each edge, and doesn't match
+        # the crisp look of the hover/selection outlines drawn the same way elsewhere in this
+        # method. One create_line PER EDGE instead -- each edge gets its own clean, independent
+        # dash run, closing the loop back to the first vertex. A SELECTED orphan gets the thick
+        # red variant instead of the plain white one (2026-09-26, explicit) -- _draw_shape above
+        # already suppressed the base class's own solid red selection outline for these shapes,
+        # so this dashed one is the only selection indicator an orphan ever shows.
+        central_ids = self.central_shape_ids()
+        for shape in self.shapes:
+            if shape["id"] not in central_ids:
+                screen_vertices = [self._world_to_screen(*wv)
+                                    for wv in self._shape_world_vertices(shape)]
+                selected = shape["id"] in self.selected_ids
+                color = SELECTION_OUTLINE_COLOR if selected else DISCONNECTED_OUTLINE_COLOR
+                dash = DISCONNECTED_SELECTED_OUTLINE_DASH if selected else DISCONNECTED_OUTLINE_DASH
+                line_count = (DISCONNECTED_SELECTED_OUTLINE_LINE_COUNT if selected
+                              else DISCONNECTED_OUTLINE_LINE_COUNT)
+                n = len(screen_vertices)
+                for i in range(n):
+                    x1, y1 = screen_vertices[i]
+                    x2, y2 = screen_vertices[(i + 1) % n]
+                    _draw_dashed_edge(self.canvas, x1, y1, x2, y2, color, dash, line_count)
+
         hover_ids = {sid for sid in (self._face_hover_shape_id, self._mouse_hover_shape_id)
                      if sid is not None and sid not in self.selected_ids}
         for shape_id in hover_ids:
@@ -776,8 +1064,23 @@ class BuilderPane(InteractiveBuilderApp):
             if shape is not None:
                 screen_vertices = [self._world_to_screen(*wv)
                                     for wv in self._shape_world_vertices(shape)]
-                flat = [coord for point in screen_vertices for coord in point]
-                self.canvas.create_polygon(flat, outline="yellow", fill="", width=3)
+                if shape_id in central_ids:
+                    flat = [coord for point in screen_vertices for coord in point]
+                    self.canvas.create_polygon(flat, outline="yellow", fill="", width=3)
+                else:
+                    # An orphan's own hover outline is DASHED too (2026-09-26, explicit) --
+                    # matching its dashed selection/idle outlines above rather than the plain
+                    # solid yellow ring a central shape gets. Same "several width=1 lines instead
+                    # of one wide one" technique as _draw_dashed_edge's other callers (a literal
+                    # width=3 solid-style polygon can't ALSO carry a crisp custom dash on
+                    # Windows -- see DISCONNECTED_OUTLINE_LINE_COUNT's own comment).
+                    n = len(screen_vertices)
+                    for i in range(n):
+                        x1, y1 = screen_vertices[i]
+                        x2, y2 = screen_vertices[(i + 1) % n]
+                        _draw_dashed_edge(self.canvas, x1, y1, x2, y2, "yellow",
+                                          DISCONNECTED_SELECTED_OUTLINE_DASH,
+                                          DISCONNECTED_SELECTED_OUTLINE_LINE_COUNT)
 
         current_selection = frozenset(self.selected_ids)
         if current_selection != self._last_forwarded_selected_ids:
@@ -868,10 +1171,39 @@ class BuilderPane(InteractiveBuilderApp):
             self._refresh_vme_state()
         self._redraw()
 
+    def _drop_shape(self, n, wx, wy):
+        """Runs InteractiveBuilderApp's own shape creation unchanged, then refreshes VME/anchor
+        state immediately (2026-09-26, explicit bug report: "when i start with an empty canvas
+        and add a first piece, that piece shouldn't have a dotted outline because it's
+        automatically the anchor of the central group") -- the inherited caller
+        (_on_canvas_press_move) never calls _refresh_vme_state itself after a plain drop, only
+        _redraw (via the immediately-following disarm click) -- without this override, that
+        _redraw ran BEFORE _refresh_vme_state's own anchor-assignment fallback (see its
+        docstring) ever got a chance to see the brand-new shape, so a first-ever shape briefly
+        (and, since nothing else happens to re-trigger a refresh, indefinitely) rendered as if it
+        had no anchor at all."""
+        super()._drop_shape(n, wx, wy)
+        self._refresh_vme_state()
+
     def _on_palette_clicked(self, n):
         if self._locked:
             return
         super()._on_palette_clicked(n)
+
+    def _on_canvas_press(self, event):
+        """Runs InteractiveBuilderApp's own Move/Join/Fold press dispatch unchanged (a no-op for
+        any OTHER tool_mode, including "anchor" -- see its own docstring), then adds the Anchor
+        mode's own gesture (2026-09-26, explicit): a plain click on a shape moves the central-
+        object anchor there -- same hit-test Move mode's own press handler uses, but no
+        selection/drag, just self._anchor_shape_id. Blocked while locked, same as every other
+        mode's own click-driven edit."""
+        super()._on_canvas_press(event)
+        if self.tool_mode == "anchor" and not self._locked:
+            wx, wy = self._screen_to_world(event.x, event.y)
+            hit = self._hit_test(wx, wy)
+            if hit is not None and hit["id"] != self._anchor_shape_id:
+                self._anchor_shape_id = hit["id"]
+                self._redraw()
 
     def _on_canvas_press_join(self, event):
         # Blocks Join/Polygon Fold's own click-click gesture while locked -- it's the one
@@ -917,7 +1249,25 @@ class BuilderPane(InteractiveBuilderApp):
         user-never-asked-for undo step. self._on_canvas_release's own `len(self.connections) >
         connections_before` check already reads the length AFTER this returns, so a rollback
         here is invisible to it -- it correctly sees no NET change and skips showing the "made"
-        3D indicator."""
+        3D indicator.
+
+        Also blocks an orphan-to-orphan join (2026-09-26, explicit -- see
+        _is_orphan_to_orphan_join's own docstring) BEFORE calling super() at all, rather than
+        letting it complete and then undoing it the way the vertex-merge-error branch does above
+        -- self._connection_pending["from_shape"]/self._hover_shape_id are exactly the two
+        endpoints the base method itself is about to join, checkable without having to make (and
+        unmake) the connection first."""
+        if self._connection_pending is not None and self._hover_shape_id is not None:
+            from_shape = self._connection_pending["from_shape"]
+            to_shape = self._hover_shape_id
+            if self._is_orphan_to_orphan_join(from_shape, to_shape):
+                self._show_orphan_join_error()
+                self._connection_pending = None
+                self._hover_shape_id = None
+                self._hover_edge_index = None
+                self._pending_cursor_screen = None
+                self._redraw()
+                return False
         was_vme_active = self._vme_active
         made = super()._complete_or_cancel_pending_connection()
         if made and self._vme_active and not was_vme_active:
@@ -971,11 +1321,12 @@ class BuilderPane(InteractiveBuilderApp):
             self.inflater_getter().set_open_edge_drag_cancelled_from_builder()
 
     def _set_tool_mode(self, mode):
-        # Blocks switching INTO Join/Polygon Fold while locked -- their own click-click
-        # gesture is blocked directly (_on_canvas_press_join above), but a user who wasn't
-        # already in one of those modes when the lock kicked in still shouldn't be able to
-        # enter one now (there'd be nothing useful to do there anyway). A user who WAS already
-        # there stays there -- this only blocks the transition INTO Join/Fold, not staying put.
+        # Blocks switching INTO Join/Polygon Fold/Anchor while locked -- their own click-driven
+        # gestures are blocked directly too (_on_canvas_press_join/_on_canvas_press above), but a
+        # user who wasn't already in one of those modes when the lock kicked in still shouldn't
+        # be able to enter one now (there'd be nothing useful to do there anyway). A user who WAS
+        # already there stays there -- this only blocks the transition INTO one of them, not
+        # staying put.
         if self._locked and mode != "move" and mode != self.tool_mode:
             return
         # 2026-09-19, explicit: "when switching between modes, everything is deselected" --
@@ -998,11 +1349,71 @@ class BuilderPane(InteractiveBuilderApp):
                 inflater.set_hover_connection_from_builder(None)
                 inflater.set_open_edge_hover_from_builder(None, None)
                 inflater.set_open_edge_drag_cancelled_from_builder()
+        # Anchor mode's own enter/leave bookkeeping (2026-09-26, explicit) -- captured BEFORE
+        # super() changes self.tool_mode. Entering snapshots the current anchor
+        # (_anchor_before_anchor_mode) so leaving can tell whether the anchor actually moved to a
+        # DIFFERENT connected piece while the user was in this mode (see
+        # _handle_anchor_mode_exit's own docstring) -- moving it within the same piece, or not at
+        # all, needs no confirmation and no re-inflate.
+        entering_anchor_mode = mode == "anchor" and mode != self.tool_mode
+        leaving_anchor_mode = self.tool_mode == "anchor" and mode != self.tool_mode
+        anchor_before = self._anchor_before_anchor_mode
         super()._set_tool_mode(mode)
+        if entering_anchor_mode:
+            self._anchor_before_anchor_mode = self._anchor_shape_id
+        elif leaving_anchor_mode:
+            self._handle_anchor_mode_exit(anchor_before)
+
+    def _handle_anchor_mode_exit(self, previous_anchor_id):
+        """Called right after the user switches OUT of Anchor mode into some other mode
+        (_set_tool_mode above), with `previous_anchor_id` = the anchor as it was the moment
+        Anchor mode was ENTERED. 2026-09-26, explicit: "once the user chooses a different mode,
+        if the anchor is no longer in the same connected piece as the previous anchor, show a pop
+        up asking if the user is sure... as it will do a full inflate of a different set of
+        pieces. if they confirm, then do the full inflate. if cancelled, then go back to the
+        previous anchor."
+
+        A no-op if the anchor never actually changed, OR changed but stayed within the SAME
+        connected component (moving the anchor to a different shape of the piece already central
+        doesn't change what gets exported/inflated at all, so nothing needs confirming)."""
+        if previous_anchor_id is None or self._anchor_shape_id == previous_anchor_id:
+            return
+        components = _shape_connected_components(self.shapes, self.connections)
+
+        def component_of(shape_id):
+            return next((c for c in components if shape_id in c), frozenset({shape_id}))
+
+        if component_of(previous_anchor_id) == component_of(self._anchor_shape_id):
+            return
+        if messagebox.askyesno(
+                "Change central piece?",
+                "Moving the anchor here makes a different connected piece central and will "
+                "re-inflate it from scratch. Continue?"):
+            if self.inflater_getter is not None:
+                self.inflater_getter().on_full_inflate_clicked()
+        else:
+            self._anchor_shape_id = previous_anchor_id
+            self._redraw()
 
     def _on_delete_key(self, _event):
+        """Runs InteractiveBuilderApp's own multi-shape/connection delete unchanged, except the
+        anchor shape (see _anchor_shape_id's own docstring) is excluded from a multi-shape
+        deletion set (with an explanatory popup -- 2026-09-26, explicit: "when the user tries to
+        delete the anchor piece, have a popup saying why it's not allowed") whenever any OTHER
+        shape would survive ("the anchor piece cannot be deleted until it's the last remaining
+        piece"). It can still be deleted once it's the ONLY shape left (the branch below only
+        filters/warns when `len(self.shapes) > 1`), at which point _refresh_vme_state's own
+        anchor-assignment fallback (self.shapes being empty) resets _anchor_shape_id to None,
+        ready for the next placed shape to become the new anchor."""
         if self._locked:
             return
+        if self._anchor_shape_id in self.selected_ids and len(self.shapes) > 1:
+            self.selected_ids = self.selected_ids - {self._anchor_shape_id}
+            messagebox.showerror(
+                "Cannot delete the anchor piece",
+                "The anchor (the central object's own marker piece) can't be deleted while any "
+                "other piece is still on the canvas -- move the anchor to a different piece "
+                "first (Anchor tool), or delete every other piece first.")
         super()._on_delete_key(_event)
 
     def _flip_selected_shapes(self, axis):
@@ -1057,19 +1468,36 @@ class BuilderPane(InteractiveBuilderApp):
         one call site EVERY state-changing edit (place/delete/connect/flip/undo/redo/load/drag-
         release) already funnels through (see that class's own docstring), so it's the natural
         hook for keeping Diff Inflate's enabled state live without a change-tracking mechanism
-        of this app's own."""
+        of this app's own.
+
+        Also the one place the anchor (see _anchor_shape_id's own docstring) gets a default
+        assigned: whenever shapes exist but the current anchor id doesn't name any of them
+        (empty canvas -> first shape ever placed; a Load that replaced self.shapes wholesale with
+        no anchor of its own restored yet -- Phase 2/3's own session loaders set the REAL anchor
+        explicitly right after calling _load_faces, which runs before this fallback would ever
+        fire from that same call), it falls back to self.shapes[0] -- unambiguous in the classic
+        "canvas was empty, exactly one shape now exists" case this is mainly for. Clears to None
+        when self.shapes empties out entirely (_on_delete_key's own guard is what makes that only
+        reachable by deleting the very last remaining shape)."""
+        if self.shapes:
+            if self._anchor_shape_id not in {s["id"] for s in self.shapes}:
+                self._anchor_shape_id = self.shapes[0]["id"]
+        else:
+            self._anchor_shape_id = None
         super()._refresh_vme_state()
         if self.on_change is not None:
             self.on_change()
 
     def snapshot_state(self):
-        """Returns (shapes, connections) -- per-dict SHALLOW copies (shape/connection dicts are
-        flat; edits like flip/drag mutate them IN PLACE, so a plain list-of-references snapshot
-        would silently "change" along with the live state) of self.shapes/self.connections at
-        this exact moment, for a later classify_change call to diff against."""
-        return [dict(s) for s in self.shapes], [dict(c) for c in self.connections]
+        """Returns (shapes, connections, anchor_shape_id) -- per-dict SHALLOW copies (shape/
+        connection dicts are flat; edits like flip/drag mutate them IN PLACE, so a plain
+        list-of-references snapshot would silently "change" along with the live state) of
+        self.shapes/self.connections, plus self._anchor_shape_id, all at this exact moment, for a
+        later classify_change call to diff against (the anchor id is needed there too, to find
+        which component was central AT THAT SNAPSHOT -- see its own docstring)."""
+        return [dict(s) for s in self.shapes], [dict(c) for c in self.connections], self._anchor_shape_id
 
-    def classify_change(self, old_shapes, old_connections):
+    def classify_change(self, old_shapes, old_connections, old_anchor_shape_id):
         """old_shapes/old_connections: a prior snapshot_state() result (or None, meaning
         "never inflated yet"). Returns (kind, extra) where kind is "none" (no topology change),
         "add_face" (EXACTLY one shape added and nothing else about the surviving net's topology
@@ -1090,11 +1518,26 @@ class BuilderPane(InteractiveBuilderApp):
         those are deliberately ignored here: dragging a shape around never disables Diff
         Inflate. Connections are compared by their (shape, edge) endpoints only (frozenset, so
         a<->b/b<->a order doesn't matter) -- a connection's own bezier handles are a pure
-        drawing detail, never read by the exported mesh either."""
+        drawing detail, never read by the exported mesh either.
+
+        Both snapshots are restricted to their OWN central object first (_central_shape_ids,
+        same restriction export_mesh_dict applies -- see its own docstring) before anything
+        else below runs, so placing (or removing) a shape that never joins the central object at
+        all classifies as "none": it doesn't change what actually gets exported/inflated, so it
+        shouldn't disable Diff Inflate or fire an unnecessary Auto Inflate re-run either."""
         if old_shapes is None:
             return "complex", None
+        old_central = _central_shape_ids(old_shapes, old_connections, old_anchor_shape_id)
+        old_shapes = [s for s in old_shapes if s["id"] in old_central]
+        old_connections = [c for c in old_connections
+                            if c["a_shape"] in old_central and c["b_shape"] in old_central]
+        new_central = self.central_shape_ids()
+        new_shapes = [s for s in self.shapes if s["id"] in new_central]
+        new_connections = [c for c in self.connections
+                            if c["a_shape"] in new_central and c["b_shape"] in new_central]
+
         old_by_id = {s["id"]: s for s in old_shapes}
-        new_by_id = {s["id"]: s for s in self.shapes}
+        new_by_id = {s["id"]: s for s in new_shapes}
         old_ids, new_ids = set(old_by_id), set(new_by_id)
         added, removed, common = new_ids - old_ids, old_ids - new_ids, old_ids & new_ids
         for sid in common:
@@ -1112,7 +1555,7 @@ class BuilderPane(InteractiveBuilderApp):
             return any(sid in shape_ids for sid, _edge in key)
 
         old_conns = {conn_key(c) for c in old_connections}
-        new_conns = {conn_key(c) for c in self.connections}
+        new_conns = {conn_key(c) for c in new_connections}
         conn_added, conn_removed = new_conns - old_conns, old_conns - new_conns
 
         if len(added) == 1 and not removed:
@@ -1185,6 +1628,7 @@ class BuilderPane(InteractiveBuilderApp):
         self._bind_all_guarded("<KeyPress-m>", lambda _e: self._set_tool_mode("move"))
         self._bind_all_guarded("<KeyPress-j>", lambda _e: self._set_tool_mode("join"))
         self._bind_all_guarded("<KeyPress-p>", lambda _e: self._set_tool_mode("fold"))
+        self._bind_all_guarded("<KeyPress-a>", lambda _e: self._set_tool_mode("anchor"))
         self._bind_all_guarded("<KeyPress-h>", lambda _e: self._flip_selected_shapes("horizontal"))
         self._bind_all_guarded("<KeyPress-v>", lambda _e: self._flip_selected_shapes("vertical"))
         self._bind_all_guarded("<Control-c>", self.on_copy_key)
@@ -1200,6 +1644,17 @@ class BuilderPane(InteractiveBuilderApp):
                 return None
             return handler(event)
         self.root.bind_all(sequence, wrapped)
+
+    def _build_toolbar(self, parent):
+        """Runs InteractiveBuilderApp's own Move/Join/Polygon-Fold/Flip toolbar unchanged, then
+        adds a 4th mode button, "Anchor [A]" (2026-09-26, explicit) -- clicking a shape while in
+        this mode moves the central-object anchor there (see _on_canvas_press's own anchor
+        branch) instead of selecting/dragging it. Uses the same _add_toolbar_mode_button the base
+        class's own three mode buttons go through, so it gets the same active-mode highlight ring
+        (_update_toolbar_highlight, keyed by self.toolbar_buttons) for free."""
+        super()._build_toolbar(parent)
+        self._add_toolbar_mode_button(parent, "anchor", "Anchor [A]", _draw_anchor_tool_icon)
+        self._update_toolbar_highlight()
 
     def _build_palette_entry(self, parent, n):
         """Same icon construction as InteractiveBuilderApp's own _build_palette_entry, but
@@ -1228,41 +1683,95 @@ class BuilderPane(InteractiveBuilderApp):
         self.file_menu, which doesn't exist here (CombinedApp builds the one real File menu,
         with only Load..., outside this pane -- see its own _build_menu)."""
 
+    def central_shape_ids(self):
+        """The live "central object"'s own shape ids (see _central_shape_ids' own docstring) --
+        the connected component currently containing self._anchor_shape_id, which
+        export_mesh_dict/root_to_vertex_id/_draw_shape all restrict themselves to. Recomputed
+        fresh from self.shapes/self.connections every call (cheap at this scale, and keeps this
+        correct through every add/remove/join/split with no separate state to invalidate)."""
+        return _central_shape_ids(self.shapes, self.connections, self._anchor_shape_id)
+
     def export_mesh_dict(self):
-        """Returns (mesh_dict, None) built from the CURRENT live shapes/connections, via the
-        exact same _expand_folded_shapes/_faces_from_shapes/_edges_from_shapes/
-        _face_edge_ids_from_shapes pipeline File > Save uses in interactive_builder_app
-        (_export_faces_and_layout, inherited unchanged) -- or (None, message) if the net is
-        empty or fails validation (self-loop, duplicate edge, disconnected net, etc.), for the
-        caller to show via the existing error-messaging pattern instead of crashing."""
-        if not self.shapes:
+        """Returns (mesh_dict, None) built from the CENTRAL OBJECT's current live shapes/
+        connections only (central_shape_ids -- any OTHER shape, not connected into it at all, is
+        excluded here so it never reaches the solver/3D view; see _central_shape_ids' own
+        docstring for why), via the same _expand_folded_shapes/_faces_from_shapes/
+        _edges_from_shapes/_face_edge_ids_from_shapes pipeline File > Save uses in
+        interactive_builder_app (_export_faces_and_layout's own body, reimplemented here over
+        the filtered shape/connection lists rather than calling that method directly -- it always
+        reads self.shapes/self.connections itself, with no override point for a filtered subset,
+        and is read-only from here) -- or (None, message) if there's no central object yet or it
+        fails validation (self-loop, duplicate edge, etc.), for the caller to show via the
+        existing error-messaging pattern instead of crashing."""
+        central_ids = self.central_shape_ids()
+        if not central_ids:
             return None, "Nothing to inflate yet -- place at least one shape first."
+        central_shapes = [s for s in self.shapes if s["id"] in central_ids]
+        central_connections = [c for c in self.connections
+                                if c["a_shape"] in central_ids and c["b_shape"] in central_ids]
         try:
-            faces, edges, face_edge_ids, source_polygon_id, _net_layout, _builder_connections = \
-                self._export_faces_and_layout()
+            expanded_shapes, expanded_connections, source_polygon_id = \
+                _expand_folded_shapes(central_shapes, central_connections)
+            _validate_shapes_connections(expanded_shapes, expanded_connections)
+            faces = _faces_from_shapes(expanded_shapes, expanded_connections)
+            edges = _edges_from_shapes(expanded_shapes, expanded_connections)
+            face_edge_ids = _face_edge_ids_from_shapes(expanded_shapes, expanded_connections)
         except (NetValidationError, ValueError) as e:
             return None, str(e)
         mesh = {"name": "live_net", "faces": faces, "edges": edges,
                 "face_edge_ids": face_edge_ids, "source_polygon_id": source_polygon_id}
         return mesh, None
 
+    def export_full_net_dict(self):
+        """Returns (mesh_dict, None) built from EVERY shape/connection currently placed --
+        central object or not -- unlike export_mesh_dict (central-object only, for actual
+        inflation), this is used ONLY by .hippie Save (2026-09-26, explicit: "Only .hippie files
+        allow more than one connected component"). Safe to call the inherited
+        _export_faces_and_layout() DIRECTLY here (unlike export_mesh_dict, which needs its own
+        filtered reimplementation): that method only checks vertex-merge/duplicate-edge validity
+        (_validate_shapes_connections), never connectivity -- the NEW connectivity restriction
+        (net-fold-project's untouchable.md, "forbid saving nets... with more than one connected
+        component") lives ONLY in interactive_builder_app's own plain-.poly Save path
+        (_save_to_path), which this method never goes through. Adds "net_layout"/
+        "builder_connections" into the returned dict (export_mesh_dict's own callers never
+        needed these -- they only ever feed a LIVE inflate, which reconstructs positions itself --
+        but a real file Save does, for an exact round trip through Load Session).
+        Returns (None, message) if the net is empty or fails that vertex-merge/duplicate-edge
+        check."""
+        if not self.shapes:
+            return None, "Nothing to save -- place at least one shape first."
+        try:
+            faces, edges, face_edge_ids, source_polygon_id, net_layout, builder_connections = \
+                self._export_faces_and_layout()
+        except (NetValidationError, ValueError) as e:
+            return None, str(e)
+        mesh = {"name": "live_net", "faces": faces, "edges": edges,
+                "face_edge_ids": face_edge_ids, "source_polygon_id": source_polygon_id,
+                "net_layout": net_layout, "builder_connections": builder_connections}
+        return mesh, None
+
     def root_to_vertex_id(self):
         """Returns {root_slot: vertex_id} in the SAME numbering export_mesh_dict's own
-        _faces_from_shapes (run inside the inherited _export_faces_and_layout) assigns --
-        root_slot a (shape_id, corner_index) tuple from interactive_builder_app._vertex_roots,
-        run over the EXPANDED (post-_expand_folded_shapes) shapes/connections to match what's
-        actually exported. A root slot is STABLE across an edit that doesn't touch its own
-        group (see _vertex_roots' own docstring) -- unlike the raw integer id, which shifts
-        under an edit that merges/splits vertex groups (a connection add/remove), NOT just a
-        plain shape append/removal. Lets InflaterPane match a vertex across two different
-        exports by this stable identity instead of by raw id (see
-        InflaterPane._diff_reexport_and_relax). This duplicates _faces_from_shapes' own
-        numbering loop (that function doesn't return the root map itself) rather than editing
-        it -- interactive_builder_app/app.py is read-only from here."""
-        if not self.shapes:
+        _faces_from_shapes assigns -- root_slot a (shape_id, corner_index) tuple from
+        interactive_builder_app._vertex_roots, run over the EXPANDED (post-
+        _expand_folded_shapes) CENTRAL-OBJECT-ONLY shapes/connections (central_shape_ids, same
+        restriction export_mesh_dict applies -- see its own docstring) to match what's actually
+        exported. A root slot is STABLE across an edit that doesn't touch its own group (see
+        _vertex_roots' own docstring) -- unlike the raw integer id, which shifts under an edit
+        that merges/splits vertex groups (a connection add/remove), NOT just a plain shape
+        append/removal. Lets InflaterPane match a vertex across two different exports by this
+        stable identity instead of by raw id (see InflaterPane._diff_reexport_and_relax). This
+        duplicates _faces_from_shapes' own numbering loop (that function doesn't return the root
+        map itself) rather than editing it -- interactive_builder_app/app.py is read-only from
+        here."""
+        central_ids = self.central_shape_ids()
+        if not central_ids:
             return {}
+        central_shapes = [s for s in self.shapes if s["id"] in central_ids]
+        central_connections = [c for c in self.connections
+                                if c["a_shape"] in central_ids and c["b_shape"] in central_ids]
         expanded_shapes, expanded_connections, _source_polygon_id = \
-            _expand_folded_shapes(self.shapes, self.connections)
+            _expand_folded_shapes(central_shapes, central_connections)
         roots = _vertex_roots(expanded_shapes, expanded_connections)
         vertex_ids = {}
         for shape in expanded_shapes:
@@ -1348,6 +1857,7 @@ class InflaterPane:
         # _record_inflate_success), never on a mid-pipeline stop/failure.
         self.last_shapes_snapshot = None
         self.last_connections_snapshot = None
+        self.last_anchor_snapshot = None
         self.last_source_polygon_id = None
         # {root_slot: vertex_id} from BuilderPane.root_to_vertex_id() at that same moment --
         # lets a later add_connection/remove_connection/add_face diff seed its fresh mesh's
@@ -1727,6 +2237,251 @@ class InflaterPane:
         if self.auto_inflate_var.get() and not self._running:
             self.on_full_inflate_clicked()
 
+    def on_load_session_clicked(self):
+        """File > Load Session... (2026-09-26, explicit: "you need to implement loading of
+        .hippo files... it will also fill in the parameters used... it should also know the
+        pressure used for level 3 so we can immediately do auto inflate as the user starts
+        interacting with the model") -- picks a session file and dispatches to whichever format
+        it actually is: an inflate_polyhedron_app `.hippo` (_load_hippo_session, ALWAYS exactly
+        one connected piece, no anchor of its own) or this app's own `.hippie`
+        (_load_hippie_session, MAY have more than one piece, carries its own anchor_shape_id) --
+        told apart by a raw JSON peek for the "anchor_shape_id" key (only an InflaterSessionStateModel has one) rather than the file extension, so a renamed/misnamed file still loads
+        correctly. A no-op while an inflate is already running."""
+        if self._running:
+            return
+        SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = filedialog.askopenfilename(
+            title="Load session", initialdir=str(SESSION_OUTPUT_DIR),
+            filetypes=[("Session", f"*{SESSION_FILE_EXTENSION} *.hippo"),
+                       ("Session JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                raw_text = f.read()
+            raw = json.loads(raw_text)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Load session failed", str(e))
+            return
+        if "anchor_shape_id" in raw:
+            self._load_hippie_session(raw_text)
+        else:
+            self._load_hippo_session(raw_text)
+
+    def _load_hippo_session(self, raw_text):
+        """Restores an inflate_polyhedron_app `.hippo` session (SessionStateModel, imported at
+        module level) -- see on_load_session_clicked's own docstring for the format-dispatch.
+        `net_file` (the ORIGINAL raw net JSON, self-contained -- no separate net file needs to
+        exist on disk) restores the LEFT pane via BuilderPane._load_faces, the exact same
+        inherited method every other Load path in this app already funnels through.
+        `self.base_faces`/base_edges/base_face_edge_ids are RE-DERIVED from `net_file` via
+        _load_mesh_from_dict (this app's own existing authoritative net-dict parser) rather than
+        trusting `state.base_faces` blindly, keeping this path consistent with every other
+        net-loading path here. Pressure prefers `level_history[3].pressure` (populated
+        specifically for Level 3 once reached, independent of whatever `pressure_value`/
+        `subdivision_level` happen to be at save time) over the top-level `pressure_value`
+        fallback.
+
+        A `.hippo` file predates the anchor concept entirely -- BuilderPane._refresh_vme_state's
+        own anchor-assignment fallback (see its docstring) picks the net's first shape as anchor
+        automatically once _load_faces replaces self.shapes wholesale, matching "when you load an
+        old save file with one connected component and no anchor specified, just let the first
+        piece be the anchor." """
+        try:
+            state = SessionStateModel.model_validate_json(raw_text)
+        except ValueError as e:
+            messagebox.showerror("Load session failed", str(e))
+            return
+
+        builder = self.builder_getter()
+        net_file = state.net_file
+        if net_file is not None:
+            try:
+                new_base_faces, new_base_edges, new_face_edge_ids = _load_mesh_from_dict(net_file)
+            except ValueError as e:
+                messagebox.showerror("Load session failed", str(e))
+                return
+            builder._load_faces(net_file.get("faces", state.base_faces), net_file.get("net_layout"),
+                                 net_file.get("view", {}).get("scale"), net_file.get("builder_connections"))
+            builder._refresh_vme_state()
+        else:
+            new_base_faces = [list(f) for f in state.base_faces]
+            new_base_edges, new_face_edge_ids = None, None
+            messagebox.showwarning(
+                "Partial session load",
+                "This session has no embedded net layout -- the 3D mesh was restored, but the "
+                "2D net on the left could not be.")
+
+        level = state.subdivision_level
+        level_state = state.levels.get(level)
+        if level_state is None:
+            messagebox.showerror(
+                "Load session failed",
+                f"Session's own subdivision_level ({level}) has no matching saved mesh.")
+            return
+        faces, positions, face_of_fine, edge_length = level_state.to_mesh()
+
+        level_history = {
+            lvl: {"pressure": record.pressure, "rms_stretch_pct": record.rms_stretch_pct,
+                  "pressure_found": record.pressure_found}
+            for lvl, record in state.level_history.items()
+        }
+        level3_record = state.level_history.get(3)
+        if level3_record is not None and level3_record.pressure is not None:
+            last_pressure = level3_record.pressure
+        else:
+            last_pressure = state.pressure_value
+
+        self._apply_loaded_session(
+            builder=builder, net_file=net_file, base_faces=new_base_faces,
+            base_edges=new_base_edges, base_face_edge_ids=new_face_edge_ids,
+            subdivision_level=level, faces=faces, positions=positions,
+            face_of_fine=face_of_fine, edge_length=edge_length,
+            target_rms_pct=state.target_rms_pct, tolerance=state.tolerance,
+            last_pressure=last_pressure, level_history=level_history, session_label=state.net_name)
+
+    def _load_hippie_session(self, raw_text):
+        """Restores this app's OWN `.hippie` session (InflaterSessionStateModel) -- see
+        on_load_session_clicked's own docstring for the format-dispatch. `net_file` here
+        describes EVERY placed shape/connection (central or not, see
+        BuilderPane.export_full_net_dict's own docstring) -- restored via _load_faces exactly
+        like a `.hippo`'s own net_file, giving back the FULL 2D net including any non-central
+        piece(s). The central object's own base mesh/edges are then re-derived by calling the
+        just-restored builder's OWN export_mesh_dict() (after the anchor below is set) rather
+        than re-parsing `net_file` directly (which describes the WHOLE net, not just the central
+        piece `state.base_faces`/`state.mesh` actually describe) -- this guarantees the same
+        vertex numbering `state.mesh`'s own saved positions assume, since both the original Save
+        and this Load run the identical central-object export pipeline over the identical
+        shapes/connections.
+
+        `anchor_shape_id` is the ANCHOR's saved `net_layout` "shape_id" -- `_load_faces` always
+        reassigns fresh LIVE ids in net_layout order (see its own docstring: "a fresh saved-id ->
+        live-id table"), so the saved integer itself is not a valid live id after this Load; the
+        anchor is instead re-found by INDEX into `net_file["net_layout"]` (the entry whose own
+        saved "shape_id" matches), then read back off `builder.shapes` at that same index --
+        `_load_faces` builds `self.shapes` in exactly `net_layout`'s own order (confirmed by
+        reading its shape-creation loop), so this index correspondence is exact."""
+        try:
+            state = InflaterSessionStateModel.model_validate_json(raw_text)
+        except ValueError as e:
+            messagebox.showerror("Load session failed", str(e))
+            return
+
+        builder = self.builder_getter()
+        net_file = state.net_file
+        builder._load_faces(net_file.get("faces"), net_file.get("net_layout"),
+                             net_file.get("view", {}).get("scale"), net_file.get("builder_connections"))
+
+        net_layout = net_file.get("net_layout") or []
+        anchor_index = next((i for i, entry in enumerate(net_layout)
+                             if entry.get("shape_id") == state.anchor_shape_id), None)
+        if anchor_index is not None and anchor_index < len(builder.shapes):
+            builder._anchor_shape_id = builder.shapes[anchor_index]["id"]
+        builder._refresh_vme_state()
+
+        central_mesh, err = builder.export_mesh_dict()
+        if err:
+            messagebox.showerror("Load session failed",
+                                  f"Restored net's central object no longer matches the saved "
+                                  f"mesh: {err}")
+            return
+
+        faces, positions, face_of_fine, edge_length = state.mesh.to_mesh()
+        self._apply_loaded_session(
+            builder=builder, net_file=net_file, base_faces=central_mesh["faces"],
+            base_edges=central_mesh["edges"], base_face_edge_ids=central_mesh["face_edge_ids"],
+            subdivision_level=state.subdivision_level, faces=faces, positions=positions,
+            face_of_fine=face_of_fine, edge_length=edge_length,
+            target_rms_pct=state.target_rms_pct, tolerance=state.tolerance,
+            last_pressure=state.last_pressure, level_history=state.level_history,
+            session_label=state.net_name)
+
+    def _apply_loaded_session(self, builder, net_file, base_faces, base_edges, base_face_edge_ids,
+                               subdivision_level, faces, positions, face_of_fine, edge_length,
+                               target_rms_pct, tolerance, last_pressure, level_history,
+                               session_label):
+        """Shared tail of _load_hippo_session/_load_hippie_session -- everything past "the
+        builder's own 2D net is already restored, and we have the central object's own base
+        mesh/current mesh": populates every remaining InflaterPane field (see
+        on_load_session_clicked's own docstring for the full list and WHY each one matters), then
+        renders and refreshes Diff Inflate's own enabled state (harmless right after a load --
+        classify_change sees an identical snapshot and reports "none", so nothing auto-fires)."""
+        self.base_faces = base_faces
+        self.base_edges = base_edges
+        self.base_face_edge_ids = base_face_edge_ids
+        self.faces = faces
+        self.positions = positions
+        self.face_of_fine = face_of_fine
+        if edge_length is not None:
+            self.edge_length = edge_length
+        self.edges = None
+        self.subdivision_level = subdivision_level
+
+        for lvl in (1, 2, 3):
+            if lvl in target_rms_pct and lvl in self.target_rms_vars:
+                self.target_rms_vars[lvl].set(target_rms_pct[lvl])
+        self.tolerance_var.set(tolerance)
+        self.level_history = dict(level_history)
+        if last_pressure is not None:
+            self.last_pressure = last_pressure
+
+        source_polygon_id = (net_file or {}).get("source_polygon_id") or list(range(len(base_faces)))
+        self._pending_source_polygon_id = source_polygon_id
+        self.last_source_polygon_id = source_polygon_id
+        (self.last_shapes_snapshot, self.last_connections_snapshot,
+         self.last_anchor_snapshot) = builder.snapshot_state()
+        self.last_root_to_vertex_id = builder.root_to_vertex_id()
+
+        self._render()
+        self.refresh_diff_eligibility()
+        self._set_status(f"Loaded session '{session_label}' at Level {subdivision_level}.", "info")
+
+    def on_save_session_clicked(self):
+        """File > Save Session... (2026-09-26, explicit) -- writes the CURRENT full session (the
+        whole live net, central or not, plus the central object's own current mesh/params/
+        pressure/anchor) to a `.hippie` file, the ONLY format allowed to describe more than one
+        connected piece (see BuilderPane.export_full_net_dict's own docstring). Refuses (with an
+        error dialog, no file written) if nothing has been placed yet or the net currently fails
+        vertex-merge/duplicate-edge validation (export_full_net_dict's own check), or if nothing
+        has been inflated yet (self.faces/base_faces are None before any Inflate ever runs -- a
+        `.hippie` always carries a real central-object mesh, never a placeholder one). A no-op
+        while an inflate is running (the net could still be changing underneath the save)."""
+        if self._running:
+            return
+        builder = self.builder_getter()
+        net_file, err = builder.export_full_net_dict()
+        if err:
+            messagebox.showerror("Save session failed", err)
+            return
+        if self.faces is None or self.base_faces is None or builder._anchor_shape_id is None:
+            messagebox.showerror("Save session failed",
+                                  "Nothing has been inflated yet -- run Full Inflate first.")
+            return
+        SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = filedialog.asksaveasfilename(
+            title="Save session", initialdir=str(SESSION_OUTPUT_DIR),
+            defaultextension=SESSION_FILE_EXTENSION,
+            filetypes=[("Inflater session", f"*{SESSION_FILE_EXTENSION}"), ("All files", "*.*")])
+        if not path:
+            return
+        mesh_state = LevelStateModel.from_mesh(self.faces, self.positions, self.face_of_fine,
+                                                self.edge_length)
+        state = InflaterSessionStateModel(
+            net_name=net_file.get("name", "live_net"), net_file=net_file,
+            anchor_shape_id=builder._anchor_shape_id,
+            base_faces=[list(f) for f in self.base_faces], subdivision_level=self.subdivision_level,
+            mesh=mesh_state, tolerance=self.tolerance_var.get(),
+            target_rms_pct={lvl: var.get() for lvl, var in self.target_rms_vars.items()},
+            last_pressure=self.last_pressure, level_history=self.level_history,
+        )
+        try:
+            with open(path, "w") as f:
+                f.write(state.model_dump_json())
+        except OSError as e:
+            messagebox.showerror("Save session failed", str(e))
+            return
+        self._set_status(f"Session saved to {path}.", "info")
+
     def refresh_diff_eligibility(self):
         """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
         current net differs from that completed state by exactly one added/removed shape or
@@ -1749,10 +2504,10 @@ class InflaterPane:
             self.diff_inflate_button.state(["disabled"])
             return
         kind, _extra = self.builder_getter().classify_change(
-            self.last_shapes_snapshot, self.last_connections_snapshot)
+            self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
         eligible = kind in self.DIFF_ELIGIBLE_KINDS
         self.diff_inflate_button.state(["!disabled"] if eligible else ["disabled"])
-        if eligible and self.auto_inflate_var.get():
+        if eligible and self.auto_inflate_var.get() and self.builder_getter().tool_mode != "anchor":
             self.on_diff_inflate_clicked()
 
     def _on_panel_configure(self, event):
@@ -3230,7 +3985,8 @@ class InflaterPane:
         even for a mesh that's currently displayed but not yet (or never) successfully
         recorded."""
         builder = self.builder_getter()
-        self.last_shapes_snapshot, self.last_connections_snapshot = builder.snapshot_state()
+        (self.last_shapes_snapshot, self.last_connections_snapshot,
+         self.last_anchor_snapshot) = builder.snapshot_state()
         self.last_source_polygon_id = self._pending_source_polygon_id
         self.last_root_to_vertex_id = builder.root_to_vertex_id()
 
@@ -3247,7 +4003,7 @@ class InflaterPane:
             return
         builder = self.builder_getter()
         kind, extra = builder.classify_change(
-            self.last_shapes_snapshot, self.last_connections_snapshot)
+            self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
         if kind == "add_face":
             self._diff_add_face(extra)
         elif kind == "remove_face":
@@ -3516,6 +4272,15 @@ class CombinedApp:
         menubar = tk.Menu(root, **menu_kwargs)
         file_menu = tk.Menu(menubar, tearoff=False, **menu_kwargs)
         file_menu.add_command(label="Load...", command=lambda: self.builder.on_load_clicked())
+        # 2026-09-26, explicit -- restores a full inflate_polyhedron_app .hippo session (net +
+        # mesh + params + pressure) into this combined window; see InflaterPane.
+        # on_load_session_clicked's own docstring.
+        file_menu.add_command(label="Load Session...",
+                               command=lambda: self.inflater.on_load_session_clicked())
+        # 2026-09-26, explicit -- writes a .hippie (this app's own session format, the only one
+        # allowed >1 connected piece); see InflaterPane.on_save_session_clicked's own docstring.
+        file_menu.add_command(label="Save Session...",
+                               command=lambda: self.inflater.on_save_session_clicked())
         menubar.add_cascade(label="File", menu=file_menu)
         root.config(menu=menubar)
 

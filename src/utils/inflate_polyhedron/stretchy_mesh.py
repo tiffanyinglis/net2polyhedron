@@ -591,30 +591,31 @@ def _remove_rigid_motion(pts_before, pts_after):
     """Re-expresses `pts_after` in the SAME rigid frame (rotation +
     translation) `pts_before` was in, via the standard Kabsch/orthogonal-
     Procrustes best-fit alignment -- removes whatever GLOBAL rigid
-    rotation/translation this step's own force-driven update happened to
-    introduce, leaving only the genuine shape change (every PAIRWISE
-    distance within `pts_after` is preserved exactly, since a rigid
-    transform is an isometry -- so this can never affect stretch stats,
-    convergence, or anything else the physics actually cares about).
+    rotation/translation happened to appear between the two, leaving only
+    the genuine shape change (every PAIRWISE distance within `pts_after`
+    is preserved exactly, since a rigid transform is an isometry -- so
+    this can never affect stretch stats, convergence, or anything else
+    the physics actually cares about).
 
     A free-floating spring/pressure system (nothing pins any vertex to a
     fixed point) has no preferred orientation of its own -- rotating the
     WHOLE mesh about its own center of mass costs zero spring/pressure
     energy, so it's an exactly-flat direction the relaxation can drift
-    along for free. Small numerical asymmetries (irregular topology,
-    floating-point rounding) can accumulate into a slow but visible net
-    spin over many steps with nothing to damp it, since nothing in
-    _relax_force/_spring_only_force distinguishes "genuine shape change"
-    from "the whole shape turning in place" -- visible both as an open
-    net spinning mid-Inflate for no shape-related reason, and as
-    different levels (each starting from wherever the previous one left
-    off) accumulating different amounts of spin, making the app's
-    shared per-level camera look inconsistent between them even though
-    the camera itself never moved. Called every step (see
-    _explicit_relax_loop) so each step's own small rotation is what gets
-    cancelled, transitively pinning the whole run's trajectory back to
-    wherever it started -- an O(N) matrix product plus one 3x3 SVD per
-    call, negligible next to the force computation itself."""
+    along for free, and nothing in _relax_force/_spring_only_force
+    distinguishes "genuine shape change" from "the whole shape turning in
+    place". This isn't only small numerical noise: an ASYMMETRIC net
+    (e.g. an off-center Polygon Fold pinch) can have a genuine, physically
+    -driven rotational component to its own gradient-descent path toward
+    lower stretch, which compounds block over block exactly like real
+    motion would, since nothing in the force law objects to it (2026-09-26,
+    explicit bug report: a ~121-degree net rotation measured between two
+    levels of `three_poly_pinch.hippo`, confirmed via this same Kabsch fit
+    applied to the two levels' own shared base vertices). _explicit_relax_
+    loop now calls this against a FIXED reference (the state at the very
+    start of the run), not a rolling one -- see its own docstring for why
+    that specific choice, and not just "call this more often", is what
+    actually eliminates cumulative drift rather than merely bounding it
+    per-block."""
     c_before = pts_before.mean(axis=0)
     c_after = pts_after.mean(axis=0)
     a = pts_before - c_before
@@ -655,21 +656,45 @@ def _explicit_relax_loop(pts, scale, force_fn,
 
     Whatever rigid rotation/translation the raw per-step updates
     introduce (_remove_rigid_motion, see its own docstring for why a
-    free-floating system needs this) is only stripped out ONCE per
+    free-floating system needs this) is only computed ONCE per
     CONVERGENCE_CHECK_INTERVAL-step block, immediately before that
     block's convergence check, rather than after every individual step --
-    this is exactly equivalent to correcting every step, not an
-    approximation: every force here (spring stretch, pressure area-
-    vector) depends only on relative vertex geometry, so it's
-    translation-invariant and rotation-equivariant, meaning the shape's
-    own intrinsic trajectory (every edge length, every face shape) never
-    depends on what rigid frame the steps in between happened to be
-    sitting in -- only the FINAL comparison against `pts_at_last_check`
-    needs to be in a consistent frame, which one alignment right before
-    that comparison achieves exactly as well as 200 smaller ones would
-    have. `on_check(pts, steps_taken, optimality, converged)`, if given,
-    is called every time this periodic check runs (whether or not it
-    ends the run) -- lets a caller sync progress reporting (e.g.
+    still exactly equivalent to correcting every step (not an
+    approximation) as far as the mesh's own SHAPE trajectory goes: every
+    force here (spring stretch, pressure area-vector) depends only on
+    relative vertex geometry, so it's translation-invariant and rotation-
+    equivariant, meaning every edge length/face shape the physics actually
+    computes never depends on what rigid frame the steps in between
+    happened to be sitting in.
+
+    Aligned against `pts_at_run_start` -- this call's own STARTING
+    positions, captured once and never updated -- rather than a rolling
+    "the previous block's own end state" (2026-09-26, explicit user
+    request, after a ~121-degree net rotation was observed and traced to
+    exactly this choice: see _remove_rigid_motion's own docstring). A
+    rolling reference only cancels drift introduced WITHIN each block,
+    chained block to block -- mathematically fine for removing numerical
+    noise, but it does nothing to stop a genuine, physically-driven
+    per-block rotational component (an asymmetric net has no reason to
+    prefer zero rotation over any other) from compounding across many
+    blocks, since each new block's "zero rotation" reference is itself
+    already however-many-degrees rotated from where the run began. Aligning
+    to the fixed start instead makes every reported/returned `pts` exactly
+    orientation-locked to the run's own beginning for its ENTIRE duration,
+    not just drift-free one block at a time -- still a pure isometric
+    correction (same reasoning above: shape trajectory is frame-
+    independent), so this changes nothing about convergence or stretch,
+    only which orientation gets reported.
+
+    `pts_at_last_check` (a separate, still-rolling reference) remains
+    for the CONVERGENCE comparison itself (`block_displacement` below) --
+    "has the mesh stopped moving" is inherently a block-to-block question,
+    unrelated to which frame the rigid-motion removal itself targets; both
+    `pts` and `pts_at_last_check` live in the same fixed run-start frame
+    by this point regardless, so their difference is unaffected either way.
+    `on_check(pts, steps_taken, optimality, converged)`, if given, is
+    called every time this periodic check runs (whether or not it ends
+    the run) -- lets a caller sync progress reporting (e.g.
     inflate_polyhedron_app redrawing its 3D panels) to the SAME cadence
     as the actual convergence check.
 
@@ -685,6 +710,7 @@ def _explicit_relax_loop(pts, scale, force_fn,
     steps_taken = 0
     converged = False
     optimality = None
+    pts_at_run_start = pts.copy()
     pts_at_last_check = pts.copy()
     recent_max_force = collections.deque(maxlen=KICK_WINDOW) if rng is not None else None
     for steps_taken in range(1, step_cap + 1):
@@ -715,12 +741,13 @@ def _explicit_relax_loop(pts, scale, force_fn,
         # to CONVERGENCE_CHECK_INTERVAL * gtol, the same per-step rate
         # scaled up to the longer window -- so a genuine multi-step drift
         # is caught even if no single step's own displacement would trip
-        # an every-step check. The block's own accumulated rigid rotation/
-        # translation (see this function's own docstring for why raw
-        # steps drift) is stripped out HERE, once per block, rather than
-        # after every step -- exactly equivalent, not an approximation.
+        # an every-step check. Rigid rotation/translation is stripped out
+        # HERE, once per block, against the FIXED pts_at_run_start (see
+        # this function's own docstring for why a fixed reference, not a
+        # rolling one, is what actually prevents cumulative drift) --
+        # still just once per block, not after every step.
         if steps_taken % CONVERGENCE_CHECK_INTERVAL == 0:
-            pts = _remove_rigid_motion(pts_at_last_check, pts)
+            pts = _remove_rigid_motion(pts_at_run_start, pts)
             block_displacement = float(np.linalg.norm(pts - pts_at_last_check, axis=1).max())
             optimality = block_displacement / CONVERGENCE_CHECK_INTERVAL
             pts_at_last_check = pts.copy()
@@ -732,11 +759,12 @@ def _explicit_relax_loop(pts, scale, force_fn,
                 break
     # A run that stops mid-block (stop_event, or step_cap not a multiple
     # of CONVERGENCE_CHECK_INTERVAL) never hit the alignment above for
-    # its own trailing partial block -- align once more here so callers
-    # never see a `pts` still carrying uncorrected rigid drift, even
-    # though no convergence check ran against it.
+    # its own trailing partial block -- align once more here (same fixed
+    # pts_at_run_start reference) so callers never see a `pts` still
+    # carrying uncorrected rigid drift, even though no convergence check
+    # ran against it.
     if steps_taken % CONVERGENCE_CHECK_INTERVAL != 0:
-        pts = _remove_rigid_motion(pts_at_last_check, pts)
+        pts = _remove_rigid_motion(pts_at_run_start, pts)
     return pts, steps_taken, optimality, converged
 
 

@@ -669,7 +669,8 @@ TOOLBAR_ACTIVE_BORDER = "white"
 # SELECTION_OUTLINE_COLOR (red, solid) that a marquee in progress can't
 # be confused with an actual selected shape's outline.
 MARQUEE_OUTLINE_COLOR = "white"
-MARQUEE_DASH = (4, 2)
+# 2026-09-26, explicit: "try (5,5)".
+MARQUEE_DASH = (5, 5)
 
 # A flipped shape (see "flipped" in the module docstring's Flip section)
 # renders as diagonal hatching instead of a solid fill, in the same
@@ -1436,6 +1437,32 @@ def _connection_chain(shapes, connections, slot_a, slot_b):
         chain.append(conn)
     chain.reverse()
     return chain
+
+
+def _count_shape_components(shapes, connections):
+    """Number of connected components among `shapes` via `connections` ("a_shape"/"b_shape"
+    endpoints) -- a small union-find, used ONLY by _save_to_path's own multi-component Save
+    restriction below (2026-09-26, explicit: "let's explicitly forbid saving nets or models with
+    more than one connected component. So there's no issue of anchor pieces. Only .hippie files
+    allow more than one connected component") -- not shared with interactive_inflater_app's own
+    equivalent (which needs this for a different reason, finding which piece is the "central
+    object" anchor), since that file already imports FROM this one; importing back would be
+    circular, and this is a self-contained handful of lines either way. Returns 0 for an empty
+    net (never counts as "more than one piece")."""
+    if not shapes:
+        return 0
+    parent = {s["id"]: s["id"] for s in shapes}
+
+    def find(x):
+        while parent[x] != x:
+            x = parent[x]
+        return x
+
+    for c in connections:
+        a, b = find(c["a_shape"]), find(c["b_shape"])
+        if a != b:
+            parent[a] = b
+    return len({find(s["id"]) for s in shapes})
 
 
 class NetValidationError(ValueError):
@@ -2347,7 +2374,26 @@ class InteractiveBuilderApp:
         (already reported via messagebox) -- callers that need to know
         whether the save actually happened (_confirm_discard_unsaved,
         before letting New/quitting throw away unsaved work) check
-        this."""
+        this.
+
+        Refuses (no file written) if the net has more than one connected
+        piece (2026-09-26, explicit -- see _count_shape_components' own
+        docstring): a plain net file has no way to record which piece is
+        "central", so this app only ever saves a single connected net;
+        interactive_inflater_app's own .hippie format is the one place a
+        multi-piece net can be saved. Checked here, not inside
+        _export_faces_and_layout/_validate_shapes_connections (which
+        interactive_inflater_app's own live inflate/central-object
+        export also call) -- those need to keep working unchanged on a
+        DISCONNECTED net (a shape not yet attached to the central object
+        is a completely normal, temporary state while building one)."""
+        component_count = _count_shape_components(self.shapes, self.connections)
+        if component_count > 1:
+            messagebox.showerror(
+                "Save failed",
+                f"This net has {component_count} disconnected pieces -- only a single "
+                f"connected net can be saved here.")
+            return False
         try:
             faces, edges, face_edge_ids, source_polygon_id, net_layout, builder_connections = \
                 self._export_faces_and_layout()
@@ -3623,8 +3669,26 @@ class InteractiveBuilderApp:
         if self._marquee_start is not None:
             x0, y0 = self._marquee_start
             x1, y1 = self._marquee_current
-            self.canvas.create_rectangle(x0, y0, x1, y1, outline=MARQUEE_OUTLINE_COLOR,
-                                          dash=MARQUEE_DASH, width=1.5)
+            # width=1 (not 2) -- Tk-on-Windows only honors a custom dash PATTERN precisely at
+            # hairline width; a wider line silently falls back to a generic short dotted GDI pen
+            # regardless of the requested dash tuple (2026-09-26, explicit bug report: "your
+            # changes aren't working" -- the (8, 4) pattern set above had no visible effect at
+            # width=2, exactly this symptom).
+            #
+            # Four separate create_line calls (one per edge), not one create_rectangle -- a
+            # single closed-shape item (rectangle or polygon) resets Tk's own dash PHASE at each
+            # corner based on where the previous edge's pattern happened to end, so the same
+            # dash tuple can land completely differently at each corner depending on the
+            # rectangle's exact pixel dimensions -- a tiny dash-length change (e.g. (5, 4) ->
+            # (4, 4)) can then shift that phase landing enough to look like a much bigger visual
+            # change than the numbers suggest (2026-09-26, explicit bug report: "there's a big
+            # difference between (4,4) and (5,4)"). Each edge getting its OWN independent dash
+            # run starting fresh (same fix already applied to the orphan-piece outline in
+            # interactive_inflater_app.app) makes a dash-length change behave predictably.
+            for (ax, ay), (bx, by) in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)),
+                                        ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))):
+                self.canvas.create_line(ax, ay, bx, by, fill=MARQUEE_OUTLINE_COLOR,
+                                         dash=MARQUEE_DASH, width=1)
 
     def _draw_debug_vertex_label(self):
         """Debug mode only ("d" key): finds the shape VERTEX (a corner,
