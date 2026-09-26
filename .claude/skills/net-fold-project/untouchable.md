@@ -1,5 +1,10 @@
 # Untouchable files
 
+`paper/` (the Bridges 2027 LaTeX paper, incl. `paper.tex`, `bridges.sty`, `figures/`) — user
+writes/edits this by hand. Never edit any file under `paper/` without explicit permission naming
+the file + change first, even for something that looks like a typo fix. Compiling it (running
+pdflatex, cleaning up aux/log/out files) is fine without asking.
+
 Every file that existed before `interactive_builder_app` work started is untouchable — user
 considers it DONE. Don't edit (even "just cleanup") w/o asking first, naming file + change.
 

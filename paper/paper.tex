@@ -1,0 +1,114 @@
+\documentclass[letterpaper,11pt]{article}
+\usepackage{amsmath, amsthm, amssymb}
+\usepackage{bridges}			% Custom bridges proceedings style
+\usepackage{graphicx}			% For including pictures
+\usepackage[colorlinks=true, urlcolor=blue, citecolor=black, linkcolor=black]{hyperref}
+\usepackage{subcaption}			% For captioning multi-panel figures
+
+\urlstyle{rm}
+
+% -----------------------------------------------------------------------------
+
+\title{From Crochet Net to Puffy Polyhedron: Designing N-gon Animals with a Stretchy-Mesh Relaxation Tool}
+
+\author{Tiffany Inglis}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+% omit abstract for now
+\end{abstract}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Motivation}
+
+African flower crochet animals are low-resolution polyhedral models that are allowed to stretch. Crochet patterns usually include large diagrams showing how various polygons join together, along with photographs of the 3d objects taken from multiple angles. For designers, it's hard to prototype. Paper is too stiff and fabric requiring sewing and stuffing. For crafters, it's hard to keep track of where you are in the pattern.
+
+In this paper, we seek to bridge the gap by first studying such crochet animals others have designed, come up with a mathematical representation, then use physical simulations to relax and inflate these models.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Field Study}
+
+I analyzed many African flower crochet animal patterns. All of them involve making regular n-gons then joining them via edges. They can be represented as polyhedral nets.
+
+Structures typically considered degenerate (e.g. two squares) or impossible (e.g. two pentagons and a square) are valid structures with non-zero volume due to the flexibility of the material. Self joins (a polygon joined to itself) are also allowed.
+
+All the examples are closed polyhedra with a clear inside and outside, although they could be temporarily open while under construction.
+
+The models (giraffe, hippo, horse, turtle) use n-gons with $3 \leq n \leq 8$. The number of polygons range from 19 (turtle) to 42 (hippo). Animal models have ``skinny'' features like legs or necks, in contrast to standard polyhedra.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection*{Representing a Stretchy Polyhedron}
+
+Conceptually a stretchy polyhedra consists of a set of polygons with edges that join them. To build it, we first assign n distinct vertices to each n-gon (in a counterclockwise fashion such that the Right Hand Rule produces an outward normal, defining its orientation). As one polygon join to another, their shared vertices are deduped. Polygons sharing an edge must also be oriented consistently (which means the shared edge must be defined in opposite directions).
+
+Since our goal is to inflate the object, the polyhedral needs to be subdivided further via triangulation so the resolution is high enough to represent a rounded object. To this end, we first subdivide each base n-gons into $n$ triangles by fanning out from the centroid. Then subsequent refinements involve dividing each triangle into four by joining edge bisectors.
+
+To give it flexibility, we use a spring model, where each edge of the polyhedron is a spring. As it's being inflated, outward normal forces act upon faces (cross product of the edges makes the forces proportional to the area, which is desirable) while the edge springs pull towards their rest lengths. We collect these forces at vertices and step forward in time using the Forward Euler Method. If convergence is reached, the final state represents the stable inflated geometry.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection*{Inflation algorithm}
+
+Before applying the inflation, we need to first establish an initial configuration. If we just use a random set of points as the vertices, the springs will initially contract/expand too rapidly, causing instability. So instead, we use the spring model with a small time step to relax the model first, much like putting a balloon in its rest, deflated state.
+
+Next we apply the inflation as an outward pressure on the faces. To keep the pressure evenly distributed, it's scaled by area. Densely triangulated models take a long time to converge due to the number of vertices, so we use a hierarchical annealing process that alternates between inflating and subdividing. At each level, we inflate until convergence then subdivide the mesh (doubling the vertices each time). Three levels are enough to reach a sufficient smooth-looking model.
+
+When the pressure is too low, the animals often end up with inverted heads or feet. This can be fixed by using a high pressure initially to ``pop'' them out, then gradually lowering the pressure at later stages to reach the desired level of inflation. Since numerical instability occurs at high pressures, we introduce a cubic hardening term to the linear springs for stability. Physically, this mimics the real-life behaviour of balloons reaching stability under pressure rather than growing unbounded.
+
+For each level, we want choose the pressure that allows the model to stretch up to some amount (RMS stretch percent). Since this depends on a variety of factors, the easiest way is to just experiment with different values until you find something good enough. We run up to 8 trials for pressure estimation (up to 5000 steps), then take the best one and run it to completion if it hasn't converged already.
+
+The 8 trials for pressure estimation only needs to happen for Level 1, the coarsest inflation. For subsequent levels, each time the resolution doubles, the pressure needed also doubles (from empirical evidence). So we can extrapolate from Level 1 results, and massively speed up the estimation process.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Extensions}
+
+Our algorithm covers the basic models. But there are more complex features found on some of the patterns I analyzed.
+\begin{itemize}
+	\item duplicate edges
+	\item self joins
+\end{itemize}
+
+When creating small appendages, it's common to have two pieces joined end-to-end. When two squares are joined by opposite edges, we end up with two distinct edges with the same endpoints. To handle them properly, we need to keep the deduping of vertices and edges separate. Two edges are only considered the same if they are directly joined together. It's not sufficient for their vertices to be the same.
+
+Appendages can also feature self joins, in which edges from the same polygon are joined to one another. This results in the polygon folding, though not creased since we're still dealing with fabric, not paper. To handle self joins, we simply subdivide the polygon into triangles (basically the Level 0 triangulation). And then any self joins are just regular inter-polygon joins.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Real-Time Construction Tool}
+
+Now that we have a tool that takes a net and creates a 3D model from simulation, I want to take it a step further and make an interactive building tool that allows the user to build models from scratch and see their creations materialize in real-time.
+
+An example workflow would be: load a pre-existing pattern, do a full inflate, then add/delete pieces or connections and repeat ad infinitum. After each step, we don't want to do a full inflate because not only is that slow, it also breaks continuity from step to step. Instead, we do an incremental inflate that takes the precomputed pressure from Level 3 of the initial full inflate and use that to inflate the modified model. In most cases, the model would already be in near-steady state and it would just be adjusted slightly.
+
+While experimenting with it, I came across some limitations involving unstable constructions. When we attach a new polygon to the model via an edge, the piece is inherently unstable. The inflation simulation can cause it to fluctuate/spin wildly and never reach convergence. For the construction tool to behave in a stable manner, we need to impose some additional stability constraints.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Results}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Conclusion and Future Work}
+
+We've presented an interactive construction tool for building fabric polyhedron models. While this is a useful tool for artists to iterate their designs on, one might also want to simply click a button and create the model without having to do trial and error.
+
+One simple way to create a polyhedron model from an arbitrary 3D input is to triangulate it then take the dual, but this method has several limitations--the resulting polygons are irregular, the polyhedron is a poor approximation of the input at low resolutions, and it does not take the flexibility of fabric into account (which allows things like self-joins).
+
+We leave this as future work.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Acknowledgements}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% References %
+
+{\setlength{\baselineskip}{13pt}
+\raggedright
+\begin{thebibliography}{99}
+
+\end{thebibliography}
+}
+
+\end{document}
