@@ -4968,12 +4968,23 @@ class InflaterPane:
             self._render_replay_frame(frames[idx])
 
     def _render_replay_frame(self, frame):
-        """Static, reduced-feature redraw of one self._replay_frames entry -- just the colored
-        face mesh (same per-group POLYGON_COLORS/inside-darkening convention _render's own
-        first loop uses), no rim outline/hover/selection/open-edge picking (see
-        _on_replay_slider_moved's own docstring for why). self._actor_to_group is cleared, not
-        repopulated -- a scrubbed frame isn't pickable, so hover/click during a scrub simply
-        find nothing, same as an empty panel."""
+        """Static, reduced-feature redraw of one self._replay_frames entry -- the colored face
+        mesh (same per-group POLYGON_COLORS/inside-darkening convention _render's own first
+        loop uses) PLUS its own bold rim outline and, when their debug-mode checkboxes are
+        checked, the SAME face-normal/vertex-normal/repulsive-force overlays _render draws for
+        the live mesh -- but no hover/selection/open-edge picking (see _on_replay_slider_moved's
+        own docstring for why). self._actor_to_group is cleared, not repopulated -- a scrubbed
+        frame isn't pickable, so hover/click during a scrub simply find nothing, same as an
+        empty panel.
+
+        2026-09-29, explicit user request ("in 3d view, debug mode should show the polygon
+        edges, face normals/vertex normals/repulsive forces... as the user uses the replay
+        slider"): every overlay here is genuinely computed fresh per scrub tick, not just at
+        release -- repulsion_force is only ever run over self._repulsion_vertex_ids()' own
+        small, FIXED base-corner set (see its own comment: intentionally excluded from the
+        full fine-mesh vertex count specifically to stay cheap), so recomputing it live during
+        a drag is no more expensive than the ordinary rebuild <ttk.Scale> already does on every
+        `command` firing; there's no separate throttle-to-release path to fall back to."""
         plotter = self.plotter
         plotter.clear()
         self._actor_to_group = {}
@@ -4983,6 +4994,9 @@ class InflaterPane:
         vertex_ids = sorted(positions)
         idx = {v: i for i, v in enumerate(vertex_ids)}
         points = np.array([positions[v] for v in vertex_ids])
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        self._center = (lo + hi) / 2
+        self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
         groups_present = sorted(set(face_of_fine))
         for group in groups_present:
             group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == group]
@@ -4999,11 +5013,109 @@ class InflaterPane:
             plotter.add_mesh(mesh, color=inside_color, show_edges=True,
                               edge_color=_weighted_color(inside_color, BACK_EDGE_WEIGHT),
                               line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front")
-        lo, hi = points.min(axis=0), points.max(axis=0)
-        self._center = (lo + hi) / 2
-        self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
+            front_rim, back_rim = self._frame_group_boundary_offset_lines(
+                faces, face_of_fine, positions, group)
+            if len(front_rim):
+                self._add_rounded_lines(front_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
+            if len(back_rim):
+                self._add_rounded_lines(back_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
+
+        if self.show_normals_var.get():
+            starts, ends = [], []
+            for a, b, c in faces:
+                pa, pb, pc = positions[a], positions[b], positions[c]
+                normal = np.cross(pb - pa, pc - pa)
+                normal_len = np.linalg.norm(normal)
+                if normal_len < 1e-12:
+                    continue
+                centroid = (pa + pb + pc) / 3.0
+                edge_len = (np.linalg.norm(pb - pa) + np.linalg.norm(pc - pb)
+                            + np.linalg.norm(pa - pc)) / 3.0
+                starts.append(centroid)
+                ends.append(centroid + normal / normal_len * edge_len * NORMAL_LENGTH_FRACTION)
+            if starts:
+                segment_points = np.empty((2 * len(starts), 3))
+                segment_points[0::2] = starts
+                segment_points[1::2] = ends
+                plotter.add_lines(segment_points, color=NORMAL_COLOR, width=2.0)
+
+        if self.show_vertex_normals_var.get():
+            starts, ends = [], []
+            for v, (unit_normal, mean_edge_len) in _vertex_normals(faces, positions).items():
+                starts.append(positions[v])
+                ends.append(positions[v] + unit_normal * mean_edge_len * NORMAL_LENGTH_FRACTION)
+            if starts:
+                segment_points = np.empty((2 * len(starts), 3))
+                segment_points[0::2] = starts
+                segment_points[1::2] = ends
+                plotter.add_lines(segment_points, color=VERTEX_NORMAL_COLOR, width=2.0)
+
+        if self.show_repulsive_forces_var.get():
+            repulsion_ids = [v for v in self._repulsion_vertex_ids() if v in idx]
+            if repulsion_ids:
+                rep_indices = [idx[v] for v in repulsion_ids]
+                mult_by_id = self._repulsion_vertex_multipliers() or {}
+                rep_mults = [mult_by_id.get(v, 1.0) for v in repulsion_ids]
+                forces = repulsion_force(points, indices=rep_indices, vertex_multipliers=rep_mults)
+                force_lens = {v: np.linalg.norm(forces[idx[v]]) for v in repulsion_ids}
+                max_len = max(force_lens.values(), default=0.0)
+                starts, ends = [], []
+                if max_len >= 1e-12:
+                    for v in repulsion_ids:
+                        force_len = force_lens[v]
+                        if force_len < 1e-12:
+                            continue
+                        force_vec = forces[idx[v]]
+                        starts.append(positions[v])
+                        ends.append(positions[v] + force_vec / max_len
+                                    * EDGE_LENGTH * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=REPULSION_FORCE_COLOR, width=2.0)
+
         self._apply_camera()
         self._grab_frame()
+
+    def _frame_group_boundary_offset_lines(self, faces, face_of_fine, positions, group):
+        """Same (front_segs, back_segs) shape/nudge convention as _group_boundary_offset_lines
+        (see its own docstring) -- reimplemented over explicit faces/face_of_fine/positions (a
+        self._replay_frames entry's own, not self.faces/self.face_of_fine/self.positions)
+        rather than parametrizing that method itself, since every OTHER caller of it (_render's
+        own live rim, _set_hover_group's yellow highlight) always means the live mesh and would
+        otherwise need to pass the same three arguments right back through for no reason.
+        `self._half` (the Z-fighting nudge distance) is read as-is -- already set from THIS
+        frame's own bounding box by the caller (_render_replay_frame), same order _render's own
+        live path already establishes it in."""
+        edge_owner = {}
+        for face, bf in zip(faces, face_of_fine):
+            if bf != group:
+                continue
+            a, b, c = face
+            for u, v in ((a, b), (b, c), (c, a)):
+                key = (u, v) if u < v else (v, u)
+                edge_owner.setdefault(key, []).append(face)
+        boundary = [(edge, tris[0]) for edge, tris in edge_owner.items() if len(tris) == 1]
+        nudge = self._half * 0.002
+        front_pairs, back_pairs = [], []
+        for (u, v), (ta, tb, tc) in boundary:
+            pa, pb, pc = positions[ta], positions[tb], positions[tc]
+            normal = np.cross(pb - pa, pc - pa)
+            length = np.linalg.norm(normal)
+            offset = (normal / length * nudge) if length > 1e-12 else np.zeros(3)
+            p_u, p_v = positions[u], positions[v]
+            front_pairs.append((p_u + offset, p_v + offset))
+            back_pairs.append((p_u - offset, p_v - offset))
+
+        def to_segments(pairs):
+            segments = np.empty((2 * len(pairs), 3))
+            for i, (p, q) in enumerate(pairs):
+                segments[2 * i] = p
+                segments[2 * i + 1] = q
+            return segments
+
+        return to_segments(front_pairs), to_segments(back_pairs)
 
     def _render(self):
         """Redraws the single panel from whatever self.faces/self.positions/self.face_of_fine
