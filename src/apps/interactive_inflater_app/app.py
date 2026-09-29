@@ -821,18 +821,31 @@ def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level
     # the only side with real information (the neighbor's actual position) to decide it from.
     rest_outward = np.array([-rest_edge_dir[1], rest_edge_dir[0]])
 
-    original_corner_ids = set(pendant["face"])
+    # Every corner except the two literally SHARED with the neighbor (a, b, already real
+    # global ids) gets a FRESH id here -- including a pendant's own THIRD+ original corner
+    # (n > 3, e.g. every pentagon), not just _flat_pendant_fine_mesh's own genuinely-new
+    # subdivision vertices. An earlier version kept a third+ corner's own original (base-
+    # export-level) id as-is, on the theory that it was already a real, reserved global id --
+    # but that id space belongs to the WHOLE original net export, while the CORE's own Level-3
+    # fine mesh numbers its subdivision-created vertices independently (starting fresh from
+    # its own "1 + max" at build time, with no idea some small integer is "reserved" by a
+    # pendant not even part of its own solve) -- the two can and do collide on an unrelated
+    # vertex (2026-09-29, explicit bug report: "spiky artifacts" persisting through
+    # re-inflate/rotation -- traced to exactly this: a core face's own fine-mesh vertex
+    # silently got its position overwritten by an unrelated pendant corner that happened to
+    # reuse the same numeric id, stretching that core triangle into a giant sliver). Exactly
+    # the same bug _diff_attach_pendant_only's own docstring already documents and fixes for
+    # its own separate code path ("a just-added pendant's own free corner silently overwrote
+    # an existing Level-3 midpoint that happened to share its raw id") -- this path just never
+    # got the same fix.
     id_map = {a: a, b: b}
     faces_out = []
     positions_out = {a: p0, b: p1}
     for v in local_positions:
         if v in id_map:
             continue
-        if v in original_corner_ids:
-            id_map[v] = v  # a THIRD+ original corner (n > 3) keeps its own real global id
-        else:
-            id_map[v] = next_free_id
-            next_free_id += 1
+        id_map[v] = next_free_id
+        next_free_id += 1
     for v, local_pos in local_positions.items():
         if v in (a, b):
             continue
