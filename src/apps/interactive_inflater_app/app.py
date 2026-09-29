@@ -1942,8 +1942,22 @@ class BuilderPane(InteractiveBuilderApp):
         # actually went through, as opposed to a failed one (a bad file shows its own error
         # box and returns with self.shapes untouched). 2026-09-19, explicit: "as soon as i
         # load a file, it should also inflate" (when Auto Inflate is checked).
-        if self.shapes is not shapes_before and self.on_load_success is not None:
-            self.on_load_success()
+        if self.shapes is not shapes_before:
+            # _load_faces' own _redraw() call (its very last line) fires BEFORE
+            # InteractiveBuilderApp.on_load_clicked's subsequent self._refresh_vme_state()
+            # call corrects self._anchor_shape_id (the overridden _refresh_vme_state's own
+            # "shapes exist but the current anchor id doesn't name any of them" fallback,
+            # above) -- so that first redraw always draws every shape dimmed as an outsider
+            # (self.central_shape_ids() sees the OLD, no-longer-valid anchor id, or None),
+            # regardless of the newly-loaded net's real connectivity. Nothing else redraws
+            # the canvas again afterward, so that wrong frame was what stayed on screen
+            # until some unrelated interaction (hover, drag, ...) happened to trigger a real
+            # one (2026-09-29, explicit bug report: "the polygons are rendered as outsiders
+            # initially and later became members"). One extra _redraw() here, now that the
+            # anchor is correct, fixes it for good.
+            self._redraw()
+            if self.on_load_success is not None:
+                self.on_load_success()
 
     def _refresh_vme_state(self):
         """Runs InteractiveBuilderApp's own vertex-merge-error check unchanged, then notifies
@@ -3109,6 +3123,14 @@ class InflaterPane:
                                  net_file.get("view", {}).get("scale"), net_file.get("builder_connections"))
             builder._refresh_vme_state()
             self._loading_session = False
+            # _load_faces' own _redraw() call (its very last line, above) draws with whatever
+            # self._anchor_shape_id was BEFORE this load -- _refresh_vme_state's own fallback
+            # (self.shapes[0]["id"], see its docstring) only corrects it just now, one line
+            # above, so that first redraw always shows every shape dimmed as an outsider
+            # regardless of the newly-loaded net's real connectivity (2026-09-29, explicit bug
+            # report: "the polygons are rendered as outsiders initially and later became
+            # members"). Nothing else redraws the canvas again afterward.
+            builder._redraw()
         else:
             new_base_faces = [list(f) for f in state.base_faces]
             new_base_edges, new_face_edge_ids = None, None
@@ -3188,6 +3210,13 @@ class InflaterPane:
         if anchor_index is not None and anchor_index < len(builder.shapes):
             builder._anchor_shape_id = builder.shapes[anchor_index]["id"]
         builder._refresh_vme_state()
+        # _load_faces' own _redraw() call (its very last line, above) draws with whatever
+        # self._anchor_shape_id was BEFORE this load -- the real one is only assigned just
+        # now, a few lines above -- so that first redraw always shows every shape dimmed as
+        # an outsider regardless of the newly-loaded net's real connectivity (2026-09-29,
+        # explicit bug report: "the polygons are rendered as outsiders initially and later
+        # became members"). Nothing else redraws the canvas again afterward.
+        builder._redraw()
 
         central_mesh, err = builder.export_mesh_dict()
         if err:
