@@ -3591,7 +3591,12 @@ class InflaterPane:
         self._pending_pendants = []
         (self.last_shapes_snapshot, self.last_connections_snapshot,
          self.last_anchor_snapshot) = builder.snapshot_state()
-        self.last_root_to_vertex_id = builder.root_to_vertex_id()
+        # _current_root_to_vertex_id (NOT builder.root_to_vertex_id() directly -- see that
+        # method's own docstring) -- self.base_faces/self._pending_source_polygon_id are
+        # already set above, correctly (state.base_faces, per _load_hippie_session's own fix),
+        # so this correctly reads a loaded guest's own arbitrary remapped id straight off them
+        # instead of re-deriving a fresh id that wouldn't match self.positions.
+        self.last_root_to_vertex_id = self._current_root_to_vertex_id()
 
         self._render()
         self.refresh_diff_eligibility()
@@ -5563,6 +5568,59 @@ class InflaterPane:
             f"{self._pipeline_label()} -- Level {self.subdivision_level}: Step 0.", "info")
         self._run_inflate_step()
 
+    def _current_root_to_vertex_id(self):
+        """Same {root_slot: vertex_id} shape as builder.root_to_vertex_id() (see its own
+        docstring for what a root_slot is/why it's stable) -- but every value is the REAL
+        vertex id self.base_faces/self.positions actually use RIGHT NOW, not a fresh export's
+        own deterministic sequential numbering. builder.root_to_vertex_id() reimplements
+        _faces_from_shapes' own numbering loop from scratch, with NO knowledge of a pendant's
+        own arbitrary _place_pendant_flat id_map remapping -- using its raw output directly as
+        a self.positions lookup key (as self.last_root_to_vertex_id used to, before this fix)
+        silently matched some UNRELATED vertex that happened to share the same small integer id
+        whenever a pendant/guest was involved (2026-09-29, explicit bug report, confirmed via
+        the debug replay slider: a guest promoted from pendant to insider mid-Diff-Inflate got
+        seeded from a random vertex on the opposite side of the mesh, "connected to the centre
+        of an opposite pentagon" -- the exact same class of stale-id mismatch as the earlier
+        _load_hippie_session fix, here in _diff_reexport_and_relax's own root-matched seeding
+        instead of the file-load path).
+
+        Walks self._pending_source_polygon_id/self.base_faces (this pane's own CURRENT, already
+        correct ids -- pendant-remapped or not, doesn't matter) group by group, matching each
+        group's shape id back to its own expanded_shapes/roots entry (same
+        central_shape_ids/_expand_folded_shapes/_vertex_roots pipeline root_to_vertex_id's own
+        traversal uses) -- then reads the REAL id straight off self.base_faces[group][corner]
+        instead of assigning a fresh sequential one. Ambiguous (silently skipped) for a Polygon-
+        Fold shape split into several expanded_shapes sharing one source_polygon_id -- same
+        known limitation _rebuild_open_edges/_connection_edge_segments already carry for a
+        Polygon-Fold group (see their own comments); out of scope for this fix."""
+        builder = self.builder_getter()
+        central_ids = builder.central_shape_ids()
+        if not central_ids or not self.base_faces or self._pending_source_polygon_id is None:
+            return {}
+        central_shapes = [s for s in builder.shapes if s["id"] in central_ids]
+        central_connections = [c for c in builder.connections
+                                if c["a_shape"] in central_ids and c["b_shape"] in central_ids]
+        expanded_shapes, expanded_connections, _spid = _expand_folded_shapes(
+            central_shapes, central_connections)
+        roots = _vertex_roots(expanded_shapes, expanded_connections)
+        shape_by_id = {s["id"]: s for s in expanded_shapes}
+        vertex_ids = {}
+        for group, spid in enumerate(self._pending_source_polygon_id):
+            if group >= len(self.base_faces):
+                continue
+            shape = shape_by_id.get(spid)
+            if shape is None:
+                continue
+            corners = _shape_face_corner_order(shape)
+            face = self.base_faces[group]
+            if len(corners) != len(face):
+                continue
+            for corner, real_id in zip(corners, face):
+                root = roots.get((shape["id"], corner))
+                if root is not None:
+                    vertex_ids[root] = real_id
+        return vertex_ids
+
     def _record_inflate_success(self):
         """Called only from _on_inflate_step_done's "Done" branch above (a clean Level-3
         finish -- never a mid-pipeline stop/failure, so a warn/error outcome leaves Diff
@@ -5573,17 +5631,18 @@ class InflaterPane:
         self._pending_source_polygon_id as the new self.last_source_polygon_id, and
         re-derives self.last_root_to_vertex_id FRESH from the builder's current state (cheap,
         and always correct at this exact moment -- no need to thread it through the async
-        pipeline the way source_polygon_id is). Deliberately does NOT clear
-        self._pending_source_polygon_id afterward -- it doubles as "the source_polygon_id
-        parallel to self.base_faces RIGHT NOW" (every pipeline path sets both together, see
-        each one's own assignment), which hover picking (_set_hover_group) needs available
-        even for a mesh that's currently displayed but not yet (or never) successfully
-        recorded."""
+        pipeline the way source_polygon_id is) via _current_root_to_vertex_id (NOT
+        builder.root_to_vertex_id() directly -- see that method's own docstring for why).
+        Deliberately does NOT clear self._pending_source_polygon_id afterward -- it doubles as
+        "the source_polygon_id parallel to self.base_faces RIGHT NOW" (every pipeline path sets
+        both together, see each one's own assignment), which hover picking (_set_hover_group)
+        needs available even for a mesh that's currently displayed but not yet (or never)
+        successfully recorded."""
         builder = self.builder_getter()
         (self.last_shapes_snapshot, self.last_connections_snapshot,
          self.last_anchor_snapshot) = builder.snapshot_state()
         self.last_source_polygon_id = self._pending_source_polygon_id
-        self.last_root_to_vertex_id = builder.root_to_vertex_id()
+        self.last_root_to_vertex_id = self._current_root_to_vertex_id()
 
     # ---- diff inflate ----
 
