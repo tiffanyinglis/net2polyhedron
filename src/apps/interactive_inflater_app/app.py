@@ -2873,17 +2873,21 @@ class InflaterPane:
         # inflate_polyhedron_app's own identically-named toggles, see _render's own overlay
         # block for what each actually draws. command=self._render (not a separate redraw path)
         # since this pane has exactly one panel/one _render, unlike that app's per-level draw().
+        # Own ROW (self._debug_overlay_row), not packed into button_row -- three extra labeled
+        # checkbuttons alongside Full/Diff Inflate/Auto Inflate didn't fit on one line (2026-09-29,
+        # explicit user request: "those three checkboxes need to be on another line").
+        self._debug_overlay_row = overlay_row = ttk.Frame(setup)
         self.show_normals_var = tk.BooleanVar(value=False)
         self._show_normals_check = ttk.Checkbutton(
-            button_row, text="Show face normals", variable=self.show_normals_var,
+            overlay_row, text="Show face normals", variable=self.show_normals_var,
             command=self._render)
         self.show_vertex_normals_var = tk.BooleanVar(value=False)
         self._show_vertex_normals_check = ttk.Checkbutton(
-            button_row, text="Show vertex normals", variable=self.show_vertex_normals_var,
+            overlay_row, text="Show vertex normals", variable=self.show_vertex_normals_var,
             command=self._render)
         self.show_repulsive_forces_var = tk.BooleanVar(value=False)
         self._show_repulsive_forces_check = ttk.Checkbutton(
-            button_row, text="Show repulsive forces", variable=self.show_repulsive_forces_var,
+            overlay_row, text="Show repulsive forces", variable=self.show_repulsive_forces_var,
             command=self._render)
         # Release-mode-only (see _apply_mode_visibility): "basically Full Inflate" (2026-09-28,
         # explicit user request) -- same command, just the one button a release-mode user needs,
@@ -2947,7 +2951,8 @@ class InflaterPane:
             self.full_inflate_button.pack(side=tk.LEFT)
             self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
             self._auto_inflate_check.pack(side=tk.LEFT, padx=(8, 0))
-            self._show_normals_check.pack(side=tk.LEFT, padx=(8, 0))
+            self._debug_overlay_row.pack(side=tk.TOP, anchor=tk.W, pady=(4, 0))
+            self._show_normals_check.pack(side=tk.LEFT)
             self._show_vertex_normals_check.pack(side=tk.LEFT, padx=(8, 0))
             self._show_repulsive_forces_check.pack(side=tk.LEFT, padx=(8, 0))
             self.reinflate_button.pack_forget()
@@ -2956,9 +2961,7 @@ class InflaterPane:
             self.full_inflate_button.pack_forget()
             self.diff_inflate_button.pack_forget()
             self._auto_inflate_check.pack_forget()
-            self._show_normals_check.pack_forget()
-            self._show_vertex_normals_check.pack_forget()
-            self._show_repulsive_forces_check.pack_forget()
+            self._debug_overlay_row.pack_forget()
             self.reinflate_button.pack(side=tk.LEFT)
             # Off, not just hidden, when leaving debug mode -- same as inflate_polyhedron_app's
             # own _apply_mode_visibility -- so a stale overlay never lingers into release mode.
