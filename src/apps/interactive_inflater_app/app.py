@@ -852,9 +852,28 @@ def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_lengt
     pendant's own fine triangles are its own `neighbor_idx` (2026-09-28: they read as part of
     the face they're attached to for coloring purposes, since they have no relaxed/inflated
     identity of their own to color by). No-op (returns the inputs unchanged) if `pendants` is
-    empty."""
+    empty.
+
+    Every `_place_pendant_flat` call below reads `neighbor_face_idx`'s own plane/normal from
+    `core_faces`/`core_face_of_fine` -- a FIXED snapshot taken once, before this loop appends
+    anything -- never from the growing `faces`/`face_of_fine` themselves (2026-09-28, explicit
+    bug report: "a pentagon anchor with 2+ guests hinged on ADJACENT edges of it came out
+    tangled"). Two pendants hinged on the SAME neighbor face share that neighbor's own
+    `neighbor_idx` value; once pendant #1 is appended, its own flat triangles are tagged with
+    that SAME `neighbor_idx` too (previous paragraph) -- reading the growing lists for pendant
+    #2's own neighbor-plane lookup would then also sweep up pendant #1's own already-placed
+    (flat, differently-oriented) triangles as if they were more of the neighbor's real curved
+    surface, corrupting pendant #2's placement whenever it happens to share a corner vertex with
+    pendant #1 (caught by direct testing: `_place_pendant_flat`'s own `local_tri_idx` filter,
+    which restricts to triangles touching the pendant's shared-edge vertices, isn't enough to
+    exclude this -- a shared CORNER vertex between two adjacent pendants means some of pendant
+    #1's own triangles pass that filter for pendant #2 too). Every pendant is independently
+    flat/coplanar against the neighbor's own TRUE (already fully solved) surface regardless of
+    how many other pendants also hang off it, so this snapshot is always correct, never stale."""
     if not pendants:
         return faces, positions, face_of_fine
+    core_faces = list(faces)
+    core_face_of_fine = list(face_of_fine)
     faces = list(faces)
     face_of_fine = list(face_of_fine)
     # NOT just `1 + max(positions)` -- `positions` only has the CORE's own vertex ids at this
@@ -868,8 +887,8 @@ def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_lengt
     next_free_id = 1 + max([*positions, *(v for p in pendants for v in p["face"])])
     for pendant in pendants:
         pendant_faces, pendant_positions, next_free_id = _place_pendant_flat(
-            pendant, positions, pendant["neighbor_idx"], face_of_fine, faces, edge_length,
-            next_free_id)
+            pendant, positions, pendant["neighbor_idx"], core_face_of_fine, core_faces,
+            edge_length, next_free_id)
         faces.extend(pendant_faces)
         face_of_fine.extend([pendant["neighbor_idx"]] * len(pendant_faces))
         positions.update(pendant_positions)
@@ -3338,6 +3357,17 @@ class InflaterPane:
             else:
                 self._set_status("Outsiders modified.", "info")
             self._last_outsider_ids = current_outsider_ids
+        if not current_central_ids:
+            # Nothing central at all (e.g. the anchor -- and everything else -- was just
+            # deleted, see the empty-club clearing block above) -- there's no net left to Full
+            # or Diff Inflate against, so stop here rather than falling into classify_change's
+            # own "remove_face" verdict below, which would otherwise redirect straight into
+            # on_full_inflate_clicked -- export_mesh_dict's own "Nothing to inflate yet" error
+            # for an empty club, surfaced as a "Cannot inflate" popup for what's really just an
+            # ordinary delete (2026-09-28, explicit bug report: "when i place the anchor and
+            # delete it, it shouldn't have a 'Cannot Inflate' popup").
+            self.diff_inflate_button.state(["disabled"])
+            return
         if self.last_shapes_snapshot is None:
             self.diff_inflate_button.state(["disabled"])
             # No inflate has EVER completed yet -- nothing to diff against, so the only
@@ -4674,7 +4704,7 @@ class InflaterPane:
             # placed flat"). None only for a genuine manual Full Inflate/Reinflate click on an
             # already-degenerate net, with no single change to describe.
             self._set_status(
-                f"{self._change_label}: placed flat (no insiders -- Rule 1)."
+                f"{self._change_label}: placed flat."
                 if self._change_label else
                 "Placed directly: no insiders yet (every member is a guest -- Rule 1), so "
                 "there's nothing to inflate here, only to place.", "success")
