@@ -552,23 +552,6 @@ def _draw_join_tool_icon(canvas, size, color):
     canvas.create_oval(x2 - r, y - r, x2 + r, y + r, fill=color, outline="")
 
 
-def _draw_polygon_fold_tool_icon(canvas, size, color):
-    """A hexagon outline with a line joining the MIDPOINTS of two
-    OPPOSITE edges -- "Polygon Fold" (an edge-to-edge connection within
-    one shape, as opposed to Join's between-shapes edge connection)."""
-    cx, cy = size / 2, size / 2
-    verts = [(cx + vx, cy + vy) for vx, vy in _vertices_with_radius(6, size * 0.34)]
-    canvas.create_polygon(verts, outline=color, fill="", width=1.5)
-    n = len(verts)
-
-    def edge_mid(i):
-        ax, ay = verts[i]
-        bx, by = verts[(i + 1) % n]
-        return (ax + bx) / 2, (ay + by) / 2
-
-    canvas.create_line(*edge_mid(0), *edge_mid(3), fill=color, width=1.5)
-
-
 def _draw_flip_horizontal_tool_icon(canvas, size, color):
     """A horizontal double-headed arrow -- "Flip Horizontal"."""
     y = size / 2
@@ -1836,7 +1819,6 @@ class InteractiveBuilderApp:
         self.root.bind_all("<KeyPress-f>", self._on_flip_key)
         self.root.bind_all("<KeyPress-m>", lambda _e: self._set_tool_mode("move"))
         self.root.bind_all("<KeyPress-j>", lambda _e: self._set_tool_mode("join"))
-        self.root.bind_all("<KeyPress-p>", lambda _e: self._set_tool_mode("fold"))
         self.root.bind_all("<KeyPress-h>", lambda _e: self._flip_selected_shapes("horizontal"))
         self.root.bind_all("<KeyPress-v>", lambda _e: self._flip_selected_shapes("vertical"))
         self.root.bind_all("<Control-c>", self.on_copy_key)
@@ -1892,15 +1874,17 @@ class InteractiveBuilderApp:
 
     def _build_toolbar(self, parent):
         """The right-side tool strip: one column of icon buttons,
-        Photoshop/Illustrator-style. "Move"/"Join"/"Polygon Fold" SELECT a
-        tool MODE (self.tool_mode, see _set_tool_mode) that gates what
-        clicking on the canvas does. "Flip Horizontal"/"Flip Vertical" are
+        Photoshop/Illustrator-style. "Move"/"Join" SELECT a tool MODE
+        (self.tool_mode, see _set_tool_mode) that gates what clicking on the canvas does --
+        Join handles both an ordinary cross-shape connection and a polygon fold (a shape
+        connected to its own other edge) in one mode (2026-09-28, explicit user request:
+        "combine Join[J] and Polygon Fold[P] into just Join[J]" -- see
+        _hit_test_any_edge_handle's own `exclude_point`). "Flip Horizontal"/"Flip Vertical" are
         plain immediate ACTIONS on the current selection
         (_flip_selected_shapes) -- clicking either never changes
         self.tool_mode."""
         self._add_toolbar_mode_button(parent, "move", "Move [M]", _draw_move_tool_icon)
         self._add_toolbar_mode_button(parent, "join", "Join [J]", _draw_join_tool_icon)
-        self._add_toolbar_mode_button(parent, "fold", "Polygon Fold [P]", _draw_polygon_fold_tool_icon)
         self._add_toolbar_action_button(parent, "Flip Horizontal [H]", _draw_flip_horizontal_tool_icon,
                                          lambda: self._flip_selected_shapes("horizontal"))
         self._add_toolbar_action_button(parent, "Flip Vertical [V]", _draw_flip_vertical_tool_icon,
@@ -2086,40 +2070,35 @@ class InteractiveBuilderApp:
             joined.add((conn["b_shape"], conn["b_edge"]))
         return joined
 
-    def _hit_test_any_edge_handle(self, screen_x, screen_y, exclude_shape_id=None,
-                                   require_shape_id=None, exclude_edge_index=None):
-        """Nearest edge handle belonging to any shape OTHER than
-        `exclude_shape_id` (Join's own restriction -- inter-shape only),
-        or, if `require_shape_id` is given instead, belonging to ONLY
-        that shape and not its own `exclude_edge_index` (Polygon Fold's
-        restriction -- a different edge of the SAME shape, see module
-        docstring's "Tool modes" section), within HANDLE_HIT_RADIUS
-        screen pixels of the given point, or None. Every placed shape's
-        every UNJOINED edge handle is clickable this way -- there's no
-        "must be selected first" gate (that WAS the rule at one point;
-        dropped since it took two clicks, select-the-shape then
-        click-its-handle, to start a connection at all -- see module
-        docstring) -- but an edge already the endpoint of a real
-        connection (see _joined_points) is EXCLUDED entirely, for both
-        starting a new connection from it and completing one onto it: an
-        edge can only ever be joined once, and allowing a second join is
-        exactly what corrupted hippo.json (see _joined_points' own
-        docstring). Also used, with `exclude_shape_id`/`require_shape_id`
-        set from a pending connection's own origin, for both hover
-        highlighting (_on_canvas_motion) and deciding what a completing
-        click actually connects to (_complete_or_cancel_pending_connection
-        just reads the hover state this leaves behind, rather than
-        re-running this itself) -- the two MUST agree, so nothing ever
-        connects without having first been visibly highlighted."""
+    def _hit_test_any_edge_handle(self, screen_x, screen_y, exclude_point=None):
+        """Nearest edge handle within HANDLE_HIT_RADIUS screen pixels of the given point, or
+        None. Every placed shape's every UNJOINED edge handle is clickable this way -- there's
+        no "must be selected first" gate (that WAS the rule at one point; dropped since it took
+        two clicks, select-the-shape then click-its-handle, to start a connection at all -- see
+        module docstring) -- but an edge already the endpoint of a real connection (see
+        _joined_points) is EXCLUDED entirely, for both starting a new connection from it and
+        completing one onto it: an edge can only ever be joined once, and allowing a second
+        join is exactly what corrupted hippo.json (see _joined_points' own docstring).
+
+        `exclude_point`, a `(shape_id, edge_index)` pair, additionally excludes exactly that
+        ONE edge -- used with a pending connection's own origin (2026-09-28, explicit user
+        request: "combine Join[J] and Polygon Fold[P] into just Join[J]... the same mode should
+        allow for both kinds of connections" -- Join mode no longer restricts a completing click
+        to a DIFFERENT shape the way it used to; the only edge that can never be the target is
+        the origin's own, since an edge can't join itself. This single exclusion is what lets
+        one mode complete onto either a different shape's edge (an ordinary join) or the SAME
+        shape's own different edge (a polygon fold, self._expand_folded_shapes' own concern at
+        Save time -- see module docstring's "Polygon folding" section), with no mode-level
+        distinction needed here at all). Also used this way for both hover highlighting
+        (_on_canvas_motion) and deciding what a completing click actually connects to
+        (_complete_or_cancel_pending_connection just reads the hover state this leaves behind,
+        rather than re-running this itself) -- the two MUST agree, so nothing ever connects
+        without having first been visibly highlighted."""
         joined = self._joined_points()
         best, best_dist = None, HANDLE_HIT_RADIUS
         for shape in self.shapes:
-            if shape["id"] == exclude_shape_id:
-                continue
-            if require_shape_id is not None and shape["id"] != require_shape_id:
-                continue
             for edge_index, (mx, my) in enumerate(self._shape_edge_midpoints(shape)):
-                if edge_index == exclude_edge_index and shape["id"] == require_shape_id:
+                if (shape["id"], edge_index) == exclude_point:
                     continue
                 if (shape["id"], edge_index) in joined:
                     continue
@@ -2759,20 +2738,18 @@ class InteractiveBuilderApp:
             # _complete_or_cancel_pending_connection relies on to decide
             # what a completing click connects to, so a shape only ever
             # lights up when it's actually a connectable target: any
-            # UNJOINED edge of any OTHER shape (see
+            # UNJOINED edge other than the origin's own (see
             # _hit_test_any_edge_handle -- both those exclusions are
             # LOCAL, unambiguous facts about the one edge being clicked,
             # never dependent on what any OTHER connection happens to
             # imply about shared vertex identity -- see module docstring
-            # on why that's deliberate).
-            if self.tool_mode == "fold":
-                target = self._hit_test_any_edge_handle(
-                    event.x, event.y,
-                    require_shape_id=self._connection_pending["from_shape"],
-                    exclude_edge_index=self._connection_pending["from_edge"])
-            else:
-                target = self._hit_test_any_edge_handle(
-                    event.x, event.y, exclude_shape_id=self._connection_pending["from_shape"])
+            # on why that's deliberate). A different shape's edge and the
+            # SAME shape's own other edge (a polygon fold) are equally
+            # valid targets -- Join no longer distinguishes them.
+            target = self._hit_test_any_edge_handle(
+                event.x, event.y,
+                exclude_point=(self._connection_pending["from_shape"],
+                                self._connection_pending["from_edge"]))
             self._hover_shape_id = None if target is None else target["shape_id"]
             self._hover_edge_index = None if target is None else target["edge_index"]
         elif self.armed_n is not None:
@@ -2788,16 +2765,12 @@ class InteractiveBuilderApp:
     def _on_canvas_press(self, event):
         """Dispatches to whichever tool mode is current (see module
         docstring's "Tool modes" section) -- Move (drag/select/marquee
-        shapes; connections aren't editable at all) or Join/Polygon Fold
-        (add/delete connections; shapes aren't selectable, so a click can
-        never start a drag). Join and Polygon Fold share the exact same
-        press-handling (_on_canvas_press_join) -- the only difference
-        between them (which shape/edge a pending connection can complete
-        onto) lives entirely in _on_canvas_motion's hover computation,
-        which both branches read from."""
+        shapes; connections aren't editable at all) or Join (add/delete
+        connections, both cross-shape and same-shape/polygon-fold; shapes
+        aren't selectable, so a click can never start a drag)."""
         if self.tool_mode == "move":
             self._on_canvas_press_move(event)
-        elif self.tool_mode in ("join", "fold"):
+        elif self.tool_mode == "join":
             self._on_canvas_press_join(event)
 
     def _on_canvas_press_move(self, event):
@@ -3607,7 +3580,7 @@ class InteractiveBuilderApp:
         # unselected look.
         # Otherwise a handle is filled white if some connection already
         # uses it, or an unfilled ring if not (see _draw_handle_circle).
-        if self.tool_mode in ("join", "fold"):
+        if self.tool_mode == "join":
             pending_point = (None if self._connection_pending is None else
                               (self._connection_pending["from_shape"], self._connection_pending["from_edge"]))
             hover_point = (None if self._hover_shape_id is None else
@@ -3645,7 +3618,7 @@ class InteractiveBuilderApp:
         # is already always None otherwise -- see _set_tool_mode). Drawn
         # last (on top of everything else drawn so far) so a handle is
         # never occluded by a shape or another connection's own curve.
-        if self.tool_mode in ("join", "fold") and self.selected_connection_id is not None:
+        if self.tool_mode == "join" and self.selected_connection_id is not None:
             selected_conn = next(
                 (c for c in self.connections if c["id"] == self.selected_connection_id), None)
             if selected_conn is not None:

@@ -18,8 +18,10 @@ in apps.md -- keep both in sync when changing behavior described here. Summary:
    current mesh, new rest lengths derive from the original flat geometry so the target shape
    stays fixed across levels.
 4. "Inflate" (Level 1+) calibrates a pressure toward the current level's "Target RMS stretch"
-   spinner (self.target_rms_vars, defaults LEVEL_DEFAULT_TARGET_RMS_PCT, independently
-   user-editable) via estimate_pressure_for_target_stretch. The winning trial's own result IS
+   spinner (self.target_rms_vars, defaulted per net load -- see _reset_target_rms_defaults --
+   from LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED/_OPEN depending on whether the net is closed,
+   independently user-editable after that) via estimate_pressure_for_target_stretch. The
+   winning trial's own result IS
    the Inflate outcome (no separate re-run at the found pressure) and is topped up to real
    convergence if the search's own step budget cut it off first. Frames captured during the
    winning trial are replayed at REPLAY_FPS once found; "Steps" advances with the real
@@ -29,12 +31,12 @@ in apps.md -- keep both in sync when changing behavior described here. Summary:
    measures since it just mirrors whatever stretchy_mesh reports).
 6. Layout: "Net" panel (flat, matplotlib) plus one 3D panel per level via PyVista/VTK (a real
    GPU depth buffer, needed because meshes here are routinely self-intersecting/non-convex,
-   which matplotlib's painter's-algorithm sort can't draw correctly). Level 0 and Levels 1-3
-   have independent camera groups (rotation/zoom/pan) since they look very different; the Net
-   panel's own zoom/pan are separate again (different rendering stack). See apps.md for pan/
-   zoom/camera mechanics.
-7. Debug mode ("d" key) adds "Validate Mesh" (purely combinatorial winding check) and normal-
-   arrow toggles (face/vertex) for visually checking orientation -- see apps.md.
+   which matplotlib's painter's-algorithm sort can't draw correctly). Every level (0-3) shares
+   one camera group (rotation/zoom/pan) -- dragging/panning/zooming one panel moves them all
+   together; the Net panel's own zoom/pan are separate again (different rendering stack). See
+   apps.md for pan/zoom/camera mechanics.
+7. Debug mode ("d" key) adds normal-arrow toggles (face/vertex) for visually checking
+   orientation, and a repulsive-force-arrow toggle -- see apps.md.
 8. "Auto" runs the whole pipeline unattended (Relax, then Inflate/Subdivide/... to MAX_LEVEL),
    exactly one attempt per level, no retries -- see apps.md/physics.md.
 """
@@ -73,8 +75,9 @@ from common.paths import STRETCHY_NETS_DIR, DATA_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, load_stretchy_mesh_edges, relax_once, relax_initial_configuration,
-    random_initial_positions, estimate_pressure_for_target_stretch, mesh_edges, EDGE_LENGTH,
-    CONVERGENCE_GTOL,
+    random_initial_positions, estimate_pressure_for_target_stretch, level0_jiggle_distance,
+    mesh_edges, EDGE_LENGTH,
+    CONVERGENCE_GTOL, REPULSION_STRENGTH, repulsion_force,
 )
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
@@ -175,14 +178,17 @@ RUNNING_ROW_COLOR = "#e0b400"
 # non-convex (mid-relax, mid-inflate, or Level 0's own random-start), which neither
 # mplot3d's painter's-algorithm depth sort nor a convexity-only culling approach can draw
 # correctly. Pixel size matches the Net panel's own matplotlib figsize*dpi so every panel is
-# the same size as its neighbors (Level 0 excepted, below).
+# the same size as its neighbors.
 NET_PANEL_SIZE = (320, 450)
-# Level 0's panel is 60% of Levels 1-3's own width -- the freed width is split evenly across
-# Levels 1-3 instead. Height unchanged for every panel; `_level_panel_size(level)` returns
-# the right (width, height) pair.
+# Level 0's panel used to be narrower (60% of Levels 1-3's own width, with the freed width
+# split evenly across Levels 1-3) -- now the same width as every other level (2026-09-28,
+# explicit user request). Height unchanged for every panel; `_level_panel_size(level)` returns
+# the right (width, height) pair -- kept as a per-level lookup (not a bare constant) since
+# other code still calls it per level, and a future re-split would only need to change these
+# two values again.
 LEVEL_PANEL_HEIGHT = 450
-LEVEL_PANEL_WIDTH_LEVEL_0 = round(320 * 0.6)
-LEVEL_PANEL_WIDTH_LEVELS_1_3 = round(320 + (320 - LEVEL_PANEL_WIDTH_LEVEL_0) / 3)
+LEVEL_PANEL_WIDTH_LEVEL_0 = 320
+LEVEL_PANEL_WIDTH_LEVELS_1_3 = 320
 
 
 def _level_panel_size(level):
@@ -193,7 +199,7 @@ def _level_panel_size(level):
 
 # Fraction of the panel the shape's own bounding box fills at zoom=1.0 (1.0 would touch the
 # panel edge exactly). Level 0 and Levels 1-3 both fill the same 90% of their own
-# (differently-sized) panels.
+# (now equally-sized) panels.
 LEVEL_ZOOM_FILL_LEVEL_0 = 0.9
 LEVEL_ZOOM_FILL_LEVELS_1_3 = 0.90
 
@@ -259,13 +265,20 @@ DEFAULT_STEPS = 10
 DEFAULT_TOLERANCE = 1e-4
 
 # Default value for each level's own "Target RMS stretch" spinner (self.target_rms_vars[level]
-# -- one independent tk.DoubleVar per level). Tapered DOWN as level increases: a finer mesh
-# approximates the same overall curvature with smaller stretch per edge (more, shorter edges
-# bending through the same arc), so keeping these level-dependent holds the actual 3D target
-# shape fixed across levels (matches mesh_levels.py's "target shape stays fixed as resolution
-# increases" design). No entry for Level 0 -- it has no target RMS stretch at all
-# (relax_initial_configuration is pure springs, not calibrated toward a target).
-LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}
+# -- one independent tk.DoubleVar per level), applied fresh on every net load
+# (on_select_net -> _reset_target_rms_defaults). No entry for Level 0 -- it has no target RMS
+# stretch at all (relax_initial_configuration is pure springs, not calibrated toward a target).
+#
+# 2026-09-28, explicit user request: depends on whether the WHOLE net is closed (no free/open
+# edge anywhere -- see _open_base_edges) -- a fully closed net (e.g. any Platonic solid) can
+# take a higher target comfortably; an open one (any free rim edge left ungled) defaults lower.
+# Uniform across levels 1-3 within each case (no longer tapered down by level, superseded by
+# this same-day request).
+LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED = {1: 10.0, 2: 10.0, 3: 10.0}
+LEVEL_DEFAULT_TARGET_RMS_PCT_OPEN = {1: 5.0, 2: 5.0, 3: 5.0}
+
+
+
 
 # Debug mode's "Show normals" toggle (_draw_level_panel) draws each triangle's own outward
 # normal from its centroid, scaled to that triangle's own mean edge length -- distinct from
@@ -278,6 +291,10 @@ VERTEX_NORMAL_COLOR = "cyan"
 # length -- a full edge length reads too long against a dense/fine mesh. Shared by both
 # "Show face normals" and "Show vertex normals".
 NORMAL_LENGTH_FRACTION = 0.5
+
+# "Show repulsive forces" toggle's own color -- distinct from both normal colors so all three
+# debug overlays stay visually distinct when several are on at once.
+REPULSION_FORCE_COLOR = "magenta"
 
 # Hard stop for "iterate until convergence" mode in case a mesh/pressure combination never
 # reaches the current tolerance -- without this, a plateauing run would loop forever instead
@@ -303,6 +320,43 @@ def _build_level1_topology(base_faces):
     faces, _, edge_length, face_of_fine = subdivide_once(
         base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
     return faces, edge_length, face_of_fine
+
+
+def _open_base_edges(base_faces, face_edge_ids):
+    """Returns {base_face_idx: {frozenset(rim-edge vertex pair), ...}} -- for each original
+    polygon, which of ITS OWN edges have no partner elsewhere in the net (a genuine
+    free/boundary edge) rather than being glued to some other piece. Per-EDGE, not per-whole-
+    polygon (2026-09-27, explicit user request: an n-gon connected at 2 of its own edges
+    triangulates into 2 "closed" wedges and n-2 "open" ones -- see
+    InflatePolyhedronApp._level1_is_open, which uses this to classify each individual wedge
+    rather than opting an entire polygon out just because ONE of its edges is free).
+
+    Adjacency is found via `face_edge_ids` when given (an edge id used by exactly ONE
+    base_faces entry across the whole net is that entry's own free edge) -- same
+    disambiguation rationale as mesh_levels.polygon_centroid_springs' own docstring, since two
+    DIFFERENT genuine edges can coincidentally share a plain vertex-id pair. Falls back to a
+    plain shared-vertex-pair match when `face_edge_ids` is None (a net with no such field has
+    no such collision risk either)."""
+    owners = {}
+    if face_edge_ids is not None:
+        for i, ids in enumerate(face_edge_ids):
+            face = base_faces[i]
+            n = len(face)
+            for k, eid in enumerate(ids):
+                pair = frozenset((face[k], face[(k + 1) % n]))
+                owners.setdefault(eid, []).append((i, pair))
+    else:
+        for i, face in enumerate(base_faces):
+            n = len(face)
+            for k in range(n):
+                pair = frozenset((face[k], face[(k + 1) % n]))
+                owners.setdefault(pair, []).append((i, pair))
+    open_edges = {}
+    for group in owners.values():
+        if len(group) == 1:
+            i, pair = group[0]
+            open_edges.setdefault(i, set()).add(pair)
+    return open_edges
 
 
 def _fan_level_edges(faces, base_edges):
@@ -452,51 +506,6 @@ def _connection_curve_points(target_layout, conn, steps=24):
     return _cubic_bezier_points(a_mid, a_ctrl, b_ctrl, b_mid, steps)
 
 
-def _validate_mesh(faces):
-    """Debug mode's "Validate Mesh" button: checks the CURRENTLY LOADED self.faces
-    (post-subdivision, possibly finer than the file's own faces) for structural winding
-    consistency. Pure function of `faces` alone (no Tk, no `positions`), independently
-    testable. Returns (ok, lines); `lines` always covers the check, even when passing.
-
-    Structural winding consistency (combinatorial, depends only on `faces`' vertex-id loops):
-    if face A has an edge as v->w, any other face sharing that undirected edge must have it as
-    w->v, never v->w again (this project's winding convention) -- exactly
-    load_stretchy_mesh's "no directed edge appears more than once" rule, re-run here against
-    the LIVE, possibly-subdivided mesh rather than just the raw file Load already checked.
-
-    Deliberately reports only structure, nothing that varies with `positions` -- "does the
-    CURRENT 3D shape look outward-facing" belongs to the separate "Show face normals" toggle
-    instead."""
-    counts = {}
-    owners = {}
-    for fi, face in enumerate(faces):
-        n = len(face)
-        for i in range(n):
-            e = (face[i], face[(i + 1) % n])
-            counts[e] = counts.get(e, 0) + 1
-            owners.setdefault(e, []).append(fi)
-    bad_faces = set()
-    winding_lines = []
-    for (v, w), c in counts.items():
-        if c > 1:
-            bad_faces.update(owners[(v, w)])
-            winding_lines.append(
-                f"  edge {v}->{w} runs the SAME direction in {c} faces {owners[(v, w)]} "
-                f"(should be reversed in all but one)")
-    ok = not winding_lines
-
-    total = len(faces)
-    if ok:
-        lines = [f"PASS: all {total} faces are consistently oriented."]
-    else:
-        # bad_faces: every face touching at least one conflicting edge --
-        # not just len(winding_lines) (a count of BAD EDGES, which can
-        # differ from the number of faces those edges actually touch).
-        lines = [f"FAIL: {len(bad_faces)}/{total} faces are inconsistently oriented."]
-        lines += winding_lines
-    return ok, lines
-
-
 class InflatePolyhedronApp:
     def __init__(self, root):
         self.root = root
@@ -537,12 +546,23 @@ class InflatePolyhedronApp:
         self.debug_mode = False
         self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
 
+        # The seed random_initial_positions uses on every net (re)load (see on_select_net/
+        # _get_or_generate_seed) -- blank (the default) means "pick a fresh random one each
+        # time", a typed integer pins that exact seed for the next net load. Only ever edited
+        # via debug mode's own "Seed" entry, but the VALUE itself isn't debug-only -- release
+        # mode gets the same randomize-by-default behavior, just without a way to see/set it
+        # (2026-09-27, explicit user request: the previous hardcoded seed=0 meant a net's own
+        # random starting embedding -- and thus which of several very different-looking local
+        # equilibria it settles into, see composite_spider_leg.poly's own investigation -- was
+        # always exactly the same, run after run).
+        self.seed_var = tk.StringVar(value="")
+
         # ---- Setup: net picker + target RMS stretch + tolerance, all
         # tiled HORIZONTALLY in one row to save vertical space (an
         # earlier version stacked net picker and target RMS stretch on
         # their own separate rows), shared by both modes, plus (debug
-        # mode only) the steps-vs-convergence choice/Validate Mesh/Show
-        # normals row below it. ----
+        # mode only) the steps-vs-convergence choice/Show normals row
+        # below it. ----
         setup_frame = ttk.LabelFrame(root, text="Setup", padding=12)
         setup_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
 
@@ -567,9 +587,14 @@ class InflatePolyhedronApp:
         self.target_rms_vars = {}
         self.target_rms_display_vars = {}
         self.target_rms_spins = {}
+        # Which of LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED/_OPEN currently applies -- set for real
+        # by on_select_net (_reset_target_rms_defaults) once a net's own closed/open status is
+        # known; OPEN here is just a placeholder for widget construction, before any net has
+        # been loaded at all.
+        self._target_rms_defaults = LEVEL_DEFAULT_TARGET_RMS_PCT_OPEN
         for level in (1, 2, 3):
             ttk.Label(target_group, text=f"Level {level}:").pack(side=tk.LEFT, padx=(20, 2))
-            var = tk.DoubleVar(value=round(LEVEL_DEFAULT_TARGET_RMS_PCT[level]))
+            var = tk.DoubleVar(value=round(self._target_rms_defaults[level]))
             # A "converged" verdict only applies to the target it was reached at -- editing
             # this level's own target while it's the current frontier means the pressure
             # hasn't been (re)calibrated for the new value, so the Inflate-gate needs to lift
@@ -632,8 +657,8 @@ class InflatePolyhedronApp:
         self.auto_button.state(["disabled"])  # no net loaded yet -- _update_auto_button syncs this
 
         # Debug-mode-only row: "Iterate for N steps" vs. "until convergence" plus
-        # "Validate Mesh"/"Show normals" (diagnostics with no effect on the solve). Shown/
-        # hidden by _apply_mode_visibility; both are forced back to release-mode defaults
+        # "Show normals"/"Show repulsive forces" (diagnostics with no effect on the solve).
+        # Shown/hidden by _apply_mode_visibility; both are forced back to release-mode defaults
         # whenever leaving debug mode, so release mode never shows a stray fixed-step
         # request or stale normals overlay.
         self.mode_row = ttk.Frame(setup_frame)
@@ -653,9 +678,6 @@ class InflatePolyhedronApp:
                                                   command=self._update_mode_state)
         self.convergence_radio.pack(side=tk.LEFT)
         ttk.Separator(self.mode_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=18)
-        self.validate_button = ttk.Button(self.mode_row, text="Validate Mesh",
-                                           command=self.on_validate_mesh_clicked)
-        self.validate_button.pack(side=tk.LEFT, padx=(0, 18))
         self.show_normals_var = tk.BooleanVar(value=False)
         self.show_normals_check = ttk.Checkbutton(self.mode_row, text="Show face normals",
                                                     variable=self.show_normals_var,
@@ -669,6 +691,29 @@ class InflatePolyhedronApp:
             self.mode_row, text="Show vertex normals",
             variable=self.show_vertex_normals_var, command=self.draw)
         self.show_vertex_normals_check.pack(side=tk.LEFT)
+        # Draws each repulsive vertex's own CURRENT force from _repulsion_force (2026-09-27,
+        # explicit user request) -- see _draw_level_panel's own repulsion block for the color/
+        # scale convention, matching "Show normals"' own pattern.
+        self.show_repulsive_forces_var = tk.BooleanVar(value=False)
+        self.show_repulsive_forces_check = ttk.Checkbutton(
+            self.mode_row, text="Show repulsive forces",
+            variable=self.show_repulsive_forces_var, command=self.draw)
+        self.show_repulsive_forces_check.pack(side=tk.LEFT)
+
+        ttk.Separator(self.mode_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=18)
+        ttk.Label(self.mode_row, text="Seed:").pack(side=tk.LEFT, padx=(0, 4))
+        # Blank (the default) means "randomize" -- _get_or_generate_seed fills this in with
+        # whatever it actually picked right after using it, so the value that produced the
+        # current shape is always visible/copyable here, even in the common case where the
+        # user never typed one in themselves. Typing a specific integer here pins that exact
+        # seed for the NEXT net (re)load (on_select_net); clearing it back to blank returns to
+        # randomizing. A plain Entry, not a Spinbox, same restricted-input pattern as the
+        # target RMS entries (_register_numeric_entry, no exponent/decimal -- but blank must
+        # stay valid, unlike a required numeric field, so no commit-time fallback is wired up
+        # the way target RMS's is).
+        self.seed_spin = ttk.Entry(self.mode_row, width=10, textvariable=self.seed_var)
+        self._register_numeric_entry(self.seed_spin, allow_exponent=False, allow_decimal=False)
+        self.seed_spin.pack(side=tk.LEFT)
 
         # ---- Status (warning/error/progress message): debug-mode-only. ----
         self.status_frame = ttk.Frame(root)
@@ -794,50 +839,51 @@ class InflatePolyhedronApp:
         self.level_photos = {}
         self._level_center = {}
         self._level_half = {}
-        # Two independent camera groups: Level 0 (a random-start-then-relax result, often
-        # tangled/widely spread) has its own rotation/zoom/pan, while Levels 1-3 (an actual
-        # settling/settled solid) share one set among themselves -- they look different
-        # enough to need separate framing. `_level_camera(level)` returns the mutable,
-        # in-place-updated dict for whichever group `level` belongs to; `_camera_group_levels
-        # (level)` returns every panel that needs re-rendering when that group's state changes
-        # -- a drag/scroll/pan on one group's panel never re-renders the other group's panels.
+        # ONE shared camera group across every level (0-3, 2026-09-28, explicit user request:
+        # "sync up the rotation/translation/scale of level 0 with the rest of the levels" --
+        # previously Level 0 had its own independent rotation/zoom/pan since an early
+        # random-start-then-relax result looked very different from an actual settling/settled
+        # solid; now every level's panel rotates/pans/zooms together). `_level_camera(level)`
+        # returns the mutable, in-place-updated dict (`level` is accepted for a uniform call
+        # signature across every caller, even though every level now maps to the same dict);
+        # `_camera_group_levels(level)` returns every panel that needs re-rendering when the
+        # shared state changes -- currently always every built level, but keeps the same
+        # call shape a future re-split would need.
         #
-        # Each group's own "rotation" is a quaternion (scipy Rotation)
+        # The camera's own "rotation" is a quaternion (scipy Rotation)
         # rather than a separate azimuth/elevation pair -- two Euler
         # angles hit gimbal lock near the poles (elevation -> +-90
         # degrees, where a horizontal drag stops rotating around a
         # sensible axis); a quaternion represents the whole orientation as
         # one object with no such singularity. _initial_level_rotation()
         # reproduces the old LEVEL_DEFAULT_AZIM/ELEV starting view as a
-        # Rotation, used as BOTH groups' own starting rotation (they just
-        # don't stay in sync with each other once either is dragged).
+        # Rotation, used as the group's own starting rotation.
         #
-        # Each group's own "pan" is a 2D NDC (normalized device
+        # The camera's own "pan" is a 2D NDC (normalized device
         # coordinate, [-1, 1]) offset applied via vtkCamera's own
         # SetWindowCenter -- a pure post-projection VIEWPORT shift --
         # rather than a 3D world-space vector added to the camera's
         # focal_point/position (an earlier version did that, and had two
-        # real bugs): (1) since every level panel renders at the exact
-        # same LEVEL_PANEL_SIZE, one NDC value produces the exact same
-        # PIXEL shift on every panel in its own group regardless of that
-        # panel's own bounding-box scale -- a world-space offset instead
-        # produced a DIFFERENT pixel shift per panel (each level's own
-        # parallel_scale differs), which is what made translation look
-        # unsynced across levels; (2) moving focal_point moves the
+        # real bugs): (1) an NDC value produces the same FRACTIONAL shift
+        # regardless of a given panel's own pixel size or bounding-box
+        # scale -- a world-space offset instead produced a DIFFERENT pixel
+        # shift per panel (each level's own parallel_scale differs, and
+        # Level 0's own panel is a different pixel size besides, see
+        # LEVEL_PANEL_SIZE), which is what made translation look unsynced
+        # across levels; (2) moving focal_point moves the
         # camera's own orbit center, so rotating (_on_level_motion) after
         # a pan no longer orbited the object's true center -- with
         # SetWindowCenter, the camera's focal_point/position are computed
         # exactly as if no pan existed (_render_level_pv), so a subsequent
         # rotation always still orbits the real center; pan only shifts
         # where that already-correct render lands in the panel.
-        self._level0_camera = {"rotation": self._initial_level_rotation(),
-                                "zoom": 1.0, "pan": np.zeros(2)}
-        self._level13_camera = {"rotation": self._initial_level_rotation(),
-                                 "zoom": 1.0, "pan": np.zeros(2)}
+        self._level_camera_state = {"rotation": self._initial_level_rotation(),
+                                     "zoom": 1.0, "pan": np.zeros(2)}
         # Populated by _build_level_pv_panel (label -> level), so a drag/
         # pan/scroll event (whose only clue which level it came from is
         # `event.widget`, the image Label that received it) can look up
-        # which camera GROUP it should actually update.
+        # which level it happened on (still needed for _level_pan_group_level
+        # etc., even though every level shares one camera now).
         self._level_of_label = {}
         self._level_dragging = False
         self._level_last_xy = None
@@ -972,6 +1018,33 @@ class InflatePolyhedronApp:
         # current level has changed since it last ran.
         self._auto_active = False
         self._auto_attempted_level = None
+        # How the LAST Auto sequence ended, once it's no longer active -- None (never run, or
+        # a fresh net/session just loaded), "completed" (reached MAX_LEVEL and converged, OR
+        # gave up on a level that wouldn't converge after one attempt -- either way, ran to a
+        # natural end on its own), or "stopped" (aborted by an explicit Stop click, or a
+        # worker-thread failure -- see _abort_auto). Read by _update_auto_button to choose the
+        # Auto button's own label/action (2026-09-27, explicit user request): "completed"/None
+        # both read "Run Simulation" and restart fresh from Level 0 (on_auto_clicked);
+        # "stopped" reads "Continue Simulation" and resumes from the START of whatever level
+        # was interrupted (on_auto_continue_clicked), not from its own mid-run progress.
+        self._auto_end_state = None
+        # Run > Run All's own state (2026-09-28, explicit user request -- see
+        # on_run_all_clicked): whether it's currently working through self._run_all_paths (a
+        # fixed [(label, path), ...] snapshot of self.label_to_path taken at kickoff, so a net
+        # added/removed mid-run doesn't change the list underway) and which index it's on --
+        # read by _update_window_title for the "(m/n)" suffix.
+        self._run_all_active = False
+        self._run_all_paths = []
+        self._run_all_index = 0
+        # The CURRENT level's own starting faces/positions/face_of_fine/edge_length/edges,
+        # captured fresh every time a level is first entered (on_select_net for Level 0,
+        # _finish_relax's own promotion to Level 1, _subdivide_step for Level 2+) -- exactly
+        # what on_auto_continue_clicked restores before resuming a stopped level, discarding
+        # whatever partial Relax/Inflate progress it had made. Safe to keep as plain
+        # references (no deep copy): self.positions/faces etc. are always REASSIGNED to a new
+        # dict/list on every update, never mutated in place, so an old reference here keeps
+        # pointing at that exact past state.
+        self._level_start_state = None
         self.current_path = None
         self.current_label = None
         self.label_to_path = {}
@@ -1025,8 +1098,9 @@ class InflatePolyhedronApp:
 
     def _build_menu(self):
         """This app's only menu bar -- File > Load.../Save..., Load above Save as the more
-        common entry point (opening a previously-saved session before continuing it). See
-        on_save_clicked/on_load_clicked for what the two actually do.
+        common entry point (opening a previously-saved session before continuing it); Run >
+        Run All (2026-09-28, explicit user request -- see on_run_all_clicked). See
+        on_save_clicked/on_load_clicked for what the File items actually do.
 
         Explicit `font=` on every Menu/add_command call here: Windows renders the native menu
         bar via its own chrome, which ignores "TkMenuFont"'s configured size regardless of
@@ -1038,22 +1112,47 @@ class InflatePolyhedronApp:
         menubar = tk.Menu(self.root, font=menu_font)
         file_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
         file_menu.add_command(label="Load...", command=self.on_load_session_clicked, font=menu_font)
-        file_menu.add_command(label="Save...", command=self.on_save_session_clicked, font=menu_font)
+        # "accelerator" is display-only (the menu label's own right-aligned hint text) -- Tk
+        # never wires it up as an actual key binding, so bind_all below is what makes Ctrl+S
+        # really work (2026-09-28, explicit user request).
+        file_menu.add_command(label="Save...", command=self.on_save_session_clicked,
+                               accelerator="Ctrl+S", font=menu_font)
         menubar.add_cascade(label="File", menu=file_menu)
+        run_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
+        run_menu.add_command(label="Run All", command=self.on_run_all_clicked, font=menu_font)
+        menubar.add_cascade(label="Run", menu=run_menu)
         self.root.config(menu=menubar)
+        # Both cases bound since a held Shift/Caps Lock reports the keysym as uppercase "S" --
+        # Control itself doesn't shift letter case the way it does on some platforms/layouts.
+        # bind_all (not bound to one widget) so it works regardless of which widget has focus,
+        # same as the "d" debug-mode toggle below.
+        self.root.bind_all("<Control-s>", lambda event: self.on_save_session_clicked())
+        self.root.bind_all("<Control-S>", lambda event: self.on_save_session_clicked())
 
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
         self._apply_mode_visibility()
         self._refit_window_height()
 
+    def _update_window_title(self):
+        """The window's own title: APP_TITLE, plus " (debug mode)" while debug mode is on, plus
+        " (m/n)" while Run All is working through the net list (2026-09-28, explicit user
+        request -- see on_run_all_clicked) -- e.g. "...  (debug mode) (2/11)" if both apply at
+        once. The single place either suffix gets composed, so toggling debug mode mid-Run-All
+        (or vice versa) never drops the other one."""
+        suffix = " (debug mode)" if self.debug_mode else ""
+        if self._run_all_active:
+            suffix += f" ({self._run_all_index + 1}/{len(self._run_all_paths)})"
+        self.root.title(f"{APP_TITLE}{suffix}")
+
     def _apply_mode_visibility(self):
         """Main differences between the two modes: whether the steps-vs-convergence radio row
-        (plus Validate Mesh/Show normals) is shown, and whether the Convergence History
-        table's "Max Stretch %" column is shown (all columns stay DEFINED in both modes, just
-        hidden per mode, so no data is lost switching back and forth). Forces the steps choice
-        back to "convergence" and Show normals off when leaving debug mode."""
-        self.root.title(f"{APP_TITLE}{' (debug mode)' if self.debug_mode else ''}")
+        (plus Show normals/Show repulsive forces) is shown, and whether the Convergence
+        History table's "Max Stretch %" column is shown (all columns stay DEFINED in both
+        modes, just hidden per mode, so no data is lost switching back and forth). Forces the
+        steps choice back to "convergence" and Show normals/Show repulsive forces off when
+        leaving debug mode."""
+        self._update_window_title()
         self.history_tree.config(
             displaycolumns="#all" if self.debug_mode else self._release_mode_history_columns)
         # Changing displaycolumns doesn't resize the widget itself, so no <Configure> fires --
@@ -1077,6 +1176,9 @@ class InflatePolyhedronApp:
                 redraw_needed = True
             if self.show_vertex_normals_var.get():
                 self.show_vertex_normals_var.set(False)
+                redraw_needed = True
+            if self.show_repulsive_forces_var.get():
+                self.show_repulsive_forces_var.set(False)
                 redraw_needed = True
             if redraw_needed and self.faces is not None:  # nothing to redraw before a net's ever loaded
                 self.draw()
@@ -1210,18 +1312,17 @@ class InflatePolyhedronApp:
         return Rotation.from_matrix(np.column_stack([direction, right, up]))
 
     def _level_camera(self, level):
-        """The mutable camera-state dict (`{"rotation", "zoom", "pan"}`) for `level`'s own
-        group -- Level 0 has an independent one from Levels 1-3's shared one. Callers mutate
-        the returned dict's keys in place rather than reassigning self._level0_camera/
-        _level13_camera themselves."""
-        return self._level0_camera if level == 0 else self._level13_camera
+        """The mutable camera-state dict (`{"rotation", "zoom", "pan"}`) -- ONE shared dict for
+        every level (0-3, see this state's own init comment). `level` is accepted, and unused,
+        purely so every caller keeps a uniform "which level's camera do I need" call shape.
+        Callers mutate the returned dict's keys in place rather than reassigning
+        self._level_camera_state themselves."""
+        return self._level_camera_state
 
     def _camera_group_levels(self, level):
-        """Every level panel sharing `level`'s own camera group -- `[0]` for Level 0, every
-        other built level otherwise (Levels 1-3)."""
-        if level == 0:
-            return [0]
-        return [lvl for lvl in self.level_plotters if lvl != 0]
+        """Every level panel sharing the camera state -- every built level (`level` is
+        accepted, and unused, for the same uniform-call-shape reason as _level_camera)."""
+        return list(self.level_plotters)
 
     def _render_camera_group(self, level):
         """Re-renders every panel in `level`'s own camera group (not every level panel) --
@@ -1309,12 +1410,11 @@ class InflatePolyhedronApp:
         self._level_pan_group_level = None
 
     def _on_level_pan_reset(self, event=None):
-        """Middle-click on a level panel resets that panel's own camera group's pan/zoom/
-        rotation together, back to defaults -- only the ONE group the click landed on, since
-        Level 0 and Levels 1-3 are independent groups. Rotation resets through
-        _initial_level_rotation() (the same starting quaternion __init__ builds), not plain
-        identity, since the default view is deliberately non-axis-aligned. `event=None` (no
-        current caller does this) falls back to resetting the Levels-1-3 shared group."""
+        """Middle-click on a level panel resets the shared camera's pan/zoom/rotation
+        together, back to defaults -- every level panel, since they all now share one camera.
+        Rotation resets through _initial_level_rotation() (the same starting quaternion
+        __init__ builds), not plain identity, since the default view is deliberately
+        non-axis-aligned."""
         level = self._level_of_label.get(event.widget, 1) if event is not None else 1
         cam = self._level_camera(level)
         cam["pan"] = np.zeros(2)
@@ -1323,10 +1423,10 @@ class InflatePolyhedronApp:
         self._render_camera_group(level)
 
     def _on_level_scroll(self, event):
-        """Mouse-wheel-scroll on a level panel zooms that panel's own camera group and
-        re-renders every panel in that group -- Level 0 and Levels 1-3 zoom independently.
-        event.num is Button-4/5 on X11 (no event.delta there); event.delta is Windows/macOS's
-        signed notch count (positive delta zooms in)."""
+        """Mouse-wheel-scroll on a level panel zooms the shared camera and re-renders every
+        level panel (they all zoom together now). event.num is Button-4/5 on X11 (no
+        event.delta there); event.delta is Windows/macOS's signed notch count (positive delta
+        zooms in)."""
         level = self._level_of_label.get(event.widget)
         if level is None:
             return
@@ -1355,7 +1455,10 @@ class InflatePolyhedronApp:
         of that triangle's mean edge length (current, not rest, geometry) so it always reads
         as "about half an edge long". "Show vertex normals" is the same idea per-vertex
         (averaged from its touching faces) -- catches a vertex where the touching faces
-        disagree, which the per-face version alone can miss."""
+        disagree, which the per-face version alone can miss. "Show repulsive forces" draws
+        each repulsive vertex's (see _repulsion_vertex_ids) own CURRENT repulsion_force
+        direction the same way (REPULSION_FORCE_COLOR, same length convention -- direction
+        only, not the force's own actual magnitude)."""
         plotter = self.level_plotters[level]
         plotter.clear()
         if faces is not None:
@@ -1384,8 +1487,17 @@ class InflatePolyhedronApp:
                                   backface_params=dict(color=_darken_color(face_color)))
 
             if self.show_normals_var.get():
+                # Skips every OPEN triangle (see _is_open_of_fine/_pressure_exclude_faces) --
+                # those genuinely feel NO pressure force at all (2026-09-27, explicit user
+                # report: an open triangle showing a face normal reads as "this face is being
+                # pushed outward", which isn't true for it), reusing the exact same is_open
+                # flag stretchy_mesh._face_index_groups itself excludes that triangle with, not
+                # an independent display-only check that could drift out of sync with it.
+                is_open = self._is_open_of_fine(level)
                 starts, ends = [], []
-                for a, b, c in faces:
+                for (a, b, c), face_is_open in zip(faces, is_open):
+                    if face_is_open:
+                        continue
                     pa, pb, pc = positions[a], positions[b], positions[c]
                     normal = np.cross(pb - pa, pc - pa)
                     normal_len = np.linalg.norm(normal)
@@ -1413,6 +1525,44 @@ class InflatePolyhedronApp:
                     segment_points[1::2] = ends
                     plotter.add_lines(segment_points, color=VERTEX_NORMAL_COLOR, width=2.0)
 
+            if self.show_repulsive_forces_var.get():
+                # Scaled by ACTUAL relative magnitude, NOT direction-only at a fixed length
+                # (unlike "Show normals" above) -- a unit-length arrow would look identical for
+                # a full-strength vertex and one weakened by _repulsion_vertex_multipliers,
+                # defeating the entire point of this toggle (2026-09-27, explicit user report:
+                # "i'm not seeing this change with cannoli"). The STRONGEST vertex drawn here
+                # gets the usual EDGE_LENGTH*NORMAL_LENGTH_FRACTION reference length, every
+                # other one scaled down proportionally against it -- absolute force magnitude
+                # depends heavily on inter-vertex distance, which varies a lot net to net, so
+                # normalizing against "the strongest one currently on screen" is what actually
+                # keeps a weakened vertex's own arrow visibly shorter regardless of that scale.
+                # Computed via the SAME repulsion_force/_repulsion_vertex_ids/
+                # _repulsion_vertex_multipliers this level's own Inflate call actually uses.
+                repulsion_ids = [v for v in self._repulsion_vertex_ids() if v in idx]
+                if repulsion_ids:
+                    rep_indices = [idx[v] for v in repulsion_ids]
+                    mult_by_id = self._repulsion_vertex_multipliers() or {}
+                    rep_mults = [mult_by_id.get(v, 1.0) for v in repulsion_ids]
+                    forces = repulsion_force(points, strength=REPULSION_STRENGTH,
+                                              indices=rep_indices, vertex_multipliers=rep_mults)
+                    force_lens = {v: np.linalg.norm(forces[idx[v]]) for v in repulsion_ids}
+                    max_len = max(force_lens.values(), default=0.0)
+                    starts, ends = [], []
+                    if max_len >= 1e-12:
+                        for v in repulsion_ids:
+                            force_len = force_lens[v]
+                            if force_len < 1e-12:
+                                continue
+                            force_vec = forces[idx[v]]
+                            starts.append(positions[v])
+                            ends.append(positions[v] + force_vec / max_len
+                                        * EDGE_LENGTH * NORMAL_LENGTH_FRACTION)
+                    if starts:
+                        segment_points = np.empty((2 * len(starts), 3))
+                        segment_points[0::2] = starts
+                        segment_points[1::2] = ends
+                        plotter.add_lines(segment_points, color=REPULSION_FORCE_COLOR, width=2.0)
+
             # Each level fills its own panel to 90% from its own CURRENT bounding box, not a
             # fixed reference framing shared across levels -- the per-level target RMS %
             # tapers down, so the converged mesh's absolute size genuinely shrinks level to
@@ -1437,25 +1587,21 @@ class InflatePolyhedronApp:
             self._level_half[level] = float(np.linalg.norm(points - center, axis=1).max()) + 1e-6
         self._render_level_pv(level)
 
-    def _render_level_pv(self, level):
-        """Positions an orthographic (parallel-projection) camera from `level`'s own camera
-        group's rotation at a distance derived from this level's own current bounding box
-        (self._level_center/_level_half, set by _draw_level_panel -- necessary since neither
-        a pure-spring relax nor a pressure inflation keeps the result near the origin or at a
-        familiar scale), renders off-screen, and blits the result into self.level_labels[level].
-        Parallel rather than perspective projection gives every panel fixed, comparable
-        axis-limit-like framing with no foreshortening.
-
-        Skips entirely (leaving the panel's "Computing..." text alone) while `level` is the
-        one currently showing it -- the single choke point every caller goes through, so
-        nothing can paint a stale image over the placeholder mid-calibration.
-
-        The panel's "Level N" title is a separate Tkinter Label, not drawn into this image --
-        a title drawn inside the rendered scene (via plotter.add_text) clips against the
-        panel's own top edge, since a VTK text actor's positioning doesn't guarantee it stays
-        fully inside the viewport the way a real widget above the image does."""
-        if level == self._computing_level:
-            return
+    def _capture_level_image(self, level):
+        """The actual pixels _render_level_pv blits into self.level_labels[level] -- factored
+        out as its own PIL Image return (2026-09-28, added so on_save_session_clicked can save
+        Level 3's own view as a .jpg alongside a .hippo without duplicating this camera-setup
+        logic). Positions an orthographic (parallel-projection) camera from `level`'s own
+        camera group's rotation at a distance derived from this level's own current bounding
+        box (self._level_center/_level_half, set by _draw_level_panel -- necessary since
+        neither a pure-spring relax nor a pressure inflation keeps the result near the origin
+        or at a familiar scale), and renders off-screen. Parallel rather than perspective
+        projection gives every panel fixed, comparable axis-limit-like framing with no
+        foreshortening. Returns None while `level` is the one currently showing "Computing..."
+        (nothing real to capture yet) or if `level` was never actually drawn at all (no entry
+        in self._level_center)."""
+        if level == self._computing_level or level not in self._level_center:
+            return None
         cam = self._level_camera(level)
         direction = cam["rotation"].apply([1.0, 0.0, 0.0])
         up = cam["rotation"].apply([0.0, 0.0, 1.0])
@@ -1490,8 +1636,23 @@ class InflatePolyhedronApp:
         # explicit render() first is what actually asks VTK to redraw the scene from the
         # camera's current position before screenshot() reads the framebuffer back.
         plotter.render()
-        image = plotter.screenshot(return_img=True)
-        self.level_photos[level] = ImageTk.PhotoImage(Image.fromarray(image))
+        return Image.fromarray(plotter.screenshot(return_img=True))
+
+    def _render_level_pv(self, level):
+        """Renders `level`'s own panel (_capture_level_image) and blits the result into
+        self.level_labels[level]. Skips entirely (leaving the panel's "Computing..." text
+        alone) while `level` is the one currently showing it -- the single choke point every
+        caller goes through, so nothing can paint a stale image over the placeholder mid-
+        calibration.
+
+        The panel's "Level N" title is a separate Tkinter Label, not drawn into this image --
+        a title drawn inside the rendered scene (via plotter.add_text) clips against the
+        panel's own top edge, since a VTK text actor's positioning doesn't guarantee it stays
+        fully inside the viewport the way a real widget above the image does."""
+        image = self._capture_level_image(level)
+        if image is None:
+            return
+        self.level_photos[level] = ImageTk.PhotoImage(image)
         # text="" clears whatever "Computing..." text was last set -- harmless to leave
         # (Label's default compound="none" shows the image over it regardless), but tidier.
         self.level_labels[level].configure(image=self.level_photos[level], text="")
@@ -1659,6 +1820,18 @@ class InflatePolyhedronApp:
             source_polygon_id = self._net_file_json.get("source_polygon_id")
         self.base_edges = base_edges
         self.base_face_edge_ids = base_face_edge_ids
+        # Only reapply the net's own closed/open target-RMS defaults when the net actually
+        # CHANGES, not on every on_select_net call -- on_select_net also re-runs for the SAME
+        # net (e.g. on_auto_clicked's own "Run Simulation again after a completed run restarts
+        # fresh from Level 0" case), and unconditionally resetting here was wiping out a user's
+        # own already-typed Target RMS value on every one of those re-runs (2026-09-28,
+        # explicit user report: "I'm not able to change the target %... it should be allowed
+        # even though I've specified defaults" -- root cause was this reset firing far more
+        # often than "a genuinely different net was just loaded"). self.current_path (from the
+        # PREVIOUS call, not yet overwritten at this point) is None on the very first load, so
+        # that first call still gets its defaults applied.
+        if getattr(self, "current_path", None) != path:
+            self._reset_target_rms_defaults()
         self.colors, self.color_by_group, self.group_of_base_face = _face_colors_by_group(
             len(self.base_faces), source_polygon_id)
 
@@ -1689,7 +1862,8 @@ class InflatePolyhedronApp:
         self.edges = _fan_level_edges(self.faces, self.base_edges)
         self.current_path = path
         self.subdivision_level = 0
-        self.positions = random_initial_positions(self.faces, seed=0)
+        self.positions = random_initial_positions(self.faces, seed=self._get_or_generate_seed())
+        self._capture_level_start_state()
         self.iteration_count = 0
         self._current_precomp_time_s = None
         self._current_sim_time_s = None
@@ -1708,14 +1882,13 @@ class InflatePolyhedronApp:
         # A fresh net starts over cleanly, resetting any Auto sequence defensively.
         self._auto_active = False
         self._auto_attempted_level = None
-        # Fresh camera state for both groups on every new net selection -- a totally
-        # different-looking shape shouldn't inherit the previous net's camera. Doesn't affect
-        # File > Load, which builds its own state directly from the saved SessionStateModel's
-        # own camera fields and never calls this method.
-        self._level0_camera = {"rotation": self._initial_level_rotation(),
-                                "zoom": 1.0, "pan": np.zeros(2)}
-        self._level13_camera = {"rotation": self._initial_level_rotation(),
-                                 "zoom": 1.0, "pan": np.zeros(2)}
+        self._auto_end_state = None
+        # Fresh camera state on every new net selection -- a totally different-looking shape
+        # shouldn't inherit the previous net's camera. Doesn't affect File > Load, which builds
+        # its own state directly from the saved SessionStateModel's own camera fields and never
+        # calls this method.
+        self._level_camera_state = {"rotation": self._initial_level_rotation(),
+                                     "zoom": 1.0, "pan": np.zeros(2)}
         self._record_level_history()
         self._update_level_action_buttons()
         self._update_auto_button()
@@ -1724,28 +1897,49 @@ class InflatePolyhedronApp:
     # ---- session save/load (File menu) ----
 
     def on_save_session_clicked(self):
-        """File > Save -- serializes the whole current session (the net, every Target RMS/
-        Tolerance spinner, the Convergence History table, the mesh at every subdivision level
-        reached so far, and each panel's own camera view) to one JSON file via
-        session_state.SessionStateModel, enough for on_load_session_clicked to reopen it
-        exactly as left with no re-solving. self.level_snapshots holds every level already
-        left behind; the current frontier level's own live faces/positions/face_of_fine/
-        edge_length aren't in there yet, so this adds them under self.subdivision_level before
-        writing. Camera rotation (a scipy Rotation) is stored as .as_quat() -- JSON has no
-        quaternion type, and a plain tuple round-trips through Rotation.from_quat() losslessly."""
+        """File > Save -- prompts for a path (defaulting to self.mesh_name under
+        SESSION_OUTPUT_DIR) and writes the current session there via _write_session. See
+        _write_session's own docstring for what actually gets saved."""
         if self.positions is None:
             messagebox.showwarning("Save", "No net is loaded yet.")
             return
         SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         # ".hippo" -- still plain JSON underneath (model_dump_json below), just a distinct
         # extension so a saved session doesn't look like an ordinary net .json in a file picker.
+        # self.mesh_name is always the loaded net FILE's own basename now (load_stretchy_mesh no
+        # longer reads any "name" field from inside the file -- 2026-09-28, explicit user
+        # request, after a stale internal "name" field caused the wrong default here once), so
+        # it's safe to use directly -- works the same whether this session came from picking a
+        # net or from loading a PREVIOUS session (self.mesh_name is restored either way).
         path = filedialog.asksaveasfilename(
             title="Save session", initialdir=str(SESSION_OUTPUT_DIR),
+            initialfile=self.mesh_name,
             defaultextension=SESSION_FILE_EXTENSION,
             filetypes=[("Inflate Polyhedron session", f"*{SESSION_FILE_EXTENSION}")])
         if not path:
             return
+        self._write_session(path)
 
+    def _write_session(self, path):
+        """Serializes the whole current session (the net, every Target RMS/Tolerance spinner,
+        the Convergence History table, the mesh at every subdivision level reached so far, and
+        each panel's own camera view) to `path` via session_state.SessionStateModel, enough for
+        on_load_session_clicked to reopen it exactly as left with no re-solving -- shared by
+        on_save_session_clicked (path from the Save dialog) and on_run_all_clicked (path
+        computed automatically per net, no dialog -- 2026-09-28, explicit user request).
+        self.level_snapshots holds every level already left behind; the current frontier
+        level's own live faces/positions/face_of_fine/edge_length aren't in there yet, so this
+        adds them under self.subdivision_level before writing. Camera rotation (a scipy
+        Rotation) is stored as .as_quat() -- JSON has no quaternion type, and a plain tuple
+        round-trips through Rotation.from_quat() losslessly.
+
+        Also saves a .jpg of Level 3's own current view alongside the .hippo, same basename,
+        same folder -- e.g. butterfly.hippo -> butterfly.jpg. Skipped (silently -- the .hippo
+        save itself already succeeded regardless) unless Level 3 actually has real content:
+        draw()'s own condition for "this level has been reached" (either the live frontier
+        right now, or already left behind as a snapshot) -- _capture_level_image(3) alone isn't
+        enough to tell, since it happily renders an EMPTY scene (plotter.clear() with nothing
+        added, see _draw_level_panel) for a level that was never reached at all."""
         levels = {level: LevelStateModel.from_mesh(snap["faces"], snap["positions"],
                                                      snap["face_of_fine"])
                   for level, snap in self.level_snapshots.items()}
@@ -1760,18 +1954,26 @@ class InflatePolyhedronApp:
             iteration_count=self.iteration_count,
             debug_mode=self.debug_mode,
             tolerance=self.tolerance_var.get(),
+            seed=self.seed_var.get(),
             target_rms_pct={level: var.get() for level, var in self.target_rms_vars.items()},
             last_stats=LastStatsModel(**{k: v for k, v in self.last_stats.items()
                                           if k in LastStatsModel.model_fields}),
             level_history={level: LevelHistoryRecordModel(**rec)
                            for level, rec in self.level_history.items()},
             levels=levels,
-            level_zoom=self._level13_camera["zoom"],
-            level_pan=(float(self._level13_camera["pan"][0]), float(self._level13_camera["pan"][1])),
-            level_rotation=tuple(float(v) for v in self._level13_camera["rotation"].as_quat()),
-            level0_zoom=self._level0_camera["zoom"],
-            level0_pan=(float(self._level0_camera["pan"][0]), float(self._level0_camera["pan"][1])),
-            level0_rotation=tuple(float(v) for v in self._level0_camera["rotation"].as_quat()),
+            # Every level shares one camera now (2026-09-28) -- written into BOTH the
+            # "level_*" and "level0_*" fields (same values) rather than dropping the latter,
+            # so the SessionStateModel schema/file format doesn't need to change and an older
+            # saved file's own level0_* fields stay meaningful to read back (on_load_session_
+            # clicked below no longer reads them, but nothing stops another tool from).
+            level_zoom=self._level_camera_state["zoom"],
+            level_pan=(float(self._level_camera_state["pan"][0]),
+                       float(self._level_camera_state["pan"][1])),
+            level_rotation=tuple(float(v) for v in self._level_camera_state["rotation"].as_quat()),
+            level0_zoom=self._level_camera_state["zoom"],
+            level0_pan=(float(self._level_camera_state["pan"][0]),
+                        float(self._level_camera_state["pan"][1])),
+            level0_rotation=tuple(float(v) for v in self._level_camera_state["rotation"].as_quat()),
             net_zoom=self.net_zoom,
             net_pan=(float(self.net_pan[0]), float(self.net_pan[1])),
         )
@@ -1780,8 +1982,20 @@ class InflatePolyhedronApp:
                 f.write(state.model_dump_json(indent=2))
         except OSError as e:
             messagebox.showerror("Save", f"Could not save session: {e}")
-            return
-        self._set_status(f"Session saved to {os.path.basename(path)}.", "info")
+            return False
+        jpg_saved = False
+        level3_reached = 3 == self.subdivision_level or 3 in self.level_snapshots
+        level3_image = self._capture_level_image(3) if level3_reached else None
+        if level3_image is not None:
+            jpg_path = os.path.splitext(path)[0] + ".jpg"
+            try:
+                level3_image.convert("RGB").save(jpg_path, "JPEG")
+                jpg_saved = True
+            except OSError as e:
+                messagebox.showerror("Save", f"Session saved, but could not save Level 3 image: {e}")
+        suffix = " (+ Level 3 .jpg)" if jpg_saved else ""
+        self._set_status(f"Session saved to {os.path.basename(path)}{suffix}.", "info")
+        return True
 
     def on_load_session_clicked(self):
         """File > Load -- the inverse of on_save_session_clicked. Fully
@@ -1855,32 +2069,26 @@ class InflatePolyhedronApp:
         self.iteration_count = state.iteration_count
         self.debug_mode = state.debug_mode
         self.tolerance_var.set(state.tolerance)
+        self.seed_var.set(state.seed)
         for level, value in state.target_rms_pct.items():
             if level in self.target_rms_vars:
                 self.target_rms_vars[level].set(value)
         self.last_stats = state.last_stats.model_dump()
         self.level_history = {level: rec.model_dump() for level, rec in state.level_history.items()}
 
-        # Each panel's own camera view -- a rotation field falls back to _initial_level_
-        # rotation() (this app's own non-axis-aligned default), not any baked-in quaternion,
-        # when None (a session saved before this existed, or with no panel ever rotated).
-        # Levels 1-3's own shared group reads the original "level_*" fields (an older,
-        # pre-split session file's one shared camera maps onto this group); Level 0's own
-        # independent group reads the newer "level0_*" fields, absent in an older file --
-        # falling back to a fresh default for Level 0 specifically rather than the old file's
-        # one shared camera. draw() below re-renders with all of these live.
-        self._level13_camera = {
+        # Every level's own camera view (one shared state, see this state's own init comment)
+        # -- read from the "level_*" fields (an older, pre-split session file's one shared
+        # camera maps onto these too; the newer "level0_*" fields written alongside them by
+        # on_save_session_clicked are ignored here, since Level 0 no longer has anything
+        # separate to restore). A rotation field falls back to _initial_level_rotation() (this
+        # app's own non-axis-aligned default), not any baked-in quaternion, when None (a
+        # session saved before rotation existed, or with no panel ever rotated). draw() below
+        # re-renders with this live.
+        self._level_camera_state = {
             "zoom": state.level_zoom,
             "pan": np.array(state.level_pan),
             "rotation": (Rotation.from_quat(state.level_rotation)
                          if state.level_rotation is not None
-                         else self._initial_level_rotation()),
-        }
-        self._level0_camera = {
-            "zoom": state.level0_zoom,
-            "pan": np.array(state.level0_pan),
-            "rotation": (Rotation.from_quat(state.level0_rotation)
-                         if state.level0_rotation is not None
                          else self._initial_level_rotation()),
         }
         self.net_zoom = state.net_zoom
@@ -1913,6 +2121,11 @@ class InflatePolyhedronApp:
             self._update_replay_slider(level)
         self._auto_active = False
         self._auto_attempted_level = None
+        self._auto_end_state = None
+        # A loaded session's own current level has no "start of level" state to resume from
+        # (a Continue right after loading would have nothing meaningful to restore) -- treated
+        # the same as a level whose Inflate/Relax hasn't been (re)started since loading.
+        self._capture_level_start_state()
         self._apply_mode_visibility()
         self._refresh_history_table()
         self._update_level_action_buttons()
@@ -1973,6 +2186,7 @@ class InflatePolyhedronApp:
         # Level 2+'s own edges are always unambiguous -- self.edges (the Level 0/1-only
         # spring-edge override) has no reason to exist past this point.
         self.edges = None
+        self._capture_level_start_state()
         # This new level's own Target RMS spinner value, just for the history row recorded
         # below, before Inflate has even run once at this level yet.
         if self.subdivision_level in self.target_rms_vars:
@@ -2001,14 +2215,20 @@ class InflatePolyhedronApp:
     # ---- convergence history table ----
 
     def _record_level_history(self):
-        """Records/updates the current level's row: pressure last calibrated for it (None for
-        Level 0, which has no pressure at all), steps so far this level, stretch stats, and
-        the stopping-condition `optimality` -- all from self.last_stats, plus the "Simulation
-        Time"/"Cumulative Time" columns' own backing state. Called on every subdivide/
-        promotion, every live progress update, and when a run finishes, so the row always
-        reflects the level's latest state rather than only its final converged one."""
+        """Records/updates the current level's row: pressure last calibrated for it at Level
+        1+, or the jiggle/burst strength actually used at Level 0 (level0_jiggle_distance --
+        2026-09-28, explicit user request: "now that we're using bursts in level 0, you can put
+        the pressure used in the convergence history" -- see that function's own docstring for
+        why a displacement, not a literal pressure, ends up in that column), steps so far this
+        level, stretch stats, and the stopping-condition `optimality` -- all from
+        self.last_stats, plus the "Simulation Time"/"Cumulative Time" columns' own backing
+        state. Called on every subdivide/promotion, every live progress update, and when a run
+        finishes, so the row always reflects the level's latest state rather than only its
+        final converged one."""
+        level0_burst = (level0_jiggle_distance(self.faces, self.edge_length, self.edges)
+                         if self.subdivision_level == 0 and self.faces is not None else None)
         self.level_history[self.subdivision_level] = {
-            "pressure": None if self.subdivision_level == 0 else self.pressure_value,
+            "pressure": level0_burst if self.subdivision_level == 0 else self.pressure_value,
             "steps": self.iteration_count,
             "max_stretch_pct": self.last_stats.get("max_stretch_pct", 0.0),
             # No 0.0 fallback here -- None is a genuine, distinct "not known yet, still
@@ -2108,17 +2328,19 @@ class InflatePolyhedronApp:
                 convergence = (f"{self._format_sci(optimality)} {op} "
                                 f"{self._format_sci(gtol, precision=0)} {mark}")
                 tags = ("converged",) if converged else ("not_converged",)
-            # "--" for Level 0, the only level whose "pressure" is ever None (pure springs, no
-            # pressure to calibrate).
+            # "--" only when this level's own row hasn't recorded anything yet -- Level 0's own
+            # "pressure" is level0_jiggle_distance (the burst strength actually used there, see
+            # _record_level_history's own comment), not a literal calibrated pressure, but
+            # still a real number once Level 0 has run at all.
             pressure_str = "--" if rec["pressure"] is None else f"{rec['pressure']:.2f}"
             # This row's own target_rms_pct (recorded at the time it was calibrated, not read
             # live from the spinner), so a level's row keeps showing what it was actually
             # chasing even after the spinner shows a different level's default. "--" while this
             # run's RMS isn't known yet (filled in the instant it's known, before replay
-            # starts). Level 0 always shows "--" here regardless of its own last_stats value --
-            # its RMS is still computed/stored, just never surfaced for this level's row.
-            rms_str = ("--" if level == 0 or rec["rms_stretch_pct"] is None
-                       else f"{rec['rms_stretch_pct']:.1f}")
+            # starts). Level 0 has no TARGET (it's pure springs, not calibrated toward
+            # anything), but its actual achieved RMS stretch % is shown same as every other
+            # level (2026-09-28, explicit user request).
+            rms_str = "--" if rec["rms_stretch_pct"] is None else f"{rec['rms_stretch_pct']:.1f}"
             # "(target: ...)" is debug-mode-only.
             if self.debug_mode and level != 0 and rec.get("target_rms_pct") is not None:
                 rms_str += f" (target: {rec['target_rms_pct']:.1f})"
@@ -2154,15 +2376,23 @@ class InflatePolyhedronApp:
         """max/rms edge stretch of the current self.faces/self.positions against
         self.edge_length -- the same stats relax_once/relax_initial_configuration report,
         computed directly for a mesh that hasn't been relaxed yet (a fresh random start, or
-        freshly-interpolated positions right after a Subdivide click)."""
+        freshly-interpolated positions right after a Subdivide click). Excludes any OPEN
+        polygon's own edges from the RMS average the same way those functions do (see
+        _rms_exclude_edges) -- max_stretch_pct is unaffected."""
         edges = mesh_edges(self.faces, self.edges)
         rest = (np.array([self.edge_length[e] for e in edges])
                 if isinstance(self.edge_length, dict) else self.edge_length)
         lengths = np.array([np.linalg.norm(self.positions[a] - self.positions[b])
                              for a, b in edges])
         stretch_pct = 100 * (lengths - rest) / rest
+        rms_exclude_edges = self._rms_exclude_edges()
+        rms_stretch_pct = float(np.sqrt(np.mean(stretch_pct ** 2)))
+        if rms_exclude_edges:
+            rms_mask = np.array([tuple(sorted(e)) not in rms_exclude_edges for e in edges])
+            if rms_mask.any() and not rms_mask.all():
+                rms_stretch_pct = float(np.sqrt(np.mean(stretch_pct[rms_mask] ** 2)))
         return {"max_stretch_pct": float(np.max(np.abs(stretch_pct))),
-                "rms_stretch_pct": float(np.sqrt(np.mean(stretch_pct ** 2))),
+                "rms_stretch_pct": rms_stretch_pct,
                 "optimality": None, "converged": None}
 
     # ---- inflate ----
@@ -2203,6 +2433,19 @@ class InflatePolyhedronApp:
         after a change that didn't go through this entry."""
         self.target_rms_display_vars[level].set(f"{self.target_rms_vars[level].get():.0f}%")
 
+    def _reset_target_rms_defaults(self):
+        """Called by on_select_net for every freshly-loaded net: picks LEVEL_DEFAULT_TARGET_
+        RMS_PCT_CLOSED or _OPEN based on whether THIS net is closed (no free/open edge
+        anywhere -- _open_base_edges returns nothing) or open (at least one), stashes it as
+        self._target_rms_defaults (read by _commit_target_rms_entry's own fallback), and
+        writes it straight into every level's spinner -- a previous net's own edited values
+        never carry over to a different net."""
+        is_closed = not _open_base_edges(self.base_faces, self.base_face_edge_ids)
+        self._target_rms_defaults = (LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED if is_closed
+                                      else LEVEL_DEFAULT_TARGET_RMS_PCT_OPEN)
+        for level, var in self.target_rms_vars.items():
+            var.set(round(self._target_rms_defaults[level]))
+
     def _commit_target_rms_entry(self, level, _event=None):
         """<Return>/<FocusOut> on a target-RMS entry: clamps whatever got typed into [0, 100],
         rounded to the nearest whole number (out-of-range values truncated to the nearest
@@ -2212,7 +2455,7 @@ class InflatePolyhedronApp:
         try:
             value = round(float(self.target_rms_display_vars[level].get()))
         except (tk.TclError, ValueError):
-            value = LEVEL_DEFAULT_TARGET_RMS_PCT[level]
+            value = self._target_rms_defaults[level]
         self.target_rms_vars[level].set(max(0, min(100, value)))
 
     def _on_target_rms_changed(self, level):
@@ -2237,6 +2480,173 @@ class InflatePolyhedronApp:
             return float(self.tolerance_var.get())
         except ValueError:
             return DEFAULT_TOLERANCE
+
+    def _get_or_generate_seed(self):
+        """Parses self.seed_var's text as an int and returns it unchanged if present -- a
+        specific seed typed into debug mode's own "Seed" entry, pinned for this net load.
+        Blank (the default) instead draws a fresh random one and writes it back into
+        self.seed_var, so whatever seed actually produced this net's starting embedding stays
+        visible/copyable afterward even though nothing was typed in beforehand."""
+        text = self.seed_var.get().strip()
+        if text:
+            try:
+                return int(text)
+            except ValueError:
+                pass
+        seed = int(np.random.default_rng().integers(0, 2**31 - 1))
+        self.seed_var.set(str(seed))
+        return seed
+
+    def _capture_level_start_state(self):
+        """Snapshots self.faces/positions/face_of_fine/edge_length/edges as "the current
+        level's own starting point" (self._level_start_state) -- called every time a level is
+        first entered: on_select_net (Level 0), _finish_relax's own promotion to Level 1, and
+        _subdivide_step (Level 2+). on_auto_continue_clicked restores exactly this to resume a
+        STOPPED level from its own beginning rather than wherever its partial Relax/Inflate
+        progress left off (2026-09-27, explicit user request)."""
+        self._level_start_state = {
+            "faces": self.faces, "positions": self.positions,
+            "face_of_fine": self.face_of_fine, "edge_length": self.edge_length,
+            "edges": self.edges,
+        }
+
+    def _repulsion_vertex_ids(self):
+        """The vertex ids repulsion acts on: each ORIGINAL polygon's own raw corners, straight
+        from self.base_faces -- e.g. a hexagon's own 6 vertices, not the extra fan-hub centroid
+        _build_level1_topology's own triangulation would add on top (2026-09-27, explicit user
+        request: "the only vertices that are repulsive are the vertices of the original
+        polygons"). A SELF-JOINED polygon (already exported as several base_faces triangle
+        pieces, e.g. a folded hexagon's own 6 wedges -- see mesh_levels.py's own docstring)
+        has no single well-defined "original polygon" left to speak of, so its own
+        already-triangular pieces' own raw corners are used instead -- exactly what reading
+        self.base_faces directly gives regardless, with no special-casing needed either way
+        (an ordinary, non-folded polygon is always exactly one base_faces entry already).
+
+        A small, FIXED set -- computed from self.base_faces, unaffected by whatever the
+        CURRENT subdivision_level actually is, so it stays correct even after later Subdivides
+        add their own finer vertices on top. Passed as every level's own `repulsion_vertex_ids`
+        in on_inflate_clicked ("let's use the same set of points... for all the levels" --
+        repulsion's own O(n^2) cost against Level 2/3's much larger full vertex count was too
+        slow in practice; restricting it to this always-small population keeps the cost
+        constant regardless of level)."""
+        return sorted({v for face in self.base_faces for v in face})
+
+    def _closed_repulsion_vertex_ids(self):
+        """The subset of _repulsion_vertex_ids that are "closed": NOT an endpoint of any free
+        (unglued) base-polygon edge (2026-09-27, explicit user request: "if a vertices borders
+        n edges and n faces, then it's closed. if not then it's open" -- for an ordinary
+        manifold vertex this is exactly equivalent to that edges-vs-faces count, since a
+        complete fan has one face per edge while an incomplete one has one fewer).
+
+        Deliberately reuses _open_base_edges (the SAME face_edge_ids-disambiguated free-edge
+        detection _level1_is_open already relies on) rather than counting edges/faces directly
+        on the fine mesh: a plain vertex-id-pair count gets the WRONG answer at a
+        highly-overlapping "pinch point" like a self-folded polygon's own fan hub, where
+        several flap-duplicate layers (see mesh_levels.py's own docstring on flap pairs) can
+        each independently have a genuinely FREE edge that happens to share its plain
+        vertex-id pair with another layer's own edge -- e.g. cannoli.poly's hub vertex sees
+        every one of its incident plain vertex-pairs "used twice" this way even though real,
+        disambiguated free edges DO touch it, so a naive count reads it as fully closed when
+        it's actually open. face_edge_ids' own per-edge-slot ids don't have that ambiguity."""
+        repulsion_ids = self._repulsion_vertex_ids()
+        open_edges_by_base = _open_base_edges(self.base_faces, self.base_face_edge_ids)
+        open_vertices = set()
+        for pairs in open_edges_by_base.values():
+            for pair in pairs:
+                open_vertices.update(pair)
+        return {v for v in repulsion_ids if v not in open_vertices}
+
+    def _repulsion_vertex_multipliers(self):
+        """{vertex_id: multiplier} for every CLOSED repulsion vertex (see
+        _closed_repulsion_vertex_ids) -- 1.0 at Level 0/1, halved at every level after that:
+        full strength at Level 1, half at Level 2, a quarter at Level 3 (2026-09-27, explicit
+        user request: "make the repulsive forces weaker at level 2 and then weaker again at
+        level 3... for vertices that are closed" -- an OPEN vertex is simply absent from this
+        dict, defaulting to its own full multiplier of 1 wherever it's looked up, unaffected by
+        level). None (rather than an all-1.0 dict) when every repulsion vertex is open, so
+        callers can skip the machinery entirely."""
+        closed = self._closed_repulsion_vertex_ids()
+        if not closed:
+            return None
+        factor = 1.0 / (2 ** max(0, self.subdivision_level - 1))
+        return {v: factor for v in closed}
+
+    def _level1_is_open(self):
+        """True/False per LEVEL-1 fine triangle (same order _build_level1_topology's own
+        `faces` would be), independent of self.subdivision_level -- whether THAT SPECIFIC
+        wedge's own outer rim edge (the one opposite the fan hub, corresponding to exactly one
+        edge of its own original polygon) is free ("open") rather than glued to a neighbor
+        ("closed") (2026-09-27, explicit user request: an n-gon connected at 2 of its own
+        edges triangulates into 2 closed wedges and n-2 open ones -- classified per WEDGE, not
+        per whole polygon, unlike the earlier, superseded version of this feature).
+
+        The fan hub is found the same way fan_hub_vertices used to (before the C2C springs
+        work that introduced it was reverted): the one vertex every one of a base polygon's
+        own wedges has in common. A wedge's own rim edge is then just its other two vertices."""
+        level1_faces, _edge_length, level1_face_of_fine = _build_level1_topology(self.base_faces)
+        open_edges = _open_base_edges(self.base_faces, self.base_face_edge_ids)
+        verts_by_base = {}
+        for face, base_idx in zip(level1_faces, level1_face_of_fine):
+            verts = set(face)
+            verts_by_base[base_idx] = (verts if base_idx not in verts_by_base
+                                        else verts_by_base[base_idx] & verts)
+        hub_by_base = {i: next(iter(s)) for i, s in verts_by_base.items() if len(s) == 1}
+        flags = []
+        for face, base_idx in zip(level1_faces, level1_face_of_fine):
+            hub = hub_by_base.get(base_idx)
+            if hub is None:
+                flags.append(False)  # no well-defined single hub -- default to "closed"/participating
+                continue
+            rim_pair = frozenset(v for v in face if v != hub)
+            flags.append(rim_pair in open_edges.get(base_idx, ()))
+        return flags
+
+    def _is_open_of_fine(self, level=None):
+        """is_open flags parallel to self.faces at `level` (self.subdivision_level if not
+        given) -- _level1_is_open's own result, repeated 4x per Subdivide since Level 1
+        (mirroring exactly how mesh_levels._quarter_triangles itself propagates face_of_fine:
+        every old triangle's 4 children are appended contiguously, in old-index order -- see
+        that function's own docstring -- so a parallel array only needs the same
+        repeat-4x-in-order treatment to stay aligned, without mesh_levels.py needing to know
+        this array exists at all). Level 0 shares Level 1's own topology, so `level <= 1` both
+        mean zero repeats. Takes an explicit `level` (rather than always reading
+        self.subdivision_level) so _draw_level_panel can compute this for whichever panel
+        it's drawing, not just the live frontier one."""
+        if level is None:
+            level = self.subdivision_level
+        flags = self._level1_is_open()
+        for _ in range(max(0, level - 1)):
+            flags = [f for f in flags for _ in range(4)]
+        return flags
+
+    def _rms_exclude_edges(self):
+        """(a, b) sorted vertex-id-pair tuples, at the CURRENT subdivision level, to exclude
+        from the RMS Stretch % calculation -- every edge of every OPEN fine triangle (see
+        _is_open_of_fine), not just its own free edge (2026-09-27, explicit user request: an
+        open wedge triangle doesn't participate in the RMS stretch % calculation at all).
+        None (rather than an empty set) when nothing in the net is open, so callers can skip
+        the exclusion machinery entirely."""
+        is_open = self._is_open_of_fine()
+        if not any(is_open):
+            return None
+        exclude = set()
+        for face, open_flag in zip(self.faces, is_open):
+            if open_flag:
+                n = len(face)
+                for k in range(n):
+                    exclude.add(tuple(sorted((face[k], face[(k + 1) % n]))))
+        return exclude
+
+    def _pressure_exclude_faces(self):
+        """Boolean list parallel to self.faces AT THE CURRENT subdivision_level -- True for
+        every OPEN fine triangle (see _is_open_of_fine), which should feel NO pressure/
+        inflation force at all (2026-09-27, explicit user request: an open wedge triangle
+        "should not experience inflation forces"), while still fully existing for springs/
+        repulsion/edges/convergence. None when nothing in the net is open, so callers can skip
+        the exclusion machinery (and stretchy_mesh._face_index_groups' own per-face check)
+        entirely."""
+        is_open = self._is_open_of_fine()
+        return is_open if any(is_open) else None
 
     def _guess_pressure_from_history(self, target_rms_pct):
         """Estimates the pressure to hand estimate_pressure_for_target_stretch as its own
@@ -2302,6 +2712,10 @@ class InflatePolyhedronApp:
         if self.positions is None or self.last_stats.get("converged"):
             return
         faces, edge_length, positions = self.faces, self.edge_length, self.positions
+        repulsion_vertex_ids = self._repulsion_vertex_ids()
+        repulsion_vertex_multipliers = self._repulsion_vertex_multipliers()
+        rms_exclude_edges = self._rms_exclude_edges()
+        pressure_exclude_faces = self._pressure_exclude_faces()
         target_rms_pct = self.target_rms_vars[self.subdivision_level].get()
         # Captured here too, not just at the level-default sites, in case the user edited the
         # spinner away from that default before clicking Inflate.
@@ -2342,7 +2756,11 @@ class InflatePolyhedronApp:
                 initial_pressure_guess=initial_pressure_guess,
                 capture_frames=True,
                 on_progress=queue_progress,
-                edges=self.edges),
+                edges=self.edges,
+                repulsion_vertex_ids=repulsion_vertex_ids,
+                repulsion_vertex_multipliers=repulsion_vertex_multipliers,
+                rms_exclude_edges=rms_exclude_edges,
+                pressure_exclude_faces=pressure_exclude_faces),
             lambda result: self._on_pressure_calibrated(result, self._precomp_base_iteration_count),
             on_progress=self._on_calibration_progress)
 
@@ -2589,12 +3007,54 @@ class InflatePolyhedronApp:
         """Runs the whole pipeline unattended: Relax at Level 0, then Inflate/Subdivide/.../
         Level MAX_LEVEL -- see _auto_step, which drives one step at a time and decides what
         "next" means at any given moment. Disabled whenever a net isn't loaded or any run is
-        already in progress."""
+        already in progress.
+
+        If the LAST Auto sequence ran all the way to a natural end (self._auto_end_state ==
+        "completed" -- reached MAX_LEVEL and converged, OR gave up on a level that wouldn't
+        converge), this is "Run Simulation" clicked again after that: restarts fresh from
+        Level 0 (on_select_net, which also draws a new random seed unless one's pinned) rather
+        than doing nothing/erroring on an already-finished run (2026-09-27, explicit user
+        request). `_auto_end_state is None` (never run at all yet) skips that reset -- the
+        current state already IS Level 0's own fresh start, nothing to redo."""
         if self.positions is None or self._auto_active:
             return
+        if self._auto_end_state == "completed":
+            self.on_select_net()
+        self._auto_end_state = None
         self._auto_active = True
         self._auto_attempted_level = None
         self._update_auto_button()
+        self._auto_step()
+
+    def on_auto_continue_clicked(self):
+        """The Auto button's own command when self._auto_end_state == "stopped" (reads
+        "Continue Simulation" -- see _update_auto_button): resumes from the START of whatever
+        level was interrupted, restoring self._level_start_state (that level's own faces/
+        positions/face_of_fine/edge_length/edges, captured the moment it was first entered --
+        see _capture_level_start_state) rather than wherever its partial Relax/Inflate progress
+        left off. Every EARLIER level's own already-recorded history/snapshot is untouched --
+        this only discards the CURRENT (interrupted) level's own in-progress attempt."""
+        if self.positions is None or self._auto_active or self._auto_end_state != "stopped":
+            return
+        if self._level_start_state is not None:
+            self.faces = self._level_start_state["faces"]
+            self.positions = self._level_start_state["positions"]
+            self.face_of_fine = self._level_start_state["face_of_fine"]
+            self.edge_length = self._level_start_state["edge_length"]
+            self.edges = self._level_start_state["edges"]
+        self.iteration_count = 0
+        self._current_precomp_time_s = None
+        self._current_sim_time_s = None
+        if self.subdivision_level in self.target_rms_vars:
+            self._current_target_rms_pct = self.target_rms_vars[self.subdivision_level].get()
+        self.last_stats = self._compute_stretch_stats()
+        self._record_level_history()
+        self._auto_end_state = None
+        self._auto_active = True
+        self._auto_attempted_level = None
+        self._update_level_action_buttons()
+        self._update_auto_button()
+        self.draw()
         self._auto_step()
 
     def on_auto_stop_clicked(self):
@@ -2608,22 +3068,31 @@ class InflatePolyhedronApp:
         """Ends an in-progress Auto sequence without touching whatever Relax/Inflate run might
         currently be underway -- also called from every worker-thread failure path that would
         otherwise leave self._auto_active stuck True with the button showing "Stop Simulation"
-        for a sequence that's already silently dead. A no-op if Auto isn't running."""
+        for a sequence that's already silently dead. Marks self._auto_end_state "stopped" (see
+        its own comment) so the button becomes "Continue Simulation" next -- a no-op, including
+        that marking, if Auto isn't actually running."""
         if self._auto_active:
             self._auto_active = False
+            self._auto_end_state = "stopped"
             self._update_auto_button()
 
     def _update_auto_button(self):
-        """Single source of truth for the Auto button: idle it reads "Run Simulation", enabled
-        only once a net is loaded -- otherwise disabled like every other control while any run
-        is in progress. While Auto itself is driving a run, it instead reads "Stop Simulation"
-        and is explicitly RE-ENABLED regardless of what _set_controls_enabled(False) just did
-        -- the same "frontier button survives the blanket disable" pattern
-        _set_level_action_button_running uses, so the one control that can interrupt a
-        multi-step Auto sequence stays clickable throughout."""
+        """Single source of truth for the Auto button: idle it reads "Run Simulation" (never
+        run yet, or the last run reached a natural end -- self._auto_end_state None/
+        "completed"), enabled only once a net is loaded -- otherwise disabled like every other
+        control while any run is in progress. While Auto itself is driving a run, it instead
+        reads "Stop Simulation" and is explicitly RE-ENABLED regardless of what
+        _set_controls_enabled(False) just did -- the same "frontier button survives the
+        blanket disable" pattern _set_level_action_button_running uses, so the one control
+        that can interrupt a multi-step Auto sequence stays clickable throughout. After an
+        explicit Stop (self._auto_end_state == "stopped"), it reads "Continue Simulation"
+        instead (on_auto_continue_clicked) -- see that method's own comment."""
         if self._auto_active:
             self.auto_button.config(text="Stop Simulation", command=self.on_auto_stop_clicked)
             self.auto_button.state(["!disabled"])
+        elif self._auto_end_state == "stopped":
+            self.auto_button.config(text="Continue Simulation", command=self.on_auto_continue_clicked)
+            self.auto_button.state(["!disabled"] if self.positions is not None else ["disabled"])
         else:
             self.auto_button.config(text="Run Simulation", command=self.on_auto_clicked)
             self.auto_button.state(["!disabled"] if self.positions is not None else ["disabled"])
@@ -2656,11 +3125,13 @@ class InflatePolyhedronApp:
                 self._auto_step()
             else:
                 self._auto_active = False
+                self._auto_end_state = "completed"
                 self._update_auto_button()
                 self._set_status(f"Auto: reached Level {MAX_LEVEL} and converged.", "success")
             return
         if self._auto_attempted_level == self.subdivision_level:
             self._auto_active = False
+            self._auto_end_state = "completed"
             self._update_auto_button()
             self._set_status(
                 f"Auto: Level {self.subdivision_level} still hasn't converged after one "
@@ -2672,6 +3143,66 @@ class InflatePolyhedronApp:
             self.on_relax_clicked()
         else:
             self.on_inflate_clicked()
+
+    # ---- Run > Run All ----
+
+    def on_run_all_clicked(self):
+        """Run > Run All (2026-09-28, explicit user request): runs the exact same unattended
+        pipeline "Run Simulation" (on_auto_clicked) drives for ONE net, for EVERY net currently
+        listed in "Choose a net", one after another, through the real UI (each one actually
+        selected, relaxed/inflated/subdivided on screen, not some separate headless
+        computation) -- saving each net's own .hippo + Level 3 .jpg (_write_session) the
+        instant its own sequence reaches a natural end, before moving to the next. The window
+        title shows "(m/n)" progress throughout (_update_window_title). No-op if Run All or an
+        Auto sequence is already active, or there's nothing to run."""
+        if self._run_all_active or self._auto_active or not self.label_to_path:
+            return
+        # A fixed snapshot taken now, not read live from self.label_to_path later -- so a net
+        # file added/removed/renamed while Run All is already working through the list doesn't
+        # change what's left to do partway through.
+        self._run_all_paths = list(self.label_to_path.items())
+        self._run_all_index = 0
+        self._run_all_active = True
+        self._start_next_run_all_net()
+
+    def _start_next_run_all_net(self):
+        """Loads self._run_all_paths[self._run_all_index] (on_select_net, exactly as if picked
+        from the dropdown by hand) and kicks off its own Auto sequence (on_auto_clicked) --
+        on_select_net's own defensive reset already clears self._auto_end_state back to None,
+        so on_auto_clicked doesn't redundantly reload the net it was just given. Then starts
+        _poll_run_all_net watching for that sequence's own natural end."""
+        label, _path = self._run_all_paths[self._run_all_index]
+        self.net_var.set(label)
+        self.on_select_net()
+        self._update_window_title()
+        self._set_status(
+            f"Run All ({self._run_all_index + 1}/{len(self._run_all_paths)}): "
+            f"running {label}...", "info")
+        self.on_auto_clicked()
+        self._poll_run_all_net()
+
+    def _poll_run_all_net(self):
+        """Watches the CURRENT net's own Auto sequence (self._auto_active) until it reaches a
+        natural end, polling every 200ms rather than threading a callback through on_auto_
+        clicked/_auto_step's own machinery (which has plenty of its own exit points already,
+        e.g. Stop, a worker error, or genuinely finishing -- self._auto_active going False is
+        the one signal all of them already funnel through, via _update_auto_button). Once it
+        does: saves this net's own .hippo + Level 3 .jpg (_write_session, no dialog -- straight
+        to SESSION_OUTPUT_DIR under self.mesh_name), then either starts the next net or, if
+        this was the last one, ends Run All and restores the plain window title."""
+        if self._auto_active:
+            self.root.after(200, self._poll_run_all_net)
+            return
+        SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        output_path = str(SESSION_OUTPUT_DIR / f"{self.mesh_name}{SESSION_FILE_EXTENSION}")
+        self._write_session(output_path)
+        self._run_all_index += 1
+        if self._run_all_index < len(self._run_all_paths):
+            self._start_next_run_all_net()
+            return
+        self._run_all_active = False
+        self._update_window_title()
+        self._set_status(f"Run All: finished all {len(self._run_all_paths)} nets.", "success")
 
     def _run_chunked_relax_stream(self, relax_fn, target_steps, stop_event, on_progress, on_finished):
         """Driver behind _run_relax_stream (Level 0's own Relax, its only remaining caller --
@@ -2818,7 +3349,9 @@ class InflatePolyhedronApp:
             return relax_initial_configuration(self.positions, faces, edge_length,
                                                 max_nfev=max_nfev, stop_event=stop_event,
                                                 gtol=gtol, rng=rng, on_progress=on_progress,
-                                                edges=self.edges)
+                                                edges=self.edges,
+                                                rms_exclude_edges=self._rms_exclude_edges(),
+                                                pressure_exclude_faces=self._pressure_exclude_faces())
 
         self._run_chunked_relax_stream(relax_fn, None, stop_event,
                                         lambda result: self._apply_relax_progress(result, base_iteration_count),
@@ -2877,6 +3410,7 @@ class InflatePolyhedronApp:
             if level0_button is not None:
                 level0_button.config(text="Relax", command=self.on_relax_clicked)
             self.subdivision_level = 1
+            self._capture_level_start_state()
             self.iteration_count = 0
             # Same reset as _subdivide_step's own.
             self._current_precomp_time_s = None
@@ -2897,31 +3431,14 @@ class InflatePolyhedronApp:
         self.draw()
         self._auto_step()  # no-op unless Auto is what actually drove this run
 
-    # ---- debug mode only: mesh validation ----
-
-    def on_validate_mesh_clicked(self):
-        """Debug-mode-only "Validate Mesh" button: runs _validate_mesh against the currently
-        loaded self.faces and reports the result in a modal messagebox -- a synchronous,
-        on-demand check, unlike Inflate/Relax's background-threaded runs, since the check is
-        cheap (pure index math, no dependence on self.positions)."""
-        if self.faces is None:
-            self._set_status("No mesh loaded to validate.", "warn")
-            return
-        ok, lines = _validate_mesh(self.faces)
-        report = "\n".join(lines)
-        if ok:
-            messagebox.showinfo("Validate Mesh", report)
-        else:
-            messagebox.showwarning("Validate Mesh", report)
-
     # ---- background worker (used by pressure calibration) ----
 
     def _set_controls_enabled(self, enabled):
         state = ["!disabled"] if enabled else ["disabled"]
-        for widget in (self.combo, self.tolerance_spin,
+        for widget in (self.combo, self.tolerance_spin, self.seed_spin,
                        self.steps_radio, self.convergence_radio,
-                       self.validate_button, self.show_normals_check,
-                       self.show_vertex_normals_check,
+                       self.show_normals_check,
+                       self.show_vertex_normals_check, self.show_repulsive_forces_check,
                        self.auto_button, *self.target_rms_spins.values()):
             widget.state(state)
         if enabled:
