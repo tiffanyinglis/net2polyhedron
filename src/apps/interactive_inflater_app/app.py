@@ -4905,9 +4905,20 @@ class InflaterPane:
             self._record_inflate_success()
             self._pre_click_snapshot = None
             self._stop_event = None
+            # Captured BEFORE _set_running(False) -- that call clears self._active_button (see
+            # its own docstring), which _pipeline_label() reads to decide "Full Inflate" vs.
+            # "Diff Inflate"; calling _pipeline_label() only AFTER _set_running(False) (as this
+            # used to) always read the just-cleared value and mislabeled every run's own final
+            # "Done" message as "Diff Inflate", even a genuine Full Inflate run throughout
+            # (2026-09-29, explicit bug report: "add a connection... you'll trigger a full
+            # inflate and then a diff inflate (at least according to the UI message), rather
+            # than just a full inflate" -- confirmed by direct testing: every OTHER status
+            # message during the same run correctly read "Full Inflate", only this final one
+            # didn't).
+            done_label = self._pipeline_label()
             self._set_running(False)
             self._set_status(
-                f"{self._pipeline_label()} -- Done at Level {MAX_LEVEL}, pressure "
+                f"{done_label} -- Done at Level {MAX_LEVEL}, pressure "
                 f"{pressure:.2f}, RMS stretch {rms_stretch:.1f}% (max {max_stretch:.2f}%).",
                 "success")
             return
