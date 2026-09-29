@@ -3724,7 +3724,25 @@ class InflaterPane:
         if last_pressure is not None:
             self.last_pressure = last_pressure
 
-        source_polygon_id = (net_file or {}).get("source_polygon_id") or list(range(len(base_faces)))
+        source_polygon_id = (net_file or {}).get("source_polygon_id")
+        if source_polygon_id is None:
+            # No "source_polygon_id" in the file at all -- e.g. a `.hippo` (predates the
+            # Polygon-Fold/source_polygon_id concept entirely, which only ever exists in THIS
+            # app's own export pipeline) -- NOT list(range(len(base_faces))) (2026-09-29,
+            # explicit bug report: "i loaded turtle.hippo, and when i hovered over the
+            # triangular piece in the 2d view, a hexagonal piece lit up in the 3d view" -- that
+            # bare-index fallback silently assumed base_faces group i's own real 2D shape is
+            # whatever LIVE builder shape id happens to equal i, which is essentially never
+            # true: _load_faces assigns fresh live ids from its own running counter, not
+            # 0/1/2/... in net_layout order). base_faces IS always 1:1 with builder.shapes in
+            # net_layout order here (a `.hippo`'s own net can never contain a Polygon-Fold
+            # shape -- that's an interactive_builder_app-only feature the hippo format has no
+            # way to express -- so _load_mesh_from_dict never needed _expand_folded_shapes to
+            # build it), and `_load_faces` builds `builder.shapes` in exactly that same
+            # net_layout order (confirmed by _load_hippie_session's own docstring, which relies
+            # on the identical invariant for its own anchor-by-index lookup) -- so group i's
+            # real shape id is builder.shapes[i]["id"], not i itself.
+            source_polygon_id = [s["id"] for s in builder.shapes[:len(base_faces)]]
         self._pending_source_polygon_id = source_polygon_id
         self.last_source_polygon_id = source_polygon_id
         # 2026-09-28, explicit user request: a save now records is_fully_inflated (True if the
