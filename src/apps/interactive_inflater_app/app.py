@@ -3356,10 +3356,25 @@ class InflaterPane:
         piece(s). The central object's own base mesh/edges are then re-derived by calling the
         just-restored builder's OWN export_mesh_dict() (after the anchor below is set) rather
         than re-parsing `net_file` directly (which describes the WHOLE net, not just the central
-        piece `state.base_faces`/`state.mesh` actually describe) -- this guarantees the same
-        vertex numbering `state.mesh`'s own saved positions assume, since both the original Save
-        and this Load run the identical central-object export pipeline over the identical
-        shapes/connections.
+        piece `state.base_faces`/`state.mesh` actually describe). This gives back `base_edges`/
+        `base_face_edge_ids` (NOT saved in the file at all -- InflaterSessionStateModel has no
+        field for either), but NOT `base_faces` itself: `state.base_faces` is used for that
+        directly instead of `central_mesh["faces"]` (2026-09-29 fix, explicit bug report --
+        "i'm not able to select the guest piece"/"highlighted a non-edge that connects a vertex
+        to the centre of an opposite face"). A guest/pendant shape's own corners get FRESH
+        runtime-counter vertex ids when first placed flat (_place_pendant_flat, so they never
+        collide with the core's independently-numbered fine mesh -- see its own docstring), ids
+        that are only reproducible by saving them, never by re-deriving them: a fresh
+        export_mesh_dict() call assigns a guest's corners whatever ids _faces_from_shapes'
+        deterministic numbering happens to land on, which is generally DIFFERENT from the
+        arbitrary-but-consistent ids `state.mesh`'s own saved positions/faces actually use for
+        that same guest. self.base_faces is read by every pick/hover/rim-walk path that matters
+        here (_rebuild_open_edges, _base_edge_vertex_chain, _group_boundary_edge_set -- none of
+        them ever touch self.base_edges/self.base_face_edge_ids), so using the SAVED value there
+        is both correct and sufficient; base_edges/base_face_edge_ids are only consulted by the
+        Diff Inflate incremental-attach path, which always re-derives its own fresh state off the
+        LIVE builder net before touching them anyway, so a freshly-exported value for those two
+        is fine.
 
         `anchor_shape_id` is the ANCHOR's saved `net_layout` "shape_id" -- `_load_faces` always
         reassigns fresh LIVE ids in net_layout order (see its own docstring: "a fresh saved-id ->
@@ -3405,7 +3420,7 @@ class InflaterPane:
         faces, positions, face_of_fine, edge_length = state.mesh.to_mesh()
         self._loading_session = False
         self._apply_loaded_session(
-            builder=builder, net_file=net_file, base_faces=central_mesh["faces"],
+            builder=builder, net_file=net_file, base_faces=[list(f) for f in state.base_faces],
             base_edges=central_mesh["edges"], base_face_edge_ids=central_mesh["face_edge_ids"],
             subdivision_level=state.subdivision_level, faces=faces, positions=positions,
             face_of_fine=face_of_fine, edge_length=edge_length,
