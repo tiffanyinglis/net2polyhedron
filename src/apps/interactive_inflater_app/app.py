@@ -1888,7 +1888,27 @@ class BuilderPane(InteractiveBuilderApp):
         super()._flip_selected_shapes(axis)
 
     def on_copy_key(self, _event=None):
+        """Blocks a MULTI-shape copy (2026-09-29, explicit: "multiselect copy paste should be
+        disallowed... outsiders must be isolated and are only allowed to connect to the club")
+        -- InteractiveBuilderApp.on_copy_key's own docstring says it captures every connection
+        with BOTH endpoints among the selected shapes, so copying 2+ CONNECTED shapes and
+        pasting would drop in two brand-new shapes already connected to EACH OTHER, neither one
+        yet connected to the club -- exactly the outsider-to-outsider connection this app
+        never otherwise allows (an outsider can only ever gain its first connection by joining
+        the club directly). Blocked here, at Ctrl+C itself, rather than at Ctrl+V -- this is
+        the only place self._clipboard ever gets populated, so refusing it here means the
+        clipboard can never hold more than one shape to begin with, no separate paste-time
+        guard needed. A single-shape copy is unaffected (its own clipboard entry can never
+        carry a connection either way -- classify_change's underlying set is what would still
+        show as an outsider, isolated, after paste)."""
         if self._locked:
+            return
+        if len(self.selected_ids) > 1:
+            messagebox.showerror(
+                "Cannot copy multiple pieces",
+                "Copy/paste only works one piece at a time here -- pieces not yet connected to "
+                "the club (outsiders) must stay isolated from each other, and pasting more than "
+                "one at once would paste them still connected to each other.")
             return
         super().on_copy_key(_event)
 
