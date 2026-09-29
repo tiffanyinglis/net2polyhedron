@@ -3844,7 +3844,7 @@ class InflaterPane:
             return None
         return np.array(self._picker.GetPickPosition())
 
-    def _nearest_connection_at_position(self, pos):
+    def _nearest_connection_at_position(self, pos, shape_id=None):
         """The builder connection id whose cached 3D seam segments
         (self._connection_edge_cache) come closest to world point `pos`, within
         CONNECTION_PICK_TOLERANCE_FRACTION * self._half -- or None if nothing's close enough
@@ -3852,19 +3852,39 @@ class InflaterPane:
         no dedicated pickable actor per connection (unlike a base face's own mesh actor,
         _actor_to_group) -- a connection's seam is a thin line lying exactly on the already-
         picked surface, not a separate 3D object of its own, so proximity-to-the-pick-point
-        is used instead of a second vtkCellPicker pass."""
+        is used instead of a second vtkCellPicker pass.
+
+        `shape_id`, when given, restricts candidates to connections touching that ONE shape
+        (2026-09-29, explicit bug report: "the edges of the guest piece [are] still not
+        selectable. instead there are some non-edges that are highlighted when hovered over"
+        -- traced to plain nearest-in-3D-space search across the WHOLE mesh: a compact,
+        nearly-closed net folds enough that a totally unrelated shape's own seam can sit
+        CLOSER in 3D to a given surface point than that surface's own nearby seam, even
+        directly on top of it, topologically distant faces having folded close together in
+        space -- caught by direct testing: a pick position confirmed to be on the guest's own
+        rendered surface still matched a DIFFERENT shape's connection more often than its own).
+        The caller passes the shape actually under the cursor (`_actor_to_group`'s own hit),
+        so a hover only ever finds an edge genuinely belonging to what's actually being
+        pointed at."""
         if pos is None or not self._connection_edge_cache:
             return None
         tolerance = CONNECTION_PICK_TOLERANCE_FRACTION * self._half
         best_id, best_dist = None, tolerance
+        connections_by_id = None
+        if shape_id is not None:
+            connections_by_id = {c["id"]: c for c in self.builder_getter().connections}
         for conn_id, segments in self._connection_edge_cache.items():
+            if shape_id is not None:
+                conn = connections_by_id.get(conn_id)
+                if conn is None or shape_id not in (conn["a_shape"], conn["b_shape"]):
+                    continue
             for i in range(0, len(segments), 2):
                 dist = _point_segment_distance_3d(pos, segments[i], segments[i + 1])
                 if dist < best_dist:
                     best_id, best_dist = conn_id, dist
         return best_id
 
-    def _nearest_open_edge_at_position(self, pos, exclude_shape_id=None):
+    def _nearest_open_edge_at_position(self, pos, exclude_shape_id=None, shape_id=None):
         """The (shape_id, raw_edge) key in self._open_edges whose own segments come closest to
         world point `pos`, within OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half -- or None if
         nothing's close enough (including `pos is None`). Point-to-SEGMENT distance against the
@@ -3873,13 +3893,17 @@ class InflaterPane:
         midpoint specifically; same convention _nearest_connection_at_position already uses for
         an EXISTING connection's own seam. `exclude_shape_id` drops one shape's own edges from
         consideration -- used while dragging OUT of a shape's edge, since Join mode never
-        connects a shape to itself (that's Fold's job)."""
+        connects a shape to itself (that's Fold's job). `shape_id`, when given, restricts
+        candidates to that ONE shape's own edges -- see _nearest_connection_at_position's own
+        docstring for why (same fold-brings-unrelated-shapes-close issue, same fix)."""
         if pos is None or not self._open_edges:
             return None
         tolerance = OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half
         best_key, best_dist = None, tolerance
         for key, info in self._open_edges.items():
             if exclude_shape_id is not None and info["shape_id"] == exclude_shape_id:
+                continue
+            if shape_id is not None and info["shape_id"] != shape_id:
                 continue
             segments = info["segments"]
             for i in range(0, len(segments), 2):
@@ -4068,16 +4092,24 @@ class InflaterPane:
         independent lookups against the same pick position. Locked (an inflate is running)
         suppresses the open-edge side entirely, matching _on_canvas_press_join's own lock check
         on the 2D side -- both are how this app blocks starting a NEW connection mid-computation
-        (an EXISTING connection's hover/select stays read-only and harmless throughout)."""
+        (an EXISTING connection's hover/select stays read-only and harmless throughout).
+
+        Both lookups are restricted to whatever shape is ACTUALLY under the cursor
+        (self._picker's own hit, read via self._actor_to_group right after _pick_world_
+        position's own Pick() call -- the picker keeps its last result until the next one) --
+        see _nearest_connection_at_position's own docstring for why a plain nearest-in-3D-space
+        search isn't enough on its own."""
         if self._connection_drag is not None:
             self._update_connection_drag(event)
             return
         pos = self._pick_world_position(event)
-        self._set_hover_connection(self._nearest_connection_at_position(pos))
+        picked_shape_id = self._shape_id_of_group(self._actor_to_group.get(self._picker.GetActor()))
+        self._set_hover_connection(self._nearest_connection_at_position(pos, shape_id=picked_shape_id))
         if self.builder_getter()._locked:
             self._set_hover_open_edge(None)
         else:
-            self._set_hover_open_edge(self._nearest_open_edge_at_position(pos))
+            self._set_hover_open_edge(
+                self._nearest_open_edge_at_position(pos, shape_id=picked_shape_id))
 
     def _start_connection_drag(self, event):
         """Called from _on_drag_start when a ButtonPress-1 lands while an open edge is
@@ -4496,8 +4528,11 @@ class InflaterPane:
         "multiselect is not available in this mode" -- always REPLACES the selection, no Ctrl-
         toggle at all, unlike face selection in Move mode). Clicking somewhere with no seam
         within CONNECTION_PICK_TOLERANCE_FRACTION clears the selection, same as clicking empty
-        space in Move mode."""
-        self._select_connection(self._nearest_connection_at_position(self._pick_world_position(event)))
+        space in Move mode. Restricted to the shape actually under the cursor, same as
+        _hover_edge_at -- see _nearest_connection_at_position's own docstring for why."""
+        pos = self._pick_world_position(event)
+        picked_shape_id = self._shape_id_of_group(self._actor_to_group.get(self._picker.GetActor()))
+        self._select_connection(self._nearest_connection_at_position(pos, shape_id=picked_shape_id))
 
     def _select_shape_ids(self, shape_ids):
         shape_ids = set(shape_ids)
