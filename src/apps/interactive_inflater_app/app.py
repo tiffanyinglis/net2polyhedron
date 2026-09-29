@@ -3110,6 +3110,87 @@ class InflaterPane:
         factor = 1.0 / (2 ** max(0, self.subdivision_level - 1))
         return {v: factor for v in closed}
 
+    def _level1_is_open(self):
+        """Same as inflate_polyhedron_app's own _level1_is_open (duplicated, not imported --
+        see module docstring): True/False per LEVEL-1 fine triangle (same order
+        _build_level1_topology's own `faces` would be) -- whether THAT SPECIFIC wedge's own
+        outer rim edge (the one opposite the fan hub, corresponding to exactly one edge of its
+        own original polygon) is free ("open") rather than glued to a neighbor ("closed") -- an
+        n-gon connected at 2 of its own edges triangulates into 2 closed wedges and n-2 open
+        ones, classified per WEDGE, not per whole polygon. The fan hub is the one vertex every
+        one of a base polygon's own wedges has in common; a wedge's own rim edge is then just
+        its other two vertices."""
+        level1_faces, _edge_length, level1_face_of_fine = _build_level1_topology(self.base_faces)
+        open_edges = _open_base_edges(self.base_faces, self.base_face_edge_ids)
+        verts_by_base = {}
+        for face, base_idx in zip(level1_faces, level1_face_of_fine):
+            verts = set(face)
+            verts_by_base[base_idx] = (verts if base_idx not in verts_by_base
+                                        else verts_by_base[base_idx] & verts)
+        hub_by_base = {i: next(iter(s)) for i, s in verts_by_base.items() if len(s) == 1}
+        flags = []
+        for face, base_idx in zip(level1_faces, level1_face_of_fine):
+            hub = hub_by_base.get(base_idx)
+            if hub is None:
+                flags.append(False)  # no well-defined single hub -- default to "closed"/participating
+                continue
+            rim_pair = frozenset(v for v in face if v != hub)
+            flags.append(rim_pair in open_edges.get(base_idx, ()))
+        return flags
+
+    def _is_open_of_fine(self, level=None):
+        """Same as inflate_polyhedron_app's own _is_open_of_fine (duplicated, not imported --
+        see module docstring): is_open flags parallel to self.faces at `level`
+        (self.subdivision_level if not given) -- _level1_is_open's own result, repeated 4x per
+        Subdivide since Level 1 (mirroring exactly how mesh_levels._quarter_triangles itself
+        propagates face_of_fine -- every old triangle's 4 children are appended contiguously,
+        in old-index order -- so a parallel array only needs the same repeat-4x-in-order
+        treatment to stay aligned). Level 0 shares Level 1's own topology, so `level <= 1` both
+        mean zero repeats."""
+        if level is None:
+            level = self.subdivision_level
+        flags = self._level1_is_open()
+        for _ in range(max(0, level - 1)):
+            flags = [f for f in flags for _ in range(4)]
+        return flags
+
+    def _rms_exclude_edges(self):
+        """Same as inflate_polyhedron_app's own _rms_exclude_edges (duplicated, not imported --
+        see module docstring): (a, b) sorted vertex-id-pair tuples, at the CURRENT subdivision
+        level, to exclude from the RMS Stretch % calculation -- every edge of every OPEN fine
+        triangle (see _is_open_of_fine), not just its own free edge: an open wedge triangle
+        doesn't participate in the RMS stretch % calculation at all (2026-09-29, explicit bug
+        report -- goose.poly, an open/semi-closed net, converged in inflate_polyhedron_app but
+        not here; this exclusion -- entirely missing from this app until now -- was the actual
+        cause: without it, an open wedge's own unconstrained, naturally-higher stretch never
+        lets the RMS convergence check settle below gtol, so relax_initial_configuration/
+        estimate_pressure_for_target_stretch just grind to their own step caps and report
+        "failed to converge" on a net that genuinely has nothing wrong with it). None (rather
+        than an empty set) when nothing in the net is open, so callers can skip the exclusion
+        machinery entirely."""
+        is_open = self._is_open_of_fine()
+        if not any(is_open):
+            return None
+        exclude = set()
+        for face, open_flag in zip(self.faces, is_open):
+            if open_flag:
+                n = len(face)
+                for k in range(n):
+                    exclude.add(tuple(sorted((face[k], face[(k + 1) % n]))))
+        return exclude
+
+    def _pressure_exclude_faces(self):
+        """Same as inflate_polyhedron_app's own _pressure_exclude_faces (duplicated, not
+        imported -- see module docstring): Boolean list parallel to self.faces AT THE CURRENT
+        subdivision_level -- True for every OPEN fine triangle (see _is_open_of_fine), which
+        should feel NO pressure/inflation force at all (2026-09-29, explicit bug report -- see
+        _rms_exclude_edges' own docstring for the goose.poly non-convergence this and that
+        together fix), while still fully existing for springs/repulsion/edges/convergence.
+        None when nothing in the net is open, so callers can skip the exclusion machinery
+        entirely."""
+        is_open = self._is_open_of_fine()
+        return is_open if any(is_open) else None
+
     def _apply_target_rms_defaults(self):
         """Re-picks LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED/_OPEN from _is_central_object_closed and
         writes it straight into every level's Target RMS spinner (2026-09-28, explicit user
@@ -5556,7 +5637,15 @@ class InflaterPane:
                 # the step count status messages show.
                 on_progress=lambda new_positions, steps_taken, *_rest:
                     queue_progress((new_positions, steps_taken)),
-                edges=self.edges, stop_event=self._stop_event),
+                edges=self.edges, stop_event=self._stop_event,
+                # 2026-09-29, explicit bug report: goose.poly (an open/semi-closed net)
+                # converged in inflate_polyhedron_app but not here -- these two were simply
+                # never passed at all, so an open wedge's own unconstrained, naturally-higher
+                # stretch kept the RMS convergence check from ever settling below gtol, and its
+                # own jiggle kick kept nudging vertices that should feel no inflation force at
+                # all. See _rms_exclude_edges/_pressure_exclude_faces' own docstrings.
+                rms_exclude_edges=self._rms_exclude_edges(),
+                pressure_exclude_faces=self._pressure_exclude_faces()),
             self._on_relax_done,
             on_progress=self._on_level0_relax_progress)
 
@@ -5683,7 +5772,14 @@ class InflaterPane:
                 # see its own INFLATE_SAFETY_STEP_CAP) and the "stop/revert if a trial doesn't
                 # converge" ceiling _on_relax_done/_on_inflate_step_done quote in their own
                 # messages -- unaffected by this change.
-                stop_event=self._stop_event, **extra),
+                stop_event=self._stop_event,
+                # 2026-09-29, explicit bug report -- see on_full_inflate_clicked's own Level 0
+                # relax_initial_configuration call for the full "goose.poly doesn't converge
+                # here but does in inflate_polyhedron_app" explanation; same fix applies here,
+                # at every level past 0 too.
+                rms_exclude_edges=self._rms_exclude_edges(),
+                pressure_exclude_faces=self._pressure_exclude_faces(),
+                **extra),
             self._on_inflate_step_done,
             on_progress=lambda steps: self._set_status(
                 f"{self._pipeline_label()} -- Level {self.subdivision_level}: Step {steps}.",
