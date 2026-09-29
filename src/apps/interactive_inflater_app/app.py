@@ -68,9 +68,10 @@ architecture for free -- no separate undo/redo-specific handling needed.
 Simplifications vs. inflate_polyhedron_app (all explicitly allowed by this
 app's own spec):
 - One drawing panel, redrawn per level, not four side-by-side ones.
-- No replay-frame capture/animation -- estimate_pressure_for_target_stretch
-  is called with capture_frames=False; the winning trial's final result is
-  applied and drawn directly.
+- No AUTO-PLAY replay animation -- unlike inflate_polyhedron_app's own winning-trial replay
+  (_start_frame_replay), a completed run's own captured frames (self._replay_frames, debug-
+  mode-only -- 2026-09-29, explicit user request) are only ever scrubbed by hand via the
+  replay slider (_on_replay_slider_moved), never auto-played.
 - No per-level independent camera groups/pan/drag/scroll -- the single
   panel auto-frames itself fresh on every redraw (PyVista's own "iso" view
   + reset_camera()), no interactive camera at all.
@@ -2588,6 +2589,17 @@ class InflaterPane:
         self._stop_event = None
         self._stop_requested = False
         self._active_button = None
+        # Debug-mode replay scrubber (2026-09-29, explicit user request -- "replay the last
+        # full/diff inflate"): self._replay_frames is every (faces, face_of_fine, positions)
+        # snapshot captured (see _capture_replay_frame) at every progress checkpoint of the
+        # LAST run, across every level/pass it actually ran, in chronological order -- reset
+        # to [] at the start of every new run (_set_running(True)) and on a revert
+        # (_revert_run), so a stale replay from an earlier/failed run can never linger.
+        # self._replay_scrub_index, when not None, is which frame _render draws INSTEAD of the
+        # live self.faces/positions/face_of_fine (None means "show live", including whenever
+        # nothing's been captured yet) -- see _on_replay_slider_moved's own docstring.
+        self._replay_frames = []
+        self._replay_scrub_index = None
         # True for the duration of a Full Inflate run that on_diff_inflate_clicked itself
         # redirected into (self.is_fully_inflated False -- see that method's own docstring) --
         # lets _revert_run's own "undo the triggering edit
@@ -2868,6 +2880,17 @@ class InflaterPane:
         self._auto_inflate_check = ttk.Checkbutton(
             button_row, text="Auto Inflate", variable=self.auto_inflate_var)
 
+        # Debug-mode-only replay scrubber (2026-09-29, explicit user request -- "add a replay
+        # slider... to replay the last full/diff inflate", "put it after Auto Inflate"): ranges
+        # over self._replay_frames (populated across the whole last completed run -- see
+        # _capture_replay_frame/_update_replay_slider), disabled/empty until one exists.
+        # length=140 -- short enough to leave room for the other button_row widgets alongside
+        # it, long enough to scrub usefully.
+        self._replay_slider = ttk.Scale(
+            button_row, from_=0, to=0, orient=tk.HORIZONTAL, length=140,
+            command=self._on_replay_slider_moved)
+        self._replay_slider.state(["disabled"])
+
         # Debug-mode-only diagnostics (2026-09-29, explicit user request -- diagnosing a
         # crumpled guest boundary after a Diff Inflate join): same idea as
         # inflate_polyhedron_app's own identically-named toggles, see _render's own overlay
@@ -2951,6 +2974,7 @@ class InflaterPane:
             self.full_inflate_button.pack(side=tk.LEFT)
             self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
             self._auto_inflate_check.pack(side=tk.LEFT, padx=(8, 0))
+            self._replay_slider.pack(side=tk.LEFT, padx=(8, 0))
             self._debug_overlay_row.pack(side=tk.TOP, anchor=tk.W, pady=(4, 0))
             self._show_normals_check.pack(side=tk.LEFT)
             self._show_vertex_normals_check.pack(side=tk.LEFT, padx=(8, 0))
@@ -2961,6 +2985,7 @@ class InflaterPane:
             self.full_inflate_button.pack_forget()
             self.diff_inflate_button.pack_forget()
             self._auto_inflate_check.pack_forget()
+            self._replay_slider.pack_forget()
             self._debug_overlay_row.pack_forget()
             self.reinflate_button.pack(side=tk.LEFT)
             # Off, not just hidden, when leaving debug mode -- same as inflate_polyhedron_app's
@@ -2971,6 +2996,9 @@ class InflaterPane:
                 if var.get():
                     var.set(False)
                     redraw_needed = True
+            if self._replay_scrub_index is not None:
+                self._replay_scrub_index = None
+                redraw_needed = True
             if redraw_needed and self.faces is not None:
                 self._render()
 
@@ -3176,6 +3204,12 @@ class InflaterPane:
         own Reinflate button needs to behave exactly like Full Inflate, Stop included)."""
         self._running = running
         if running:
+            # A brand new run's own frames haven't been captured yet -- discard whatever the
+            # PREVIOUS run left in the scrubber right away (not just on success/revert) so it
+            # can never be scrubbed mid-run, when self.faces/positions are actively changing
+            # underneath it.
+            self._replay_frames = []
+            self._update_replay_slider()
             self._active_button = active
             active_btn = self.full_inflate_button if active == "full" else self.diff_inflate_button
             other_btn = self.diff_inflate_button if active == "full" else self.full_inflate_button
@@ -3285,6 +3319,11 @@ class InflaterPane:
         self._pre_click_snapshot = None
         self._stop_event = None
         self._stop_requested = False
+        # A reverted run's own frames describe a mesh state that no longer exists (the restore
+        # above just discarded it) -- discard the replay history right along with it rather
+        # than leaving the scrubber pointing at a run that never actually completed.
+        self._replay_frames = []
+        self._update_replay_slider()
         # self._diff_redirect_pending covers on_diff_inflate_clicked's own redirect into a real
         # Full Inflate (self._active_button reads "full" for one of those, not "diff", even
         # though the SAME "undo the triggering edit" logic applies -- see that flag's own init
@@ -3625,6 +3664,14 @@ class InflaterPane:
             # would be evaluating a consistent state. _apply_loaded_session calls this again,
             # correctly, once everything is actually in sync.
             return
+        # A builder edit always snaps the replay scrubber back to live (2026-09-29, explicit
+        # user request) -- self._replay_frames itself is left alone (still valid history of
+        # the last completed run until the NEXT run overwrites it), but a stale mid-history
+        # frame drawn via _render_replay_frame would otherwise keep showing while the user
+        # edits a now-DIFFERENT live net, which reads as this pane being stuck/broken.
+        if self._replay_scrub_index is not None:
+            self._replay_scrub_index = None
+            self._update_replay_slider()
         # Keeps self._open_edges in sync with the LIVE net on every edit, not just after the
         # next full _render() (which only happens once an Inflate actually runs) -- otherwise a
         # just-made-or-broken connection could keep offering/hiding its own edges' 3D
@@ -4852,6 +4899,107 @@ class InflaterPane:
 
         return to_segments(front_pairs), to_segments(back_pairs)
 
+    def _capture_replay_frame(self, faces, face_of_fine, positions):
+        """Appends one snapshot to self._replay_frames (2026-09-29, explicit user request --
+        see _on_replay_slider_moved's own docstring). `positions`' own dict VALUES are deep-
+        copied -- relax_once/estimate_pressure_for_target_stretch's own on_progress callbacks
+        hand back array views into a `pts` array that keeps changing step to step (see
+        stretchy_mesh._positions_and_stretch), so a captured frame would otherwise silently
+        change out from under an earlier one. `faces`/`face_of_fine` are never mutated in
+        place by anything in this pipeline (every step reassigns a fresh list instead -- same
+        reasoning _snapshot_mesh_state's own docstring gives), so those are kept by reference."""
+        self._replay_frames.append({
+            "faces": faces, "face_of_fine": face_of_fine,
+            "positions": {v: np.array(p, dtype=float) for v, p in positions.items()},
+        })
+
+    def _update_replay_slider(self):
+        """Configures the replay scrubber to match self._replay_frames -- enabled, ranged over
+        every captured frame index, iff at least 2 exist; positioned at the LAST one (the
+        live-equivalent end, see _on_replay_slider_moved). Called once a run finishes
+        successfully (_on_inflate_step_done's Level-3 Done branch) and whenever a builder edit
+        resets the scrub back to live (refresh_diff_eligibility) -- ttk.Scale.set DOES fire
+        `command`, so the latter harmlessly re-triggers _on_replay_slider_moved at the same
+        (live) index, not a real scrub."""
+        frames = self._replay_frames
+        if not frames or len(frames) < 2:
+            self._replay_slider.configure(to=0)
+            self._replay_slider.set(0)
+            self._replay_slider.state(["disabled"])
+            self._replay_scrub_index = None
+            return
+        self._replay_slider.configure(from_=0, to=len(frames) - 1)
+        self._replay_slider.state(["!disabled"])
+        self._replay_slider.set(len(frames) - 1)
+
+    def _on_replay_slider_moved(self, value):
+        """`command` callback for the debug-mode replay scrubber (2026-09-29, explicit user
+        request -- "add a replay slider... to replay the last full/diff inflate"): scrubs
+        through self._replay_frames, every (faces, face_of_fine, positions) snapshot captured
+        across the WHOLE last completed run (Level 0's relax_initial_configuration plus every
+        Level 1-3/single-Diff-pass estimate_pressure_for_target_stretch call it actually ran,
+        in chronological order -- see _capture_replay_frame's own call sites). `value` is
+        ttk.Scale's string-formatted float, rounded to the nearest captured frame index
+        (clamped, since a Scale can report a value fractionally past its `to` during a fast
+        drag). Purely a display override -- never touches self.faces/self.positions/etc., so
+        scrubbing can't affect what the next real Inflate continues from.
+
+        The RIGHTMOST position (the final, already-live frame) draws through the ordinary
+        _render() -- full hover/selection/open-edge picking, exactly like right after the run
+        finished. Every other position draws through _render_replay_frame instead, a reduced
+        STATIC view (colored face mesh only, no rim outline/hover/selection/open-edge picking)
+        -- a mid-history frame has no live-net hover/selection state that would make sense to
+        overlay on it anyway, and _group_boundary_offset_lines/_rebuild_open_edges/etc. all
+        read self.positions directly, not whatever frame is being scrubbed to."""
+        frames = self._replay_frames
+        if not frames:
+            return
+        idx = max(0, min(int(round(float(value))), len(frames) - 1))
+        if idx == len(frames) - 1:
+            self._replay_scrub_index = None
+            self._render()
+        else:
+            self._replay_scrub_index = idx
+            self._render_replay_frame(frames[idx])
+
+    def _render_replay_frame(self, frame):
+        """Static, reduced-feature redraw of one self._replay_frames entry -- just the colored
+        face mesh (same per-group POLYGON_COLORS/inside-darkening convention _render's own
+        first loop uses), no rim outline/hover/selection/open-edge picking (see
+        _on_replay_slider_moved's own docstring for why). self._actor_to_group is cleared, not
+        repopulated -- a scrubbed frame isn't pickable, so hover/click during a scrub simply
+        find nothing, same as an empty panel."""
+        plotter = self.plotter
+        plotter.clear()
+        self._actor_to_group = {}
+        faces = frame["faces"]
+        positions = frame["positions"]
+        face_of_fine = frame["face_of_fine"]
+        vertex_ids = sorted(positions)
+        idx = {v: i for i, v in enumerate(vertex_ids)}
+        points = np.array([positions[v] for v in vertex_ids])
+        groups_present = sorted(set(face_of_fine))
+        for group in groups_present:
+            group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == group]
+            if not group_faces:
+                continue
+            n = len(self.base_faces[group]) if group < len(self.base_faces) else 3
+            color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
+            inside_color = _darken_color(color)
+            face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
+            mesh = pv.PolyData(points, face_conn)
+            plotter.add_mesh(mesh, color=color, show_edges=True,
+                              edge_color=_weighted_color(color, FRONT_EDGE_WEIGHT),
+                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back")
+            plotter.add_mesh(mesh, color=inside_color, show_edges=True,
+                              edge_color=_weighted_color(inside_color, BACK_EDGE_WEIGHT),
+                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front")
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        self._center = (lo + hi) / 2
+        self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
+        self._apply_camera()
+        self._grab_frame()
+
     def _render(self):
         """Redraws the single panel from whatever self.faces/self.positions/self.face_of_fine
         currently hold -- colored per ORIGINAL base face (face_of_fine) by POLYGON_COLORS[n]
@@ -5113,6 +5261,11 @@ class InflaterPane:
             self._pending_source_polygon_id = [
                 reference_spid, *(p["source_polygon_id"] for p in pendants)]
             self._pending_pendants = []
+            # No physics ran here at all -- any earlier run's own replay history describes a
+            # mesh this flat placement just replaced, so it's discarded rather than left
+            # scrubbable against a topology that no longer exists.
+            self._replay_frames = []
+            self._update_replay_slider()
             self._render()
             self.last_pressure = None  # nothing was calibrated this run
             # No real physics ran -- flags a future Diff Inflate to force a real Full Inflate
@@ -5154,14 +5307,26 @@ class InflaterPane:
                 max_nfev=SAFETY_STEP_CAP, gtol=self._get_tolerance(), rng=None,
                 # Adapts relax_once's own 6-arg on_progress (new_positions, steps_taken,
                 # max_stretch_pct, rms_stretch_pct, optimality, converged -- see its own
-                # docstring) down to just the step count queue_progress/on_progress below
-                # actually shows (2026-09-29, explicit: status messages should say "Level N:
-                # Step xxx", not pressure/RMS/max stretch).
-                on_progress=lambda _positions, steps_taken, *_rest: queue_progress(steps_taken),
+                # docstring) down to (positions, steps_taken) -- queue_progress/on_progress
+                # below need positions too now, to capture a replay frame per checkpoint
+                # (2026-09-29, explicit user request -- see _capture_replay_frame), not just
+                # the step count status messages show.
+                on_progress=lambda new_positions, steps_taken, *_rest:
+                    queue_progress((new_positions, steps_taken)),
                 edges=self.edges, stop_event=self._stop_event),
             self._on_relax_done,
-            on_progress=lambda steps: self._set_status(
-                f"{self._pipeline_label()} -- Level 0: Step {steps}.", "info"))
+            on_progress=self._on_level0_relax_progress)
+
+    def _on_level0_relax_progress(self, payload):
+        """`on_progress` for on_full_inflate_clicked's own relax_initial_configuration call --
+        runs on the MAIN thread (via _run_background's own queue/poll), so it's safe to touch
+        self._replay_frames/self.faces/self.face_of_fine directly here. self.faces/
+        self.face_of_fine are fixed for this whole Level 0 call (only reassigned afterward, in
+        _on_relax_done once it's converged), so every captured frame this level gets tagged
+        with the SAME pair, correctly."""
+        positions, steps = payload
+        self._capture_replay_frame(self.faces, self.face_of_fine, positions)
+        self._set_status(f"{self._pipeline_label()} -- Level 0: Step {steps}.", "info")
 
     def _on_relax_done(self, result):
         if self._stop_requested:
@@ -5245,7 +5410,12 @@ class InflaterPane:
             lambda queue_progress: estimate_pressure_for_target_stretch(
                 self.positions, self.faces, self.edge_length,
                 target_rms_pct=target_rms_pct, gtol=tolerance, rng=None,
-                capture_frames=False, on_progress=queue_progress,
+                # capture_frames=True (2026-09-29, explicit user request -- "replay the last
+                # full/diff inflate"): returns the WINNING trial's own frames as an extra
+                # return value (see _on_inflate_step_done's own unpacking) -- only ITS frames,
+                # never a discarded search trial's, so a replay scrub never shows a pressure
+                # guess that didn't pan out.
+                capture_frames=True, on_progress=queue_progress,
                 edges=self.edges if self.subdivision_level == 1 else None,
                 # Restricted to self.base_faces' own small fixed vertex set, same as
                 # inflate_polyhedron_app's own on_inflate_clicked -- see _repulsion_vertex_ids'
@@ -5280,9 +5450,10 @@ class InflaterPane:
         if self._stop_requested:
             self._revert_run(f"{self._pipeline_label()} -- Stopped.")
             return
-        # capture_frames=False (see on_full_inflate_clicked's own call) -- 8 values, no frames list.
+        # capture_frames=True (see _run_inflate_step's own call) -- 9 values, `frames` (the
+        # winning trial's own captured positions) 8th, before pressure_found.
         (pressure, new_positions, _steps, max_stretch, rms_stretch,
-         _optimality, converged, pressure_found) = result
+         _optimality, converged, frames, pressure_found) = result
         if not pressure_found:
             self._revert_run(
                 f"{self._pipeline_label()} -- Failed to converge.",
@@ -5307,6 +5478,12 @@ class InflaterPane:
                     "-- it may have a loosely-attached or floppy face. Try anchoring/"
                     "reconnecting it and Inflate again."))
             return
+        # self.faces/self.face_of_fine are still THIS level's own (fixed since before this
+        # call, only reassigned below by subdivide_once once this level is fully done) -- every
+        # frame from `frames` (this level's own winning-trial capture) gets tagged with them,
+        # correctly, same as _on_level0_relax_progress's own Level 0 capture.
+        for frame_positions, _frame_steps in frames:
+            self._capture_replay_frame(self.faces, self.face_of_fine, frame_positions)
         self.positions = new_positions
         if self.subdivision_level >= MAX_LEVEL and self._pending_pendants:
             # Only now, once the CORE mesh (every pendant excluded from it -- see
@@ -5367,6 +5544,11 @@ class InflaterPane:
             # didn't).
             done_label = self._pipeline_label()
             self._set_running(False)
+            # This run's own replay history is only ever complete/meaningful once the WHOLE
+            # run has actually converged -- populated here, not per-level, so a Diff Inflate's
+            # single Level-3 pass and a Full Inflate's Level 0-3 run both end up with their
+            # own frames spanning start to finish (2026-09-29, explicit user request).
+            self._update_replay_slider()
             self._set_status(f"{done_label} -- Converged.", "success")
             return
         self.level_snapshot_faces = self.faces
