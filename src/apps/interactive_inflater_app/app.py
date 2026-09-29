@@ -798,12 +798,21 @@ def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level
     """Computes final 3D positions for one excluded pendant's ENTIRE Level-3 fine mesh, laid
     out flat/coplanar ("parallel") against whichever face it's hinged to, once that neighbor's
     own final positions are known -- see this section's own header comment for why this is a
-    closed-form placement, not another relax pass. Returns (faces, positions, next_free_id) --
-    `faces`/`positions` already in the REAL mesh's global vertex-id space (remapped from
-    _flat_pendant_fine_mesh's own local ids, `next_free_id` the next unused one after this
-    call), ready to concatenate straight onto the core's own self.faces/self.positions/
-    self.face_of_fine (face_of_fine value: neighbor_face_idx -- see this function's own
-    caller).
+    closed-form placement, not another relax pass. Returns (faces, positions, next_free_id,
+    remapped_face) -- `faces`/`positions` already in the REAL mesh's global vertex-id space
+    (remapped from _flat_pendant_fine_mesh's own local ids, `next_free_id` the next unused one
+    after this call), ready to concatenate straight onto the core's own self.faces/
+    self.positions/self.face_of_fine (face_of_fine value: neighbor_face_idx -- see this
+    function's own caller). `remapped_face` is `pendant["face"]` (the ORIGINAL, base-export-
+    level corner loop) passed through this SAME id_map -- needed because a third+ corner (see
+    its own comment below) no longer keeps its raw id, so it's the only correct record of what
+    this pendant's own corners are actually CALLED in the mesh just built (the caller uses it
+    for its own self.base_faces entry -- self.base_faces[group] must list ids that genuinely
+    exist in self.positions, not stale pre-remap ones, or _rebuild_open_edges/
+    _base_edge_vertex_chain silently walk from a vertex id that was never actually placed,
+    2026-09-29, explicit bug report: "highlighted a non-edge that connects a vertex to the
+    centre of an opposite face" -- _base_edge_vertex_chain's own "never found a path" fallback,
+    a straight [u, v] chord, dead code until then).
 
     The pendant's own SHARED edge's intermediate (subdivision-created) vertices are PINNED to
     the core's own EXISTING ones for that same edge -- same id, same (already-solved) position,
@@ -934,7 +943,12 @@ def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level
         positions_out[core_v] = final_positions_by_id[core_v]
     for face in local_faces:
         faces_out.append([id_map[v] for v in face])
-    return faces_out, positions_out, next_free_id
+    # The pendant's own ORIGINAL corner loop (pendant["face"]), remapped through id_map --
+    # since a THIRD+ corner (above) no longer keeps its own raw id, this is the ONLY correct
+    # way to know what its corners are actually CALLED in the output mesh (positions_out/
+    # faces_out) -- see this function's own caller for why that distinction matters.
+    remapped_face = [id_map[v] for v in pendant["face"]]
+    return faces_out, positions_out, next_free_id, remapped_face
 
 
 def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length, own_groups,
@@ -978,9 +992,17 @@ def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_lengt
 
     `core_base_faces` (the CORE's own self.base_faces, one entry per `core_face_of_fine` value)
     is threaded straight through to `_place_pendant_flat` as each pendant's own
-    `neighbor_base_face` -- see its own docstring for why."""
+    `neighbor_base_face` -- see its own docstring for why.
+
+    Also returns `remapped_base_faces` (parallel to `pendants`) -- each pendant's own
+    `remapped_face` from `_place_pendant_flat` (see its own docstring), for the caller to use
+    as that pendant's OWN self.base_faces entry instead of its raw, pre-remap `pendant["face"]`
+    (2026-09-29, explicit bug report: "highlighted a non-edge that connects a vertex to the
+    centre of an opposite face" -- self.base_faces[group] listing an id that was never actually
+    placed sent _base_edge_vertex_chain's own rim walk nowhere, falling back to a straight
+    chord across the polygon)."""
     if not pendants:
-        return faces, positions, face_of_fine
+        return faces, positions, face_of_fine, []
     core_faces = list(faces)
     core_face_of_fine = list(face_of_fine)
     faces = list(faces)
@@ -994,14 +1016,16 @@ def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_lengt
     # overwritten by a same-numbered subdivision vertex). Every pendant's own face is included
     # in this max too, so the count starts safely above every id that could ever appear here.
     next_free_id = 1 + max([*positions, *(v for p in pendants for v in p["face"])])
+    remapped_base_faces = []
     for pendant, own_group in zip(pendants, own_groups):
-        pendant_faces, pendant_positions, next_free_id = _place_pendant_flat(
+        pendant_faces, pendant_positions, next_free_id, remapped_face = _place_pendant_flat(
             pendant, positions, pendant["neighbor_idx"], core_face_of_fine, core_faces,
             edge_length, next_free_id, core_base_faces[pendant["neighbor_idx"]])
         faces.extend(pendant_faces)
         face_of_fine.extend([own_group] * len(pendant_faces))
         positions.update(pendant_positions)
-    return faces, positions, face_of_fine
+        remapped_base_faces.append(remapped_face)
+    return faces, positions, face_of_fine, remapped_base_faces
 
 
 def _pendant_own_face_edge_ids(pendant, base_faces, base_face_edge_ids, next_id):
@@ -1135,10 +1159,12 @@ def _place_all_flat(reference_face, pendants, edge_length):
     # own_groups: reference_face is base_faces[0], each pendant its own trailing index (1..N)
     # -- see this function's own base_faces line below, and _reattach_pendant_faces' own
     # docstring for why each pendant needs a DISTINCT tag rather than sharing its neighbor's.
-    faces, positions, face_of_fine = _reattach_pendant_faces(
+    faces, positions, face_of_fine, remapped_base_faces = _reattach_pendant_faces(
         pendants, faces, positions, face_of_fine, edge_length,
         list(range(1, 1 + len(pendants))), [reference_face])
-    base_faces = [reference_face, *(p["face"] for p in pendants)]
+    # remapped_base_faces, NOT raw p["face"] -- see _reattach_pendant_faces' own docstring for
+    # why a pendant's own THIRD+ corner no longer keeps its raw id.
+    base_faces = [reference_face, *remapped_base_faces]
     return faces, positions, face_of_fine, base_faces
 
 
@@ -5139,10 +5165,13 @@ class InflaterPane:
                         pendant, core_base_faces, self.base_face_edge_ids, next_edge_id)
                     new_edge_id_rows.append(row)
                 self.base_face_edge_ids = [*self.base_face_edge_ids, *new_edge_id_rows]
-            self.faces, self.positions, self.face_of_fine = _reattach_pendant_faces(
-                self._pending_pendants, self.faces, self.positions, self.face_of_fine,
-                EDGE_LENGTH, own_groups, core_base_faces)
-            self.base_faces = [*core_base_faces, *(p["face"] for p in self._pending_pendants)]
+            self.faces, self.positions, self.face_of_fine, remapped_base_faces = \
+                _reattach_pendant_faces(
+                    self._pending_pendants, self.faces, self.positions, self.face_of_fine,
+                    EDGE_LENGTH, own_groups, core_base_faces)
+            # remapped_base_faces, NOT raw p["face"] -- see _reattach_pendant_faces' own
+            # docstring for why a pendant's own THIRD+ corner no longer keeps its raw id.
+            self.base_faces = [*core_base_faces, *remapped_base_faces]
             self._pending_source_polygon_id = [
                 *self._pending_source_polygon_id,
                 *(p["source_polygon_id"] for p in self._pending_pendants)]
@@ -5411,17 +5440,21 @@ class InflaterPane:
             new_row, _next_edge_id = _pendant_own_face_edge_ids(
                 pendant, core_base_faces, self.base_face_edge_ids, next_edge_id)
             self.base_face_edge_ids = [*self.base_face_edge_ids, new_row]
-        self.base_faces = [*core_base_faces, pendant["face"]]
         self._pending_source_polygon_id = [*existing_source_polygon_id, new_shape_id]
         self._pending_pendants = [*self._pending_pendants, pendant]
         # A defensive copy, not self.positions itself -- _reattach_pendant_faces mutates its own
         # `positions` argument in place (.update()), and self.positions may still be referenced
         # by an EARLIER _snapshot_mesh_state() (e.g. self._pre_click_snapshot from a just-
         # stopped run) that must not silently change out from under it. own_group is this
-        # pendant's own JUST-APPENDED trailing self.base_faces index, above.
-        self.faces, self.positions, self.face_of_fine = _reattach_pendant_faces(
-            [pendant], self.faces, dict(self.positions), self.face_of_fine, EDGE_LENGTH,
-            [len(self.base_faces) - 1], core_base_faces)
+        # pendant's own future trailing self.base_faces index (core_base_faces's own length,
+        # before the append below).
+        self.faces, self.positions, self.face_of_fine, remapped_base_faces = \
+            _reattach_pendant_faces(
+                [pendant], self.faces, dict(self.positions), self.face_of_fine, EDGE_LENGTH,
+                [len(core_base_faces)], core_base_faces)
+        # remapped_base_faces, NOT raw pendant["face"] -- see _reattach_pendant_faces' own
+        # docstring for why a pendant's own THIRD+ corner no longer keeps its raw id.
+        self.base_faces = [*core_base_faces, *remapped_base_faces]
         self._render()
         self._record_inflate_success()
         self._set_status(f"{label}: no inflation needed.", "success")
