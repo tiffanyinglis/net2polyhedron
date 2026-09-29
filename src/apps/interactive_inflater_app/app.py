@@ -750,8 +750,51 @@ def _flat_pendant_fine_mesh(pendant_face, edge_length):
     return faces, positions
 
 
+def _fine_group_boundary_edges(faces, face_of_fine, group):
+    """{(u, v) sorted, ...} for every boundary edge of `group` within `faces`/`face_of_fine` --
+    a free function twin of InflaterPane._group_boundary_edge_set (same counting rule: a
+    spoke/internal-to-the-fan edge is shared by two triangles of the SAME group and cancels
+    out; only a true rim edge, whose other triangle is in a different group (or doesn't exist
+    at all), survives) -- needed here because _place_pendant_flat runs before any InflaterPane
+    group state exists for a pendant's own new group."""
+    edge_count = {}
+    for face, bf in zip(faces, face_of_fine):
+        if bf != group:
+            continue
+        a, b, c = face
+        for u, v in ((a, b), (b, c), (c, a)):
+            key = (u, v) if u < v else (v, u)
+            edge_count[key] = edge_count.get(key, 0) + 1
+    return {e for e, count in edge_count.items() if count == 1}
+
+
+def _rim_vertex_chain(u, v, boundary_edges, original_corners):
+    """Ordered fine-mesh vertex ids from `u` to `v` along one rim (walking `boundary_edges`,
+    stopping at `v` or any other of `original_corners`) -- a free function twin of
+    InflaterPane._base_edge_vertex_chain (see its own docstring for the full walk rationale:
+    `u` has exactly two neighbors within a closed rim loop, one toward `v` via this one edge,
+    the other around the rest of the polygon, and the two can't be told apart by which reaches
+    `v` sooner). Falls back to the plain `[u, v]` pair if neither direction ever reaches `v`."""
+    neighbors = {}
+    for a, b in boundary_edges:
+        neighbors.setdefault(a, []).append(b)
+        neighbors.setdefault(b, []).append(a)
+    for first_step in neighbors.get(u, []):
+        chain = [u, first_step]
+        prev, cur = u, first_step
+        while cur != v and cur not in original_corners:
+            options = [n for n in neighbors.get(cur, []) if n != prev]
+            if not options:
+                break
+            prev, cur = cur, options[0]
+            chain.append(cur)
+        if cur == v:
+            return chain
+    return [u, v]
+
+
 def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level3_face_of_fine,
-                         level3_faces, edge_length, next_free_id):
+                         level3_faces, edge_length, next_free_id, neighbor_base_face):
     """Computes final 3D positions for one excluded pendant's ENTIRE Level-3 fine mesh, laid
     out flat/coplanar ("parallel") against whichever face it's hinged to, once that neighbor's
     own final positions are known -- see this section's own header comment for why this is a
@@ -761,6 +804,23 @@ def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level
     call), ready to concatenate straight onto the core's own self.faces/self.positions/
     self.face_of_fine (face_of_fine value: neighbor_face_idx -- see this function's own
     caller).
+
+    The pendant's own SHARED edge's intermediate (subdivision-created) vertices are PINNED to
+    the core's own EXISTING ones for that same edge -- same id, same (already-solved) position,
+    never independently recomputed -- not just the two endpoints `shared_pair` already reused
+    (2026-09-29, explicit bug report: "not able to select any of the edges of the guest
+    piece... some non-edges are highlighted when hovered over" -- _flat_pendant_fine_mesh builds
+    the pendant's own fine mesh as a totally SEPARATE subdivide_once run, with no way to know
+    the core's own existing midpoint ids for that same physical edge, so every earlier version
+    independently re-synthesized fresh ones instead -- two DIFFERENT vertex ids at the same
+    physical location, which `_group_boundary_edge_set`'s own by-id matching (everything reading
+    a "shared seam" ultimately goes through it) could never recognize as the same edge at all).
+    `neighbor_base_face` (`self.base_faces[neighbor_face_idx]`) bounds the walk that finds the
+    core's own existing chain (see _rim_vertex_chain's own docstring for why that bound is
+    needed at all). Also more accurate than the old recompute: a rim edge of an already-solved,
+    possibly-curved neighbor isn't necessarily straight, so reusing its own real intermediate
+    positions (rather than a pendant-side straight-line guess between the two endpoints) avoids
+    a hairline gap/crease at the seam.
 
     The neighbor's own plane/normal is estimated from the MEAN of only the fine triangles
     actually touching the SHARED EDGE's own two endpoints (a local fan around the attachment
@@ -821,6 +881,20 @@ def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level
     # the only side with real information (the neighbor's actual position) to decide it from.
     rest_outward = np.array([-rest_edge_dir[1], rest_edge_dir[0]])
 
+    # The core's own EXISTING chain of vertex ids from a to b along the neighbor's rim, and the
+    # pendant's own ANALOGOUS chain along its own (separately-subdivided) rim -- see this
+    # function's own docstring for why these get PINNED together below instead of the pendant's
+    # own chain getting fresh ids/recomputed positions like everything else. Same subdivision
+    # scheme (fan then quarter to the same MAX_LEVEL) on both sides always produces the same
+    # NUMBER of intermediate points for one original edge regardless of curvature -- the `len`
+    # guard is just defensive (never actually expected to differ).
+    core_boundary = _fine_group_boundary_edges(level3_faces, level3_face_of_fine, neighbor_face_idx)
+    core_chain = _rim_vertex_chain(a, b, core_boundary, set(neighbor_base_face))
+    pendant_boundary = _fine_group_boundary_edges(local_faces, [0] * len(local_faces), 0)
+    pendant_chain = _rim_vertex_chain(a, b, pendant_boundary, set(pendant["face"]))
+    shared_chain_map = (dict(zip(pendant_chain, core_chain))
+                         if len(pendant_chain) == len(core_chain) else {})
+
     # Every corner except the two literally SHARED with the neighbor (a, b, already real
     # global ids) gets a FRESH id here -- including a pendant's own THIRD+ original corner
     # (n > 3, e.g. every pentagon), not just _flat_pendant_fine_mesh's own genuinely-new
@@ -844,21 +918,27 @@ def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level
     for v in local_positions:
         if v in id_map:
             continue
-        id_map[v] = next_free_id
-        next_free_id += 1
+        if v in shared_chain_map:
+            id_map[v] = shared_chain_map[v]
+        else:
+            id_map[v] = next_free_id
+            next_free_id += 1
     for v, local_pos in local_positions.items():
-        if v in (a, b):
+        if v in (a, b) or v in shared_chain_map:
             continue
         rel = local_pos[:2] - rest_p0[:2]
         along = np.dot(rel, rest_edge_dir)
         perp = np.dot(rel, rest_outward)
         positions_out[id_map[v]] = p0 + edge_dir * along * scale + in_plane_perp * perp * scale
+    for local_v, core_v in shared_chain_map.items():
+        positions_out[core_v] = final_positions_by_id[core_v]
     for face in local_faces:
         faces_out.append([id_map[v] for v in face])
     return faces_out, positions_out, next_free_id
 
 
-def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length, own_groups):
+def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length, own_groups,
+                             core_base_faces):
     """Runs _place_pendant_flat for every excluded pendant against the just-solved CORE mesh's
     own final faces/positions/face_of_fine, and returns (faces, positions, face_of_fine) with
     every pendant's own flat Level-3 fine mesh concatenated on -- `face_of_fine` entries for a
@@ -894,7 +974,11 @@ def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_lengt
     exclude this -- a shared CORNER vertex between two adjacent pendants means some of pendant
     #1's own triangles pass that filter for pendant #2 too). Every pendant is independently
     flat/coplanar against the neighbor's own TRUE (already fully solved) surface regardless of
-    how many other pendants also hang off it, so this snapshot is always correct, never stale."""
+    how many other pendants also hang off it, so this snapshot is always correct, never stale.
+
+    `core_base_faces` (the CORE's own self.base_faces, one entry per `core_face_of_fine` value)
+    is threaded straight through to `_place_pendant_flat` as each pendant's own
+    `neighbor_base_face` -- see its own docstring for why."""
     if not pendants:
         return faces, positions, face_of_fine
     core_faces = list(faces)
@@ -913,7 +997,7 @@ def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_lengt
     for pendant, own_group in zip(pendants, own_groups):
         pendant_faces, pendant_positions, next_free_id = _place_pendant_flat(
             pendant, positions, pendant["neighbor_idx"], core_face_of_fine, core_faces,
-            edge_length, next_free_id)
+            edge_length, next_free_id, core_base_faces[pendant["neighbor_idx"]])
         faces.extend(pendant_faces)
         face_of_fine.extend([own_group] * len(pendant_faces))
         positions.update(pendant_positions)
@@ -1053,7 +1137,7 @@ def _place_all_flat(reference_face, pendants, edge_length):
     # docstring for why each pendant needs a DISTINCT tag rather than sharing its neighbor's.
     faces, positions, face_of_fine = _reattach_pendant_faces(
         pendants, faces, positions, face_of_fine, edge_length,
-        list(range(1, 1 + len(pendants))))
+        list(range(1, 1 + len(pendants))), [reference_face])
     base_faces = [reference_face, *(p["face"] for p in pendants)]
     return faces, positions, face_of_fine, base_faces
 
@@ -5009,23 +5093,24 @@ class InflaterPane:
             # docstring) -- same convention _diff_attach_pendant_only already used for its own
             # single-pendant fast path, applied here too so a guest is independently pickable
             # regardless of which pipeline path reattached it.
-            own_groups = list(range(len(self.base_faces),
-                                     len(self.base_faces) + len(self._pending_pendants)))
+            core_base_faces = self.base_faces
+            own_groups = list(range(len(core_base_faces),
+                                     len(core_base_faces) + len(self._pending_pendants)))
             if self.base_face_edge_ids is not None:
                 next_edge_id = 1 + max(eid for ids in self.base_face_edge_ids for eid in ids)
                 new_edge_id_rows = []
                 for pendant in self._pending_pendants:
                     row, next_edge_id = _pendant_own_face_edge_ids(
-                        pendant, self.base_faces, self.base_face_edge_ids, next_edge_id)
+                        pendant, core_base_faces, self.base_face_edge_ids, next_edge_id)
                     new_edge_id_rows.append(row)
                 self.base_face_edge_ids = [*self.base_face_edge_ids, *new_edge_id_rows]
-            self.base_faces = [*self.base_faces, *(p["face"] for p in self._pending_pendants)]
+            self.faces, self.positions, self.face_of_fine = _reattach_pendant_faces(
+                self._pending_pendants, self.faces, self.positions, self.face_of_fine,
+                EDGE_LENGTH, own_groups, core_base_faces)
+            self.base_faces = [*core_base_faces, *(p["face"] for p in self._pending_pendants)]
             self._pending_source_polygon_id = [
                 *self._pending_source_polygon_id,
                 *(p["source_polygon_id"] for p in self._pending_pendants)]
-            self.faces, self.positions, self.face_of_fine = _reattach_pendant_faces(
-                self._pending_pendants, self.faces, self.positions, self.face_of_fine,
-                EDGE_LENGTH, own_groups)
         self._render()
         # Feeds _guess_pressure_from_history for whichever level runs next this SAME Full
         # Inflate pass (harmless to also record during a Diff Inflate run -- nothing reads
@@ -5285,12 +5370,13 @@ class InflaterPane:
         pendant_face = [remap[v] for v in fresh_base_faces[new_fresh_idx]]
         pendant = {"face": pendant_face, "neighbor_idx": neighbor_idx,
                    "shared_pair": (real_a, real_b), "source_polygon_id": new_shape_id}
+        core_base_faces = self.base_faces
         if self.base_face_edge_ids is not None:
             next_edge_id = 1 + max(eid for ids in self.base_face_edge_ids for eid in ids)
             new_row, _next_edge_id = _pendant_own_face_edge_ids(
-                pendant, self.base_faces, self.base_face_edge_ids, next_edge_id)
+                pendant, core_base_faces, self.base_face_edge_ids, next_edge_id)
             self.base_face_edge_ids = [*self.base_face_edge_ids, new_row]
-        self.base_faces = [*self.base_faces, pendant["face"]]
+        self.base_faces = [*core_base_faces, pendant["face"]]
         self._pending_source_polygon_id = [*existing_source_polygon_id, new_shape_id]
         self._pending_pendants = [*self._pending_pendants, pendant]
         # A defensive copy, not self.positions itself -- _reattach_pendant_faces mutates its own
@@ -5300,7 +5386,7 @@ class InflaterPane:
         # pendant's own JUST-APPENDED trailing self.base_faces index, above.
         self.faces, self.positions, self.face_of_fine = _reattach_pendant_faces(
             [pendant], self.faces, dict(self.positions), self.face_of_fine, EDGE_LENGTH,
-            [len(self.base_faces) - 1])
+            [len(self.base_faces) - 1], core_base_faces)
         self._render()
         self._record_inflate_success()
         self._set_status(f"{label}: no inflation needed.", "success")
