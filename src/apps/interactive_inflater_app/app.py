@@ -4722,23 +4722,30 @@ class InflaterPane:
         # settled -- or, if it never does, _revert_run puts the panel straight back to
         # self._pre_click_snapshot without ever showing this or any other unconverged frame.
         self._set_running(True, active="full")
-        self._set_status("Full Inflate -- Level 0: relaxing...", "info")
+        self._set_status(f"{self._pipeline_label()} -- Level 0: Step 0.", "info")
         self._run_background(
             lambda queue_progress: relax_initial_configuration(
                 self.positions, self.faces, self.edge_length,
                 max_nfev=SAFETY_STEP_CAP, gtol=self._get_tolerance(), rng=None,
-                on_progress=None, edges=self.edges, stop_event=self._stop_event),
-            self._on_relax_done)
+                # Adapts relax_once's own 6-arg on_progress (new_positions, steps_taken,
+                # max_stretch_pct, rms_stretch_pct, optimality, converged -- see its own
+                # docstring) down to just the step count queue_progress/on_progress below
+                # actually shows (2026-09-29, explicit: status messages should say "Level N:
+                # Step xxx", not pressure/RMS/max stretch).
+                on_progress=lambda _positions, steps_taken, *_rest: queue_progress(steps_taken),
+                edges=self.edges, stop_event=self._stop_event),
+            self._on_relax_done,
+            on_progress=lambda steps: self._set_status(
+                f"{self._pipeline_label()} -- Level 0: Step {steps}.", "info"))
 
     def _on_relax_done(self, result):
         if self._stop_requested:
-            self._revert_run("Stopped -- reverted to the state before Inflate.")
+            self._revert_run(f"{self._pipeline_label()} -- Stopped.")
             return
         positions, _steps, max_stretch, rms_stretch, _optimality, converged = result
         if not converged:
             self._revert_run(
-                f"Full Inflate -- Level 0 relax didn't converge within {SAFETY_STEP_CAP} steps "
-                "-- reverted to the state before Inflate.",
+                f"{self._pipeline_label()} -- Failed to converge.",
                 popup_text=(
                     f"The mesh didn't converge (max stretch {max_stretch:.1f}%, RMS "
                     f"{rms_stretch:.1f}% after {SAFETY_STEP_CAP} steps) -- it may have a "
@@ -4748,9 +4755,7 @@ class InflaterPane:
         self.positions = positions
         self._render()
         self.subdivision_level = 1
-        self._set_status(
-            f"Full Inflate -- Level 0 relaxed (RMS {rms_stretch:.1f}%). Inflating Level 1...",
-            "info")
+        self._set_status(f"{self._pipeline_label()} -- Level 1: Step 0.", "info")
         self._run_inflate_step()
 
     def _guess_pressure_from_history(self, target_rms_pct):
@@ -4843,21 +4848,19 @@ class InflaterPane:
                 stop_event=self._stop_event, **extra),
             self._on_inflate_step_done,
             on_progress=lambda steps: self._set_status(
-                f"{self._pipeline_label()} -- Level {self.subdivision_level}: calibrating "
-                f"pressure toward {target_rms_pct:.0f}% RMS stretch ({steps} steps so far)...",
+                f"{self._pipeline_label()} -- Level {self.subdivision_level}: Step {steps}.",
                 "info"))
 
     def _on_inflate_step_done(self, result):
         if self._stop_requested:
-            self._revert_run("Stopped -- reverted to the state before Inflate.")
+            self._revert_run(f"{self._pipeline_label()} -- Stopped.")
             return
         # capture_frames=False (see on_full_inflate_clicked's own call) -- 8 values, no frames list.
         (pressure, new_positions, _steps, max_stretch, rms_stretch,
          _optimality, converged, pressure_found) = result
         if not pressure_found:
             self._revert_run(
-                f"{self._pipeline_label()} -- Level {self.subdivision_level}: mesh didn't "
-                "respond to pressure -- reverted to the state before Inflate.",
+                f"{self._pipeline_label()} -- Failed to converge.",
                 popup_text=(
                     "The mesh didn't respond to any pressure tried at Level "
                     f"{self.subdivision_level} -- it may have a loosely-attached or floppy "
@@ -4872,8 +4875,7 @@ class InflaterPane:
             # relax_once's internal MAX_UNBOUNDED_STEPS=200_000 runaway guard) -- so a specific
             # "didn't converge within N steps" number would just be wrong.
             self._revert_run(
-                f"{self._pipeline_label()} -- Level {self.subdivision_level}: pressure "
-                f"{pressure:.2f} didn't converge -- reverted to the state before Inflate.",
+                f"{self._pipeline_label()} -- Failed to converge.",
                 popup_text=(
                     f"The mesh didn't converge at Level {self.subdivision_level} (pressure "
                     f"{pressure:.2f}, max stretch {max_stretch:.1f}%, RMS {rms_stretch:.1f}%) "
@@ -4917,10 +4919,7 @@ class InflaterPane:
             # didn't).
             done_label = self._pipeline_label()
             self._set_running(False)
-            self._set_status(
-                f"{done_label} -- Done at Level {MAX_LEVEL}, pressure "
-                f"{pressure:.2f}, RMS stretch {rms_stretch:.1f}% (max {max_stretch:.2f}%).",
-                "success")
+            self._set_status(f"{done_label} -- Converged.", "success")
             return
         self.level_snapshot_faces = self.faces
         self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
@@ -4931,8 +4930,7 @@ class InflaterPane:
         self.edges = None
         self._render()
         self._set_status(
-            f"{self._pipeline_label()} -- subdivided to level {self.subdivision_level}. "
-            "Inflating...", "info")
+            f"{self._pipeline_label()} -- Level {self.subdivision_level}: Step 0.", "info")
         self._run_inflate_step()
 
     def _record_inflate_success(self):
@@ -5017,9 +5015,9 @@ class InflaterPane:
         elif kind == "remove_face":
             self._diff_remove_face(extra)
         elif kind == "add_connection":
-            self._diff_connection_change("added a connection")
+            self._diff_connection_change()
         elif kind == "remove_connection":
-            self._diff_connection_change("removed a connection")
+            self._diff_connection_change()
         else:
             messagebox.showerror(
                 "Cannot Diff Inflate",
@@ -5250,10 +5248,7 @@ class InflaterPane:
         # "never redraw anything" before real convergence) -- if it never converges,
         # _revert_run puts the panel straight back to self._pre_click_snapshot instead.
         self._set_running(True, active="diff")
-        face_word = "a face" if len(shape_ids) == 1 else f"{len(shape_ids)} faces"
-        self._set_status(
-            f"{self._pipeline_label()} -- removed {face_word}, calibrating pressure at Level "
-            f"{MAX_LEVEL}...", "info")
+        self._set_status(f"{self._pipeline_label()} -- Level {MAX_LEVEL}: Step 0.", "info")
         self._run_inflate_step(initial_pressure_guess=self.last_pressure,
                                 tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
 
@@ -5263,12 +5258,12 @@ class InflaterPane:
         _diff_reexport_and_relax); the shape id itself isn't needed there (root-matching finds
         automatically that this shape's own corners have no prior root, and BFS-seeds them near
         whatever they got connected to)."""
-        self._diff_reexport_and_relax("added a face")
+        self._diff_reexport_and_relax()
 
-    def _diff_connection_change(self, verb_phrase):
-        self._diff_reexport_and_relax(verb_phrase)
+    def _diff_connection_change(self):
+        self._diff_reexport_and_relax()
 
-    def _diff_reexport_and_relax(self, status_verb_phrase):
+    def _diff_reexport_and_relax(self):
         """Shared by _diff_add_face/_diff_connection_change (see module docstring's "Full
         Inflate vs. Diff Inflate" section) -- re-exports the FULL current net, seeds the fresh
         base mesh's own Level-0 positions by matching each vertex's STABLE root identity
@@ -5355,9 +5350,7 @@ class InflaterPane:
         # REAL, pressure-inclusive force law) starting fresh from these seeded positions each
         # time, so the old portion's already-correct geometry is respected from the very first
         # trial.
-        self._set_status(
-            f"{self._pipeline_label()} -- {status_verb_phrase}, calibrating pressure at Level "
-            f"{MAX_LEVEL}...", "info")
+        self._set_status(f"{self._pipeline_label()} -- Level {MAX_LEVEL}: Step 0.", "info")
         self._run_inflate_step(initial_pressure_guess=self.last_pressure,
                                 tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
 
