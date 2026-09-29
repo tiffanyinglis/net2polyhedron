@@ -165,7 +165,7 @@ from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.inflate_polyhedron.stretchy_mesh import (
     EDGE_LENGTH, estimate_pressure_for_target_stretch, load_stretchy_mesh,
     load_stretchy_mesh_edges, mesh_edges, random_initial_positions,
-    relax_initial_configuration,
+    relax_initial_configuration, repulsion_force,
 )
 
 # interactive_builder_app/app.py is NOT on the untouchable list, but per this app's own
@@ -456,6 +456,49 @@ def _point_segment_distance_3d(point, a, b):
 FRONT_EDGE_WEIGHT = 0.85
 BACK_EDGE_WEIGHT = 0.9
 SUBDIVISION_EDGE_LINE_WIDTH = 0.75
+
+# Debug mode's "Show face normals"/"Show vertex normals"/"Show repulsive forces" toggles
+# (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a Diff
+# Inflate join) -- same colors/length convention as inflate_polyhedron_app's own identically-
+# named toggles (_draw_level_panel), so a user familiar with that app reads these the same way.
+NORMAL_COLOR = "yellow"
+VERTEX_NORMAL_COLOR = "cyan"
+REPULSION_FORCE_COLOR = "magenta"
+NORMAL_LENGTH_FRACTION = 0.5
+
+
+def _vertex_normals(faces, positions):
+    """Same as inflate_polyhedron_app's own _vertex_normals (duplicated, not imported -- that
+    app's own app.py only resolves its `from session_state import ...` when run as __main__
+    with its own directory on sys.path, so it isn't safely importable as a library module from
+    here). faces: triangle vertex-id loops; positions: {vertex_id: pos}. Returns
+    {vertex_id: (unit_normal, mean_incident_edge_length)} for "Show vertex normals" below --
+    every vertex touched by at least one non-degenerate face, `unit_normal` the normalized SUM
+    of every incident face's own unit normal (equally weighted, not by area)."""
+    normal_sums = {}
+    edge_len_sums = {}
+    edge_len_counts = {}
+    for a, b, c in faces:
+        pa, pb, pc = positions[a], positions[b], positions[c]
+        normal = np.cross(pb - pa, pc - pa)
+        normal_len = np.linalg.norm(normal)
+        if normal_len < 1e-12:
+            continue
+        unit_normal = normal / normal_len
+        for v in (a, b, c):
+            normal_sums[v] = normal_sums.get(v, np.zeros(3)) + unit_normal
+        for u, w in ((a, b), (b, c), (c, a)):
+            length = np.linalg.norm(positions[w] - positions[u])
+            for v in (u, w):
+                edge_len_sums[v] = edge_len_sums.get(v, 0.0) + length
+                edge_len_counts[v] = edge_len_counts.get(v, 0) + 1
+    result = {}
+    for v, total in normal_sums.items():
+        total_len = np.linalg.norm(total)
+        if total_len < 1e-12:
+            continue
+        result[v] = (total / total_len, edge_len_sums[v] / edge_len_counts[v])
+    return result
 
 
 def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
@@ -2824,6 +2867,24 @@ class InflaterPane:
         self.auto_inflate_var = tk.BooleanVar(value=True)
         self._auto_inflate_check = ttk.Checkbutton(
             button_row, text="Auto Inflate", variable=self.auto_inflate_var)
+
+        # Debug-mode-only diagnostics (2026-09-29, explicit user request -- diagnosing a
+        # crumpled guest boundary after a Diff Inflate join): same idea as
+        # inflate_polyhedron_app's own identically-named toggles, see _render's own overlay
+        # block for what each actually draws. command=self._render (not a separate redraw path)
+        # since this pane has exactly one panel/one _render, unlike that app's per-level draw().
+        self.show_normals_var = tk.BooleanVar(value=False)
+        self._show_normals_check = ttk.Checkbutton(
+            button_row, text="Show face normals", variable=self.show_normals_var,
+            command=self._render)
+        self.show_vertex_normals_var = tk.BooleanVar(value=False)
+        self._show_vertex_normals_check = ttk.Checkbutton(
+            button_row, text="Show vertex normals", variable=self.show_vertex_normals_var,
+            command=self._render)
+        self.show_repulsive_forces_var = tk.BooleanVar(value=False)
+        self._show_repulsive_forces_check = ttk.Checkbutton(
+            button_row, text="Show repulsive forces", variable=self.show_repulsive_forces_var,
+            command=self._render)
         # Release-mode-only (see _apply_mode_visibility): "basically Full Inflate" (2026-09-28,
         # explicit user request) -- same command, just the one button a release-mode user needs,
         # since auto-inflate already keeps the mesh current without any button in that mode.
@@ -2886,13 +2947,29 @@ class InflaterPane:
             self.full_inflate_button.pack(side=tk.LEFT)
             self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
             self._auto_inflate_check.pack(side=tk.LEFT, padx=(8, 0))
+            self._show_normals_check.pack(side=tk.LEFT, padx=(8, 0))
+            self._show_vertex_normals_check.pack(side=tk.LEFT, padx=(8, 0))
+            self._show_repulsive_forces_check.pack(side=tk.LEFT, padx=(8, 0))
             self.reinflate_button.pack_forget()
         else:
             self._setup_row.pack_forget()
             self.full_inflate_button.pack_forget()
             self.diff_inflate_button.pack_forget()
             self._auto_inflate_check.pack_forget()
+            self._show_normals_check.pack_forget()
+            self._show_vertex_normals_check.pack_forget()
+            self._show_repulsive_forces_check.pack_forget()
             self.reinflate_button.pack(side=tk.LEFT)
+            # Off, not just hidden, when leaving debug mode -- same as inflate_polyhedron_app's
+            # own _apply_mode_visibility -- so a stale overlay never lingers into release mode.
+            redraw_needed = False
+            for var in (self.show_normals_var, self.show_vertex_normals_var,
+                        self.show_repulsive_forces_var):
+                if var.get():
+                    var.set(False)
+                    redraw_needed = True
+            if redraw_needed and self.faces is not None:
+                self._render()
 
     def _register_numeric_entry(self, entry, allow_exponent, allow_decimal=True):
         vcmd = self.root.register(lambda proposed: _is_valid_numeric_partial(
@@ -4880,6 +4957,76 @@ class InflaterPane:
                     self._add_rounded_lines(front_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
                 if len(back_rim):
                     self._add_rounded_lines(back_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
+
+            # Debug mode's "Show face/vertex normals"/"Show repulsive forces" toggles
+            # (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a
+            # Diff Inflate join) -- same drawing convention as inflate_polyhedron_app's own
+            # identically-named toggles (_draw_level_panel): a line segment per vertex/face,
+            # NORMAL_LENGTH_FRACTION of the local mean edge length long, direction only (not
+            # scaled by any physical magnitude) for the two normal toggles, but ACTUAL relative
+            # magnitude for repulsive forces (a unit-length arrow would look identical for a
+            # full-strength vertex and one weakened by _repulsion_vertex_multipliers, defeating
+            # the whole point of the toggle) -- the strongest vertex drawn gets the usual
+            # EDGE_LENGTH*NORMAL_LENGTH_FRACTION reference length, every other one scaled down
+            # proportionally against it.
+            if self.show_normals_var.get():
+                starts, ends = [], []
+                for a, b, c in self.faces:
+                    pa, pb, pc = self.positions[a], self.positions[b], self.positions[c]
+                    normal = np.cross(pb - pa, pc - pa)
+                    normal_len = np.linalg.norm(normal)
+                    if normal_len < 1e-12:
+                        continue
+                    centroid = (pa + pb + pc) / 3.0
+                    edge_len = (np.linalg.norm(pb - pa) + np.linalg.norm(pc - pb)
+                                + np.linalg.norm(pa - pc)) / 3.0
+                    starts.append(centroid)
+                    ends.append(centroid + normal / normal_len * edge_len * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=NORMAL_COLOR, width=2.0)
+
+            if self.show_vertex_normals_var.get():
+                starts, ends = [], []
+                for v, (unit_normal, mean_edge_len) in _vertex_normals(
+                        self.faces, self.positions).items():
+                    starts.append(self.positions[v])
+                    ends.append(self.positions[v]
+                                 + unit_normal * mean_edge_len * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=VERTEX_NORMAL_COLOR, width=2.0)
+
+            if self.show_repulsive_forces_var.get():
+                repulsion_ids = [v for v in self._repulsion_vertex_ids() if v in idx]
+                if repulsion_ids:
+                    rep_indices = [idx[v] for v in repulsion_ids]
+                    mult_by_id = self._repulsion_vertex_multipliers() or {}
+                    rep_mults = [mult_by_id.get(v, 1.0) for v in repulsion_ids]
+                    forces = repulsion_force(points, indices=rep_indices,
+                                              vertex_multipliers=rep_mults)
+                    force_lens = {v: np.linalg.norm(forces[idx[v]]) for v in repulsion_ids}
+                    max_len = max(force_lens.values(), default=0.0)
+                    starts, ends = [], []
+                    if max_len >= 1e-12:
+                        for v in repulsion_ids:
+                            force_len = force_lens[v]
+                            if force_len < 1e-12:
+                                continue
+                            force_vec = forces[idx[v]]
+                            starts.append(self.positions[v])
+                            ends.append(self.positions[v] + force_vec / max_len
+                                        * EDGE_LENGTH * NORMAL_LENGTH_FRACTION)
+                    if starts:
+                        segment_points = np.empty((2 * len(starts), 3))
+                        segment_points[0::2] = starts
+                        segment_points[1::2] = ends
+                        plotter.add_lines(segment_points, color=REPULSION_FORCE_COLOR, width=2.0)
+
             for group in self._hover_groups:
                 if group in groups_present:
                     self._hover_actors += self._add_rounded_lines(
