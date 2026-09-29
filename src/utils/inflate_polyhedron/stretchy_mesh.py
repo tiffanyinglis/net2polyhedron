@@ -16,13 +16,17 @@ special-casing, and there's no "flat 2D net" or "fold angle" concept to
 derive at all. JSON shape:
 
     {
-      "name": "...",
       "faces": [
         [0, 1, 2, 3, 4],
         [3, 2, 1, 0, 5],
         [0, 4, 3, 5]
       ]
     }
+
+No "name" field -- a net's own display name is always its FILENAME (see
+load_stretchy_mesh's own docstring), not anything stored inside the file,
+so a copy/rename never leaves a stale name behind. A legacy file that
+still carries one is simply ignored, harmless to leave in place.
 
 WINDING CONVENTION: each face is a loop of vertex ids (ints, 0..N-1,
 referenced -- not separately declared; N is inferred as 1 + the largest
@@ -53,11 +57,12 @@ That check alone can't catch every possible mistake, though: flipping
 EVERY face at once (a full mirror image) is just as valid a loop
 structure as the original. A subtler problem can still reach the pipeline
 even so: relax_initial_configuration's random-start-plus-spring relax
-(see its own docstring) has no notion of "outward" at all, so it can just
-as easily land globally inside-out, or (rarer, and not fixed for free)
-genuinely mixed -- some faces each way. See _orientation_signs/
-_is_orientation_consistent for how a caller can check this, and
-relax_initial_configuration's own docstring for what it does about it.
+(see its own docstring) has no GLOBAL notion of "outward" at all, so it
+can land globally inside-out, or genuinely mixed -- some faces each way
+(its own per-vertex repulsion gating, see _vertex_outward_normals, only
+discourages a LOCAL fold at each vertex as it relaxes, not a global
+inside-out result). See _orientation_signs/_is_orientation_consistent for
+how a caller can check this.
 
 The overall pipeline this module supports (used by inflate_polyhedron_app,
 see its own module docstring): random_initial_positions gives a fresh net
@@ -118,6 +123,7 @@ physics.
 """
 import collections
 import json
+import os
 
 import numpy as np
 
@@ -134,7 +140,14 @@ def _face_edges(face):
 
 def load_stretchy_mesh(path):
     """path: a vertex-loop stretchy-mesh .json (see module docstring).
-    Returns (faces, name), faces a list of vertex-id lists. Raises
+    Returns (faces, name), faces a list of vertex-id lists. `name` is
+    always `path`'s own basename (extension stripped) -- 2026-09-28,
+    explicit user request: NOT read from any "name" field inside the
+    file itself (a file can be copied/renamed without its own internal
+    metadata staying in sync, which is exactly what caused a stale name
+    to surface elsewhere -- see inflate_polyhedron_app's own
+    on_save_session_clicked). A file's own "name" field, if it still has
+    one from before this change, is simply never read here. Raises
     ValueError if any directed edge appears more than once -- the mesh
     need NOT be closed: an edge with no reverse partner at all is a
     valid, free boundary edge, not an error. See load_stretchy_mesh_edges
@@ -143,7 +156,7 @@ def load_stretchy_mesh(path):
     than added to this return, so this function's own return shape stays
     exactly what its existing callers/tests already unpack."""
     faces, _spec = _load_stretchy_mesh_spec(path)
-    name = _spec.get("name") or path
+    name = os.path.splitext(os.path.basename(path))[0]
     return faces, name
 
 
@@ -301,13 +314,23 @@ def _per_face_volumes(pts, face_volume_group):
     return np.bincount(face_ids, weights=tetra_volumes, minlength=n_faces)
 
 
-def _face_index_groups(faces, idx):
+def _face_index_groups(faces, idx, pressure_exclude_faces=None):
     """faces/idx: as elsewhere. Groups EVERY face's vertex indices by
     side count (3..8) -- {n: array of shape (num_faces_with_n_sides, n)}
     -- for vectorized per-face area/outward-normal computation (see
-    _relax_force)."""
+    _relax_force).
+
+    `pressure_exclude_faces`, if given, is a sequence of booleans the same length as `faces`
+    -- any face where it's True is left out of every group entirely, so _relax_force's own
+    pressure term never applies to it (2026-09-27, explicit user request: an "open" wedge
+    triangle -- one whose own outer edge isn't glued to another polygon -- "should not
+    experience inflation forces"). That face still exists completely normally everywhere
+    else (edges/stretch/repulsion/convergence) -- this is the ONLY place its exclusion is
+    applied."""
     groups = {}
-    for face in faces:
+    for i, face in enumerate(faces):
+        if pressure_exclude_faces is not None and pressure_exclude_faces[i]:
+            continue
         n = len(face)
         groups.setdefault(n, []).append([idx[v] for v in face])
     return {n: np.array(rows, dtype=int) for n, rows in groups.items()}
@@ -404,6 +427,106 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, edge_length, pressure=0
     return force
 
 
+# All-pairs repulsion, used by every relax force (2026-09-27, explicit user request: "just for
+# level 0, add some repulsion between all the vertices", then "let's add some repulsion to all
+# the levels" as a test) -- inverse-square in distance, like electrostatic repulsion in a
+# force-directed graph layout, between EVERY pair of vertices, not just edge-connected ones.
+# At Level 0 (relax_initial_configuration's own _spring_only_force) this keeps the initial
+# random cloud from leaving vertices piled up near each other before the spring network gets a
+# chance to spread them into a well-separated shape; at Level 1+ (_relax_force, via
+# relax_once's own `repulsion_strength` param) it's an extra separating force alongside real
+# per-face pressure -- strong enough to measurably shift the pressure/stretch equilibrium (see
+# relax_once's own comment), so a caller passing a non-default strength should expect to
+# recalibrate pressure against it, not assume the old pressure-only tuning still applies.
+# REPULSION_STRENGTH (the Level 0/1 baseline) is small relative to the spring's own stiffness
+# (its restoring force at exactly 1 edge_length of stretch is 1.0), so it only meaningfully
+# pushes vertices that are already close together, fading quickly at ordinary inter-vertex
+# spacing rather than fighting the spring network's own job of finding the right edge lengths.
+# Lowered from 0.05 (2026-09-27, explicit user report: restricting repulsion to just each
+# original polygon's own raw corners -- see inflate_polyhedron_app's own
+# _repulsion_vertex_ids -- made those specific, now much SPARSER vertices visibly spike
+# outward past their own denser, non-repulsive subdivided neighbors at the old strength).
+# MIN_REPULSION_DISTANCE floors the distance term so two vertices that land almost exactly on
+# top of each other don't blow the force up toward infinity.
+REPULSION_STRENGTH = 0.015
+MIN_REPULSION_DISTANCE = 0.05
+
+
+def repulsion_force(pts, strength=REPULSION_STRENGTH, indices=None, vertex_multipliers=None):
+    """All-pairs inverse-square repulsion -- see REPULSION_STRENGTH's own comment. O(k^2) in
+    vertex count, where k is len(indices) if given, else all of `pts` -- fine at Level 0/1's
+    own (small, unsubdivided) scale, but the SAME O(n^2) cost every relax step at Level 2/3
+    too, if run against every one of their own much larger vertex counts, was too slow in
+    practice (2026-09-27, explicit user report). `indices` (array positions into `pts`, not
+    vertex ids -- see relax_once's own `repulsion_vertex_ids` for the vertex-id-keyed version a
+    caller actually passes), when given, restricts BOTH which vertices repel each other AND
+    which vertices receive any resulting force to just that subset -- every vertex outside it
+    gets a zero contribution here, left entirely to springs/pressure, same as if repulsion
+    didn't exist for it at all.
+
+    `vertex_multipliers`, if given, is an array the same length as `indices` (or `pts` if
+    `indices` is None) -- each vertex's OWN [0, 1] scale on `strength` (2026-09-27, explicit
+    user request: weaken repulsion at "closed" vertices specifically, progressively more at
+    higher levels, while "open" ones stay at full strength -- see inflate_polyhedron_app's own
+    _repulsion_vertex_multipliers). The pairwise force between i and j uses the PRODUCT of
+    their own two multipliers (like a product of electrostatic charges), so a vertex weakened
+    to e.g. 0.5 pulls down every pair it's part of by that factor, not just a single uniform
+    rescale of the whole term. None (the default) means every vertex is at multiplier 1,
+    mathematically identical to `strength` alone -- exactly this function's own behavior
+    before this parameter existed."""
+    n = pts.shape[0]
+    sub_idx = np.arange(n) if indices is None else np.asarray(indices)
+    sub_pts = pts[sub_idx]
+    mult = (np.ones(len(sub_idx)) if vertex_multipliers is None
+            else np.asarray(vertex_multipliers, dtype=float))
+    diff = sub_pts[:, None, :] - sub_pts[None, :, :]  # diff[i, j] = sub_pts[i] - sub_pts[j]
+    dist_safe = np.maximum(np.linalg.norm(diff, axis=2), MIN_REPULSION_DISTANCE)
+    pair_mult = mult[:, None] * mult[None, :]
+    magnitude = strength * pair_mult / dist_safe ** 2
+    np.fill_diagonal(magnitude, 0.0)  # no self-repulsion
+    sub_force = np.sum(diff / dist_safe[:, :, None] * magnitude[:, :, None], axis=1)
+    force = np.zeros((n, 3))
+    force[sub_idx] = sub_force
+    return force
+
+
+def _vertex_outward_normals(pts, all_face_groups):
+    """pts: (N,3); all_face_groups: as _face_index_groups' own return (every face's vertex
+    indices INTO pts, grouped by side count) -- same structure _relax_force's own pressure term
+    uses, reused here so this works for any polygon size, not just triangles. Returns (N,3):
+    each vertex's own outward direction as the NORMALIZED SUM of its incident faces' unit
+    normals, each face weighted equally (not by area) -- same definition as
+    inflate_polyhedron_app's own _vertex_normals (used there for "Show vertex normals"), just
+    array-indexed. Each face's own unit normal is its `area * outward_normal` Newell's-method
+    vector (see _relax_force's own comment), normalized -- "outward" here means whatever the
+    mesh's own face WINDING implies, the same convention _relax_force's pressure term and
+    _orientation_signs both already use elsewhere -- not a distance-from-centroid guess -- so
+    it's well-defined even for a currently-folded/self-intersecting embedding.
+
+    A vertex touching no non-degenerate face, or whose incident face normals cancel exactly,
+    gets the GENUINE zero vector here -- deliberately NOT _safe_unit_vectors' own (1,0,0)
+    fallback (meant for a spring direction, where SOME direction is needed to avoid a NaN step):
+    a zero row here means "no known outward direction", and a zero dot product against it
+    leaves a repulsion force untouched (not `< 0`) rather than risking suppressing a
+    perfectly legitimate force because of an arbitrary fallback axis."""
+    n = pts.shape[0]
+    normal_sums = np.zeros((n, 3))
+    for n_sides, group_idx in all_face_groups.items():
+        face_pts = pts[group_idx]                                     # (F, n_sides, 3)
+        next_pts = np.roll(face_pts, -1, axis=1)
+        area_vector = 0.5 * np.cross(face_pts, next_pts).sum(axis=1)   # (F, 3)
+        lens = np.linalg.norm(area_vector, axis=1)
+        ok = lens > 1e-12
+        unit = np.zeros_like(area_vector)
+        unit[ok] = area_vector[ok] / lens[ok, None]
+        np.add.at(normal_sums, group_idx.ravel(), np.repeat(unit, n_sides, axis=0))
+    sum_lens = np.linalg.norm(normal_sums, axis=1)
+    ok_vertex = sum_lens > 1e-12
+    result = np.zeros((n, 3))
+    result[ok_vertex] = normal_sums[ok_vertex] / sum_lens[ok_vertex, None]
+    return result
+
+
 def _orientation_signs(pts, faces, idx):
     """pts: (N,3) vertex positions; faces/idx: as above. Returns each
     face's normal sign (+1/-1, or 0 if degenerate) relative to "pointing
@@ -434,12 +557,13 @@ def _is_orientation_consistent(pts, faces, idx):
     return signs <= {1.0}
 
 
-def _edge_setup(faces, edge_length, edges=None):
+def _edge_setup(faces, edge_length, edges=None, pressure_exclude_faces=None):
     """faces: vertex-id loops (see module docstring for the winding
     convention); edge_length: scalar rest length, or a {(a,b): length}
     dict for a non-uniform (e.g. subdivided) mesh; edges: an explicit
     mesh-edge list (see mesh_edges' own docstring), or None to derive one
-    from `faces`. Shared setup for relax_once/relax_initial_configuration:
+    from `faces`. `pressure_exclude_faces`: as _face_index_groups.
+    Shared setup for relax_once/relax_initial_configuration:
     vertex/edge index arrays plus the precomputed structures _relax_force
     needs (built once here, not per call). Returns (vertex_ids, idx,
     edges, edge_ai, edge_bi, all_face_groups, length_arr, scale)."""
@@ -447,7 +571,7 @@ def _edge_setup(faces, edge_length, edges=None):
     idx = {v: i for i, v in enumerate(vertex_ids)}
     edges = mesh_edges(faces, edges)
     edge_ai, edge_bi = _pair_index_arrays(edges, idx)
-    all_face_groups = _face_index_groups(faces, idx)
+    all_face_groups = _face_index_groups(faces, idx, pressure_exclude_faces)
     if isinstance(edge_length, dict):
         length_arr = np.array([edge_length[e] for e in edges])
         scale = float(np.min(length_arr)) if len(length_arr) else 1.0
@@ -458,14 +582,29 @@ def _edge_setup(faces, edge_length, edges=None):
             length_arr, scale)
 
 
-def _positions_and_stretch(pts, vertex_ids, edges, length_arr):
+def _positions_and_stretch(pts, vertex_ids, edges, length_arr, rms_exclude_edges=None):
     """pts: (N,3) flat solved positions; vertex_ids/edges/length_arr: as
     from _edge_setup. Returns (positions dict, max_stretch_pct,
-    rms_stretch_pct)."""
+    rms_stretch_pct).
+
+    `rms_exclude_edges`, if given, is a set of (a, b) SORTED vertex-id-pair tuples to omit
+    from the RMS stat -- `max_stretch_pct` always still uses every edge. Membership is
+    checked per edge here rather than requiring a mask the same length/order as `edges`, so a
+    caller building this set (e.g. inflate_polyhedron_app's own "exclude any OPEN polygon's
+    own edges from RMS" -- 2026-09-27, explicit user request) doesn't need to know anything
+    about how `edges` got built or ordered. Falls back to including every edge if the
+    exclusion would otherwise leave nothing to average (e.g. every polygon in the mesh is
+    open) rather than producing a NaN."""
     positions = {v: pts[i] for i, v in enumerate(vertex_ids)}
     lengths = np.array([np.linalg.norm(positions[a] - positions[b]) for a, b in edges])
     stretch_pct = 100 * (lengths - length_arr) / length_arr
-    return positions, float(np.max(np.abs(stretch_pct))), float(np.sqrt(np.mean(stretch_pct ** 2)))
+    max_stretch_pct = float(np.max(np.abs(stretch_pct)))
+    rms_stretch_pct = float(np.sqrt(np.mean(stretch_pct ** 2)))
+    if rms_exclude_edges:
+        rms_mask = np.array([tuple(sorted(e)) not in rms_exclude_edges for e in edges])
+        if rms_mask.any() and not rms_mask.all():
+            rms_stretch_pct = float(np.sqrt(np.mean(stretch_pct[rms_mask] ** 2)))
+    return positions, max_stretch_pct, rms_stretch_pct
 
 
 # relax_once's convergence check: a step counts as "at rest" once every
@@ -770,15 +909,52 @@ def _explicit_relax_loop(pts, scale, force_fn,
 
 def relax_once(positions, faces, edge_length, pressure=0.0,
                 max_nfev=None, stop_event=None,
-                gtol=CONVERGENCE_GTOL, rng=None, on_progress=None, edges=None):
+                gtol=CONVERGENCE_GTOL, rng=None, on_progress=None, edges=None,
+                repulsion_strength=REPULSION_STRENGTH, repulsion_vertex_ids=None,
+                repulsion_vertex_multipliers=None,
+                rms_exclude_edges=None, pressure_exclude_faces=None):
     """positions: {vertex_id: [x,y,z]} starting point; faces/edge_length/
-    edges: as _edge_setup. Runs ONE relaxation pass at a fixed `pressure`
+    edges: as _edge_setup. `repulsion_vertex_multipliers`: a {vertex_id: multiplier} dict (only
+    needs entries for vertices NOT at the default multiplier of 1) forwarded to
+    repulsion_force's own `vertex_multipliers` (see its own comment) -- translated here from
+    vertex ids to the same array-index space `repulsion_vertex_ids` already gets translated to.
+    `pressure_exclude_faces`: as _face_index_groups -- those faces get
+    NO pressure force at all (still fully present for springs/repulsion/edges/convergence).
+    `rms_exclude_edges`: as _positions_and_stretch (excluded from every
+    reported/checked rms_stretch_pct here, both live progress and the final return -- never
+    affects max_stretch_pct, the convergence check itself, or the springs/pressure/repulsion
+    forces actually driving the relaxation, only which edges' stretch gets AVERAGED into the
+    one summary number). Runs ONE relaxation pass at a fixed `pressure`
     -- no automatic ramp; call again with the result to keep steering it.
     Each iteration moves every vertex a small step along its own net
-    force from _relax_force (see module docstring's Design notes for why
-    this walks explicitly rather than handing the force balance to a
-    Newton-style solver) -- `pressure` is a real per-face outward force,
-    with no volume or remembered state anywhere in it.
+    force from _relax_force PLUS repulsion_force at `repulsion_strength`
+    (2026-09-27, explicit user request, as a test: "let's add some
+    repulsion to all the levels" -- previously Level 0 only; see
+    repulsion_force's own comment for why the default is weak enough
+    not to fight the spring/pressure forces at ordinary spacing).
+
+    `repulsion_vertex_ids`, if given, restricts repulsion to just that
+    subset of `positions`' own vertex ids (translated to _repulsion_
+    force's own array-index space here, via this call's own `idx`) --
+    every OTHER vertex gets zero repulsion, left entirely to springs/
+    pressure. None (the default) repels every vertex, O(n^2) in the
+    mesh's own current vertex count -- fine at Level 0/1's scale, but
+    running the SAME O(n^2) cost every relax step against Level 2/3's
+    own much larger vertex count was too slow in practice (2026-09-27,
+    explicit user report) -- inflate_polyhedron_app instead passes
+    Level 0's own small, fixed vertex-id set at every level ("let's use
+    the same set of points (from level 0) for all the levels"), keeping
+    the repulsion population size constant regardless of how many finer
+    vertices later Subdivides add. `repulsion_strength` is a SEPARATE,
+    independent knob from this -- inflate_polyhedron_app still halves it
+    at each level past 1 ("let's still halve the repulsion from L1->L2
+    and L2->L3, but still use the same set of points for all the
+    levels"), it just no longer needs to ALSO shrink the population to
+    keep the per-step cost down, now that this param does that instead
+    (see module docstring's Design notes for why this walks explicitly
+    rather than handing the force balance to a Newton-style solver) --
+    `pressure` is a real per-face outward force, with no volume or
+    remembered state anywhere in it.
 
     `max_nfev` caps the number of steps; None runs until convergence
     (capped at MAX_UNBOUNDED_STEPS as a runaway guard), via the worst
@@ -807,15 +983,26 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
     one of the two criteria above (not the step cap or a stop request) is
     what stopped it."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, length_arr, scale = \
-        _edge_setup(faces, edge_length, edges)
+        _edge_setup(faces, edge_length, edges, pressure_exclude_faces)
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
+    if repulsion_vertex_ids is None:
+        repulsion_indices = None
+        repulsion_mult_arr = None
+    else:
+        present_repulsion_ids = [v for v in repulsion_vertex_ids if v in idx]
+        repulsion_indices = [idx[v] for v in present_repulsion_ids]
+        repulsion_mult_arr = (None if repulsion_vertex_multipliers is None
+                               else [repulsion_vertex_multipliers.get(v, 1.0)
+                                     for v in present_repulsion_ids])
 
     def force_fn(pts):
-        return _relax_force(pts, edge_ai, edge_bi, all_face_groups, length_arr, pressure)
+        return (_relax_force(pts, edge_ai, edge_bi, all_face_groups, length_arr, pressure)
+                + repulsion_force(pts, strength=repulsion_strength, indices=repulsion_indices,
+                                   vertex_multipliers=repulsion_mult_arr))
 
     def on_check(check_pts, check_steps, check_optimality, check_converged):
         check_positions, check_max_stretch, check_rms_stretch = _positions_and_stretch(
-            check_pts, vertex_ids, edges, length_arr)
+            check_pts, vertex_ids, edges, length_arr, rms_exclude_edges)
         on_progress(check_positions, check_steps, check_max_stretch, check_rms_stretch,
                     check_optimality, check_converged)
 
@@ -823,7 +1010,8 @@ def relax_once(positions, faces, edge_length, pressure=0.0,
         pts0, scale, force_fn, max_nfev, stop_event, gtol, rng,
         step_max_multiplier=STEP_MAX_MULTIPLIER,
         on_check=on_check if on_progress is not None else None)
-    new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
+    new_positions, max_stretch, rms_stretch = _positions_and_stretch(
+        pts, vertex_ids, edges, length_arr, rms_exclude_edges)
     return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
 
 
@@ -885,19 +1073,73 @@ def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
     return force
 
 
+
+
+# Periodic "jiggle" (2026-09-28, explicit user request: "shake things up a bit every 200 steps
+# ... jiggle in the direction of the vertex normals ... basically an inflation burst every 200
+# steps") -- unlike an earlier sustained-pressure burst (tried and removed, see git history),
+# this is a single bounded DISPLACEMENT kick along each vertex's own outward normal
+# (_vertex_outward_normals, same winding-based convention the repulsion gate above already
+# uses). Gated by should_jiggle_next (see its own comment in relax_initial_configuration): a
+# jiggle only fires while the mesh hasn't yet been reported converged by the MOST RECENT
+# CONVERGENCE_CHECK_INTERVAL-cadence check (fixed at 200 steps, not adjustable here) -- doing
+# it unconditionally forever meant the check could never actually see a genuinely settled mesh.
+# 200 -> 100 (2026-09-28, "a bit more often, say every 100 steps instead") -> 50 (2026-09-28,
+# "inflate more frequently, in smaller doses"). Still evenly divides CONVERGENCE_CHECK_INTERVAL
+# (200), so a jiggle never lands ON the check step itself (fires at step_count % 50 == 1, the
+# check at step_count % 200 == 0 -- residues 1 and 0 of a shared divisor never coincide), which
+# is what keeps the "check is never mid-jiggle" property this whole mechanism relies on --
+# see should_jiggle_next's own comment for why that matters. An un-converged block now gets up
+# to 4 jiggles (steps 1/51/101/151) before its own check at step 200, not just 2.
+LEVEL0_JIGGLE_INTERVAL_STEPS = 50
+
+# Fixed DISPLACEMENT (not force) magnitude per jiggle, as a fraction of the mesh's own `scale`
+# (_edge_setup's own representative rest-length scalar -- the min edge length for a per-edge
+# dict, or the uniform edge length itself, same value _explicit_relax_loop's own step size is
+# scaled against) -- deliberately bounded independent of current geometry (unlike a pressure
+# force, whose magnitude scales with CURRENT face area and blew up against
+# random_initial_positions' own wildly-oversized raw starting spread -- see git history), so no
+# separate warmup delay is needed before the first jiggle. Converted to an equivalent one-step
+# FORCE (jiggle_distance / dt) inside force_fn, since _explicit_relax_loop only accepts a force
+# to apply, not a direct position nudge. 0.2 -> 0.4 ("enable the jiggle and double that") -> 0.8
+# ("make the inflation bursts in level 0 stronger") -> 0.4 (2026-09-28, "inflate more
+# frequently, in smaller doses" -- halved back down alongside LEVEL0_JIGGLE_INTERVAL_STEPS
+# above). Verified stable (no blowup, still converges) across icosahedron/hippo/cube/turtle/
+# giraffe at this interval/fraction pair, and at a further halving of both (25/0.2) too, so
+# there's real margin either direction from here.
+LEVEL0_JIGGLE_DISTANCE_FRACTION = 0.4
+
+
+def level0_jiggle_distance(faces, edge_length, edges=None):
+    """The actual jiggle displacement magnitude relax_initial_configuration applies at Level 0
+    (LEVEL0_JIGGLE_DISTANCE_FRACTION * scale -- see that constant's own comment for what
+    `scale` is), exposed here purely for DISPLAY (2026-09-28, explicit user request: show the
+    Level 0 burst strength used, in the Convergence History table's own "Pressure" column,
+    which otherwise reads "--" for Level 0 since Level 0 never calibrates a real pressure the
+    way relax_once does). This is a length (same units as `edge_length`), not literally a
+    pressure -- shown there anyway since it's the closest analogue "how strong was the burst"
+    has for Level 0, and that column has no other use at Level 0."""
+    _, _, _, _, _, _, _, scale = _edge_setup(faces, edge_length, edges)
+    return LEVEL0_JIGGLE_DISTANCE_FRACTION * scale
+
+
 def relax_initial_configuration(positions, faces, edge_length,
                                  max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None,
-                                 on_progress=None, edges=None):
-    """positions/faces/edge_length/edges: as relax_once, but `positions` is
+                                 on_progress=None, edges=None, rms_exclude_edges=None,
+                                 pressure_exclude_faces=None):
+    """positions/faces/edge_length/edges/rms_exclude_edges: as relax_once, but `positions` is
     typically random_initial_positions' output here, not a meaningful
     embedding -- this is what turns it into one, WITHOUT ever touching
-    pressure: pure Hooke's-law springs only (_spring_only_force). Nothing
-    here constrains vertices that don't share an edge, or fixes overall
-    position/scale, so the result can end up anywhere in space, at any
-    scale, and self-intersecting -- fine, since the only goal is a
-    well-separated, edge-length-plausible starting point for relax_once's
-    real per-face pressure model afterward. Any view of this result must
-    re-derive its own camera
+    pressure: pure Hooke's-law springs (_spring_only_force) plus an
+    all-pairs repulsion between EVERY vertex (repulsion_force, see its
+    own comment) -- the repulsion is the only thing here that has any
+    opinion about a pair of vertices with no edge between them at all,
+    and only at short range (it fades quickly past ordinary spacing).
+    Nothing here fixes overall position/scale, so the result can end up
+    anywhere in space, at any scale, and self-intersecting -- fine, since
+    the only goal is a well-separated, edge-length-plausible starting
+    point for relax_once's real per-face pressure model afterward. Any
+    view of this result must re-derive its own camera
     framing from its actual bounding box (see _draw_wireframe_panel)
     rather than assuming it lands near the origin or at a familiar scale.
     See this module's docstring for why a plain polyhedron wireframe
@@ -914,48 +1156,92 @@ def relax_initial_configuration(positions, faces, edge_length,
     relax_once, opts into an occasional random perturbation when stuck
     oscillating (`None` -- the default -- is fully deterministic).
     `on_progress`, as in relax_once, is called every CONVERGENCE_CHECK_
-    INTERVAL steps with this function's own return shape (note: reflects
-    the PRE-reflection embedding described below, since that fix-up only
-    happens once, at the very end).
+    INTERVAL steps with this function's own return shape.
+    Each vertex's own repulsion force (see repulsion_force) is discarded entirely whenever it
+    points INWARD -- dot(repulsion_force_at_v, outward_normal_at_v) < 0 (2026-09-28, explicit
+    user request) -- rather than letting repulsion push a vertex further into a fold. See
+    _vertex_outward_normals' own docstring for what "outward" means here (the mesh's own face
+    winding, not a centroid guess) and why a vertex with no well-defined outward direction (the
+    zero vector) leaves its repulsion force untouched instead of risking suppressing it on an
+    arbitrary fallback axis.
+
+    Every LEVEL0_JIGGLE_INTERVAL_STEPS steps, every vertex also gets a one-step kick along its
+    own outward normal (see LEVEL0_JIGGLE_INTERVAL_STEPS/LEVEL0_JIGGLE_DISTANCE_FRACTION's own
+    comments) -- meant to jog a locally-stuck/folded region loose periodically, not to shape
+    the final result. Convergence is always checked BEFORE that block's own jiggle, never after
+    (2026-09-28, explicit user request: "the jiggle shouldn't be taken into account or it'll
+    never converge") -- a block's own convergence check and a jiggle NEVER land in the same
+    block, so a genuinely at-rest mesh is reported converged (and the loop stops) at the very
+    next check, without ever depending on a kick having fully re-settled first. See
+    should_jiggle_next's own comment below for how.
+
+    `pressure_exclude_faces`: as _face_index_groups -- an OPEN wedge triangle contributes
+    NOTHING to the JIGGLE's own per-vertex outward normal (2026-09-28, explicit user request:
+    match Level 1+'s own rule that an open wedge "should not experience inflation forces" --
+    see relax_once's own `pressure_exclude_faces` and _face_index_groups' comment; the jiggle
+    IS a kind of inflation force, per its own comment). Does NOT affect the repulsion-gate's
+    own outward normal, which still considers every face -- that gate has no established
+    open/closed distinction of its own (unlike pressure, repulsion was never excluded from open
+    wedges at Level 1+ either), so this only narrows what the jiggle itself reads. A vertex
+    touching ONLY open faces gets the zero vector for the jiggle's own normal (see
+    _vertex_outward_normals' own docstring) and so contributes nothing to that step's jiggle;
+    a vertex touching at least one CLOSED face still gets a perfectly good normal from that
+    face alone.
+
     Returns (new_positions, steps_taken, max_stretch_pct, rms_stretch_pct,
     optimality, converged) -- exactly relax_once's own return shape."""
     vertex_ids, idx, edges, edge_ai, edge_bi, all_face_groups, length_arr, scale = \
         _edge_setup(faces, edge_length, edges)
+    # A SEPARATE, possibly-narrower group than all_face_groups above -- only used for the
+    # jiggle's own outward normal (see this function's own docstring on why the repulsion-gate
+    # deliberately keeps using the unrestricted all_face_groups instead).
+    inflating_face_groups = (all_face_groups if pressure_exclude_faces is None
+                              else _face_index_groups(faces, idx, pressure_exclude_faces))
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
+    jiggle_distance = LEVEL0_JIGGLE_DISTANCE_FRACTION * scale
+    jiggle_dt = LEVEL0_STEP_MAX_MULTIPLIER * scale
+    # Mutable (not a plain int) so force_fn -- called fresh each step by _explicit_relax_loop,
+    # with no step-number argument of its own -- can advance it via closure.
+    step_count = [0]
+    # Whether the FIRST step of the block about to start should jiggle -- set only by on_check,
+    # from that check's own `converged` result, which _explicit_relax_loop always computes
+    # BEFORE calling on_check and before deciding whether to break. False for the very first
+    # block (nothing has been checked yet, so nothing has earned a jiggle); once a check
+    # reports converged, this is set False too, but by then the loop is about to break anyway
+    # (_explicit_relax_loop breaks the same iteration its own on_check fires) -- so it's really
+    # only ever True for the block immediately following a NOT-yet-converged check.
+    should_jiggle_next = [False]
 
     def force_fn(pts):
-        return _spring_only_force(pts, edge_ai, edge_bi, length_arr)
+        step_count[0] += 1
+        repulsion = repulsion_force(pts)
+        outward = _vertex_outward_normals(pts, all_face_groups)
+        inward = np.einsum('ij,ij->i', repulsion, outward) < 0
+        repulsion[inward] = 0.0
+        force = _spring_only_force(pts, edge_ai, edge_bi, length_arr) + repulsion
+        if should_jiggle_next[0] and step_count[0] % LEVEL0_JIGGLE_INTERVAL_STEPS == 1:
+            jiggle_outward = (outward if inflating_face_groups is all_face_groups
+                               else _vertex_outward_normals(pts, inflating_face_groups))
+            force = force + (jiggle_distance / jiggle_dt) * jiggle_outward
+        return force
 
     def on_check(check_pts, check_steps, check_optimality, check_converged):
-        check_positions, check_max_stretch, check_rms_stretch = _positions_and_stretch(
-            check_pts, vertex_ids, edges, length_arr)
-        on_progress(check_positions, check_steps, check_max_stretch, check_rms_stretch,
-                    check_optimality, check_converged)
+        should_jiggle_next[0] = not check_converged
+        if on_progress is not None:
+            check_positions, check_max_stretch, check_rms_stretch = _positions_and_stretch(
+                check_pts, vertex_ids, edges, length_arr, rms_exclude_edges)
+            on_progress(check_positions, check_steps, check_max_stretch, check_rms_stretch,
+                        check_optimality, check_converged)
 
+    # Always passed now (not conditional on on_progress), since should_jiggle_next needs
+    # updating every check regardless of whether the caller wants progress reports too.
     pts, steps_taken, optimality, converged = _explicit_relax_loop(
         pts0, scale, force_fn, max_nfev, stop_event, gtol, rng,
         step_max_multiplier=LEVEL0_STEP_MAX_MULTIPLIER,
-        on_check=on_check if on_progress is not None else None)
+        on_check=on_check)
 
-    # A pure-spring relax has no notion of "outward" at all -- nothing in
-    # the force cares which way a face's normal points, so it lands
-    # globally inside-out about as often as right-side-out. If every face
-    # agrees on being inward, reflecting every vertex through the mesh's
-    # own centroid is a free fix: a point reflection is an isometry
-    # (every pairwise distance, so every edge length and stretch stat, is
-    # unchanged), and it flips every face's sign AT ONCE, since a face's
-    # normal itself is unchanged by the reflection (cross(-a,-b) =
-    # cross(a,b)) while its "outward from centroid" reference direction
-    # flips (see _orientation_signs) -- so what was a consistent wrong
-    # answer becomes a consistent right one, for free. A genuinely MIXED
-    # result (some faces each way) can't be fixed this cheaply and is
-    # returned as-is; per instructions, that residual case is left to the
-    # subsequent pressure model rather than retried here.
-    idx = {v: i for i, v in enumerate(vertex_ids)}
-    if {s for s in _orientation_signs(pts, faces, idx) if s != 0} == {-1.0}:
-        pts = 2 * pts.mean(axis=0) - pts
-
-    new_positions, max_stretch, rms_stretch = _positions_and_stretch(pts, vertex_ids, edges, length_arr)
+    new_positions, max_stretch, rms_stretch = _positions_and_stretch(
+        pts, vertex_ids, edges, length_arr, rms_exclude_edges)
     return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
 
 
@@ -975,8 +1261,10 @@ _PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0
 # stretch regime this targets, verified against the bisection trace above).
 _PRESSURE_RATIO_CLAMP = (0.2, 5.0)
 
-# Was 8.0; raised to 10.0 per explicit user request.
-DEFAULT_TARGET_RMS_STRETCH_PCT = 10.0
+# Was 8.0, then 10.0; lowered to 5.0 per explicit user request (2026-09-28: "let the default
+# target stretch be all 5%") -- matches inflate_polyhedron_app's own LEVEL_DEFAULT_TARGET_RMS_
+# PCT, now 5.0 at every level too.
+DEFAULT_TARGET_RMS_STRETCH_PCT = 5.0
 
 
 
@@ -1023,9 +1311,22 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           tol_pct=1.0, max_nfev_per_trial=5000, stop_event=None,
                                           gtol=CONVERGENCE_GTOL, rng=None,
                                           initial_pressure_guess=None,
-                                          capture_frames=False, on_progress=None, edges=None):
-    """positions/faces/edge_length/edges: as relax_once. Finds a pressure whose
-    relax_once result lands within `tol_pct` of `target_rms_pct` RMS
+                                          capture_frames=False, on_progress=None, edges=None,
+                                          repulsion_strength=REPULSION_STRENGTH,
+                                          repulsion_vertex_ids=None,
+                                          repulsion_vertex_multipliers=None,
+                                          rms_exclude_edges=None,
+                                          pressure_exclude_faces=None):
+    """positions/faces/edge_length/edges: as relax_once. `repulsion_strength`/
+    `repulsion_vertex_ids`/`repulsion_vertex_multipliers`/`rms_exclude_edges`/
+    `pressure_exclude_faces` are forwarded
+    unchanged to every relax_once call this makes (every trial and the final top-up), same
+    defaulting as relax_once's own (see that param's own comment there) -- note this means
+    `target_rms_pct` below is calibrated against the EXCLUDED-edges-aside RMS too, so an open
+    polygon's own stretch never drives the pressure search, only however the well-connected
+    rest of the mesh
+    responds. Finds a pressure whose relax_once result lands within `tol_pct` of
+    `target_rms_pct` RMS
     stretch (RMS, not max -- an irregular/subdivided mesh stretches
     unevenly, and RMS is what the "Target RMS stretch" spinner asks for).
     Every trial runs at the exact same step size and step budget a real
@@ -1167,7 +1468,11 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                 result = relax_once(positions, faces, edge_length, pressure,
                                      max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
                                      rng=rng, on_progress=_relax_progress if need_progress else None,
-                                     edges=edges)
+                                     edges=edges, repulsion_strength=repulsion_strength,
+                                     repulsion_vertex_ids=repulsion_vertex_ids,
+                                     repulsion_vertex_multipliers=repulsion_vertex_multipliers,
+                                     rms_exclude_edges=rms_exclude_edges,
+                                     pressure_exclude_faces=pressure_exclude_faces)
             _, trial_steps, _, rms_stretch, _, _ = result
         except np.linalg.LinAlgError:
             # A pathological trial (e.g. a pressure far outside any sane
@@ -1267,7 +1572,11 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                           max_nfev=None, stop_event=stop_event, gtol=gtol,
                                           rng=rng,
                                           on_progress=_topup_progress if need_progress else None,
-                                          edges=edges)
+                                          edges=edges, repulsion_strength=repulsion_strength,
+                                          repulsion_vertex_ids=repulsion_vertex_ids,
+                                          repulsion_vertex_multipliers=repulsion_vertex_multipliers,
+                                          rms_exclude_edges=rms_exclude_edges,
+                                          pressure_exclude_faces=pressure_exclude_faces)
                 (new_positions, top_up_steps, max_stretch, rms_stretch,
                  optimality, converged) = best_result
                 best_result = (new_positions, steps_taken + top_up_steps, max_stretch,

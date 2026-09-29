@@ -136,6 +136,12 @@ class SessionStateModel(BaseModel):
     iteration_count: int
     debug_mode: bool
     tolerance: str
+    # self.seed_var's own text -- the seed random_initial_positions actually used to produce
+    # this session's Level 0 starting embedding (blank if it was never generated/typed, e.g. a
+    # session saved before seed randomization existed). Restoring it on load means Continue/
+    # Run Simulation afterward pins that exact same seed rather than falling back to "blank ->
+    # randomize" and silently losing which draw actually produced this session's shape.
+    seed: str = ""
     target_rms_pct: Dict[int, float]
     last_stats: LastStatsModel
     level_history: Dict[int, LevelHistoryRecordModel]

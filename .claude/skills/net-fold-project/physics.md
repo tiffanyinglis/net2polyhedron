@@ -13,8 +13,13 @@ an edge with no reverse partner is a valid open boundary (mesh need not be close
 1. `random_initial_positions` — iid uniform noise, no meaning.
 2. `relax_initial_configuration` (Level 0, "Relax" button) — PLAIN LINEAR spring only, no
    pressure. Needs mesh pre-triangulated (fan about centroid) or it's a floppy mechanism.
-   Orientation not guaranteed: uniform inside-out fixed free via centroid reflection; mixed
-   result passed on to pressure stage as-is.
+   Repulsion here is GATED per vertex per step (2026-09-28, explicit user request): a vertex's
+   own repulsion force is zeroed whenever it dots negative against that vertex's own outward
+   normal (`_vertex_outward_normals` — face-winding-based, same convention as `_relax_force`'s
+   pressure term, NOT a centroid guess) — discourages repulsion from pushing a vertex further
+   into a local fold. No global orientation fix-up (the old centroid-reflection step was
+   removed 2026-09-28, explicit user request — "not likely" to be the relevant case in
+   practice): orientation is left exactly as the physics settles it, good or bad.
 3. Promote to Level 1 (same topology, no re-subdivide needed).
 4. `relax_once` ("Inflate") — pressure-driven, HARDENING spring (see below). One call =
    fixed pressure; app recalibrates pressure fresh every Inflate click.
@@ -163,7 +168,8 @@ pressure can reach the target from) so `inflate_polyhedron_app`'s
 levels' starting guess.
 
 ## Defaults (current)
-- `LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}` (app, per-level spinner default)
+- `LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 5.0, 2: 5.0, 3: 5.0}` (app, per-level spinner default);
+  `DEFAULT_TARGET_RMS_STRETCH_PCT = 5.0` (module's own fallback, same value)
 - `DEFAULT_TOLERANCE = 1e-4` (app's Tolerance spinner default)
 - `CONVERGENCE_GTOL = 1e-4` (module default when no gtol passed)
 - `INFLATE_SAFETY_STEP_CAP = 50000` (app, hard per-attempt step cap)

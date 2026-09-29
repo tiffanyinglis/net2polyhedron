@@ -49,3 +49,16 @@ class InflaterSessionStateModel(BaseModel):
     # than a dedicated model since it's never anything but this one app's own internal cache, fed
     # straight back into self.level_history on load with no translation needed either way.
     level_history: Dict[int, Dict[str, Any]] = {}
+    # Whether `mesh` reflects a real relax/inflate result (True) or was only ever geometrically
+    # placed, never really solved (False) -- InflaterPane.is_fully_inflated at save time
+    # (2026-09-28, explicit user request: "when i save a session, it should contain information
+    # about the last full inflate, if is_fully_inflated = true. if is_fully_inflated=false, that
+    # should be saved as well" -- see app.py's own "Club terminology"/Rule 2-3 section for what
+    # this flag means and drives). Defaults True for a file saved before this field existed: a
+    # save was refused entirely unless self.faces/base_faces were already set (see
+    # on_save_session_clicked's own guard), and every save path that reaches that point already
+    # implies a real relax/inflate happened at some point in this app's history -- True is a
+    # safe, non-regressive default for reading such a file back (worst case, Diff Inflate is
+    # offered from a save that ACTUALLY still needed a Full Inflate at save time, exactly
+    # today's already-existing behavior for every file saved before this field was added).
+    is_fully_inflated: bool = True

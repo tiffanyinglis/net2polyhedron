@@ -86,6 +86,8 @@ An example workflow would be: load a pre-existing pattern, do a full inflate, th
 
 While experimenting with it, I came across some limitations involving unstable constructions. When we attach a new polygon to the model via an edge, the piece is inherently unstable. The inflation simulation can cause it to fluctuate/spin wildly and never reach convergence. For the construction tool to behave in a stable manner, we need to impose some additional stability constraints.
 
+(When pieces are loosely constrained, the whole thing can move in many different directions and still have the same optimality. basically there are a lot of solutions so it can't settle on one unless we improve the optimality condition to prefer certain types of solutions)
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section*{Results}
 

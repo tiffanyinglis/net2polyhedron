@@ -39,17 +39,20 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   `self.pressure_value` and blanks them to `None` at the start of a click (restored verbatim if
   Stopped); `_record_level_history` doesn't default `rms_stretch_pct` to `0.0` the way it does
   `max_stretch_pct`, so `None` survives into `level_history` for `_refresh_history_table` to show
-  as `"--"`. The "(target: N.N)" suffix is debug-mode-only. Level 0's own row always shows "--" for
-  RMS Stretch % (never surfaced there at all, though the real number still feeds `last_stats`).
-  **Level 0 and Levels 1-3 have INDEPENDENT camera state** (rotation/zoom/pan) — since they look
-  very different (a random-start Level 0 vs. a settled solid): `self._level0_camera`/
-  `self._level13_camera` (each a `{"rotation", "zoom", "pan"}` dict) replace one shared camera.
-  `_level_camera(level)` returns the right dict; `_camera_group_levels(level)` returns which
-  panels need re-rendering when it changes (`[0]` or `[1, 2, 3]`); every drag/pan/scroll handler
-  determines which group triggered it via `self._level_of_label` (captured once at press time for
-  a drag/pan, read directly for a scroll/middle-click). `SessionStateModel`'s pre-existing
-  `level_*` fields now mean specifically "the Levels 1-3 shared group"; new `level0_*` fields
-  default to `_initial_level_rotation()` so an older session file still loads with no migration.
+  as `"--"`. The "(target: N.N)" suffix is debug-mode-only. Level 0's own row shows its actual RMS
+  Stretch % same as every other level (2026-09-28, explicit user request; previously always "--"
+  there), and its own "Pressure" column shows `level0_jiggle_distance` -- the fixed burst/jiggle
+  displacement Level 0 actually uses (see physics.md), not a literal calibrated pressure, but the
+  closest analogue that column has for "how strong was the burst" at Level 0.
+  **Every level (0-3) shares ONE camera state** (rotation/zoom/pan, 2026-09-28, explicit user
+  request — was previously split, Level 0 independent from Levels 1-3, since an early
+  random-start Level 0 looked very different from a settled solid; reverted since dragging one
+  panel now rotates/pans/zooms all of them together): `self._level_camera_state` (a
+  `{"rotation", "zoom", "pan"}` dict). `_level_camera(level)` returns it regardless of `level`
+  (kept as a param purely for a uniform call shape); `_camera_group_levels(level)` likewise
+  always returns every built level now. `SessionStateModel`'s `level_*` fields hold the one
+  shared state on save; `level0_*` fields are still WRITTEN (same values, for file-format/
+  backward-compat reasons) but never read back on load.
   Each "Level 1"/"Level 2"/"Level 3" panel (Level 0 excluded) has its own bottom status-message
   Label (`self.level_message_labels`), left-anchored with a `padx` computed per-message from its
   own rendered text width (`_set_level_message`, via a real `tkfont.Font`) rather than one fixed
@@ -97,9 +100,6 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   `rms_stretch_pct` are unaffected, updating live throughout. Exactly three row colors exist
   (`converged`/`not_converged`/`running`, each with its own `tag_configure`) — no other
   combination is reachable.
-- **Validate Mesh** (`_validate_mesh`, debug-only): returns `"PASS: all N faces are consistently
-  oriented."` or `"FAIL: B/N faces are inconsistently oriented."` plus per-edge detail lines when
-  it fails; `B` is the count of DISTINCT faces touching any conflicting edge, not the edge count.
 - **3D panels**: PyVista off-screen render blitted into a Tk Label per level (`pv.Plotter(
   off_screen=True)` + `PIL.ImageTk`) — needed because meshes here are routinely non-convex/
   self-intersecting mid-relax, which plain mplot3d/backface-culling can't draw correctly. One
@@ -151,9 +151,11 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   that real shrinkage, reading as "inconsistent sizes" rather than the consistent LOOK wanted.
   Reverted to each level auto-fitting its own current bounding box; rotation/pan/zoom stay shared
   across Levels 1-3 regardless (a separate, still-current mechanism, above).
-  "Level N" panels are NOT all the same width — Level 0's is 60% of Levels 1-3's own width
-  (`LEVEL_PANEL_WIDTH_LEVEL_0`/`_LEVELS_1_3`, `_level_panel_size(level)` returns the right pair;
-  height unchanged for every panel). The Net panel keeps its own separate, unchanged
+  "Level N" panels are ALL the same width (2026-09-28, explicit user request — Level 0's used to
+  be 60% of Levels 1-3's own width; `LEVEL_PANEL_WIDTH_LEVEL_0`/`_LEVELS_1_3`,
+  `_level_panel_size(level)` returns the right pair; height unchanged for every panel; kept as a
+  per-level lookup rather than a bare constant in case of a future re-split). The Net panel keeps
+  its own separate, unchanged
   `NET_PANEL_SIZE`. `self.net_pan` is the Net panel's own 2D data-space offset — its y-sign is
   OPPOSITE x's (Tk pixels grow downward, this axes' data y grows upward). Middle-click resets pan,
   zoom, and (level panels only) rotation together, back to `_initial_level_rotation()` (the
@@ -198,11 +200,13 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   row's own height instead of a disabled spacer `ttk.Button` matching the "Level N" panels' own
   action-button height.
 - **Debug mode** ("d" key): adds steps-vs-convergence radio (inert for Inflate, above — still left
-  in place), **Validate Mesh** (combinatorial winding check only — a geometric inside/out check is
-  informational, never gating), and two normal-arrow toggles for checking whether the CURRENT
-  shape faces outward: **Show face normals** (one per face, from its centroid) and **Show vertex
-  normals** (one per vertex, averaged from its touching faces — catches a disagreement a per-face
-  check alone can miss). Release mode and debug mode are otherwise IDENTICAL — don't add new
+  in place) and three arrow toggles for checking whether the CURRENT shape faces outward:
+  **Show face normals** (one per face, from its centroid), **Show vertex normals** (one per
+  vertex, averaged from its touching faces — catches a disagreement a per-face check alone can
+  miss), and **Show repulsive forces** (Level 0's own per-vertex repulsion force, see
+  physics.md's Force model section — magnitude-scaled against the max among drawn vertices, not
+  unit-length, so a weakened/zeroed force is visibly shorter/absent). Release mode and debug
+  mode are otherwise IDENTICAL — don't add new
   differences w/o asking. Precomp/Simulation Time update live via each background poll loop's own
   100ms cycle even without a progress callback of their own to drive them; `poll()` keeps only the
   LATEST queued progress message per cycle (discarding older ones) so a burst of messages can't
@@ -217,8 +221,8 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
 - **No caching, no chunking**: solve starts fresh each session; UI progress synced to
   `on_progress` callback fired by the solver itself every `CONVERGENCE_CHECK_INTERVAL` steps
   (see physics.md) — not an app-side chunk schedule.
-- **File > Save/Load session** (`session_state.py`'s `SessionStateModel`) carries each panel's own
-  camera view — `level_zoom`/`level_pan`/`level_rotation` (Levels 1-3's shared camera) and
+- **File > Save/Load session** (`session_state.py`'s `SessionStateModel`) carries the camera view —
+  `level_zoom`/`level_pan`/`level_rotation` (every level's shared camera, see above) and
   `net_zoom`/`net_pan`. `level_rotation` is a scipy `Rotation`'s `.as_quat()` (JSON has no
   quaternion type) — `None` falls back to `_initial_level_rotation()` on load. `net_file` (the raw
   parsed net JSON, embedded wholesale) already carries `interactive_builder_app`'s own bezier
@@ -236,6 +240,24 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   map (second one wins — the two extensions replace one another per net, not coexist).
   `DEFAULT_NET_BASENAME` matches by basename, not a hardcoded `+ ".json"` path — all 11 shipped
   nets are `.poly` now.
+
+## interactive_inflater_app (`src/apps/interactive_inflater_app/app.py`)
+Combines `interactive_builder_app`'s canvas (left) with a simplified one-panel solver viewer
+(right) — build a net by hand and inflate it immediately, no save/load round trip.
+
+**Club terminology** (2026-09-28, explicit): the anchor's own connected component is the **club**;
+every shape in it is a **member**; a member with 0 or 1 connections is a **guest** (0 = the first
+piece ever placed, nothing to connect to yet; flat-attached or just placed, never touches
+relax/inflate); a member with ≥2 connections is an **insider** (inflation only ever involves
+insiders); a shape not connected to the anchor at all is an **outsider**. `self.
+is_fully_inflated` tracks whether the insiders currently reflect a real relax/inflate result.
+Rules: (1) inflation only involves insiders, guests are attached flatly; (2) `is_fully_inflated`
+resets to False whenever the club empties, set True after a real Full Inflate; (3) a change to
+insiders (membership or their internal connections) triggers Diff Inflate if `is_fully_inflated`
+else Full Inflate; (4) undo/redo fall under the same rules for free, via the same `on_change` hook
+every edit funnels through. Status messages always say which pipeline (Full/Diff Inflate) and
+level is running (`_pipeline_label`), including when Diff Inflate redirects into a real Full
+Inflate because the insiders were never really solved yet.
 
 ## interactive_builder_app (`src/apps/interactive_builder_app/app.py`)
 Unrelated 2D shape-placement canvas, no relation to solving. Palette of regular polygons

@@ -45,12 +45,33 @@ deletes it immediately after -- the mesh itself is never written to (or
 read from) any file under data/, only this one transient temp file that
 never outlives a single Inflate click.
 
+Club terminology (2026-09-28, explicit user request -- "let's make it clear by using the same
+language (both in docs and in code)"): the anchor's own connected component (BuilderPane.
+central_shape_ids) is the CLUB. Every shape in it is a MEMBER. A member with 0 or 1 connections
+is a GUEST (2026-09-28, explicit correction: "Guests are members with 0 or 1 connections" -- 0
+covers the very first piece ever placed, with nothing to connect to yet) -- placed flatly
+against its one neighbor if it has one, or just placed with no relax/inflate involved at all if
+it has none, never touching relax/inflate either way (this is what the surrounding code still
+mostly calls a "pendant" -- same concept, not yet renamed everywhere). A member with two or more
+connections is an INSIDER -- inflation only ever involves insiders (Rule 1). A shape not in the
+club at all (not connected to the anchor) is an OUTSIDER/non-member. self.is_fully_inflated tracks whether the club's own insiders currently
+reflect a real relax/inflate result (Rule 2: reset to False whenever the club empties out
+entirely; set True whenever a real pressure-calibration pass completes) -- on_diff_inflate_
+clicked reads it to decide Diff Inflate (True) vs. a Full Inflate redirect (False) whenever a
+builder edit actually changes the insiders -- their own membership (a guest promoted to insider,
+or vice versa) or a connection between two of them (Rule 3). A guest-only add/remove never
+reaches that decision at all (_is_pendant_add/_diff_attach_pendant_only's own fast path) since
+it never changes what the insiders are. Undo/redo funnel through the SAME BuilderPane.on_change
+hook (refresh_diff_eligibility) every other edit does, so Rule 4 falls out of the existing
+architecture for free -- no separate undo/redo-specific handling needed.
+
 Simplifications vs. inflate_polyhedron_app (all explicitly allowed by this
 app's own spec):
 - One drawing panel, redrawn per level, not four side-by-side ones.
-- No replay-frame capture/animation -- estimate_pressure_for_target_stretch
-  is called with capture_frames=False; the winning trial's final result is
-  applied and drawn directly.
+- No AUTO-PLAY replay animation -- unlike inflate_polyhedron_app's own winning-trial replay
+  (_start_frame_replay), a completed run's own captured frames (self._replay_frames, debug-
+  mode-only -- 2026-09-29, explicit user request) are only ever scrubbed by hand via the
+  replay slider (_on_replay_slider_moved), never auto-played.
 - No per-level independent camera groups/pan/drag/scroll -- the single
   panel auto-frames itself fresh on every redraw (PyVista's own "iso" view
   + reset_camera()), no interactive camera at all.
@@ -145,7 +166,7 @@ from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.inflate_polyhedron.stretchy_mesh import (
     EDGE_LENGTH, estimate_pressure_for_target_stretch, load_stretchy_mesh,
     load_stretchy_mesh_edges, mesh_edges, random_initial_positions,
-    relax_initial_configuration,
+    relax_initial_configuration, repulsion_force,
 )
 
 # interactive_builder_app/app.py is NOT on the untouchable list, but per this app's own
@@ -180,7 +201,16 @@ INFLATER_ICON_SIZE = 48
 # ---- right pane (InflaterPane) constants, adapted from inflate_polyhedron_app ----
 
 DEFAULT_TOLERANCE = 1e-4
-LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 80.0, 2: 40.0, 3: 10.0}
+# Per-level Target RMS stretch % defaults -- auto-picked from whether the CENTRAL object is
+# currently closed (no free/unglued edge anywhere) or open (at least one), re-checked after
+# every builder edit (2026-09-28, explicit user request: "the algorithm should auto detect
+# whether the current central model is open or closed, and inflate it to 5% or 10% based on
+# that information. that should be checked after every change") -- see InflaterPane's own
+# _is_central_object_closed/_apply_target_rms_defaults, and refresh_diff_eligibility for where
+# it's re-applied on every change. Adapted directly from inflate_polyhedron_app's own
+# LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED/_OPEN (duplicated, not imported -- see module docstring).
+LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED = {1: 10.0, 2: 10.0, 3: 10.0}
+LEVEL_DEFAULT_TARGET_RMS_PCT_OPEN = {1: 5.0, 2: 5.0, 3: 5.0}
 
 # Where inflate_polyhedron_app's own .hippo session saves (and this app's own .hippie saves) live
 # -- same directory that app's SESSION_OUTPUT_DIR points at (DATA_DIR / "output"), duplicated
@@ -428,6 +458,93 @@ FRONT_EDGE_WEIGHT = 0.85
 BACK_EDGE_WEIGHT = 0.9
 SUBDIVISION_EDGE_LINE_WIDTH = 0.75
 
+# Lighting/shading for the two per-group face actors (2026-09-29, explicit user request: "add
+# some lighting and shading... performant") -- SMOOTH_SHADING is the actual visual win: VTK
+# interpolates PER-VERTEX normals (averaged from each vertex's own incident fine triangles)
+# across every triangle instead of using one flat per-triangle normal, so a subdivided face
+# reads as a smoothly curved/inflated surface instead of a faceted polyhedron made of visible
+# flat triangles -- exactly what an "inflated" mesh should look like, and cheap: VTK computes
+# these normals once per add_mesh call (a `vtkPolyDataNormals` pass over however many triangles
+# that one group's own PolyData has, not the whole scene, not per-frame), not a rendering-time
+# cost repeated every redraw. No new library needed -- this is PyVista/VTK's own existing Phong
+# lighting pipeline (already active with a default 3-light kit; add_mesh's default
+# smooth_shading=False was simply never overridden), not a swap to some heavier PBR/raytracing
+# path. The material constants below tone the default lighting down slightly from add_mesh's
+# own defaults (ambient=0.0, diffuse=1.0, specular=0.0) -- a touch of ambient keeps the shadowed
+# side of a face from ever going fully black/flat, and a modest specular highlight is what
+# actually SELLS the "smooth, slightly glossy inflated surface" look once combined with smooth
+# shading; SPECULAR_POWER keeps that highlight small/tight rather than a big soft blob.
+SMOOTH_SHADING = True
+MATERIAL_AMBIENT = 0.25
+MATERIAL_DIFFUSE = 0.85
+MATERIAL_SPECULAR = 0.35
+MATERIAL_SPECULAR_POWER = 20
+
+# Explicit 2-light camera-relative rig, REPLACING the plotter's own default light kit
+# (2026-09-29, explicit bug report: "I don't see any shading" on a mesh that converges fine --
+# smooth_shading/material tuning alone weren't enough). A plain default VTK Plotter lights the
+# scene with a HEADLIGHT -- a light collocated with the camera, pointed straight down the view
+# axis -- which is exactly the lighting setup that looks flattest: every point on a convex
+# surface facing the camera receives close to the SAME light angle relative to its own normal,
+# so there's minimal brightness falloff across the visible surface regardless of how good
+# smooth_shading's own normal interpolation is (a shading MODEL can't manufacture contrast a
+# light rig never provides). `light_type='camera light'` positions a light in a coordinate
+# space where the camera itself sits at (0, 0, 1) looking at (0, 0, 0) with up=(0, 1, 0) --
+# OFFSETTING position away from (0, 0, 1) (unlike a headlight) puts the light off the view axis,
+# so there's always real angular falloff across a curved surface, and VTK automatically keeps
+# the light following the camera as the user rotates/pans -- no per-render recomputation needed,
+# unlike a world-space light that could leave one whole side permanently unlit. KEY (bright,
+# upper-right) does the actual shape-defining work; FILL (dim, opposite side) keeps the unlit
+# side from going flat black without washing out the key's own contrast -- classic 2-point
+# rig, cheaper than the default kit's 5 lights and deliberately more off-axis than any of them.
+KEY_LIGHT_POSITION = (0.55, 0.7, 0.85)
+KEY_LIGHT_INTENSITY = 1.0
+FILL_LIGHT_POSITION = (-0.6, -0.35, 0.5)
+FILL_LIGHT_INTENSITY = 0.35
+
+# Debug mode's "Show face normals"/"Show vertex normals"/"Show repulsive forces" toggles
+# (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a Diff
+# Inflate join) -- same colors/length convention as inflate_polyhedron_app's own identically-
+# named toggles (_draw_level_panel), so a user familiar with that app reads these the same way.
+NORMAL_COLOR = "yellow"
+VERTEX_NORMAL_COLOR = "cyan"
+REPULSION_FORCE_COLOR = "magenta"
+NORMAL_LENGTH_FRACTION = 0.5
+
+
+def _vertex_normals(faces, positions):
+    """Same as inflate_polyhedron_app's own _vertex_normals (duplicated, not imported -- that
+    app's own app.py only resolves its `from session_state import ...` when run as __main__
+    with its own directory on sys.path, so it isn't safely importable as a library module from
+    here). faces: triangle vertex-id loops; positions: {vertex_id: pos}. Returns
+    {vertex_id: (unit_normal, mean_incident_edge_length)} for "Show vertex normals" below --
+    every vertex touched by at least one non-degenerate face, `unit_normal` the normalized SUM
+    of every incident face's own unit normal (equally weighted, not by area)."""
+    normal_sums = {}
+    edge_len_sums = {}
+    edge_len_counts = {}
+    for a, b, c in faces:
+        pa, pb, pc = positions[a], positions[b], positions[c]
+        normal = np.cross(pb - pa, pc - pa)
+        normal_len = np.linalg.norm(normal)
+        if normal_len < 1e-12:
+            continue
+        unit_normal = normal / normal_len
+        for v in (a, b, c):
+            normal_sums[v] = normal_sums.get(v, np.zeros(3)) + unit_normal
+        for u, w in ((a, b), (b, c), (c, a)):
+            length = np.linalg.norm(positions[w] - positions[u])
+            for v in (u, w):
+                edge_len_sums[v] = edge_len_sums.get(v, 0.0) + length
+                edge_len_counts[v] = edge_len_counts.get(v, 0) + 1
+    result = {}
+    for v, total in normal_sums.items():
+        total_len = np.linalg.norm(total)
+        if total_len < 1e-12:
+            continue
+        result[v] = (total / total_len, edge_len_sums[v] / edge_len_counts[v])
+    return result
+
 
 def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
     """True if `proposed` is a full number or a prefix a user could still be typing toward one
@@ -437,6 +554,41 @@ def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
     digits = r"\d*\.?\d*" if allow_decimal else r"\d*"
     pattern = f"-?{digits}(?:[eE][-+]?\\d*)?" if allow_exponent else f"-?{digits}"
     return re.fullmatch(pattern, proposed) is not None
+
+
+def _open_base_edges(base_faces, face_edge_ids):
+    """Returns {base_face_idx: {frozenset(rim-edge vertex pair), ...}} -- for each of
+    `base_faces`' own polygons, which of ITS OWN edges have no partner elsewhere in the mesh (a
+    genuine free/boundary edge) rather than being glued to some other piece. Same logic as
+    inflate_polyhedron_app's own _open_base_edges (duplicated, not imported -- see module
+    docstring), used here only to answer "is the central object closed" (InflaterPane's own
+    _is_central_object_closed) -- an empty return means every edge is glued, i.e. closed.
+
+    Adjacency is found via `face_edge_ids` when given (an edge id used by exactly ONE
+    base_faces entry across the whole mesh is that entry's own free edge) -- same
+    disambiguation rationale as mesh_levels.polygon_centroid_springs' own docstring, since two
+    DIFFERENT genuine edges can coincidentally share a plain vertex-id pair. Falls back to a
+    plain shared-vertex-pair match when `face_edge_ids` is None."""
+    owners = {}
+    if face_edge_ids is not None:
+        for i, ids in enumerate(face_edge_ids):
+            face = base_faces[i]
+            n = len(face)
+            for k, eid in enumerate(ids):
+                pair = frozenset((face[k], face[(k + 1) % n]))
+                owners.setdefault(eid, []).append((i, pair))
+    else:
+        for i, face in enumerate(base_faces):
+            n = len(face)
+            for k in range(n):
+                pair = frozenset((face[k], face[(k + 1) % n]))
+                owners.setdefault(pair, []).append((i, pair))
+    open_edges = {}
+    for group in owners.values():
+        if len(group) == 1:
+            i, pair = group[0]
+            open_edges.setdefault(i, set()).add(pair)
+    return open_edges
 
 
 def _build_level1_topology(base_faces):
@@ -557,6 +709,553 @@ def _load_mesh_from_dict(mesh_dict):
     return faces, base_edges, face_edge_ids
 
 
+# ---- pendant (single-edge-attached) face exclusion (2026-09-28, explicit user request) ----
+#
+# "when a face is attached to the central group by only one edge, it is going to flop around
+# because it's too unconstrained. that face should be excluded from the relaxation/inflation
+# process completely. it should be attached to the face it's connected to after the relaxation/
+# inflation is done, and it should be attached parallel to that face." A face hinged to the rest
+# of the mesh along exactly one of its own edges has one whole rotational degree of freedom
+# (around that hinge) the spring/pressure network does nothing to pin down -- exactly the
+# "loosely-attached or floppy face" _on_relax_done/_on_inflate_step_done already warn about by
+# name. Rather than solve it (unconstrained by construction, so any solved position is as
+# arbitrary as any other), on_full_inflate_clicked drops it from the mesh entirely before
+# relax/inflate ever runs, then _reattach_pendant_faces lays it back on, flat/coplanar
+# ("parallel") against whichever face it's hinged to, once that neighbor's own final position is
+# known -- a closed-form placement, not a physics step.
+
+def _pendant_face_attachments(base_faces, face_edge_ids):
+    """Returns {pendant_face_idx: (neighbor_face_idx, (a, b))} for every one of `base_faces`
+    attached to the rest of the mesh by EXACTLY one glued edge -- `(a, b)` that edge's own
+    vertex-id pair, in the SAME order `base_faces[pendant_face_idx]`'s own loop lists it.
+    `neighbor_face_idx` is whichever OTHER base face shares that exact edge. A face with ZERO
+    glued edges (not attached to anything -- nothing to exclude it against or reattach it to,
+    e.g. a lone anchor with nothing placed yet) or TWO OR MORE (braced by more than one point of
+    contact, not the "flops around" case this targets) is not included.
+
+    Same owners-dict disambiguation as _open_base_edges (an edge id used by exactly one
+    base_faces entry is a free edge; used by exactly two is a genuine glued edge between
+    them) -- reimplemented here rather than extending that function, since this needs BOTH
+    sides of a glued pair, not just which edges are free."""
+    owners = {}
+    if face_edge_ids is not None:
+        for i, ids in enumerate(face_edge_ids):
+            face = base_faces[i]
+            n = len(face)
+            for k, eid in enumerate(ids):
+                owners.setdefault(eid, []).append((i, (face[k], face[(k + 1) % n])))
+    else:
+        for i, face in enumerate(base_faces):
+            n = len(face)
+            for k in range(n):
+                pair = (face[k], face[(k + 1) % n])
+                owners.setdefault(frozenset(pair), []).append((i, pair))
+    glued_count = {}
+    glued_partner = {}
+    for group in owners.values():
+        if len(group) != 2:
+            continue
+        (i0, pair0), (i1, pair1) = group
+        glued_count[i0] = glued_count.get(i0, 0) + 1
+        glued_count[i1] = glued_count.get(i1, 0) + 1
+        glued_partner[i0] = (i1, pair0)
+        glued_partner[i1] = (i0, pair1)
+    return {i: glued_partner[i] for i, count in glued_count.items() if count == 1}
+
+
+def _exclude_pendant_faces(base_faces, base_edges, face_edge_ids, source_polygon_id=None):
+    """Returns (core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id,
+    pendants) -- `base_faces`/`face_edge_ids`/`source_polygon_id` with every pendant
+    (_pendant_face_attachments) face index dropped (all three stay index-parallel to each
+    other, same as the caller's own), and `base_edges` filtered down to pairs whose BOTH
+    endpoints survive (a stray reference to a now-excluded vertex would otherwise KeyError deep
+    in _edge_setup's own index arrays). `pendants` is a list of {"face": <original vertex-id
+    loop>, "neighbor_idx": <index into the RETURNED core_base_faces -- already remapped from
+    the original list, since face_of_fine values _reattach_pendant_faces later compares against
+    are themselves built from core_base_faces>, "shared_pair": (a, b)} dicts, everything
+    _reattach_pendant_faces needs once the core mesh has been solved. Falls back to
+    (base_faces, base_edges, face_edge_ids, source_polygon_id, []) UNCHANGED if excluding every
+    detected pendant would leave nothing left to solve (e.g. the whole central object is just a
+    2-face hinge, so each is the other's only neighbor -- the only way a pendant's own neighbor
+    can ALSO be a pendant, since the central object is always one connected component: if that
+    pair weren't the WHOLE object, whatever connects them to whatever else contains the anchor
+    would itself be a second connection for at least one of them, contradicting "exactly one
+    glued edge") -- an empty core mesh has nothing for relax_initial_configuration to do, so
+    there's no safe way to exclude here."""
+    attachments = _pendant_face_attachments(base_faces, face_edge_ids)
+    if not attachments or len(attachments) >= len(base_faces):
+        return base_faces, base_edges, face_edge_ids, source_polygon_id, []
+    keep = [i for i in range(len(base_faces)) if i not in attachments]
+    orig_to_core = {orig_i: core_i for core_i, orig_i in enumerate(keep)}
+    pendants = [{"face": base_faces[i], "neighbor_idx": orig_to_core[neighbor_idx],
+                 "shared_pair": pair,
+                 "source_polygon_id": (source_polygon_id[i] if source_polygon_id is not None
+                                        else i)}
+                for i, (neighbor_idx, pair) in attachments.items()]
+    core_base_faces = [base_faces[i] for i in keep]
+    core_face_edge_ids = ([face_edge_ids[i] for i in keep] if face_edge_ids is not None else None)
+    core_source_polygon_id = ([source_polygon_id[i] for i in keep]
+                               if source_polygon_id is not None else None)
+    core_vertex_ids = {v for face in core_base_faces for v in face}
+    core_base_edges = (None if base_edges is None else
+                        [e for e in base_edges if e[0] in core_vertex_ids and e[1] in core_vertex_ids])
+    return core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id, pendants
+
+
+def _regular_polygon_rest_positions(face, edge_length):
+    """{vertex_id: np.array([x, y, 0.0])} for `face`'s own n corners, laid out as a REGULAR
+    n-gon of side length `edge_length` in the z=0 plane -- vertex k (in `face`'s own listed,
+    CCW order) at angle 2*pi*k/n, radius edge_length/(2*sin(pi/n)) (the standard circumradius
+    that makes every EDGE exactly `edge_length` long, not just every vertex equidistant from
+    the center). The canonical REST frame _flat_pendant_fine_mesh/_place_pendant_flat build on."""
+    n = len(face)
+    radius = edge_length / (2 * math.sin(math.pi / n))
+    return {v: np.array([radius * math.cos(2 * math.pi * k / n),
+                          radius * math.sin(2 * math.pi * k / n), 0.0])
+            for k, v in enumerate(face)}
+
+
+def _flat_pendant_fine_mesh(pendant_face, edge_length):
+    """Returns (faces_lvl3, positions_lvl3) -- `pendant_face` alone, fan-triangulated then
+    quartered twice (subdivide_once, level 0->1->2) up to Level 3, EXACTLY as a real Full
+    Inflate pipeline would, but starting from _regular_polygon_rest_positions instead of a
+    random Level-0 start and with NO relax/calibration call in between: every one of
+    subdivide_once's own position updates is pure linear interpolation (a new vertex is a
+    corner mean or an edge midpoint of whatever's already there -- see mesh_levels.py's own
+    _fan_level_0_to_1/_quarter_triangles), which keeps an already-flat (z=0) input exactly flat
+    the whole way through. `faces_lvl3`/`positions_lvl3` still use `pendant_face`'s OWN vertex
+    ids for its 3 corners plus freshly local-to-this-call ids (from
+    `next_id = 1 + max(positions)`, mesh_levels.py's own convention) for every hub/midpoint --
+    the caller (_exclude_pendant_faces' own pendant reattachment) is responsible for remapping
+    those local ids into the real mesh's own global vertex-id space before merging anything in,
+    since they're only guaranteed unique within this one call."""
+    positions = _regular_polygon_rest_positions(pendant_face, edge_length)
+    faces, positions, edge_len, face_of_fine = subdivide_once(
+        [pendant_face], positions, edge_length, [0], 0)
+    for level in (1, 2):
+        faces, positions, edge_len, face_of_fine = subdivide_once(
+            faces, positions, edge_len, face_of_fine, level)
+    return faces, positions
+
+
+def _fine_group_boundary_edges(faces, face_of_fine, group):
+    """{(u, v) sorted, ...} for every boundary edge of `group` within `faces`/`face_of_fine` --
+    a free function twin of InflaterPane._group_boundary_edge_set (same counting rule: a
+    spoke/internal-to-the-fan edge is shared by two triangles of the SAME group and cancels
+    out; only a true rim edge, whose other triangle is in a different group (or doesn't exist
+    at all), survives) -- needed here because _place_pendant_flat runs before any InflaterPane
+    group state exists for a pendant's own new group."""
+    edge_count = {}
+    for face, bf in zip(faces, face_of_fine):
+        if bf != group:
+            continue
+        a, b, c = face
+        for u, v in ((a, b), (b, c), (c, a)):
+            key = (u, v) if u < v else (v, u)
+            edge_count[key] = edge_count.get(key, 0) + 1
+    return {e for e, count in edge_count.items() if count == 1}
+
+
+def _rim_vertex_chain(u, v, boundary_edges, original_corners):
+    """Ordered fine-mesh vertex ids from `u` to `v` along one rim (walking `boundary_edges`,
+    stopping at `v` or any other of `original_corners`) -- a free function twin of
+    InflaterPane._base_edge_vertex_chain (see its own docstring for the full walk rationale:
+    `u` has exactly two neighbors within a closed rim loop, one toward `v` via this one edge,
+    the other around the rest of the polygon, and the two can't be told apart by which reaches
+    `v` sooner). Falls back to the plain `[u, v]` pair if neither direction ever reaches `v`."""
+    neighbors = {}
+    for a, b in boundary_edges:
+        neighbors.setdefault(a, []).append(b)
+        neighbors.setdefault(b, []).append(a)
+    for first_step in neighbors.get(u, []):
+        chain = [u, first_step]
+        prev, cur = u, first_step
+        while cur != v and cur not in original_corners:
+            options = [n for n in neighbors.get(cur, []) if n != prev]
+            if not options:
+                break
+            prev, cur = cur, options[0]
+            chain.append(cur)
+        if cur == v:
+            return chain
+    return [u, v]
+
+
+def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level3_face_of_fine,
+                         level3_faces, edge_length, next_free_id, neighbor_base_face):
+    """Computes final 3D positions for one excluded pendant's ENTIRE Level-3 fine mesh, laid
+    out flat/coplanar ("parallel") against whichever face it's hinged to, once that neighbor's
+    own final positions are known -- see this section's own header comment for why this is a
+    closed-form placement, not another relax pass. Returns (faces, positions, next_free_id,
+    remapped_face) -- `faces`/`positions` already in the REAL mesh's global vertex-id space
+    (remapped from _flat_pendant_fine_mesh's own local ids, `next_free_id` the next unused one
+    after this call), ready to concatenate straight onto the core's own self.faces/
+    self.positions/self.face_of_fine (face_of_fine value: neighbor_face_idx -- see this
+    function's own caller). `remapped_face` is `pendant["face"]` (the ORIGINAL, base-export-
+    level corner loop) passed through this SAME id_map -- needed because a third+ corner (see
+    its own comment below) no longer keeps its raw id, so it's the only correct record of what
+    this pendant's own corners are actually CALLED in the mesh just built (the caller uses it
+    for its own self.base_faces entry -- self.base_faces[group] must list ids that genuinely
+    exist in self.positions, not stale pre-remap ones, or _rebuild_open_edges/
+    _base_edge_vertex_chain silently walk from a vertex id that was never actually placed,
+    2026-09-29, explicit bug report: "highlighted a non-edge that connects a vertex to the
+    centre of an opposite face" -- _base_edge_vertex_chain's own "never found a path" fallback,
+    a straight [u, v] chord, dead code until then).
+
+    The pendant's own SHARED edge's intermediate (subdivision-created) vertices are PINNED to
+    the core's own EXISTING ones for that same edge -- same id, same (already-solved) position,
+    never independently recomputed -- not just the two endpoints `shared_pair` already reused
+    (2026-09-29, explicit bug report: "not able to select any of the edges of the guest
+    piece... some non-edges are highlighted when hovered over" -- _flat_pendant_fine_mesh builds
+    the pendant's own fine mesh as a totally SEPARATE subdivide_once run, with no way to know
+    the core's own existing midpoint ids for that same physical edge, so every earlier version
+    independently re-synthesized fresh ones instead -- two DIFFERENT vertex ids at the same
+    physical location, which `_group_boundary_edge_set`'s own by-id matching (everything reading
+    a "shared seam" ultimately goes through it) could never recognize as the same edge at all).
+    `neighbor_base_face` (`self.base_faces[neighbor_face_idx]`) bounds the walk that finds the
+    core's own existing chain (see _rim_vertex_chain's own docstring for why that bound is
+    needed at all). Also more accurate than the old recompute: a rim edge of an already-solved,
+    possibly-curved neighbor isn't necessarily straight, so reusing its own real intermediate
+    positions (rather than a pendant-side straight-line guess between the two endpoints) avoids
+    a hairline gap/crease at the seam.
+
+    The neighbor's own plane/normal is estimated from the MEAN of only the fine triangles
+    actually touching the SHARED EDGE's own two endpoints (a local fan around the attachment
+    point), not its whole fine mesh -- a neighbor face can be meaningfully curved once it's a
+    real solved part of a multi-face core (unlike a lone flat "place", pressure genuinely bends
+    it), and when several pendants hang off DIFFERENT edges of the SAME curved neighbor, a
+    single face-wide average plane is a poor stand-in for any one of their own local tangent
+    planes -- each pendant would flatten against the same blurred "average" direction instead
+    of its own edge's actual local orientation, landing them overlapping/crossing each other
+    instead of fanning out with the neighbor's real curvature (2026-09-28, explicit bug report:
+    a pentagon core with 3 pendants on 3 different edges came out visibly tangled -- caught by
+    restricting this to the local neighborhood and comparing). Falls back to the WHOLE
+    neighbor's own fine mesh only if the local fan is somehow empty (shouldn't happen: `a`/`b`
+    are always real neighbor vertices). The OUTWARD side (which half-plane, split by the shared
+    edge, the pendant extends into) is whichever side is AWAY from this SAME local centroid, so
+    the flap extends past the shared edge rather than folding back on top of the piece it's
+    hinged to."""
+    a, b = pendant["shared_pair"]
+    p0, p1 = final_positions_by_id[a], final_positions_by_id[b]
+    all_neighbor_tri_idx = [i for i, bf in enumerate(level3_face_of_fine) if bf == neighbor_face_idx]
+    local_tri_idx = [i for i in all_neighbor_tri_idx if a in level3_faces[i] or b in level3_faces[i]]
+    neighbor_tri_idx = local_tri_idx or all_neighbor_tri_idx
+    neighbor_vertex_ids = {v for i in neighbor_tri_idx for v in level3_faces[i]}
+    neighbor_normal = np.zeros(3)
+    for i in neighbor_tri_idx:
+        va, vb, vc = (final_positions_by_id[v] for v in level3_faces[i])
+        n = np.cross(vb - va, vc - va)
+        norm = np.linalg.norm(n)
+        if norm > 1e-9:
+            neighbor_normal += n / norm
+    plane_normal = neighbor_normal / max(np.linalg.norm(neighbor_normal), 1e-9)
+    neighbor_centroid = np.mean([final_positions_by_id[v] for v in neighbor_vertex_ids], axis=0)
+
+    edge_dir = (p1 - p0) / max(np.linalg.norm(p1 - p0), 1e-9)
+    in_plane_perp = np.cross(plane_normal, edge_dir)
+    in_plane_perp /= max(np.linalg.norm(in_plane_perp), 1e-9)
+    edge_mid = (p0 + p1) / 2
+    if np.dot(neighbor_centroid - edge_mid, in_plane_perp) > 0:
+        in_plane_perp = -in_plane_perp  # flip so it points AWAY from the neighbor, not into it
+    actual_length = np.linalg.norm(p1 - p0)
+    scale = actual_length / edge_length
+
+    local_faces, local_positions = _flat_pendant_fine_mesh(pendant["face"], edge_length)
+    rest_p0, rest_p1 = local_positions[a], local_positions[b]
+    rest_edge_dir = (rest_p1 - rest_p0)[:2] / edge_length  # unit, since |rest_p1-rest_p0|==edge_length
+    # [-y, x] for (x, y) = cross([0, 0, 1], (rest_edge_dir, 0))[:2] -- [0,0,1] being the REST
+    # frame's own fixed normal (`pendant["face"]`'s vertex k sits at angle 2*pi*k/n, INCREASING
+    # with k, i.e. CCW as seen from +z, by construction -- see _regular_polygon_rest_positions).
+    # Deliberately NOT independently sign-flipped by some rest-side "away from centroid" test:
+    # using this SAME cross-product FORM on both this side and in_plane_perp's own (rest normal
+    # here, plane_normal there) is what makes the rest->target mapping a pure rotation+scale,
+    # never a reflection -- a separate flip on EACH side (an earlier version of this function
+    # had one here too) can disagree about which way is "outward" and land the pendant
+    # MIRRORED, folded back onto the neighbor instead of extending past it (caught by direct
+    # numeric testing: a symmetric pendant landed exactly on top of the core's own opposite
+    # corner instead of on the far side of the shared edge). The single "which of the two
+    # coplanar sides" decision belongs ENTIRELY to in_plane_perp's own flip above, since that's
+    # the only side with real information (the neighbor's actual position) to decide it from.
+    rest_outward = np.array([-rest_edge_dir[1], rest_edge_dir[0]])
+
+    # The core's own EXISTING chain of vertex ids from a to b along the neighbor's rim, and the
+    # pendant's own ANALOGOUS chain along its own (separately-subdivided) rim -- see this
+    # function's own docstring for why these get PINNED together below instead of the pendant's
+    # own chain getting fresh ids/recomputed positions like everything else. Same subdivision
+    # scheme (fan then quarter to the same MAX_LEVEL) on both sides always produces the same
+    # NUMBER of intermediate points for one original edge regardless of curvature -- the `len`
+    # guard is just defensive (never actually expected to differ).
+    core_boundary = _fine_group_boundary_edges(level3_faces, level3_face_of_fine, neighbor_face_idx)
+    core_chain = _rim_vertex_chain(a, b, core_boundary, set(neighbor_base_face))
+    pendant_boundary = _fine_group_boundary_edges(local_faces, [0] * len(local_faces), 0)
+    pendant_chain = _rim_vertex_chain(a, b, pendant_boundary, set(pendant["face"]))
+    shared_chain_map = (dict(zip(pendant_chain, core_chain))
+                         if len(pendant_chain) == len(core_chain) else {})
+
+    # Every corner except the two literally SHARED with the neighbor (a, b, already real
+    # global ids) gets a FRESH id here -- including a pendant's own THIRD+ original corner
+    # (n > 3, e.g. every pentagon), not just _flat_pendant_fine_mesh's own genuinely-new
+    # subdivision vertices. An earlier version kept a third+ corner's own original (base-
+    # export-level) id as-is, on the theory that it was already a real, reserved global id --
+    # but that id space belongs to the WHOLE original net export, while the CORE's own Level-3
+    # fine mesh numbers its subdivision-created vertices independently (starting fresh from
+    # its own "1 + max" at build time, with no idea some small integer is "reserved" by a
+    # pendant not even part of its own solve) -- the two can and do collide on an unrelated
+    # vertex (2026-09-29, explicit bug report: "spiky artifacts" persisting through
+    # re-inflate/rotation -- traced to exactly this: a core face's own fine-mesh vertex
+    # silently got its position overwritten by an unrelated pendant corner that happened to
+    # reuse the same numeric id, stretching that core triangle into a giant sliver). Exactly
+    # the same bug _diff_attach_pendant_only's own docstring already documents and fixes for
+    # its own separate code path ("a just-added pendant's own free corner silently overwrote
+    # an existing Level-3 midpoint that happened to share its raw id") -- this path just never
+    # got the same fix.
+    id_map = {a: a, b: b}
+    faces_out = []
+    positions_out = {a: p0, b: p1}
+    for v in local_positions:
+        if v in id_map:
+            continue
+        if v in shared_chain_map:
+            id_map[v] = shared_chain_map[v]
+        else:
+            id_map[v] = next_free_id
+            next_free_id += 1
+    for v, local_pos in local_positions.items():
+        if v in (a, b) or v in shared_chain_map:
+            continue
+        rel = local_pos[:2] - rest_p0[:2]
+        along = np.dot(rel, rest_edge_dir)
+        perp = np.dot(rel, rest_outward)
+        positions_out[id_map[v]] = p0 + edge_dir * along * scale + in_plane_perp * perp * scale
+    for local_v, core_v in shared_chain_map.items():
+        positions_out[core_v] = final_positions_by_id[core_v]
+    for face in local_faces:
+        faces_out.append([id_map[v] for v in face])
+    # The pendant's own ORIGINAL corner loop (pendant["face"]), remapped through id_map --
+    # since a THIRD+ corner (above) no longer keeps its own raw id, this is the ONLY correct
+    # way to know what its corners are actually CALLED in the output mesh (positions_out/
+    # faces_out) -- see this function's own caller for why that distinction matters.
+    remapped_face = [id_map[v] for v in pendant["face"]]
+    return faces_out, positions_out, next_free_id, remapped_face
+
+
+def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length, own_groups,
+                             core_base_faces):
+    """Runs _place_pendant_flat for every excluded pendant against the just-solved CORE mesh's
+    own final faces/positions/face_of_fine, and returns (faces, positions, face_of_fine) with
+    every pendant's own flat Level-3 fine mesh concatenated on -- `face_of_fine` entries for a
+    pendant's own fine triangles are `own_groups`' own matching entry (parallel to `pendants`,
+    the caller's OWN reserved trailing self.base_faces/self._pending_source_polygon_id index
+    for that one pendant -- 2026-09-29, explicit bug report: "not able to select the guest
+    piece [in 3D]... only selectable together with the insider it's connected to... not able
+    to select any of the edges of the guest piece" -- an EARLIER version tagged a pendant's own
+    triangles with its `neighbor_idx` instead, folding it into the SAME pick/hover/rim group as
+    the real neighbor it's attached to: clicking anywhere on either one always resolved to the
+    neighbor's own shape id (self._pending_source_polygon_id has no entry for the pendant's own
+    id at all), and the boundary edge shared between them canceled out INSIDE that one merged
+    group instead of surviving as a rim (_group_boundary_edge_set counts an edge shared by TWO
+    triangles of the SAME group as interior, not a rim -- see its own docstring), so no seam
+    ever showed between a guest and its neighbor either. Giving the pendant its own group fixes
+    both: it's now its own independently pickable/hoverable actor, with a real rim of its own,
+    without changing `_place_pendant_flat`'s own geometry at all (`neighbor_face_idx`, read from
+    `pendant["neighbor_idx"]` below, is still what its PLACEMENT is computed against -- only the
+    OUTPUT tag changes). No-op (returns the inputs unchanged) if `pendants` is empty.
+
+    Every `_place_pendant_flat` call below reads `neighbor_face_idx`'s own plane/normal from
+    `core_faces`/`core_face_of_fine` -- a FIXED snapshot taken once, before this loop appends
+    anything -- never from the growing `faces`/`face_of_fine` themselves (2026-09-28, explicit
+    bug report: "a pentagon anchor with 2+ guests hinged on ADJACENT edges of it came out
+    tangled"). Two pendants hinged on the SAME neighbor face share that neighbor's own
+    `neighbor_idx` value; once pendant #1 is appended, its own flat triangles are tagged with
+    that SAME `neighbor_idx` too (previous paragraph) -- reading the growing lists for pendant
+    #2's own neighbor-plane lookup would then also sweep up pendant #1's own already-placed
+    (flat, differently-oriented) triangles as if they were more of the neighbor's real curved
+    surface, corrupting pendant #2's placement whenever it happens to share a corner vertex with
+    pendant #1 (caught by direct testing: `_place_pendant_flat`'s own `local_tri_idx` filter,
+    which restricts to triangles touching the pendant's shared-edge vertices, isn't enough to
+    exclude this -- a shared CORNER vertex between two adjacent pendants means some of pendant
+    #1's own triangles pass that filter for pendant #2 too). Every pendant is independently
+    flat/coplanar against the neighbor's own TRUE (already fully solved) surface regardless of
+    how many other pendants also hang off it, so this snapshot is always correct, never stale.
+
+    `core_base_faces` (the CORE's own self.base_faces, one entry per `core_face_of_fine` value)
+    is threaded straight through to `_place_pendant_flat` as each pendant's own
+    `neighbor_base_face` -- see its own docstring for why.
+
+    Also returns `remapped_base_faces` (parallel to `pendants`) -- each pendant's own
+    `remapped_face` from `_place_pendant_flat` (see its own docstring), for the caller to use
+    as that pendant's OWN self.base_faces entry instead of its raw, pre-remap `pendant["face"]`
+    (2026-09-29, explicit bug report: "highlighted a non-edge that connects a vertex to the
+    centre of an opposite face" -- self.base_faces[group] listing an id that was never actually
+    placed sent _base_edge_vertex_chain's own rim walk nowhere, falling back to a straight
+    chord across the polygon)."""
+    if not pendants:
+        return faces, positions, face_of_fine, []
+    core_faces = list(faces)
+    core_face_of_fine = list(face_of_fine)
+    faces = list(faces)
+    face_of_fine = list(face_of_fine)
+    # NOT just `1 + max(positions)` -- `positions` only has the CORE's own vertex ids at this
+    # point, but every pendant's own ORIGINAL corners (real, already-reserved ids from the
+    # whole original net, just not present in the core-only solve) can be numerically LOWER
+    # than that max while still being live ids _place_pendant_flat needs to keep as-is -- a
+    # "fresh" id counter that only looked at the core would collide with one of those (a real
+    # bug, caught by direct numeric testing: a pendant's own un-transformed corner silently got
+    # overwritten by a same-numbered subdivision vertex). Every pendant's own face is included
+    # in this max too, so the count starts safely above every id that could ever appear here.
+    next_free_id = 1 + max([*positions, *(v for p in pendants for v in p["face"])])
+    remapped_base_faces = []
+    for pendant, own_group in zip(pendants, own_groups):
+        pendant_faces, pendant_positions, next_free_id, remapped_face = _place_pendant_flat(
+            pendant, positions, pendant["neighbor_idx"], core_face_of_fine, core_faces,
+            edge_length, next_free_id, core_base_faces[pendant["neighbor_idx"]])
+        faces.extend(pendant_faces)
+        face_of_fine.extend([own_group] * len(pendant_faces))
+        positions.update(pendant_positions)
+        remapped_base_faces.append(remapped_face)
+    return faces, positions, face_of_fine, remapped_base_faces
+
+
+def _pendant_own_face_edge_ids(pendant, base_faces, base_face_edge_ids, next_id):
+    """Returns (row, next_id) -- `pendant["face"]`'s own face_edge_ids row (parallel to its
+    vertex loop, same convention as interactive_builder_app._face_edge_ids_from_shapes), for
+    appending alongside its own trailing self.base_faces entry (2026-09-29, explicit bug
+    report: appending a pendant to self.base_faces -- see _reattach_pendant_faces' own
+    docstring for why -- without a matching self.base_face_edge_ids row left that list one
+    entry SHORTER than self.base_faces, raising IndexError the next time _diff_remove_face
+    indexed it). `None` if `base_face_edge_ids` itself is None (this mesh has no disambiguation
+    data at all -- every OTHER reader already treats that as "fall back to plain vertex-pair
+    matching," so there's nothing to extend). The pendant's own SHARED edge reuses whatever id
+    the neighbor's own row already has for that exact edge, so the two still correctly count as
+    ONE glued connection (see _pendant_face_attachments' own owners-dict docstring) rather than
+    two independent free edges that merely happen to share a vertex pair; every other edge of
+    the pendant gets a fresh id, `next_id` and up (guaranteed not to collide with anything --
+    the caller seeds `next_id` past every id already in use)."""
+    if base_face_edge_ids is None:
+        return None, next_id
+    a, b = pendant["shared_pair"]
+    neighbor_face = base_faces[pendant["neighbor_idx"]]
+    neighbor_ids = base_face_edge_ids[pendant["neighbor_idx"]]
+    n = len(neighbor_face)
+    shared_id = next(
+        (neighbor_ids[k] for k in range(n)
+         if {neighbor_face[k], neighbor_face[(k + 1) % n]} == {a, b}),
+        None)
+    face = pendant["face"]
+    m = len(face)
+    row = []
+    for k in range(m):
+        if {face[k], face[(k + 1) % m]} == {a, b}:
+            row.append(shared_id)
+        else:
+            row.append(next_id)
+            next_id += 1
+    return row, next_id
+
+
+def _prepare_mesh_for_inflate(base_faces, base_edges, face_edge_ids, source_polygon_id=None):
+    """Returns ("solve", core_base_faces, core_base_edges, core_face_edge_ids,
+    core_source_polygon_id, pendants) for the ordinary case -- exactly _exclude_pendant_faces'
+    own return shape, just tagged with which mode applies -- or ("place", reference_face,
+    pendants) when there's nothing worth running relax/inflate on AT ALL (2026-09-28, explicit
+    user request: "when only one piece is on the canvas, it is also considered unstable... just
+    place the piece flat. and if a second piece is joined to it at only one edge, then both are
+    unstable... both should just be placed instead of inflated").
+
+    "solve" needs the CORE (every ordinary pendant excluded) to have at least 2 faces -- with
+    fewer than that, there's no genuine bracing left for physics to mean anything: a single
+    core face has no neighbor to relax against at all. Checking `core_base_faces`' own size
+    ALONE isn't enough to decide this, though -- _exclude_pendant_faces' own fallback (excluding
+    every detected pendant would leave nothing, i.e. the WHOLE object is a mutual single-edge
+    pair with nothing else) returns a 2-face "core" that LOOKS large enough, but whose own two
+    faces are STILL only single-edge-hinged to EACH OTHER, exactly as unconstrained as a lone
+    face -- so this checks _pendant_face_attachments directly first, to tell "nothing was
+    excluded because nothing needed to be" (attachments empty -- a genuinely braced mesh, e.g.
+    a closed net) apart from "nothing was excluded because excluding it all would leave
+    nothing" (attachments covers every face -- always degenerate).
+
+    "place" picks a fixed reference face (placed flat/centered with no neighbor to hinge
+    against) and folds every OTHER face into ONE combined `pendants` list, all hinged directly
+    on that SAME reference -- `_place_all_flat` lays every one of them out with no physics at
+    all. A degenerate mesh can only ever have the reference plus pendants hinged DIRECTLY on
+    it, never a deeper chain: a connected graph where every node but one has degree <= 1 can
+    only be a star centered on that one node (any OTHER shape would need a path of length >= 2
+    to reach it, which would force an intermediate node to degree >= 2, making that node's own
+    -- and every node's -- "core" at least 2 faces, taking the "solve" path instead)."""
+    attachments = _pendant_face_attachments(base_faces, face_edge_ids)
+    if attachments and len(attachments) < len(base_faces):
+        core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id, pendants = \
+            _exclude_pendant_faces(base_faces, base_edges, face_edge_ids, source_polygon_id)
+        if len(core_base_faces) >= 2:
+            return ("solve", core_base_faces, core_base_edges, core_face_edge_ids,
+                    core_source_polygon_id, pendants)
+        # Excluding every ordinary pendant left a LONE core face (e.g. a 3-face straight chain,
+        # A-B-C: A and C are each pendant to hub B, and B alone is left with no surviving
+        # neighbor of its own) -- still degenerate; B becomes the reference below, A/C its
+        # pendants (already correctly attached to core index 0, i.e. B, by
+        # _exclude_pendant_faces' own neighbor_idx remapping).
+        reference_face = core_base_faces[0]
+        reference_spid = core_source_polygon_id[0] if core_source_polygon_id is not None else 0
+        return "place", reference_face, reference_spid, pendants
+    if not attachments and len(base_faces) >= 2:
+        # No pendant relationship detected at all -- a genuinely braced mesh (every face has
+        # either 0 glued edges, impossible for a connected multi-face object, or >= 2).
+        return "solve", base_faces, base_edges, face_edge_ids, source_polygon_id, []
+    # Degenerate: a lone face (attachments empty, len(base_faces) == 1), or a mutual single-edge
+    # pair (attachments covers both, len(base_faces) == 2).
+    reference_face = base_faces[0]
+    reference_spid = source_polygon_id[0] if source_polygon_id is not None else 0
+    extra_pendants = []
+    if len(base_faces) == 2:
+        second = base_faces[1]
+        second_spid = source_polygon_id[1] if source_polygon_id is not None else 1
+        shared = set(reference_face) & set(second)
+        n = len(second)
+        shared_pair = next((second[k], second[(k + 1) % n]) for k in range(n)
+                            if {second[k], second[(k + 1) % n]} == shared)
+        extra_pendants.append({"face": second, "neighbor_idx": 0, "shared_pair": shared_pair,
+                                "source_polygon_id": second_spid})
+    return "place", reference_face, reference_spid, extra_pendants
+
+
+def _place_all_flat(reference_face, pendants, edge_length):
+    """Builds a full Level-3 mesh (faces, positions, face_of_fine, base_faces,
+    source_polygon_id) with NO physics at all -- 2026-09-28, explicit user request, see
+    _prepare_mesh_for_inflate's own docstring for when this applies. `reference_face` is placed
+    flat/centered as a fixed reference (base index 0, via _flat_pendant_fine_mesh -- the exact
+    same flat construction a pendant's own fine mesh uses); every one of `pendants` (all hinged
+    directly on `reference_face` -- see _prepare_mesh_for_inflate's own proof) is then flat-
+    attached against it via _reattach_pendant_faces, the SAME closed-form geometry a real
+    pendant uses post-solve."""
+    local_faces, local_positions = _flat_pendant_fine_mesh(reference_face, edge_length)
+    # Local hub/midpoint ids from _flat_pendant_fine_mesh are only guaranteed unique WITHIN
+    # that one call (see its own docstring) -- remapped here to ids guaranteed safe against
+    # every pendant's own real corners too, same "keep real corners, remap the rest" pattern
+    # _place_pendant_flat's own id_map uses.
+    all_real_ids = set(reference_face) | {v for p in pendants for v in p["face"]}
+    next_id = 1 + max([*all_real_ids, *local_positions])
+    id_map = {}
+    for v in local_positions:
+        if v in reference_face:
+            id_map[v] = v
+        else:
+            id_map[v] = next_id
+            next_id += 1
+    faces = [[id_map[v] for v in face] for face in local_faces]
+    positions = {id_map[v]: pos for v, pos in local_positions.items()}
+    face_of_fine = [0] * len(faces)
+    # own_groups: reference_face is base_faces[0], each pendant its own trailing index (1..N)
+    # -- see this function's own base_faces line below, and _reattach_pendant_faces' own
+    # docstring for why each pendant needs a DISTINCT tag rather than sharing its neighbor's.
+    faces, positions, face_of_fine, remapped_base_faces = _reattach_pendant_faces(
+        pendants, faces, positions, face_of_fine, edge_length,
+        list(range(1, 1 + len(pendants))), [reference_face])
+    # remapped_base_faces, NOT raw p["face"] -- see _reattach_pendant_faces' own docstring for
+    # why a pendant's own THIRD+ corner no longer keeps its raw id.
+    base_faces = [reference_face, *remapped_base_faces]
+    return faces, positions, face_of_fine, base_faces
+
+
 # "Central object" concept (2026-09-26, explicit: "if i add polygon and its not attached to
 # anything, things go haywire" -- a shape/component with no connection at all into the rest of
 # the net still passed export_mesh_dict's own validation (that function's docstring already
@@ -670,6 +1369,17 @@ class BuilderPane(InteractiveBuilderApp):
     # before-both-panes-exist reason as on_change/_hover_shape_id above -- left None until then,
     # in which case the 2D->3D hover direction below is simply not forwarded.
     inflater_getter = None
+
+    # Notified whenever this pane's own inherited debug_mode ('d' key) flips (2026-09-28,
+    # explicit user request: InflaterPane's own release-vs-debug UI split reuses THIS SAME
+    # toggle, rather than inventing a separate one) -- wired to InflaterPane._apply_mode_
+    # visibility once both panes exist, same before-both-panes-exist reasoning as on_change.
+    on_debug_mode_change = None
+
+    def _on_toggle_debug_mode(self, _event=None):
+        super()._on_toggle_debug_mode()
+        if self.on_debug_mode_change is not None:
+            self.on_debug_mode_change()
 
     # Join-mode connection hover state (2026-09-19, explicit: "in Join[J] mode, hovering over a
     # connection highlights it in yellow and the corresponding edge in 3d is also highlighted...
@@ -1186,8 +1896,18 @@ class BuilderPane(InteractiveBuilderApp):
         self._refresh_vme_state()
 
     def _on_palette_clicked(self, n):
+        """Same as the inherited palette click, except it first switches to Move mode if some
+        OTHER tool mode is currently active (2026-09-28, explicit user request: "when one of
+        the shapes at the top are clicked, we should automatically switch to Move mode") --
+        the inherited implementation silently no-ops on a palette click made from any mode but
+        Move ("dropping a new shape only makes sense in Move mode" -- its own comment), which
+        otherwise makes a palette click look like it did nothing at all from Join/Fold/Anchor
+        mode. _set_tool_mode("move") is always allowed even while locked (see its own
+        docstring), so this doesn't need its own separate locked-check for that part."""
         if self._locked:
             return
+        if self.tool_mode != "move":
+            self._set_tool_mode("move")
         super()._on_palette_clicked(n)
 
     def _on_canvas_press(self, event):
@@ -1400,20 +2120,27 @@ class BuilderPane(InteractiveBuilderApp):
         anchor shape (see _anchor_shape_id's own docstring) is excluded from a multi-shape
         deletion set (with an explanatory popup -- 2026-09-26, explicit: "when the user tries to
         delete the anchor piece, have a popup saying why it's not allowed") whenever any OTHER
-        shape would survive ("the anchor piece cannot be deleted until it's the last remaining
-        piece"). It can still be deleted once it's the ONLY shape left (the branch below only
-        filters/warns when `len(self.shapes) > 1`), at which point _refresh_vme_state's own
-        anchor-assignment fallback (self.shapes being empty) resets _anchor_shape_id to None,
-        ready for the next placed shape to become the new anchor."""
+        shape would survive it AND ISN'T ALSO part of this same deletion ("the anchor piece
+        cannot be deleted while any OTHER piece would be left orphaned behind" -- 2026-09-28,
+        explicit user request: "if the user chooses everything to delete, including the anchor,
+        that's fine" -- deleting the anchor alongside literally everything else leaves nothing
+        behind to be orphaned, so there's nothing left to warn about). It can still be deleted
+        once it's the ONLY shape left, or once every OTHER shape is being deleted in this same
+        selection, at which point _refresh_vme_state's own anchor-assignment fallback
+        (self.shapes being empty) resets _anchor_shape_id to None, ready for the next placed
+        shape to become the new anchor."""
         if self._locked:
             return
-        if self._anchor_shape_id in self.selected_ids and len(self.shapes) > 1:
+        deleting_everything = all(s["id"] in self.selected_ids for s in self.shapes)
+        if (self._anchor_shape_id in self.selected_ids and len(self.shapes) > 1
+                and not deleting_everything):
             self.selected_ids = self.selected_ids - {self._anchor_shape_id}
             messagebox.showerror(
                 "Cannot delete the anchor piece",
-                "The anchor (the central object's own marker piece) can't be deleted while any "
-                "other piece is still on the canvas -- move the anchor to a different piece "
-                "first (Anchor tool), or delete every other piece first.")
+                "The anchor (the central object's own marker piece) can't be deleted while "
+                "another piece not also being deleted is still on the canvas -- move the "
+                "anchor to a different piece first (Anchor tool), or select every other piece "
+                "for deletion too.")
         super()._on_delete_key(_event)
 
     def _flip_selected_shapes(self, axis):
@@ -1425,7 +2152,27 @@ class BuilderPane(InteractiveBuilderApp):
         super()._flip_selected_shapes(axis)
 
     def on_copy_key(self, _event=None):
+        """Blocks a MULTI-shape copy (2026-09-29, explicit: "multiselect copy paste should be
+        disallowed... outsiders must be isolated and are only allowed to connect to the club")
+        -- InteractiveBuilderApp.on_copy_key's own docstring says it captures every connection
+        with BOTH endpoints among the selected shapes, so copying 2+ CONNECTED shapes and
+        pasting would drop in two brand-new shapes already connected to EACH OTHER, neither one
+        yet connected to the club -- exactly the outsider-to-outsider connection this app
+        never otherwise allows (an outsider can only ever gain its first connection by joining
+        the club directly). Blocked here, at Ctrl+C itself, rather than at Ctrl+V -- this is
+        the only place self._clipboard ever gets populated, so refusing it here means the
+        clipboard can never hold more than one shape to begin with, no separate paste-time
+        guard needed. A single-shape copy is unaffected (its own clipboard entry can never
+        carry a connection either way -- classify_change's underlying set is what would still
+        show as an outsider, isolated, after paste)."""
         if self._locked:
+            return
+        if len(self.selected_ids) > 1:
+            messagebox.showerror(
+                "Cannot copy multiple pieces",
+                "Copy/paste only works one piece at a time here -- pieces not yet connected to "
+                "the club (outsiders) must stay isolated from each other, and pasting more than "
+                "one at once would paste them still connected to each other.")
             return
         super().on_copy_key(_event)
 
@@ -1459,8 +2206,22 @@ class BuilderPane(InteractiveBuilderApp):
         # actually went through, as opposed to a failed one (a bad file shows its own error
         # box and returns with self.shapes untouched). 2026-09-19, explicit: "as soon as i
         # load a file, it should also inflate" (when Auto Inflate is checked).
-        if self.shapes is not shapes_before and self.on_load_success is not None:
-            self.on_load_success()
+        if self.shapes is not shapes_before:
+            # _load_faces' own _redraw() call (its very last line) fires BEFORE
+            # InteractiveBuilderApp.on_load_clicked's subsequent self._refresh_vme_state()
+            # call corrects self._anchor_shape_id (the overridden _refresh_vme_state's own
+            # "shapes exist but the current anchor id doesn't name any of them" fallback,
+            # above) -- so that first redraw always draws every shape dimmed as an outsider
+            # (self.central_shape_ids() sees the OLD, no-longer-valid anchor id, or None),
+            # regardless of the newly-loaded net's real connectivity. Nothing else redraws
+            # the canvas again afterward, so that wrong frame was what stayed on screen
+            # until some unrelated interaction (hover, drag, ...) happened to trigger a real
+            # one (2026-09-29, explicit bug report: "the polygons are rendered as outsiders
+            # initially and later became members"). One extra _redraw() here, now that the
+            # anchor is correct, fixes it for good.
+            self._redraw()
+            if self.on_load_success is not None:
+                self.on_load_success()
 
     def _refresh_vme_state(self):
         """Runs InteractiveBuilderApp's own vertex-merge-error check unchanged, then notifies
@@ -1627,7 +2388,6 @@ class BuilderPane(InteractiveBuilderApp):
         self._bind_all_guarded("<KeyPress-f>", self._on_flip_key)
         self._bind_all_guarded("<KeyPress-m>", lambda _e: self._set_tool_mode("move"))
         self._bind_all_guarded("<KeyPress-j>", lambda _e: self._set_tool_mode("join"))
-        self._bind_all_guarded("<KeyPress-p>", lambda _e: self._set_tool_mode("fold"))
         self._bind_all_guarded("<KeyPress-a>", lambda _e: self._set_tool_mode("anchor"))
         self._bind_all_guarded("<KeyPress-h>", lambda _e: self._flip_selected_shapes("horizontal"))
         self._bind_all_guarded("<KeyPress-v>", lambda _e: self._flip_selected_shapes("vertical"))
@@ -1821,6 +2581,12 @@ class InflaterPane:
         self.root = container
         self.builder_getter = builder_getter
 
+        # Which of LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED/_OPEN currently applies -- set for real
+        # by _apply_target_rms_defaults (called once _build_ui below has built target_rms_vars,
+        # and again after every builder edit via refresh_diff_eligibility); OPEN here is just a
+        # placeholder read by _commit_target_rms_entry's own fallback before that first call.
+        self._target_rms_defaults = LEVEL_DEFAULT_TARGET_RMS_PCT_OPEN
+
         self.base_faces = None
         self.base_edges = None
         self.base_face_edge_ids = None
@@ -1831,6 +2597,24 @@ class InflaterPane:
         self.positions = None
         self.subdivision_level = 0
         self._running = False
+        # True for the duration of _load_hippie_session/_load_hippo_session's own restoration
+        # work (from right before builder._load_faces through right before _apply_loaded_
+        # session) -- suppresses refresh_diff_eligibility entirely during that window (2026-09-
+        # 28, explicit bug report: loading a session crashed/froze on its own, no user action,
+        # because builder._load_faces/its own _refresh_vme_state call BuilderPane.on_change
+        # (== refresh_diff_eligibility) mid-restoration, while self.last_shapes_snapshot still
+        # holds whatever it was BEFORE this load -- often None on a fresh app, which fired
+        # refresh_diff_eligibility's own "first piece ever" auto-Full-Inflate branch against a
+        # net that's only PARTLY restored: self.base_faces/positions/etc. still describe the
+        # OLD (or no) mesh while builder.shapes/connections already describe the NEW one, and a
+        # relax_initial_configuration this triggers ends up rendering the just-solved CORE
+        # against the NEW net's own full connection list, including ones to a pendant shape
+        # whose vertices were never part of that core -- crashing with a KeyError deep in
+        # _render, which aborts _on_relax_done partway through, leaving self._running stuck
+        # True forever with no live background thread left for Stop to interrupt). Cleared
+        # right before _apply_loaded_session runs its OWN correct, fully-populated
+        # refresh_diff_eligibility call.
+        self._loading_session = False
 
         # Stop/revert state (2026-09-19, explicit: "never redraw anything" mid-computation
         # before real convergence; Inflate becomes a Stop button while running; a stop or a
@@ -1849,6 +2633,67 @@ class InflaterPane:
         self._stop_event = None
         self._stop_requested = False
         self._active_button = None
+        # Debug-mode replay scrubber (2026-09-29, explicit user request -- "replay the last
+        # full/diff inflate"): self._replay_frames is every (faces, face_of_fine, positions)
+        # snapshot captured (see _capture_replay_frame) at every progress checkpoint of the
+        # LAST run, across every level/pass it actually ran, in chronological order -- reset
+        # to [] at the start of every new run (_set_running(True)) and on a revert
+        # (_revert_run), so a stale replay from an earlier/failed run can never linger.
+        # self._replay_scrub_index, when not None, is which frame _render draws INSTEAD of the
+        # live self.faces/positions/face_of_fine (None means "show live", including whenever
+        # nothing's been captured yet) -- see _on_replay_slider_moved's own docstring.
+        self._replay_frames = []
+        self._replay_scrub_index = None
+        # Window-title/unsaved-changes hooks (2026-09-29, explicit user request) -- all three
+        # None until CombinedApp.__init__ wires them, same optional-callback pattern as
+        # BuilderPane.on_load_success/on_debug_mode_change. on_inflate_success fires at the very
+        # end of _record_inflate_success (a completed Full/Diff Inflate/flat-place run changes
+        # what a Save Session would write even when the 2D net itself didn't change, e.g. a
+        # manual Reinflate after only a target-RMS/tolerance tweak -- CombinedApp's own
+        # BuilderPane-revision-based dirty tracking can't see that on its own).
+        # on_session_saved/on_session_loaded fire once a Save Session/Load Session actually
+        # completes (see on_save_session_clicked/_apply_loaded_session's own call sites) --
+        # CombinedApp wires both to its own _mark_clean.
+        self.on_inflate_success = None
+        self.on_session_saved = None
+        self.on_session_loaded = None
+        # True for the duration of a Full Inflate run that on_diff_inflate_clicked itself
+        # redirected into (self.is_fully_inflated False -- see that method's own docstring) --
+        # lets _revert_run's own "undo the triggering edit
+        # on a failed run" safety net still fire even though self._active_button reads "full",
+        # not "diff", for a redirected run (2026-09-28, explicit bug report: without this, a
+        # redirected run that fails to converge leaves the doomed edit in place, and Auto
+        # Inflate deterministically re-triggers -- SAME seed=0 starting point -- the exact same
+        # failing run forever, since refresh_diff_eligibility's post-run re-check still sees the
+        # same "eligible" change with nothing ever undone). Set only by the redirect call site
+        # itself, never by a genuine manual Full Inflate/Reinflate/on_load_success click (those
+        # correctly leave this False, so a real manual-run failure still doesn't auto-undo an
+        # unrelated edit) -- cleared in both _revert_run and _record_inflate_success so it never
+        # leaks into a later, unrelated run.
+        self._diff_redirect_pending = False
+        # A short label ("Anchor piece"/"Insider added"/"Insiders deleted"/"Insider modified")
+        # prefixed onto every status message for the run this change triggered (2026-09-28,
+        # explicit user request: status messages should say what kind of club change is
+        # driving the run, not just which pipeline/level -- see _describe_change's own
+        # docstring for how this is derived and _pipeline_label for where it's applied). None
+        # for a run started by a plain manual Full Inflate/Reinflate/on_load_success click,
+        # which has no single "triggering change" to describe. Deliberately NOT cleared in
+        # _set_running -- the Level-3 "Done" status is set AFTER _set_running(False) runs (see
+        # _on_inflate_step_done), so clearing it there would wipe the label before that final
+        # message ever reads it. Instead, every genuine entry point sets this FRESH at its own
+        # start (on_diff_inflate_clicked always recomputes it; on_full_inflate_clicked takes it
+        # as an explicit `change_label` param, defaulting to None for a bare manual click) --
+        # each new run's own start always overwrites whatever a PRIOR run left behind, so
+        # staleness is never possible without a separate clearing step.
+        self._change_label = None
+        # {shape_id, ...} of every OUTSIDER (a placed shape not connected to the club at all --
+        # see the module's own "Club terminology" section) as of the last refresh_diff_
+        # eligibility call -- BuilderPane.classify_change deliberately reports "none" for an
+        # outsider-only add/remove (see its own docstring: it never changes what's actually
+        # exported/inflated), so this is the ONLY way outsider changes get their own status
+        # message ("Outsider added"/"Outsider deleted") at all (2026-09-28, explicit user
+        # request).
+        self._last_outsider_ids = frozenset()
 
         # The BUILDER's own shapes/connections at the moment of the last successfully-COMPLETED
         # inflate (Full or Diff) -- None until the first one finishes -- plus source_polygon_id
@@ -1884,6 +2729,31 @@ class InflaterPane:
         # (see _record_inflate_success's own docstring) is never cleared, so it also always
         # tracks "the source_polygon_id for whatever self.base_faces currently is".
         self._pending_source_polygon_id = None
+        # Same staging idea as _pending_source_polygon_id above, for pendant (single-edge-
+        # attached) face reattachment (2026-09-28, explicit user request -- see
+        # _exclude_pendant_faces' own section header comment) -- only ever set by
+        # on_full_inflate_clicked (Diff Inflate's own paths explicitly clear it to [], since
+        # they don't run pendant exclusion themselves); _on_inflate_step_done's own Level-3
+        # "Done" branch consumes it via _reattach_pendant_faces.
+        self._pending_pendants = []
+        # Whether the CLUB's own insiders (every member except guests, i.e. single-connection
+        # members -- see the module docstring's "Club terminology" section) currently reflect a
+        # real relax/inflate result, or were only ever geometrically placed
+        # (on_full_inflate_clicked's own "place" mode -- see _prepare_mesh_for_inflate's own
+        # docstring) -- 2026-09-28, explicit user request, now this app's Rule 2/3: "every time
+        # the canvas empties, the is_fully_inflated flag is set to false. every time a full
+        # inflate is performed, the flag is set to true... when there is a change to insiders...
+        # if is_fully_inflated = true, then do diff inflate. else do full inflate." Diff
+        # Inflate's own incremental paths all assume they're seeding from an ALREADY relaxed/
+        # calibrated result -- reusing a flat placement's own positions that way would feed
+        # real physics a starting point it was never designed for. Checked by
+        # on_diff_inflate_clicked, set True whenever _on_inflate_step_done's own Level-3 "Done"
+        # branch is reached (a real pressure-calibration pass just ran, whichever pipeline path
+        # got it there), set False by on_full_inflate_clicked's own "place" branch AND by
+        # refresh_diff_eligibility whenever the club empties out entirely (Rule 2). Left
+        # UNCHANGED by _diff_attach_pendant_only -- attaching a guest never touches the
+        # insiders either way, so it doesn't change whether they were ever really solved.
+        self.is_fully_inflated = False
 
         # Hover-highlight state (2026-09-19, explicit: "when i mouse over a face in the 3d
         # image, that face should be outlined in yellow in both the 2d view and the 3d view",
@@ -1999,6 +2869,7 @@ class InflaterPane:
         self._pan_last_xy = None
 
         self._build_ui()
+        self._apply_target_rms_defaults()
         self._render()
 
     # ---- UI ----
@@ -2010,14 +2881,16 @@ class InflaterPane:
         # One row -- "Target stretch: L1 __ L2 __ L3 __  Tolerance: ___" -- short enough
         # labels/entry widths to fit on a single line even in this pane's own (roughly half-
         # window) width (2026-09-19, explicit: "i want all to fit on one line if possible").
-        row = ttk.Frame(setup)
-        row.pack(side=tk.TOP, anchor=tk.W)
+        # Debug-mode-only (2026-09-28, explicit user request -- see _apply_mode_visibility):
+        # `self._setup_row` is kept unpacked at the end of _build_ui rather than packed here,
+        # then (re-)packed only while debug mode is on.
+        self._setup_row = row = ttk.Frame(setup)
         ttk.Label(row, text="Target stretch:").pack(side=tk.LEFT, padx=(0, 4))
         self.target_rms_vars = {}
         self.target_rms_display_vars = {}
         for level in (1, 2, 3):
             ttk.Label(row, text=f"L{level}:").pack(side=tk.LEFT, padx=(8, 2))
-            var = tk.DoubleVar(value=round(LEVEL_DEFAULT_TARGET_RMS_PCT[level]))
+            var = tk.DoubleVar(value=round(self._target_rms_defaults[level]))
             self.target_rms_vars[level] = var
             display_var = tk.StringVar(value=f"{var.get():.0f}%")
             self.target_rms_display_vars[level] = display_var
@@ -2042,22 +2915,65 @@ class InflaterPane:
         # completed inflate's own Level-3 result and is only enabled when the net has changed
         # by exactly one added/removed shape since then (see refresh_diff_eligibility, module
         # docstring's own "Full Inflate vs. Diff Inflate" section).
-        button_row = ttk.Frame(setup)
+        # `self._button_row` itself is always packed (it also holds the release-mode-only
+        # Reinflate button below); the three debug-only widgets inside it are individually
+        # packed/unpacked by _apply_mode_visibility instead of the whole row.
+        self._button_row = button_row = ttk.Frame(setup)
         button_row.pack(side=tk.TOP, anchor=tk.W, pady=(8, 0))
         self.full_inflate_button = ttk.Button(
             button_row, text="Full Inflate", command=self.on_full_inflate_clicked)
-        self.full_inflate_button.pack(side=tk.LEFT)
         self.diff_inflate_button = ttk.Button(
             button_row, text="Diff Inflate", command=self.on_diff_inflate_clicked)
-        self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
         self.diff_inflate_button.state(["disabled"])
         # Default checked (2026-09-19, explicit) -- whenever refresh_diff_eligibility finds a
         # single-face/connection add/remove since the last completed inflate (the SAME
         # DIFF_ELIGIBLE_KINDS check the button's own enabled state uses), it fires Diff Inflate
-        # automatically instead of just enabling the button.
+        # automatically instead of just enabling the button. Debug-mode-only UI (see
+        # _apply_mode_visibility) -- release mode instead always behaves as if this were
+        # checked (2026-09-28, explicit user request: "remove... auto inflate in its release
+        # mode" means the CONTROL, not the behavior -- see _effective_auto_inflate), with
+        # "Reinflate" below as its manual force-a-clean-Full-Inflate escape hatch.
         self.auto_inflate_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(button_row, text="Auto Inflate", variable=self.auto_inflate_var).pack(
-            side=tk.LEFT, padx=(8, 0))
+        self._auto_inflate_check = ttk.Checkbutton(
+            button_row, text="Auto Inflate", variable=self.auto_inflate_var)
+
+        # Debug-mode-only replay scrubber (2026-09-29, explicit user request -- "add a replay
+        # slider... to replay the last full/diff inflate", "put it after Auto Inflate"): ranges
+        # over self._replay_frames (populated across the whole last completed run -- see
+        # _capture_replay_frame/_update_replay_slider), disabled/empty until one exists.
+        # length=140 -- short enough to leave room for the other button_row widgets alongside
+        # it, long enough to scrub usefully.
+        self._replay_slider = ttk.Scale(
+            button_row, from_=0, to=0, orient=tk.HORIZONTAL, length=140,
+            command=self._on_replay_slider_moved)
+        self._replay_slider.state(["disabled"])
+
+        # Debug-mode-only diagnostics (2026-09-29, explicit user request -- diagnosing a
+        # crumpled guest boundary after a Diff Inflate join): same idea as
+        # inflate_polyhedron_app's own identically-named toggles, see _render's own overlay
+        # block for what each actually draws. command=self._render (not a separate redraw path)
+        # since this pane has exactly one panel/one _render, unlike that app's per-level draw().
+        # Own ROW (self._debug_overlay_row), not packed into button_row -- three extra labeled
+        # checkbuttons alongside Full/Diff Inflate/Auto Inflate didn't fit on one line (2026-09-29,
+        # explicit user request: "those three checkboxes need to be on another line").
+        self._debug_overlay_row = overlay_row = ttk.Frame(setup)
+        self.show_normals_var = tk.BooleanVar(value=False)
+        self._show_normals_check = ttk.Checkbutton(
+            overlay_row, text="Show face normals", variable=self.show_normals_var,
+            command=self._render)
+        self.show_vertex_normals_var = tk.BooleanVar(value=False)
+        self._show_vertex_normals_check = ttk.Checkbutton(
+            overlay_row, text="Show vertex normals", variable=self.show_vertex_normals_var,
+            command=self._render)
+        self.show_repulsive_forces_var = tk.BooleanVar(value=False)
+        self._show_repulsive_forces_check = ttk.Checkbutton(
+            overlay_row, text="Show repulsive forces", variable=self.show_repulsive_forces_var,
+            command=self._render)
+        # Release-mode-only (see _apply_mode_visibility): "basically Full Inflate" (2026-09-28,
+        # explicit user request) -- same command, just the one button a release-mode user needs,
+        # since auto-inflate already keeps the mesh current without any button in that mode.
+        self.reinflate_button = ttk.Button(
+            button_row, text="Reinflate", command=self.on_full_inflate_clicked)
 
         self.status_label = ttk.Label(self.root, anchor="w", padding=(8, 3))
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
@@ -2067,6 +2983,7 @@ class InflaterPane:
         self.panel_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.plotter = pv.Plotter(off_screen=True, window_size=list(self.panel_size))
         self.plotter.set_background(PLOT_THEME["bg"])
+        self._setup_plotter_lighting()
         self._photo = None
         self.panel_label.bind("<Configure>", self._on_panel_configure)
 
@@ -2087,10 +3004,207 @@ class InflaterPane:
         self.panel_label.bind("<Motion>", self._on_panel_hover_motion)
         self.panel_label.bind("<Leave>", self._on_panel_hover_leave)
 
+        self._apply_mode_visibility()
+
+    def _effective_auto_inflate(self):
+        """Whether an eligible builder edit should auto-fire an inflate right now (2026-09-28,
+        explicit user request). Debug mode: exactly self.auto_inflate_var (the visible
+        checkbox, user-controlled, default True). Release mode: always True -- that mode has no
+        checkbox at all (see _apply_mode_visibility), "removing auto inflate" there means
+        removing the CONTROL, not the behavior itself -- a release-mode user just builds/edits
+        and watches it inflate, with Reinflate as a manual force-a-clean-Full-Inflate escape
+        hatch, never needing to babysit a toggle."""
+        if not self.builder_getter().debug_mode:
+            return True
+        return self.auto_inflate_var.get()
+
+    def _apply_mode_visibility(self):
+        """Debug mode ('d' key, shared with BuilderPane's own toggle -- see BuilderPane.
+        on_debug_mode_change) shows the target-stretch/tolerance row plus Full Inflate/Diff
+        Inflate/Auto Inflate; release mode (the default) hides all of those and shows just
+        Reinflate instead (2026-09-28, explicit user request: "remove all the target stretch,
+        tolerance, full/diff inflate buttons and auto inflate in its release mode... just have
+        a 'reinflate' which basically is 'full inflate'"). Called once at the end of _build_ui
+        (release mode is the startup default) and again every time debug mode flips."""
+        debug = self.builder_getter().debug_mode
+        if debug:
+            self._setup_row.pack(side=tk.TOP, anchor=tk.W)
+            self.full_inflate_button.pack(side=tk.LEFT)
+            self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
+            self._auto_inflate_check.pack(side=tk.LEFT, padx=(8, 0))
+            self._replay_slider.pack(side=tk.LEFT, padx=(8, 0))
+            self._debug_overlay_row.pack(side=tk.TOP, anchor=tk.W, pady=(4, 0))
+            self._show_normals_check.pack(side=tk.LEFT)
+            self._show_vertex_normals_check.pack(side=tk.LEFT, padx=(8, 0))
+            self._show_repulsive_forces_check.pack(side=tk.LEFT, padx=(8, 0))
+            self.reinflate_button.pack_forget()
+        else:
+            self._setup_row.pack_forget()
+            self.full_inflate_button.pack_forget()
+            self.diff_inflate_button.pack_forget()
+            self._auto_inflate_check.pack_forget()
+            self._replay_slider.pack_forget()
+            self._debug_overlay_row.pack_forget()
+            self.reinflate_button.pack(side=tk.LEFT)
+            # Off, not just hidden, when leaving debug mode -- same as inflate_polyhedron_app's
+            # own _apply_mode_visibility -- so a stale overlay never lingers into release mode.
+            redraw_needed = False
+            for var in (self.show_normals_var, self.show_vertex_normals_var,
+                        self.show_repulsive_forces_var):
+                if var.get():
+                    var.set(False)
+                    redraw_needed = True
+            if self._replay_scrub_index is not None:
+                self._replay_scrub_index = None
+                redraw_needed = True
+            if redraw_needed and self.faces is not None:
+                self._render()
+
     def _register_numeric_entry(self, entry, allow_exponent, allow_decimal=True):
         vcmd = self.root.register(lambda proposed: _is_valid_numeric_partial(
             proposed, allow_exponent, allow_decimal))
         entry.configure(validate="key", validatecommand=(vcmd, "%P"))
+
+    def _is_central_object_closed(self):
+        """True iff the BUILDER's current central object (builder_getter().export_mesh_dict())
+        has no free/unglued edge anywhere -- read straight off the LIVE 2D builder state, not
+        off whatever was last actually inflated, so this stays correct even before the very
+        first Inflate click. False (treated as "open") whenever there's nothing to inflate yet
+        (export_mesh_dict returns (None, message) -- see its own docstring) or the net fails
+        validation, since neither case has a real closed shape to claim."""
+        mesh, error = self.builder_getter().export_mesh_dict()
+        if mesh is None:
+            return False
+        return not _open_base_edges(mesh["faces"], mesh["face_edge_ids"])
+
+    def _repulsion_vertex_ids(self):
+        """Same as inflate_polyhedron_app's own _repulsion_vertex_ids (duplicated, not imported
+        -- see module docstring): each ORIGINAL polygon's own raw corners, straight from
+        self.base_faces -- a small, FIXED set, unaffected by self.subdivision_level, passed as
+        every level's own `repulsion_vertex_ids` in _run_inflate_step (2026-09-28, bug fix --
+        this call used to omit repulsion_vertex_ids entirely, so repulsion_force ran against
+        EVERY Level 2/3 vertex instead of this small fixed set, an O(n^2) blowup that was the
+        actual cause of a reported "Level 3 got much slower" regression)."""
+        return sorted({v for face in self.base_faces for v in face})
+
+    def _closed_repulsion_vertex_ids(self):
+        """Same as inflate_polyhedron_app's own _closed_repulsion_vertex_ids (duplicated, not
+        imported -- see module docstring): the subset of _repulsion_vertex_ids that are NOT an
+        endpoint of any free (unglued) base-polygon edge."""
+        repulsion_ids = self._repulsion_vertex_ids()
+        open_edges_by_base = _open_base_edges(self.base_faces, self.base_face_edge_ids)
+        open_vertices = set()
+        for pairs in open_edges_by_base.values():
+            for pair in pairs:
+                open_vertices.update(pair)
+        return {v for v in repulsion_ids if v not in open_vertices}
+
+    def _repulsion_vertex_multipliers(self):
+        """Same as inflate_polyhedron_app's own _repulsion_vertex_multipliers (duplicated, not
+        imported -- see module docstring): {vertex_id: multiplier} for every CLOSED repulsion
+        vertex, 1.0 at Level 1, halved at every level after that. None when every repulsion
+        vertex is open."""
+        closed = self._closed_repulsion_vertex_ids()
+        if not closed:
+            return None
+        factor = 1.0 / (2 ** max(0, self.subdivision_level - 1))
+        return {v: factor for v in closed}
+
+    def _level1_is_open(self):
+        """Same as inflate_polyhedron_app's own _level1_is_open (duplicated, not imported --
+        see module docstring): True/False per LEVEL-1 fine triangle (same order
+        _build_level1_topology's own `faces` would be) -- whether THAT SPECIFIC wedge's own
+        outer rim edge (the one opposite the fan hub, corresponding to exactly one edge of its
+        own original polygon) is free ("open") rather than glued to a neighbor ("closed") -- an
+        n-gon connected at 2 of its own edges triangulates into 2 closed wedges and n-2 open
+        ones, classified per WEDGE, not per whole polygon. The fan hub is the one vertex every
+        one of a base polygon's own wedges has in common; a wedge's own rim edge is then just
+        its other two vertices."""
+        level1_faces, _edge_length, level1_face_of_fine = _build_level1_topology(self.base_faces)
+        open_edges = _open_base_edges(self.base_faces, self.base_face_edge_ids)
+        verts_by_base = {}
+        for face, base_idx in zip(level1_faces, level1_face_of_fine):
+            verts = set(face)
+            verts_by_base[base_idx] = (verts if base_idx not in verts_by_base
+                                        else verts_by_base[base_idx] & verts)
+        hub_by_base = {i: next(iter(s)) for i, s in verts_by_base.items() if len(s) == 1}
+        flags = []
+        for face, base_idx in zip(level1_faces, level1_face_of_fine):
+            hub = hub_by_base.get(base_idx)
+            if hub is None:
+                flags.append(False)  # no well-defined single hub -- default to "closed"/participating
+                continue
+            rim_pair = frozenset(v for v in face if v != hub)
+            flags.append(rim_pair in open_edges.get(base_idx, ()))
+        return flags
+
+    def _is_open_of_fine(self, level=None):
+        """Same as inflate_polyhedron_app's own _is_open_of_fine (duplicated, not imported --
+        see module docstring): is_open flags parallel to self.faces at `level`
+        (self.subdivision_level if not given) -- _level1_is_open's own result, repeated 4x per
+        Subdivide since Level 1 (mirroring exactly how mesh_levels._quarter_triangles itself
+        propagates face_of_fine -- every old triangle's 4 children are appended contiguously,
+        in old-index order -- so a parallel array only needs the same repeat-4x-in-order
+        treatment to stay aligned). Level 0 shares Level 1's own topology, so `level <= 1` both
+        mean zero repeats."""
+        if level is None:
+            level = self.subdivision_level
+        flags = self._level1_is_open()
+        for _ in range(max(0, level - 1)):
+            flags = [f for f in flags for _ in range(4)]
+        return flags
+
+    def _rms_exclude_edges(self):
+        """Same as inflate_polyhedron_app's own _rms_exclude_edges (duplicated, not imported --
+        see module docstring): (a, b) sorted vertex-id-pair tuples, at the CURRENT subdivision
+        level, to exclude from the RMS Stretch % calculation -- every edge of every OPEN fine
+        triangle (see _is_open_of_fine), not just its own free edge: an open wedge triangle
+        doesn't participate in the RMS stretch % calculation at all (2026-09-29, explicit bug
+        report -- goose.poly, an open/semi-closed net, converged in inflate_polyhedron_app but
+        not here; this exclusion -- entirely missing from this app until now -- was the actual
+        cause: without it, an open wedge's own unconstrained, naturally-higher stretch never
+        lets the RMS convergence check settle below gtol, so relax_initial_configuration/
+        estimate_pressure_for_target_stretch just grind to their own step caps and report
+        "failed to converge" on a net that genuinely has nothing wrong with it). None (rather
+        than an empty set) when nothing in the net is open, so callers can skip the exclusion
+        machinery entirely."""
+        is_open = self._is_open_of_fine()
+        if not any(is_open):
+            return None
+        exclude = set()
+        for face, open_flag in zip(self.faces, is_open):
+            if open_flag:
+                n = len(face)
+                for k in range(n):
+                    exclude.add(tuple(sorted((face[k], face[(k + 1) % n]))))
+        return exclude
+
+    def _pressure_exclude_faces(self):
+        """Same as inflate_polyhedron_app's own _pressure_exclude_faces (duplicated, not
+        imported -- see module docstring): Boolean list parallel to self.faces AT THE CURRENT
+        subdivision_level -- True for every OPEN fine triangle (see _is_open_of_fine), which
+        should feel NO pressure/inflation force at all (2026-09-29, explicit bug report -- see
+        _rms_exclude_edges' own docstring for the goose.poly non-convergence this and that
+        together fix), while still fully existing for springs/repulsion/edges/convergence.
+        None when nothing in the net is open, so callers can skip the exclusion machinery
+        entirely."""
+        is_open = self._is_open_of_fine()
+        return is_open if any(is_open) else None
+
+    def _apply_target_rms_defaults(self):
+        """Re-picks LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED/_OPEN from _is_central_object_closed and
+        writes it straight into every level's Target RMS spinner (2026-09-28, explicit user
+        request: "checked after every change") -- called from refresh_diff_eligibility, so this
+        runs on every builder edit, not just once at startup. Unlike inflate_polyhedron_app's
+        own _reset_target_rms_defaults (which only re-applies when the NET FILE changes, to
+        avoid clobbering a hand-typed value -- see its own comment), this app's own spec asks
+        for it every time, since a live-edited shape's open/closed status can flip on any edit
+        and there's no separate "net just loaded" moment to gate on here."""
+        self._target_rms_defaults = (LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED
+                                      if self._is_central_object_closed()
+                                      else LEVEL_DEFAULT_TARGET_RMS_PCT_OPEN)
+        for level, var in self.target_rms_vars.items():
+            var.set(round(self._target_rms_defaults[level]))
 
     def _begin_edit_target_rms(self, level):
         self.target_rms_display_vars[level].set(f"{self.target_rms_vars[level].get():.0f}")
@@ -2102,7 +3216,7 @@ class InflaterPane:
         try:
             value = round(float(self.target_rms_display_vars[level].get()))
         except (tk.TclError, ValueError):
-            value = LEVEL_DEFAULT_TARGET_RMS_PCT[level]
+            value = self._target_rms_defaults[level]
         self.target_rms_vars[level].set(max(0, min(100, value)))
 
     def _get_tolerance(self):
@@ -2114,6 +3228,101 @@ class InflaterPane:
     def _set_status(self, text, kind="info"):
         self.status_label.config(text=text, foreground=STATUS_COLORS.get(kind, STATUS_COLORS["info"]))
 
+    def _pipeline_label(self):
+        """'Full Inflate' or 'Diff Inflate', matching self._active_button -- every in-run status
+        message is prefixed with this (2026-09-28, explicit user request: "it should say
+        whether it's doing Full Inflate (and which level) or Diff Inflate") so it's never
+        ambiguous which pipeline is actually running, including when on_diff_inflate_clicked
+        redirected an ordinary edit into a real Full Inflate (self._active_button reads "full"
+        for one of those too, same as a manual Full Inflate/Reinflate click -- see
+        self._diff_redirect_pending's own comment) -- the user should see "Full Inflate" and
+        know why it's starting from Level 0, not be left guessing whether it's a bug. Read
+        only while self._active_button is actually set (i.e. mid-run); harmless default of
+        "Diff Inflate" otherwise, since nothing calls this outside a run.
+
+        Prefixed with self._change_label when set (2026-09-28, explicit user request: "Insider
+        added/deleted/modified: diff inflate" / "Insiders added/deleted/modified: full inflate
+        -- Level x: Step xx" -- see _describe_change's own docstring for how that label is
+        derived), e.g. "Insider modified: Diff Inflate -- Level 3: calibrating...". Bare
+        "Full Inflate"/"Diff Inflate" (no prefix) for a run with no single triggering change to
+        describe (a manual Full Inflate/Reinflate/Stop click, or on_load_success)."""
+        base = "Full Inflate" if self._active_button == "full" else "Diff Inflate"
+        return f"{self._change_label}: {base}" if self._change_label else base
+
+    def _describe_change(self, kind, extra):
+        """Returns a short label ("Anchor piece"/"Insider(s) added"/"Insider(s) deleted"/
+        "Insider modified"/"Guest(s) added"/"Guest(s) deleted") for `kind`/`extra` (as returned
+        by BuilderPane.classify_change) -- see the module's own "Club terminology" section for
+        what these mean, and _pipeline_label for where this gets used. None for a kind this
+        doesn't describe (only ever called with a DIFF_ELIGIBLE_KINDS value or "add_face" for a
+        guest attach, never "none"/"complex").
+
+        "add_face": a brand new shape, so ITS OWN connection count IS its own glued-edge count
+        (see _is_pendant_add's own reasoning). 0 connections means this is the very first piece
+        ever placed (nothing else exists yet to connect to) -- "Anchor piece". Exactly 1
+        connection is ordinarily a guest add, UNLESS that one neighbor itself only had exactly
+        1 OTHER connection before this -- then the neighbor is PROMOTED from guest to insider
+        by this same edit (see _is_pendant_add's own docstring), so it's really an insider
+        change, not a guest one. 2+ connections (rare, but possible) is a genuine insider add.
+
+        "remove_face": `extra` is the SET of removed shape ids -- gone now, so their own former
+        connection counts are read from self.last_connections_snapshot (the net as of the last
+        successful inflate, the correct "before" reference point for a single diff-eligible
+        edit). Counts as an insider change if any removed member itself had >= 2 connections
+        THEN, or if removing it drops some SURVIVING neighbor that had exactly 2 down to 1
+        (demoting that neighbor from insider to guest) -- otherwise every removed member (and
+        anything it touched) was already guest-level, so it's a guest removal.
+
+        "add_connection"/"remove_connection": always an insider change -- these only ever run
+        between two members ALREADY in the club (see classify_change's own docstring), and
+        changing a connection between them is exactly Rule 3's "their internal connections"."""
+        builder = self.builder_getter()
+        if kind == "add_face":
+            new_shape_id = extra
+            connections = builder.connections
+            my_conns = [c for c in connections
+                        if c["a_shape"] == new_shape_id or c["b_shape"] == new_shape_id]
+            if not my_conns:
+                return "Anchor piece"
+            if len(my_conns) == 1:
+                conn = my_conns[0]
+                neighbor_id = (conn["b_shape"] if conn["a_shape"] == new_shape_id
+                                else conn["a_shape"])
+                neighbor_other = sum(
+                    1 for c in connections if c["id"] != conn["id"]
+                    and (c["a_shape"] == neighbor_id or c["b_shape"] == neighbor_id))
+                # A guest is 0 OR 1 connections -- the neighbor stays a guest itself (0 -> 1,
+                # a mutual guest pair) iff it had ZERO other connections before this one; it's
+                # promoted to insider (1 -> 2) iff it had EXACTLY one. 2+ already meant it was
+                # already an insider, unaffected either way.
+                if neighbor_other != 1:
+                    return "Guest added"
+            return "Insider added"
+        if kind == "remove_face":
+            removed_ids = set(extra)
+            word = "Insider" if len(removed_ids) == 1 else "Insiders"
+            old_conns = self.last_connections_snapshot or []
+
+            def count_of(shape_id):
+                return sum(1 for c in old_conns
+                           if c["a_shape"] == shape_id or c["b_shape"] == shape_id)
+
+            if any(count_of(sid) >= 2 for sid in removed_ids):
+                return f"{word} deleted"
+            for c in old_conns:
+                other = None
+                if c["a_shape"] in removed_ids and c["b_shape"] not in removed_ids:
+                    other = c["b_shape"]
+                elif c["b_shape"] in removed_ids and c["a_shape"] not in removed_ids:
+                    other = c["a_shape"]
+                if other is not None and count_of(other) == 2:
+                    return f"{word} deleted"
+            guest_word = "Guest" if len(removed_ids) == 1 else "Guests"
+            return f"{guest_word} deleted"
+        if kind in ("add_connection", "remove_connection"):
+            return "Insider modified"
+        return None
+
     def _set_running(self, running, active=None):
         """running=True: `active` ("full" or "diff") is whichever button was clicked -- that
         button switches to "Stop" (still enabled, now wired to _on_stop_clicked), the OTHER one
@@ -2123,20 +3332,49 @@ class InflaterPane:
         unlocks the LEFT pane (BuilderPane.set_locked) -- while an inflate of any kind is
         running, the net stays read-only (move/rotate/pan/the 3D camera still work; add/
         delete/connect don't) so a mid-computation edit can never invalidate the mesh the
-        background thread is actively working on (2026-09-19, explicit)."""
+        background thread is actively working on (2026-09-19, explicit).
+
+        `self.reinflate_button` (release mode's own stand-in for Full Inflate, see
+        _apply_mode_visibility) is kept in lockstep with `self.full_inflate_button` here too,
+        always, regardless of which mode is CURRENTLY visible -- cheap (only one of the two is
+        ever packed at a time) and means a Reinflate click in release mode still gets a real,
+        visible Stop while it runs, instead of the invisible debug-mode button silently
+        becoming unclickable "Stop" text no one can see (2026-09-28, explicit user request's
+        own Reinflate button needs to behave exactly like Full Inflate, Stop included)."""
         self._running = running
         if running:
+            # A brand new run's own frames haven't been captured yet -- discard whatever the
+            # PREVIOUS run left in the scrubber right away (not just on success/revert) so it
+            # can never be scrubbed mid-run, when self.faces/positions are actively changing
+            # underneath it.
+            self._replay_frames = []
+            self._update_replay_slider()
             self._active_button = active
             active_btn = self.full_inflate_button if active == "full" else self.diff_inflate_button
             other_btn = self.diff_inflate_button if active == "full" else self.full_inflate_button
             active_btn.config(text="Stop", command=self._on_stop_clicked)
             active_btn.state(["!disabled"])
             other_btn.state(["disabled"])
+            # "Stop" regardless of whether THIS run is "full" or "diff" -- release mode has no
+            # separate Diff Inflate button of its own to show a Stop on, so an auto-fired Diff
+            # Inflate (see _effective_auto_inflate) needs Reinflate itself to double as the only
+            # visible way to interrupt it, not just runs it itself started.
+            self.reinflate_button.config(text="Stop", command=self._on_stop_clicked)
+            self.reinflate_button.state(["!disabled"])
         else:
             self._active_button = None
+            # Cleared here, not in _revert_run alone, so it can't leak into a LATER, unrelated
+            # run -- every run's end (success via _on_inflate_step_done's Done branch, or
+            # failure via _revert_run) passes through here exactly once, and _revert_run itself
+            # already reads this flag's value (into its own local `was_diff`) before calling
+            # this method, so clearing it here is always safe (see _diff_redirect_pending's own
+            # init comment).
+            self._diff_redirect_pending = False
             self.full_inflate_button.config(text="Full Inflate", command=self.on_full_inflate_clicked)
             self.full_inflate_button.state(["!disabled"])
             self.diff_inflate_button.config(text="Diff Inflate", command=self.on_diff_inflate_clicked)
+            self.reinflate_button.config(text="Reinflate", command=self.on_full_inflate_clicked)
+            self.reinflate_button.state(["!disabled"])
         self.builder_getter().set_locked(running)
         if not running:
             self.refresh_diff_eligibility()
@@ -2170,6 +3408,8 @@ class InflaterPane:
             "edges": self.edges, "positions": self.positions,
             "subdivision_level": self.subdivision_level,
             "pending_source_polygon_id": self._pending_source_polygon_id,
+            "pending_pendants": self._pending_pendants,
+            "is_fully_inflated": self.is_fully_inflated,
         }
 
     def _restore_mesh_state(self, snapshot):
@@ -2183,6 +3423,8 @@ class InflaterPane:
         self.positions = snapshot["positions"]
         self.subdivision_level = snapshot["subdivision_level"]
         self._pending_source_polygon_id = snapshot["pending_source_polygon_id"]
+        self.is_fully_inflated = snapshot["is_fully_inflated"]
+        self._pending_pendants = snapshot["pending_pendants"]
 
     def _revert_run(self, status_text, popup_text=None):
         """Discards whatever the current run computed and restores self._pre_click_snapshot --
@@ -2216,7 +3458,16 @@ class InflaterPane:
         self._pre_click_snapshot = None
         self._stop_event = None
         self._stop_requested = False
-        was_diff = self._active_button == "diff"
+        # A reverted run's own frames describe a mesh state that no longer exists (the restore
+        # above just discarded it) -- discard the replay history right along with it rather
+        # than leaving the scrubber pointing at a run that never actually completed.
+        self._replay_frames = []
+        self._update_replay_slider()
+        # self._diff_redirect_pending covers on_diff_inflate_clicked's own redirect into a real
+        # Full Inflate (self._active_button reads "full" for one of those, not "diff", even
+        # though the SAME "undo the triggering edit" logic applies -- see that flag's own init
+        # comment for the infinite-retry loop this prevents).
+        was_diff = self._active_button == "diff" or self._diff_redirect_pending
         self._render()
         if was_diff:
             InteractiveBuilderApp.on_undo_key(self.builder_getter())
@@ -2234,7 +3485,7 @@ class InflaterPane:
         has no relation to whatever self.last_shapes_snapshot/last_pressure/etc. were from
         before, if anything). A no-op if Auto Inflate is unchecked or something's already
         running (2026-09-19, explicit: "as soon as i load a file, it should also inflate")."""
-        if self.auto_inflate_var.get() and not self._running:
+        if self._effective_auto_inflate() and not self._running:
             self.on_full_inflate_clicked()
 
     def on_load_session_clicked(self):
@@ -2264,7 +3515,7 @@ class InflaterPane:
             messagebox.showerror("Load session failed", str(e))
             return
         if "anchor_shape_id" in raw:
-            self._load_hippie_session(raw_text)
+            self._load_hippie_session(raw_text, path=path)
         else:
             self._load_hippo_session(raw_text)
 
@@ -2301,9 +3552,19 @@ class InflaterPane:
             except ValueError as e:
                 messagebox.showerror("Load session failed", str(e))
                 return
+            self._loading_session = True
             builder._load_faces(net_file.get("faces", state.base_faces), net_file.get("net_layout"),
                                  net_file.get("view", {}).get("scale"), net_file.get("builder_connections"))
             builder._refresh_vme_state()
+            self._loading_session = False
+            # _load_faces' own _redraw() call (its very last line, above) draws with whatever
+            # self._anchor_shape_id was BEFORE this load -- _refresh_vme_state's own fallback
+            # (self.shapes[0]["id"], see its docstring) only corrects it just now, one line
+            # above, so that first redraw always shows every shape dimmed as an outsider
+            # regardless of the newly-loaded net's real connectivity (2026-09-29, explicit bug
+            # report: "the polygons are rendered as outsiders initially and later became
+            # members"). Nothing else redraws the canvas again afterward.
+            builder._redraw()
         else:
             new_base_faces = [list(f) for f in state.base_faces]
             new_base_edges, new_face_edge_ids = None, None
@@ -2338,9 +3599,13 @@ class InflaterPane:
             subdivision_level=level, faces=faces, positions=positions,
             face_of_fine=face_of_fine, edge_length=edge_length,
             target_rms_pct=state.target_rms_pct, tolerance=state.tolerance,
-            last_pressure=last_pressure, level_history=level_history, session_label=state.net_name)
+            last_pressure=last_pressure, level_history=level_history, session_label=state.net_name,
+            # A .hippo comes from inflate_polyhedron_app, which has no guest/insider concept at
+            # all -- every mesh it ever saves is a real relax/inflate result, never a flat
+            # "place" (see this app's own is_fully_inflated docstring), so this is always True.
+            is_fully_inflated=True)
 
-    def _load_hippie_session(self, raw_text):
+    def _load_hippie_session(self, raw_text, path=None):
         """Restores this app's OWN `.hippie` session (InflaterSessionStateModel) -- see
         on_load_session_clicked's own docstring for the format-dispatch. `net_file` here
         describes EVERY placed shape/connection (central or not, see
@@ -2349,10 +3614,25 @@ class InflaterPane:
         piece(s). The central object's own base mesh/edges are then re-derived by calling the
         just-restored builder's OWN export_mesh_dict() (after the anchor below is set) rather
         than re-parsing `net_file` directly (which describes the WHOLE net, not just the central
-        piece `state.base_faces`/`state.mesh` actually describe) -- this guarantees the same
-        vertex numbering `state.mesh`'s own saved positions assume, since both the original Save
-        and this Load run the identical central-object export pipeline over the identical
-        shapes/connections.
+        piece `state.base_faces`/`state.mesh` actually describe). This gives back `base_edges`/
+        `base_face_edge_ids` (NOT saved in the file at all -- InflaterSessionStateModel has no
+        field for either), but NOT `base_faces` itself: `state.base_faces` is used for that
+        directly instead of `central_mesh["faces"]` (2026-09-29 fix, explicit bug report --
+        "i'm not able to select the guest piece"/"highlighted a non-edge that connects a vertex
+        to the centre of an opposite face"). A guest/pendant shape's own corners get FRESH
+        runtime-counter vertex ids when first placed flat (_place_pendant_flat, so they never
+        collide with the core's independently-numbered fine mesh -- see its own docstring), ids
+        that are only reproducible by saving them, never by re-deriving them: a fresh
+        export_mesh_dict() call assigns a guest's corners whatever ids _faces_from_shapes'
+        deterministic numbering happens to land on, which is generally DIFFERENT from the
+        arbitrary-but-consistent ids `state.mesh`'s own saved positions/faces actually use for
+        that same guest. self.base_faces is read by every pick/hover/rim-walk path that matters
+        here (_rebuild_open_edges, _base_edge_vertex_chain, _group_boundary_edge_set -- none of
+        them ever touch self.base_edges/self.base_face_edge_ids), so using the SAVED value there
+        is both correct and sufficient; base_edges/base_face_edge_ids are only consulted by the
+        Diff Inflate incremental-attach path, which always re-derives its own fresh state off the
+        LIVE builder net before touching them anyway, so a freshly-exported value for those two
+        is fine.
 
         `anchor_shape_id` is the ANCHOR's saved `net_layout` "shape_id" -- `_load_faces` always
         reassigns fresh LIVE ids in net_layout order (see its own docstring: "a fresh saved-id ->
@@ -2369,6 +3649,7 @@ class InflaterPane:
 
         builder = self.builder_getter()
         net_file = state.net_file
+        self._loading_session = True
         builder._load_faces(net_file.get("faces"), net_file.get("net_layout"),
                              net_file.get("view", {}).get("scale"), net_file.get("builder_connections"))
 
@@ -2378,34 +3659,52 @@ class InflaterPane:
         if anchor_index is not None and anchor_index < len(builder.shapes):
             builder._anchor_shape_id = builder.shapes[anchor_index]["id"]
         builder._refresh_vme_state()
+        # _load_faces' own _redraw() call (its very last line, above) draws with whatever
+        # self._anchor_shape_id was BEFORE this load -- the real one is only assigned just
+        # now, a few lines above -- so that first redraw always shows every shape dimmed as
+        # an outsider regardless of the newly-loaded net's real connectivity (2026-09-29,
+        # explicit bug report: "the polygons are rendered as outsiders initially and later
+        # became members"). Nothing else redraws the canvas again afterward.
+        builder._redraw()
 
         central_mesh, err = builder.export_mesh_dict()
         if err:
+            self._loading_session = False
             messagebox.showerror("Load session failed",
                                   f"Restored net's central object no longer matches the saved "
                                   f"mesh: {err}")
             return
 
         faces, positions, face_of_fine, edge_length = state.mesh.to_mesh()
+        self._loading_session = False
         self._apply_loaded_session(
-            builder=builder, net_file=net_file, base_faces=central_mesh["faces"],
+            builder=builder, net_file=net_file, base_faces=[list(f) for f in state.base_faces],
             base_edges=central_mesh["edges"], base_face_edge_ids=central_mesh["face_edge_ids"],
             subdivision_level=state.subdivision_level, faces=faces, positions=positions,
             face_of_fine=face_of_fine, edge_length=edge_length,
             target_rms_pct=state.target_rms_pct, tolerance=state.tolerance,
             last_pressure=state.last_pressure, level_history=state.level_history,
-            session_label=state.net_name)
+            session_label=state.net_name, is_fully_inflated=state.is_fully_inflated,
+            session_path=path)
 
     def _apply_loaded_session(self, builder, net_file, base_faces, base_edges, base_face_edge_ids,
                                subdivision_level, faces, positions, face_of_fine, edge_length,
                                target_rms_pct, tolerance, last_pressure, level_history,
-                               session_label):
+                               session_label, is_fully_inflated, session_path=None):
         """Shared tail of _load_hippo_session/_load_hippie_session -- everything past "the
         builder's own 2D net is already restored, and we have the central object's own base
         mesh/current mesh": populates every remaining InflaterPane field (see
         on_load_session_clicked's own docstring for the full list and WHY each one matters), then
         renders and refreshes Diff Inflate's own enabled state (harmless right after a load --
-        classify_change sees an identical snapshot and reports "none", so nothing auto-fires)."""
+        classify_change sees an identical snapshot and reports "none", so nothing auto-fires).
+
+        `session_path`, only ever given by _load_hippie_session (None from _load_hippo_session
+        -- 2026-09-29, explicit user request: "if loaded from a non-hippie file... say
+        '[Untitled]'"), is passed straight to self.on_session_loaded (CombinedApp's own
+        _mark_clean) at the very end, once every field above is genuinely consistent -- a
+        `.hippo` load's own None correctly resets the title to "[Untitled]" (still marked
+        CLEAN, not "started from scratch" dirty: nothing's unsaved immediately after a load,
+        only once the user actually changes something)."""
         self.base_faces = base_faces
         self.base_edges = base_edges
         self.base_face_edge_ids = base_face_edge_ids
@@ -2425,16 +3724,51 @@ class InflaterPane:
         if last_pressure is not None:
             self.last_pressure = last_pressure
 
-        source_polygon_id = (net_file or {}).get("source_polygon_id") or list(range(len(base_faces)))
+        source_polygon_id = (net_file or {}).get("source_polygon_id")
+        if source_polygon_id is None:
+            # No "source_polygon_id" in the file at all -- e.g. a `.hippo` (predates the
+            # Polygon-Fold/source_polygon_id concept entirely, which only ever exists in THIS
+            # app's own export pipeline) -- NOT list(range(len(base_faces))) (2026-09-29,
+            # explicit bug report: "i loaded turtle.hippo, and when i hovered over the
+            # triangular piece in the 2d view, a hexagonal piece lit up in the 3d view" -- that
+            # bare-index fallback silently assumed base_faces group i's own real 2D shape is
+            # whatever LIVE builder shape id happens to equal i, which is essentially never
+            # true: _load_faces assigns fresh live ids from its own running counter, not
+            # 0/1/2/... in net_layout order). base_faces IS always 1:1 with builder.shapes in
+            # net_layout order here (a `.hippo`'s own net can never contain a Polygon-Fold
+            # shape -- that's an interactive_builder_app-only feature the hippo format has no
+            # way to express -- so _load_mesh_from_dict never needed _expand_folded_shapes to
+            # build it), and `_load_faces` builds `builder.shapes` in exactly that same
+            # net_layout order (confirmed by _load_hippie_session's own docstring, which relies
+            # on the identical invariant for its own anchor-by-index lookup) -- so group i's
+            # real shape id is builder.shapes[i]["id"], not i itself.
+            source_polygon_id = [s["id"] for s in builder.shapes[:len(base_faces)]]
         self._pending_source_polygon_id = source_polygon_id
         self.last_source_polygon_id = source_polygon_id
+        # 2026-09-28, explicit user request: a save now records is_fully_inflated (True if the
+        # saved mesh is a real relax/inflate result, False if it was only ever geometrically
+        # placed -- see InflaterSessionStateModel's own docstring) -- restored here rather than
+        # assumed True, so a loaded "place"-only session still correctly redirects its own next
+        # edit to a real Full Inflate (Rule 3) instead of trying to Diff Inflate from geometry
+        # that was never actually solved.
+        self.is_fully_inflated = is_fully_inflated
+        # Nothing pendant/guest-excluded staged here regardless -- a future Full/Diff Inflate
+        # re-derives its own guest exclusion fresh from the builder's current net either way.
+        self._pending_pendants = []
         (self.last_shapes_snapshot, self.last_connections_snapshot,
          self.last_anchor_snapshot) = builder.snapshot_state()
-        self.last_root_to_vertex_id = builder.root_to_vertex_id()
+        # _current_root_to_vertex_id (NOT builder.root_to_vertex_id() directly -- see that
+        # method's own docstring) -- self.base_faces/self._pending_source_polygon_id are
+        # already set above, correctly (state.base_faces, per _load_hippie_session's own fix),
+        # so this correctly reads a loaded guest's own arbitrary remapped id straight off them
+        # instead of re-deriving a fresh id that wouldn't match self.positions.
+        self.last_root_to_vertex_id = self._current_root_to_vertex_id()
 
         self._render()
         self.refresh_diff_eligibility()
         self._set_status(f"Loaded session '{session_label}' at Level {subdivision_level}.", "info")
+        if self.on_session_loaded is not None:
+            self.on_session_loaded(session_path)
 
     def on_save_session_clicked(self):
         """File > Save Session... (2026-09-26, explicit) -- writes the CURRENT full session (the
@@ -2445,25 +3779,31 @@ class InflaterPane:
         vertex-merge/duplicate-edge validation (export_full_net_dict's own check), or if nothing
         has been inflated yet (self.faces/base_faces are None before any Inflate ever runs -- a
         `.hippie` always carries a real central-object mesh, never a placeholder one). A no-op
-        while an inflate is running (the net could still be changing underneath the save)."""
+        while an inflate is running (the net could still be changing underneath the save).
+
+        Returns True iff a file was actually written, False otherwise (refused, or the user
+        cancelled the save dialog) -- CombinedApp._confirm_discard_unsaved (2026-09-29, explicit
+        user request: File > New/window-close should offer to save first) reads this to know
+        whether "Yes" genuinely went through before it's safe to proceed with discarding the
+        current session."""
         if self._running:
-            return
+            return False
         builder = self.builder_getter()
         net_file, err = builder.export_full_net_dict()
         if err:
             messagebox.showerror("Save session failed", err)
-            return
+            return False
         if self.faces is None or self.base_faces is None or builder._anchor_shape_id is None:
             messagebox.showerror("Save session failed",
                                   "Nothing has been inflated yet -- run Full Inflate first.")
-            return
+            return False
         SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(
             title="Save session", initialdir=str(SESSION_OUTPUT_DIR),
             defaultextension=SESSION_FILE_EXTENSION,
             filetypes=[("Inflater session", f"*{SESSION_FILE_EXTENSION}"), ("All files", "*.*")])
         if not path:
-            return
+            return False
         mesh_state = LevelStateModel.from_mesh(self.faces, self.positions, self.face_of_fine,
                                                 self.edge_length)
         state = InflaterSessionStateModel(
@@ -2473,14 +3813,21 @@ class InflaterPane:
             mesh=mesh_state, tolerance=self.tolerance_var.get(),
             target_rms_pct={lvl: var.get() for lvl, var in self.target_rms_vars.items()},
             last_pressure=self.last_pressure, level_history=self.level_history,
+            is_fully_inflated=self.is_fully_inflated,
         )
         try:
             with open(path, "w") as f:
                 f.write(state.model_dump_json())
         except OSError as e:
             messagebox.showerror("Save session failed", str(e))
-            return
+            return False
         self._set_status(f"Session saved to {path}.", "info")
+        # 2026-09-29, explicit user request: the window title/dirty-tracking needs to know a
+        # `.hippie` was just successfully written to `path` -- CombinedApp.__init__ wires this
+        # to its own _mark_clean(path).
+        if self.on_session_saved is not None:
+            self.on_session_saved(Path(path))
+        return True
 
     def refresh_diff_eligibility(self):
         """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
@@ -2494,20 +3841,106 @@ class InflaterPane:
         [topological] change to the model... it automatically does a Diff Inflate" (a plain
         move/rotate never reaches here as anything but "none", since classify_change already
         ignores cx/cy/rotation entirely -- see its own docstring)."""
+        if self._loading_session:
+            # A session load is still MID-restoration (see self._loading_session's own init
+            # comment for the crash this prevents) -- builder.shapes/connections already
+            # describe the NEW net, but self.base_faces/faces/positions/last_shapes_snapshot
+            # etc. don't yet, so nothing here (eligibility, target-RMS re-pick, any auto-fire)
+            # would be evaluating a consistent state. _apply_loaded_session calls this again,
+            # correctly, once everything is actually in sync.
+            return
+        # A builder edit always snaps the replay scrubber back to live (2026-09-29, explicit
+        # user request) -- self._replay_frames itself is left alone (still valid history of
+        # the last completed run until the NEXT run overwrites it), but a stale mid-history
+        # frame drawn via _render_replay_frame would otherwise keep showing while the user
+        # edits a now-DIFFERENT live net, which reads as this pane being stuck/broken.
+        if self._replay_scrub_index is not None:
+            self._replay_scrub_index = None
+            self._update_replay_slider()
         # Keeps self._open_edges in sync with the LIVE net on every edit, not just after the
         # next full _render() (which only happens once an Inflate actually runs) -- otherwise a
         # just-made-or-broken connection could keep offering/hiding its own edges' 3D
         # drag-to-connect handles a beat too long (2026-09-19 feature, "creating connections in
         # 3d").
         self._rebuild_open_edges()
-        if self._running or self.last_shapes_snapshot is None:
+        # Re-picks the Target RMS % defaults from the LIVE central object's own closed/open
+        # status on every edit (2026-09-28, explicit user request) -- same chokepoint, same
+        # reasoning: this needs to stay current even before the first Inflate click, not just
+        # once a completed run exists to diff against.
+        self._apply_target_rms_defaults()
+        # Clears a stale last-inflated mesh once nothing is central anymore -- e.g. the anchor
+        # (and everything else) just got deleted (2026-09-28, explicit user request: "after
+        # anchor deleted, the view should refresh") -- without this, self.faces/self.positions
+        # still hold whatever was inflated before the delete, and _render() keeps drawing that
+        # now-nonexistent shape since nothing else here ever clears them.
+        if not self.builder_getter().central_shape_ids() and self.faces is not None:
+            self.base_faces = self.base_edges = self.base_face_edge_ids = None
+            self.faces = self.edge_length = self.face_of_fine = self.edges = None
+            self.positions = None
+            self.subdivision_level = 0
+            # Rule 2 (2026-09-28, explicit): "every time the canvas empties, the
+            # is_fully_inflated flag is set to false" -- the club itself is gone (no member is
+            # central anymore), so there's nothing left that could be "fully inflated".
+            self.is_fully_inflated = False
+            self._render()
+        if self._running:
             self.diff_inflate_button.state(["disabled"])
+            return
+        # Outsider add/delete gets its OWN status message (2026-09-28, explicit user request:
+        # "if outsiders changed, it can say 'Outsider added/deleted/modified'") -- BuilderPane.
+        # classify_change deliberately reports "none" for an outsider-only change (see its own
+        # docstring: it never affects what's actually exported/inflated), so it's the only way
+        # this ever gets noticed at all. Tracked here (every edit), not just around a
+        # successful inflate, since an outsider change never touches self.last_shapes_snapshot
+        # either.
+        builder = self.builder_getter()
+        current_central_ids = builder.central_shape_ids()
+        current_outsider_ids = frozenset(
+            s["id"] for s in builder.shapes if s["id"] not in current_central_ids)
+        if current_outsider_ids != self._last_outsider_ids:
+            added = current_outsider_ids - self._last_outsider_ids
+            removed = self._last_outsider_ids - current_outsider_ids
+            if added and not removed:
+                self._set_status(
+                    f"{'Outsider' if len(added) == 1 else 'Outsiders'} added.", "info")
+            elif removed and not added:
+                self._set_status(
+                    f"{'Outsider' if len(removed) == 1 else 'Outsiders'} deleted.", "info")
+            else:
+                self._set_status("Outsiders modified.", "info")
+            self._last_outsider_ids = current_outsider_ids
+        if not current_central_ids:
+            # Nothing central at all (e.g. the anchor -- and everything else -- was just
+            # deleted, see the empty-club clearing block above) -- there's no net left to Full
+            # or Diff Inflate against, so stop here rather than falling into classify_change's
+            # own "remove_face" verdict below, which would otherwise redirect straight into
+            # on_full_inflate_clicked -- export_mesh_dict's own "Nothing to inflate yet" error
+            # for an empty club, surfaced as a "Cannot inflate" popup for what's really just an
+            # ordinary delete (2026-09-28, explicit bug report: "when i place the anchor and
+            # delete it, it shouldn't have a 'Cannot Inflate' popup").
+            self.diff_inflate_button.state(["disabled"])
+            return
+        if self.last_shapes_snapshot is None:
+            self.diff_inflate_button.state(["disabled"])
+            # No inflate has EVER completed yet -- nothing to diff against, so the only
+            # meaningful action is a Full Inflate (2026-09-28, explicit user request: "let auto
+            # inflate apply as soon as i put down the first piece" -- _prepare_mesh_for_inflate
+            # itself reduces this to a plain flat "place", never real physics, for a lone face,
+            # see its own docstring, so this is cheap even on the very first piece).
+            if (self._effective_auto_inflate() and self.builder_getter().tool_mode != "anchor"
+                    and self.builder_getter().central_shape_ids()):
+                # Same infinite-retry hazard as on_diff_inflate_clicked's own redirect (see its
+                # own docstring/_diff_redirect_pending's init comment) if this auto-triggered
+                # run fails to converge -- e.g. several pieces placed and braced together before
+                # any prior inflate ever succeeded.
+                self._diff_redirect_pending = True
+                self.on_full_inflate_clicked(change_label="Anchor piece")
             return
         kind, _extra = self.builder_getter().classify_change(
             self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
         eligible = kind in self.DIFF_ELIGIBLE_KINDS
         self.diff_inflate_button.state(["!disabled"] if eligible else ["disabled"])
-        if eligible and self.auto_inflate_var.get() and self.builder_getter().tool_mode != "anchor":
+        if eligible and self._effective_auto_inflate() and self.builder_getter().tool_mode != "anchor":
             self.on_diff_inflate_clicked()
 
     def _on_panel_configure(self, event):
@@ -2531,6 +3964,7 @@ class InflaterPane:
         self.plotter.close()
         self.plotter = pv.Plotter(off_screen=True, window_size=[width, height])
         self.plotter.set_background(PLOT_THEME["bg"])
+        self._setup_plotter_lighting()
         self._render()
 
     # ---- camera (rotate/pan/zoom) ----
@@ -2549,6 +3983,26 @@ class InflaterPane:
         right /= np.linalg.norm(right)
         up = np.cross(direction, right)
         return Rotation.from_matrix(np.column_stack([direction, right, up]))
+
+    def _setup_plotter_lighting(self):
+        """Replaces self.plotter's own default light kit with the explicit KEY/FILL
+        camera-relative rig (see KEY_LIGHT_POSITION's own comment for why). Called right after
+        every `self.plotter = pv.Plotter(...)` (both _build_ui's initial one and
+        _apply_panel_resize's rebuild-on-resize one) AND at the top of every _render/
+        _render_replay_frame, right after plotter.clear() -- that call wipes every light, not
+        just actors (pyvista's own Renderer.clear() calls remove_all_lights() internally), so a
+        one-time setup right after construction was silently undone the moment the very first
+        real frame drew (2026-09-29, explicit bug report: "I don't see any shading" -- this was
+        the actual cause, not the lighting model itself). Cheap either way: two lightweight VTK
+        Light objects, no mesh work -- `light_type='camera light'` lights track the camera
+        automatically from here on, no re-positioning needed as the user rotates/pans/zooms."""
+        self.plotter.remove_all_lights()
+        key_light = pv.Light(light_type="camera light", intensity=KEY_LIGHT_INTENSITY)
+        key_light.position = KEY_LIGHT_POSITION
+        self.plotter.add_light(key_light)
+        fill_light = pv.Light(light_type="camera light", intensity=FILL_LIGHT_INTENSITY)
+        fill_light.position = FILL_LIGHT_POSITION
+        self.plotter.add_light(fill_light)
 
     def _apply_camera(self):
         """Positions the plotter's orthographic camera from self._camera (rotation/zoom/pan)
@@ -2764,7 +4218,7 @@ class InflaterPane:
             return None
         return np.array(self._picker.GetPickPosition())
 
-    def _nearest_connection_at_position(self, pos):
+    def _nearest_connection_at_position(self, pos, shape_id=None):
         """The builder connection id whose cached 3D seam segments
         (self._connection_edge_cache) come closest to world point `pos`, within
         CONNECTION_PICK_TOLERANCE_FRACTION * self._half -- or None if nothing's close enough
@@ -2772,19 +4226,39 @@ class InflaterPane:
         no dedicated pickable actor per connection (unlike a base face's own mesh actor,
         _actor_to_group) -- a connection's seam is a thin line lying exactly on the already-
         picked surface, not a separate 3D object of its own, so proximity-to-the-pick-point
-        is used instead of a second vtkCellPicker pass."""
+        is used instead of a second vtkCellPicker pass.
+
+        `shape_id`, when given, restricts candidates to connections touching that ONE shape
+        (2026-09-29, explicit bug report: "the edges of the guest piece [are] still not
+        selectable. instead there are some non-edges that are highlighted when hovered over"
+        -- traced to plain nearest-in-3D-space search across the WHOLE mesh: a compact,
+        nearly-closed net folds enough that a totally unrelated shape's own seam can sit
+        CLOSER in 3D to a given surface point than that surface's own nearby seam, even
+        directly on top of it, topologically distant faces having folded close together in
+        space -- caught by direct testing: a pick position confirmed to be on the guest's own
+        rendered surface still matched a DIFFERENT shape's connection more often than its own).
+        The caller passes the shape actually under the cursor (`_actor_to_group`'s own hit),
+        so a hover only ever finds an edge genuinely belonging to what's actually being
+        pointed at."""
         if pos is None or not self._connection_edge_cache:
             return None
         tolerance = CONNECTION_PICK_TOLERANCE_FRACTION * self._half
         best_id, best_dist = None, tolerance
+        connections_by_id = None
+        if shape_id is not None:
+            connections_by_id = {c["id"]: c for c in self.builder_getter().connections}
         for conn_id, segments in self._connection_edge_cache.items():
+            if shape_id is not None:
+                conn = connections_by_id.get(conn_id)
+                if conn is None or shape_id not in (conn["a_shape"], conn["b_shape"]):
+                    continue
             for i in range(0, len(segments), 2):
                 dist = _point_segment_distance_3d(pos, segments[i], segments[i + 1])
                 if dist < best_dist:
                     best_id, best_dist = conn_id, dist
         return best_id
 
-    def _nearest_open_edge_at_position(self, pos, exclude_shape_id=None):
+    def _nearest_open_edge_at_position(self, pos, exclude_shape_id=None, shape_id=None):
         """The (shape_id, raw_edge) key in self._open_edges whose own segments come closest to
         world point `pos`, within OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half -- or None if
         nothing's close enough (including `pos is None`). Point-to-SEGMENT distance against the
@@ -2793,13 +4267,17 @@ class InflaterPane:
         midpoint specifically; same convention _nearest_connection_at_position already uses for
         an EXISTING connection's own seam. `exclude_shape_id` drops one shape's own edges from
         consideration -- used while dragging OUT of a shape's edge, since Join mode never
-        connects a shape to itself (that's Fold's job)."""
+        connects a shape to itself (that's Fold's job). `shape_id`, when given, restricts
+        candidates to that ONE shape's own edges -- see _nearest_connection_at_position's own
+        docstring for why (same fold-brings-unrelated-shapes-close issue, same fix)."""
         if pos is None or not self._open_edges:
             return None
         tolerance = OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half
         best_key, best_dist = None, tolerance
         for key, info in self._open_edges.items():
             if exclude_shape_id is not None and info["shape_id"] == exclude_shape_id:
+                continue
+            if shape_id is not None and info["shape_id"] != shape_id:
                 continue
             segments = info["segments"]
             for i in range(0, len(segments), 2):
@@ -2988,16 +4466,24 @@ class InflaterPane:
         independent lookups against the same pick position. Locked (an inflate is running)
         suppresses the open-edge side entirely, matching _on_canvas_press_join's own lock check
         on the 2D side -- both are how this app blocks starting a NEW connection mid-computation
-        (an EXISTING connection's hover/select stays read-only and harmless throughout)."""
+        (an EXISTING connection's hover/select stays read-only and harmless throughout).
+
+        Both lookups are restricted to whatever shape is ACTUALLY under the cursor
+        (self._picker's own hit, read via self._actor_to_group right after _pick_world_
+        position's own Pick() call -- the picker keeps its last result until the next one) --
+        see _nearest_connection_at_position's own docstring for why a plain nearest-in-3D-space
+        search isn't enough on its own."""
         if self._connection_drag is not None:
             self._update_connection_drag(event)
             return
         pos = self._pick_world_position(event)
-        self._set_hover_connection(self._nearest_connection_at_position(pos))
+        picked_shape_id = self._shape_id_of_group(self._actor_to_group.get(self._picker.GetActor()))
+        self._set_hover_connection(self._nearest_connection_at_position(pos, shape_id=picked_shape_id))
         if self.builder_getter()._locked:
             self._set_hover_open_edge(None)
         else:
-            self._set_hover_open_edge(self._nearest_open_edge_at_position(pos))
+            self._set_hover_open_edge(
+                self._nearest_open_edge_at_position(pos, shape_id=picked_shape_id))
 
     def _start_connection_drag(self, event):
         """Called from _on_drag_start when a ButtonPress-1 lands while an open edge is
@@ -3416,8 +4902,11 @@ class InflaterPane:
         "multiselect is not available in this mode" -- always REPLACES the selection, no Ctrl-
         toggle at all, unlike face selection in Move mode). Clicking somewhere with no seam
         within CONNECTION_PICK_TOLERANCE_FRACTION clears the selection, same as clicking empty
-        space in Move mode."""
-        self._select_connection(self._nearest_connection_at_position(self._pick_world_position(event)))
+        space in Move mode. Restricted to the shape actually under the cursor, same as
+        _hover_edge_at -- see _nearest_connection_at_position's own docstring for why."""
+        pos = self._pick_world_position(event)
+        picked_shape_id = self._shape_id_of_group(self._actor_to_group.get(self._picker.GetActor()))
+        self._select_connection(self._nearest_connection_at_position(pos, shape_id=picked_shape_id))
 
     def _select_shape_ids(self, shape_ids):
         shape_ids = set(shape_ids)
@@ -3616,6 +5105,232 @@ class InflaterPane:
 
         return to_segments(front_pairs), to_segments(back_pairs)
 
+    def _capture_replay_frame(self, faces, face_of_fine, positions):
+        """Appends one snapshot to self._replay_frames (2026-09-29, explicit user request --
+        see _on_replay_slider_moved's own docstring). `positions`' own dict VALUES are deep-
+        copied -- relax_once/estimate_pressure_for_target_stretch's own on_progress callbacks
+        hand back array views into a `pts` array that keeps changing step to step (see
+        stretchy_mesh._positions_and_stretch), so a captured frame would otherwise silently
+        change out from under an earlier one. `faces`/`face_of_fine` are never mutated in
+        place by anything in this pipeline (every step reassigns a fresh list instead -- same
+        reasoning _snapshot_mesh_state's own docstring gives), so those are kept by reference."""
+        self._replay_frames.append({
+            "faces": faces, "face_of_fine": face_of_fine,
+            "positions": {v: np.array(p, dtype=float) for v, p in positions.items()},
+        })
+
+    def _update_replay_slider(self):
+        """Configures the replay scrubber to match self._replay_frames -- enabled, ranged over
+        every captured frame index, iff at least 2 exist; positioned at the LAST one (the
+        live-equivalent end, see _on_replay_slider_moved). Called once a run finishes
+        successfully (_on_inflate_step_done's Level-3 Done branch) and whenever a builder edit
+        resets the scrub back to live (refresh_diff_eligibility) -- ttk.Scale.set DOES fire
+        `command`, so the latter harmlessly re-triggers _on_replay_slider_moved at the same
+        (live) index, not a real scrub."""
+        frames = self._replay_frames
+        if not frames or len(frames) < 2:
+            self._replay_slider.configure(to=0)
+            self._replay_slider.set(0)
+            self._replay_slider.state(["disabled"])
+            self._replay_scrub_index = None
+            return
+        self._replay_slider.configure(from_=0, to=len(frames) - 1)
+        self._replay_slider.state(["!disabled"])
+        self._replay_slider.set(len(frames) - 1)
+
+    def _on_replay_slider_moved(self, value):
+        """`command` callback for the debug-mode replay scrubber (2026-09-29, explicit user
+        request -- "add a replay slider... to replay the last full/diff inflate"): scrubs
+        through self._replay_frames, every (faces, face_of_fine, positions) snapshot captured
+        across the WHOLE last completed run (Level 0's relax_initial_configuration plus every
+        Level 1-3/single-Diff-pass estimate_pressure_for_target_stretch call it actually ran,
+        in chronological order -- see _capture_replay_frame's own call sites). `value` is
+        ttk.Scale's string-formatted float, rounded to the nearest captured frame index
+        (clamped, since a Scale can report a value fractionally past its `to` during a fast
+        drag). Purely a display override -- never touches self.faces/self.positions/etc., so
+        scrubbing can't affect what the next real Inflate continues from.
+
+        The RIGHTMOST position (the final, already-live frame) draws through the ordinary
+        _render() -- full hover/selection/open-edge picking, exactly like right after the run
+        finished. Every other position draws through _render_replay_frame instead, a reduced
+        STATIC view (colored face mesh only, no rim outline/hover/selection/open-edge picking)
+        -- a mid-history frame has no live-net hover/selection state that would make sense to
+        overlay on it anyway, and _group_boundary_offset_lines/_rebuild_open_edges/etc. all
+        read self.positions directly, not whatever frame is being scrubbed to."""
+        frames = self._replay_frames
+        if not frames:
+            return
+        idx = max(0, min(int(round(float(value))), len(frames) - 1))
+        if idx == len(frames) - 1:
+            self._replay_scrub_index = None
+            self._render()
+        else:
+            self._replay_scrub_index = idx
+            self._render_replay_frame(frames[idx])
+
+    def _render_replay_frame(self, frame):
+        """Static, reduced-feature redraw of one self._replay_frames entry -- the colored face
+        mesh (same per-group POLYGON_COLORS/inside-darkening convention _render's own first
+        loop uses) PLUS its own bold rim outline and, when their debug-mode checkboxes are
+        checked, the SAME face-normal/vertex-normal/repulsive-force overlays _render draws for
+        the live mesh -- but no hover/selection/open-edge picking (see _on_replay_slider_moved's
+        own docstring for why). self._actor_to_group is cleared, not repopulated -- a scrubbed
+        frame isn't pickable, so hover/click during a scrub simply find nothing, same as an
+        empty panel.
+
+        2026-09-29, explicit user request ("in 3d view, debug mode should show the polygon
+        edges, face normals/vertex normals/repulsive forces... as the user uses the replay
+        slider"): every overlay here is genuinely computed fresh per scrub tick, not just at
+        release -- repulsion_force is only ever run over self._repulsion_vertex_ids()' own
+        small, FIXED base-corner set (see its own comment: intentionally excluded from the
+        full fine-mesh vertex count specifically to stay cheap), so recomputing it live during
+        a drag is no more expensive than the ordinary rebuild <ttk.Scale> already does on every
+        `command` firing; there's no separate throttle-to-release path to fall back to."""
+        plotter = self.plotter
+        plotter.clear()
+        # plotter.clear() wipes EVERY light too (Renderer.clear() calls its own
+        # remove_all_lights() internally, not just actors) -- re-applied every call, not just
+        # once at plotter construction (2026-09-29, explicit bug report: "I don't see any
+        # shading" -- the custom KEY/FILL rig was being silently wiped on the very first real
+        # render, long before the user ever saw a frame; see _setup_plotter_lighting's own
+        # docstring). Cheap: two lightweight VTK Light objects, no mesh work.
+        self._setup_plotter_lighting()
+        self._actor_to_group = {}
+        faces = frame["faces"]
+        positions = frame["positions"]
+        face_of_fine = frame["face_of_fine"]
+        vertex_ids = sorted(positions)
+        idx = {v: i for i, v in enumerate(vertex_ids)}
+        points = np.array([positions[v] for v in vertex_ids])
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        self._center = (lo + hi) / 2
+        self._half = float(np.linalg.norm(points - self._center, axis=1).max()) + 1e-6
+        groups_present = sorted(set(face_of_fine))
+        for group in groups_present:
+            group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == group]
+            if not group_faces:
+                continue
+            n = len(self.base_faces[group]) if group < len(self.base_faces) else 3
+            color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
+            inside_color = _darken_color(color)
+            face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
+            mesh = pv.PolyData(points, face_conn)
+            plotter.add_mesh(mesh, color=color, show_edges=True,
+                              edge_color=_weighted_color(color, FRONT_EDGE_WEIGHT),
+                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back",
+                              smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                              diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                              specular_power=MATERIAL_SPECULAR_POWER)
+            plotter.add_mesh(mesh, color=inside_color, show_edges=True,
+                              edge_color=_weighted_color(inside_color, BACK_EDGE_WEIGHT),
+                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front",
+                              smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                              diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                              specular_power=MATERIAL_SPECULAR_POWER)
+            front_rim, back_rim = self._frame_group_boundary_offset_lines(
+                faces, face_of_fine, positions, group)
+            if len(front_rim):
+                self._add_rounded_lines(front_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
+            if len(back_rim):
+                self._add_rounded_lines(back_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
+
+        if self.show_normals_var.get():
+            starts, ends = [], []
+            for a, b, c in faces:
+                pa, pb, pc = positions[a], positions[b], positions[c]
+                normal = np.cross(pb - pa, pc - pa)
+                normal_len = np.linalg.norm(normal)
+                if normal_len < 1e-12:
+                    continue
+                centroid = (pa + pb + pc) / 3.0
+                edge_len = (np.linalg.norm(pb - pa) + np.linalg.norm(pc - pb)
+                            + np.linalg.norm(pa - pc)) / 3.0
+                starts.append(centroid)
+                ends.append(centroid + normal / normal_len * edge_len * NORMAL_LENGTH_FRACTION)
+            if starts:
+                segment_points = np.empty((2 * len(starts), 3))
+                segment_points[0::2] = starts
+                segment_points[1::2] = ends
+                plotter.add_lines(segment_points, color=NORMAL_COLOR, width=2.0)
+
+        if self.show_vertex_normals_var.get():
+            starts, ends = [], []
+            for v, (unit_normal, mean_edge_len) in _vertex_normals(faces, positions).items():
+                starts.append(positions[v])
+                ends.append(positions[v] + unit_normal * mean_edge_len * NORMAL_LENGTH_FRACTION)
+            if starts:
+                segment_points = np.empty((2 * len(starts), 3))
+                segment_points[0::2] = starts
+                segment_points[1::2] = ends
+                plotter.add_lines(segment_points, color=VERTEX_NORMAL_COLOR, width=2.0)
+
+        if self.show_repulsive_forces_var.get():
+            repulsion_ids = [v for v in self._repulsion_vertex_ids() if v in idx]
+            if repulsion_ids:
+                rep_indices = [idx[v] for v in repulsion_ids]
+                mult_by_id = self._repulsion_vertex_multipliers() or {}
+                rep_mults = [mult_by_id.get(v, 1.0) for v in repulsion_ids]
+                forces = repulsion_force(points, indices=rep_indices, vertex_multipliers=rep_mults)
+                force_lens = {v: np.linalg.norm(forces[idx[v]]) for v in repulsion_ids}
+                max_len = max(force_lens.values(), default=0.0)
+                starts, ends = [], []
+                if max_len >= 1e-12:
+                    for v in repulsion_ids:
+                        force_len = force_lens[v]
+                        if force_len < 1e-12:
+                            continue
+                        force_vec = forces[idx[v]]
+                        starts.append(positions[v])
+                        ends.append(positions[v] + force_vec / max_len
+                                    * EDGE_LENGTH * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=REPULSION_FORCE_COLOR, width=2.0)
+
+        self._apply_camera()
+        self._grab_frame()
+
+    def _frame_group_boundary_offset_lines(self, faces, face_of_fine, positions, group):
+        """Same (front_segs, back_segs) shape/nudge convention as _group_boundary_offset_lines
+        (see its own docstring) -- reimplemented over explicit faces/face_of_fine/positions (a
+        self._replay_frames entry's own, not self.faces/self.face_of_fine/self.positions)
+        rather than parametrizing that method itself, since every OTHER caller of it (_render's
+        own live rim, _set_hover_group's yellow highlight) always means the live mesh and would
+        otherwise need to pass the same three arguments right back through for no reason.
+        `self._half` (the Z-fighting nudge distance) is read as-is -- already set from THIS
+        frame's own bounding box by the caller (_render_replay_frame), same order _render's own
+        live path already establishes it in."""
+        edge_owner = {}
+        for face, bf in zip(faces, face_of_fine):
+            if bf != group:
+                continue
+            a, b, c = face
+            for u, v in ((a, b), (b, c), (c, a)):
+                key = (u, v) if u < v else (v, u)
+                edge_owner.setdefault(key, []).append(face)
+        boundary = [(edge, tris[0]) for edge, tris in edge_owner.items() if len(tris) == 1]
+        nudge = self._half * 0.002
+        front_pairs, back_pairs = [], []
+        for (u, v), (ta, tb, tc) in boundary:
+            pa, pb, pc = positions[ta], positions[tb], positions[tc]
+            normal = np.cross(pb - pa, pc - pa)
+            length = np.linalg.norm(normal)
+            offset = (normal / length * nudge) if length > 1e-12 else np.zeros(3)
+            p_u, p_v = positions[u], positions[v]
+            front_pairs.append((p_u + offset, p_v + offset))
+            back_pairs.append((p_u - offset, p_v - offset))
+
+        def to_segments(pairs):
+            segments = np.empty((2 * len(pairs), 3))
+            for i, (p, q) in enumerate(pairs):
+                segments[2 * i] = p
+                segments[2 * i + 1] = q
+            return segments
+
+        return to_segments(front_pairs), to_segments(back_pairs)
+
     def _render(self):
         """Redraws the single panel from whatever self.faces/self.positions/self.face_of_fine
         currently hold -- colored per ORIGINAL base face (face_of_fine) by POLYGON_COLORS[n]
@@ -3650,6 +5365,11 @@ class InflaterPane:
         after any edit."""
         plotter = self.plotter
         plotter.clear()
+        # plotter.clear() wipes EVERY light too (Renderer.clear() calls its own
+        # remove_all_lights() internally, not just actors) -- see _setup_plotter_lighting's own
+        # docstring for why this has to be reapplied on every render, not just once at plotter
+        # construction.
+        self._setup_plotter_lighting()
         self._actor_to_group = {}
         self._hover_actors = []
         self._selected_actors = []
@@ -3703,7 +5423,10 @@ class InflaterPane:
                 outside_actor = plotter.add_mesh(
                     mesh, color=color, show_edges=True,
                     edge_color=_weighted_color(color, FRONT_EDGE_WEIGHT),
-                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back")
+                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back",
+                    smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                    diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                    specular_power=MATERIAL_SPECULAR_POWER)
                 inside_actor = plotter.add_mesh(
                     mesh, color=inside_color, show_edges=True,
                     # Blended from inside_color (the actor's OWN fill color) toward WHITE --
@@ -3711,7 +5434,10 @@ class InflaterPane:
                     # instead of the bright outward one (2026-09-19, explicit: "backside lines
                     # should be 85% backside face color and 15% white").
                     edge_color=_weighted_color(inside_color, BACK_EDGE_WEIGHT),
-                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front")
+                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front",
+                    smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                    diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                    specular_power=MATERIAL_SPECULAR_POWER)
                 self._actor_to_group[outside_actor] = group
                 self._actor_to_group[inside_actor] = group
                 # The bold rim overlay -- both offset copies (_group_boundary_offset_lines, see
@@ -3724,6 +5450,76 @@ class InflaterPane:
                     self._add_rounded_lines(front_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
                 if len(back_rim):
                     self._add_rounded_lines(back_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
+
+            # Debug mode's "Show face/vertex normals"/"Show repulsive forces" toggles
+            # (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a
+            # Diff Inflate join) -- same drawing convention as inflate_polyhedron_app's own
+            # identically-named toggles (_draw_level_panel): a line segment per vertex/face,
+            # NORMAL_LENGTH_FRACTION of the local mean edge length long, direction only (not
+            # scaled by any physical magnitude) for the two normal toggles, but ACTUAL relative
+            # magnitude for repulsive forces (a unit-length arrow would look identical for a
+            # full-strength vertex and one weakened by _repulsion_vertex_multipliers, defeating
+            # the whole point of the toggle) -- the strongest vertex drawn gets the usual
+            # EDGE_LENGTH*NORMAL_LENGTH_FRACTION reference length, every other one scaled down
+            # proportionally against it.
+            if self.show_normals_var.get():
+                starts, ends = [], []
+                for a, b, c in self.faces:
+                    pa, pb, pc = self.positions[a], self.positions[b], self.positions[c]
+                    normal = np.cross(pb - pa, pc - pa)
+                    normal_len = np.linalg.norm(normal)
+                    if normal_len < 1e-12:
+                        continue
+                    centroid = (pa + pb + pc) / 3.0
+                    edge_len = (np.linalg.norm(pb - pa) + np.linalg.norm(pc - pb)
+                                + np.linalg.norm(pa - pc)) / 3.0
+                    starts.append(centroid)
+                    ends.append(centroid + normal / normal_len * edge_len * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=NORMAL_COLOR, width=2.0)
+
+            if self.show_vertex_normals_var.get():
+                starts, ends = [], []
+                for v, (unit_normal, mean_edge_len) in _vertex_normals(
+                        self.faces, self.positions).items():
+                    starts.append(self.positions[v])
+                    ends.append(self.positions[v]
+                                 + unit_normal * mean_edge_len * NORMAL_LENGTH_FRACTION)
+                if starts:
+                    segment_points = np.empty((2 * len(starts), 3))
+                    segment_points[0::2] = starts
+                    segment_points[1::2] = ends
+                    plotter.add_lines(segment_points, color=VERTEX_NORMAL_COLOR, width=2.0)
+
+            if self.show_repulsive_forces_var.get():
+                repulsion_ids = [v for v in self._repulsion_vertex_ids() if v in idx]
+                if repulsion_ids:
+                    rep_indices = [idx[v] for v in repulsion_ids]
+                    mult_by_id = self._repulsion_vertex_multipliers() or {}
+                    rep_mults = [mult_by_id.get(v, 1.0) for v in repulsion_ids]
+                    forces = repulsion_force(points, indices=rep_indices,
+                                              vertex_multipliers=rep_mults)
+                    force_lens = {v: np.linalg.norm(forces[idx[v]]) for v in repulsion_ids}
+                    max_len = max(force_lens.values(), default=0.0)
+                    starts, ends = [], []
+                    if max_len >= 1e-12:
+                        for v in repulsion_ids:
+                            force_len = force_lens[v]
+                            if force_len < 1e-12:
+                                continue
+                            force_vec = forces[idx[v]]
+                            starts.append(self.positions[v])
+                            ends.append(self.positions[v] + force_vec / max_len
+                                        * EDGE_LENGTH * NORMAL_LENGTH_FRACTION)
+                    if starts:
+                        segment_points = np.empty((2 * len(starts), 3))
+                        segment_points[0::2] = starts
+                        segment_points[1::2] = ends
+                        plotter.add_lines(segment_points, color=REPULSION_FORCE_COLOR, width=2.0)
+
             for group in self._hover_groups:
                 if group in groups_present:
                     self._hover_actors += self._add_rounded_lines(
@@ -3751,14 +5547,23 @@ class InflaterPane:
 
     # ---- pipeline ----
 
-    def on_full_inflate_clicked(self):
+    def on_full_inflate_clicked(self, change_label=None):
         """Reads the LEFT pane's current net, then runs the full Level 0->1->2->3 auto-pipeline
         (fan-triangulate -> Relax -> calibrate/Inflate to target RMS -> Subdivide -> repeat) --
         the same sequence inflate_polyhedron_app's "Run Simulation" runs, redrawing this ONE
         panel in place at each step instead of four side-by-side panels. Always enabled, always
         starts completely from scratch (2026-09-19, explicit) -- contrast Diff Inflate
         (on_diff_inflate_clicked), which reuses the last completed inflate's own Level-3
-        result. A no-op while already running."""
+        result. A no-op while already running.
+
+        `change_label`, if given, is set as self._change_label for the WHOLE run (2026-09-28,
+        explicit user request -- see _describe_change/_pipeline_label) -- passed only by the
+        two callers that actually have a single classified change driving this run
+        (refresh_diff_eligibility's own "Anchor piece" first-placement branch, and
+        on_diff_inflate_clicked's own redirect); every other caller (a manual Full Inflate/
+        Reinflate click, on_load_success, or BuilderPane's own "moving the anchor" confirmation)
+        leaves it None, correctly, since none of those has one single change to describe."""
+        self._change_label = change_label
         if self._running:
             return
         builder = self.builder_getter()
@@ -3775,10 +5580,58 @@ class InflaterPane:
         self._stop_event = threading.Event()
         self._stop_requested = False
         self.level_history = {}
-        self.base_faces = faces
-        self.base_edges = base_edges
-        self.base_face_edge_ids = face_edge_ids
-        self._pending_source_polygon_id = mesh.get("source_polygon_id")
+        # A face hinged to the rest by exactly one glued edge is excluded from the actual
+        # relax/inflate pipeline entirely and reattached flat once it's done (2026-09-28,
+        # explicit user request -- see this module's own "pendant (single-edge-attached) face
+        # exclusion" section header comment). self._pending_pendants is consumed once, in
+        # _on_inflate_step_done's own Level-3 "Done" branch. When there's nothing left worth
+        # running physics on AT ALL (a lone face, or a mutual single-edge pair -- 2026-09-28,
+        # explicit user request: "just place the piece flat" -- see _prepare_mesh_for_inflate's
+        # own docstring), this skips the whole Relax/Inflate pipeline below entirely and places
+        # everything directly instead.
+        prepared = _prepare_mesh_for_inflate(
+            faces, base_edges, face_edge_ids, mesh.get("source_polygon_id"))
+        if prepared[0] == "place":
+            _mode, reference_face, reference_spid, pendants = prepared
+            self.faces, self.positions, self.face_of_fine, self.base_faces = _place_all_flat(
+                reference_face, pendants, EDGE_LENGTH)
+            self.base_edges = None
+            self.base_face_edge_ids = None
+            self.edge_length = EDGE_LENGTH
+            self.edges = None
+            self.subdivision_level = MAX_LEVEL
+            self._pending_source_polygon_id = [
+                reference_spid, *(p["source_polygon_id"] for p in pendants)]
+            self._pending_pendants = []
+            # No physics ran here at all -- any earlier run's own replay history describes a
+            # mesh this flat placement just replaced, so it's discarded rather than left
+            # scrubbable against a topology that no longer exists.
+            self._replay_frames = []
+            self._update_replay_slider()
+            self._render()
+            self.last_pressure = None  # nothing was calibrated this run
+            # No real physics ran -- flags a future Diff Inflate to force a real Full Inflate
+            # instead of incrementally "solving" from a flat placement (2026-09-28, explicit
+            # user request -- see this flag's own init comment).
+            self.is_fully_inflated = False
+            self._record_inflate_success()
+            self._pre_click_snapshot = None
+            self._stop_event = None
+            # self._change_label ("Anchor piece" for the very first placement, or whatever
+            # club change triggered a LATER degenerate collapse -- e.g. deleting enough
+            # insiders to leave only guests) prefixes this exactly like _pipeline_label does
+            # for a real relax/inflate run (2026-09-28, explicit user request: "Anchor piece:
+            # placed flat"). None only for a genuine manual Full Inflate/Reinflate click on an
+            # already-degenerate net, with no single change to describe.
+            self._set_status(
+                f"{self._change_label}: placed flat."
+                if self._change_label else
+                "Placed directly: no insiders yet (every member is a guest -- Rule 1), so "
+                "there's nothing to inflate here, only to place.", "success")
+            return
+        (_mode, self.base_faces, self.base_edges, self.base_face_edge_ids, source_polygon_id,
+         self._pending_pendants) = prepared
+        self._pending_source_polygon_id = source_polygon_id
         self.faces, self.edge_length, self.face_of_fine = _build_level1_topology(self.base_faces)
         self.edges = _fan_level_edges(self.faces, self.base_edges)
         self.subdivision_level = 0
@@ -3789,23 +5642,50 @@ class InflaterPane:
         # settled -- or, if it never does, _revert_run puts the panel straight back to
         # self._pre_click_snapshot without ever showing this or any other unconverged frame.
         self._set_running(True, active="full")
-        self._set_status("Level 0: relaxing...", "info")
+        self._set_status(f"{self._pipeline_label()} -- Level 0: Step 0.", "info")
         self._run_background(
             lambda queue_progress: relax_initial_configuration(
                 self.positions, self.faces, self.edge_length,
                 max_nfev=SAFETY_STEP_CAP, gtol=self._get_tolerance(), rng=None,
-                on_progress=None, edges=self.edges, stop_event=self._stop_event),
-            self._on_relax_done)
+                # Adapts relax_once's own 6-arg on_progress (new_positions, steps_taken,
+                # max_stretch_pct, rms_stretch_pct, optimality, converged -- see its own
+                # docstring) down to (positions, steps_taken) -- queue_progress/on_progress
+                # below need positions too now, to capture a replay frame per checkpoint
+                # (2026-09-29, explicit user request -- see _capture_replay_frame), not just
+                # the step count status messages show.
+                on_progress=lambda new_positions, steps_taken, *_rest:
+                    queue_progress((new_positions, steps_taken)),
+                edges=self.edges, stop_event=self._stop_event,
+                # 2026-09-29, explicit bug report: goose.poly (an open/semi-closed net)
+                # converged in inflate_polyhedron_app but not here -- these two were simply
+                # never passed at all, so an open wedge's own unconstrained, naturally-higher
+                # stretch kept the RMS convergence check from ever settling below gtol, and its
+                # own jiggle kick kept nudging vertices that should feel no inflation force at
+                # all. See _rms_exclude_edges/_pressure_exclude_faces' own docstrings.
+                rms_exclude_edges=self._rms_exclude_edges(),
+                pressure_exclude_faces=self._pressure_exclude_faces()),
+            self._on_relax_done,
+            on_progress=self._on_level0_relax_progress)
+
+    def _on_level0_relax_progress(self, payload):
+        """`on_progress` for on_full_inflate_clicked's own relax_initial_configuration call --
+        runs on the MAIN thread (via _run_background's own queue/poll), so it's safe to touch
+        self._replay_frames/self.faces/self.face_of_fine directly here. self.faces/
+        self.face_of_fine are fixed for this whole Level 0 call (only reassigned afterward, in
+        _on_relax_done once it's converged), so every captured frame this level gets tagged
+        with the SAME pair, correctly."""
+        positions, steps = payload
+        self._capture_replay_frame(self.faces, self.face_of_fine, positions)
+        self._set_status(f"{self._pipeline_label()} -- Level 0: Step {steps}.", "info")
 
     def _on_relax_done(self, result):
         if self._stop_requested:
-            self._revert_run("Stopped -- reverted to the state before Inflate.")
+            self._revert_run(f"{self._pipeline_label()} -- Stopped.")
             return
         positions, _steps, max_stretch, rms_stretch, _optimality, converged = result
         if not converged:
             self._revert_run(
-                f"Level 0 relax didn't converge within {SAFETY_STEP_CAP} steps -- reverted to "
-                "the state before Inflate.",
+                f"{self._pipeline_label()} -- Failed to converge.",
                 popup_text=(
                     f"The mesh didn't converge (max stretch {max_stretch:.1f}%, RMS "
                     f"{rms_stretch:.1f}% after {SAFETY_STEP_CAP} steps) -- it may have a "
@@ -3815,8 +5695,7 @@ class InflaterPane:
         self.positions = positions
         self._render()
         self.subdivision_level = 1
-        self._set_status(
-            f"Level 0 relaxed (RMS {rms_stretch:.1f}%). Inflating Level 1...", "info")
+        self._set_status(f"{self._pipeline_label()} -- Level 1: Step 0.", "info")
         self._run_inflate_step()
 
     def _guess_pressure_from_history(self, target_rms_pct):
@@ -3881,8 +5760,19 @@ class InflaterPane:
             lambda queue_progress: estimate_pressure_for_target_stretch(
                 self.positions, self.faces, self.edge_length,
                 target_rms_pct=target_rms_pct, gtol=tolerance, rng=None,
-                capture_frames=False, on_progress=queue_progress,
+                # capture_frames=True (2026-09-29, explicit user request -- "replay the last
+                # full/diff inflate"): returns the WINNING trial's own frames as an extra
+                # return value (see _on_inflate_step_done's own unpacking) -- only ITS frames,
+                # never a discarded search trial's, so a replay scrub never shows a pressure
+                # guess that didn't pan out.
+                capture_frames=True, on_progress=queue_progress,
                 edges=self.edges if self.subdivision_level == 1 else None,
+                # Restricted to self.base_faces' own small fixed vertex set, same as
+                # inflate_polyhedron_app's own on_inflate_clicked -- see _repulsion_vertex_ids'
+                # own comment for why omitting this let repulsion run against every Level 2/3
+                # vertex instead (an O(n^2) regression).
+                repulsion_vertex_ids=self._repulsion_vertex_ids(),
+                repulsion_vertex_multipliers=self._repulsion_vertex_multipliers(),
                 # Deliberately NOT max_nfev_per_trial=SAFETY_STEP_CAP here (an earlier version
                 # of this call passed it explicitly) -- inflate_polyhedron_app's own equivalent
                 # calibration call never overrides it either, leaving it at the function's own
@@ -3900,23 +5790,30 @@ class InflaterPane:
                 # see its own INFLATE_SAFETY_STEP_CAP) and the "stop/revert if a trial doesn't
                 # converge" ceiling _on_relax_done/_on_inflate_step_done quote in their own
                 # messages -- unaffected by this change.
-                stop_event=self._stop_event, **extra),
+                stop_event=self._stop_event,
+                # 2026-09-29, explicit bug report -- see on_full_inflate_clicked's own Level 0
+                # relax_initial_configuration call for the full "goose.poly doesn't converge
+                # here but does in inflate_polyhedron_app" explanation; same fix applies here,
+                # at every level past 0 too.
+                rms_exclude_edges=self._rms_exclude_edges(),
+                pressure_exclude_faces=self._pressure_exclude_faces(),
+                **extra),
             self._on_inflate_step_done,
             on_progress=lambda steps: self._set_status(
-                f"Level {self.subdivision_level}: calibrating pressure toward "
-                f"{target_rms_pct:.0f}% RMS stretch ({steps} steps so far)...", "info"))
+                f"{self._pipeline_label()} -- Level {self.subdivision_level}: Step {steps}.",
+                "info"))
 
     def _on_inflate_step_done(self, result):
         if self._stop_requested:
-            self._revert_run("Stopped -- reverted to the state before Inflate.")
+            self._revert_run(f"{self._pipeline_label()} -- Stopped.")
             return
-        # capture_frames=False (see on_full_inflate_clicked's own call) -- 8 values, no frames list.
+        # capture_frames=True (see _run_inflate_step's own call) -- 9 values, `frames` (the
+        # winning trial's own captured positions) 8th, before pressure_found.
         (pressure, new_positions, _steps, max_stretch, rms_stretch,
-         _optimality, converged, pressure_found) = result
+         _optimality, converged, frames, pressure_found) = result
         if not pressure_found:
             self._revert_run(
-                f"Level {self.subdivision_level}: mesh didn't respond to pressure -- reverted "
-                "to the state before Inflate.",
+                f"{self._pipeline_label()} -- Failed to converge.",
                 popup_text=(
                     "The mesh didn't respond to any pressure tried at Level "
                     f"{self.subdivision_level} -- it may have a loosely-attached or floppy "
@@ -3931,15 +5828,52 @@ class InflaterPane:
             # relax_once's internal MAX_UNBOUNDED_STEPS=200_000 runaway guard) -- so a specific
             # "didn't converge within N steps" number would just be wrong.
             self._revert_run(
-                f"Level {self.subdivision_level}: pressure {pressure:.2f} didn't converge -- "
-                "reverted to the state before Inflate.",
+                f"{self._pipeline_label()} -- Failed to converge.",
                 popup_text=(
                     f"The mesh didn't converge at Level {self.subdivision_level} (pressure "
                     f"{pressure:.2f}, max stretch {max_stretch:.1f}%, RMS {rms_stretch:.1f}%) "
                     "-- it may have a loosely-attached or floppy face. Try anchoring/"
                     "reconnecting it and Inflate again."))
             return
+        # self.faces/self.face_of_fine are still THIS level's own (fixed since before this
+        # call, only reassigned below by subdivide_once once this level is fully done) -- every
+        # frame from `frames` (this level's own winning-trial capture) gets tagged with them,
+        # correctly, same as _on_level0_relax_progress's own Level 0 capture.
+        for frame_positions, _frame_steps in frames:
+            self._capture_replay_frame(self.faces, self.face_of_fine, frame_positions)
         self.positions = new_positions
+        if self.subdivision_level >= MAX_LEVEL and self._pending_pendants:
+            # Only now, once the CORE mesh (every pendant excluded from it -- see
+            # _exclude_pendant_faces) has actually reached its own final Level-3 result, is
+            # each excluded pendant's own neighbor position known -- reattach flat against it
+            # (2026-09-28, explicit user request) before this level's own render/status, so the
+            # very first thing shown at Level 3 already includes them, not a later redraw.
+            # Each pendant gets its OWN trailing self.base_faces/self._pending_source_polygon_id
+            # index (2026-09-29, explicit bug report -- see _reattach_pendant_faces' own
+            # docstring) -- same convention _diff_attach_pendant_only already used for its own
+            # single-pendant fast path, applied here too so a guest is independently pickable
+            # regardless of which pipeline path reattached it.
+            core_base_faces = self.base_faces
+            own_groups = list(range(len(core_base_faces),
+                                     len(core_base_faces) + len(self._pending_pendants)))
+            if self.base_face_edge_ids is not None:
+                next_edge_id = 1 + max(eid for ids in self.base_face_edge_ids for eid in ids)
+                new_edge_id_rows = []
+                for pendant in self._pending_pendants:
+                    row, next_edge_id = _pendant_own_face_edge_ids(
+                        pendant, core_base_faces, self.base_face_edge_ids, next_edge_id)
+                    new_edge_id_rows.append(row)
+                self.base_face_edge_ids = [*self.base_face_edge_ids, *new_edge_id_rows]
+            self.faces, self.positions, self.face_of_fine, remapped_base_faces = \
+                _reattach_pendant_faces(
+                    self._pending_pendants, self.faces, self.positions, self.face_of_fine,
+                    EDGE_LENGTH, own_groups, core_base_faces)
+            # remapped_base_faces, NOT raw p["face"] -- see _reattach_pendant_faces' own
+            # docstring for why a pendant's own THIRD+ corner no longer keeps its raw id.
+            self.base_faces = [*core_base_faces, *remapped_base_faces]
+            self._pending_source_polygon_id = [
+                *self._pending_source_polygon_id,
+                *(p["source_polygon_id"] for p in self._pending_pendants)]
         self._render()
         # Feeds _guess_pressure_from_history for whichever level runs next this SAME Full
         # Inflate pass (harmless to also record during a Diff Inflate run -- nothing reads
@@ -3948,13 +5882,31 @@ class InflaterPane:
             "pressure": pressure, "rms_stretch_pct": rms_stretch, "pressure_found": pressure_found}
         if self.subdivision_level >= MAX_LEVEL:
             self.last_pressure = pressure
+            # A real pressure calibration pass just completed, whichever pipeline path got
+            # here (Full Inflate's own "solve" mode, _diff_remove_face, or
+            # _diff_reexport_and_relax) -- see this flag's own init comment.
+            self.is_fully_inflated = True
             self._record_inflate_success()
             self._pre_click_snapshot = None
             self._stop_event = None
+            # Captured BEFORE _set_running(False) -- that call clears self._active_button (see
+            # its own docstring), which _pipeline_label() reads to decide "Full Inflate" vs.
+            # "Diff Inflate"; calling _pipeline_label() only AFTER _set_running(False) (as this
+            # used to) always read the just-cleared value and mislabeled every run's own final
+            # "Done" message as "Diff Inflate", even a genuine Full Inflate run throughout
+            # (2026-09-29, explicit bug report: "add a connection... you'll trigger a full
+            # inflate and then a diff inflate (at least according to the UI message), rather
+            # than just a full inflate" -- confirmed by direct testing: every OTHER status
+            # message during the same run correctly read "Full Inflate", only this final one
+            # didn't).
+            done_label = self._pipeline_label()
             self._set_running(False)
-            self._set_status(
-                f"Done -- Level {MAX_LEVEL}, pressure {pressure:.2f}, RMS stretch "
-                f"{rms_stretch:.1f}% (max {max_stretch:.2f}%).", "success")
+            # This run's own replay history is only ever complete/meaningful once the WHOLE
+            # run has actually converged -- populated here, not per-level, so a Diff Inflate's
+            # single Level-3 pass and a Full Inflate's Level 0-3 run both end up with their
+            # own frames spanning start to finish (2026-09-29, explicit user request).
+            self._update_replay_slider()
+            self._set_status(f"{done_label} -- Converged.", "success")
             return
         self.level_snapshot_faces = self.faces
         self.faces, self.positions, self.edge_length, self.face_of_fine = subdivide_once(
@@ -3965,8 +5917,61 @@ class InflaterPane:
         self.edges = None
         self._render()
         self._set_status(
-            f"Subdivided to level {self.subdivision_level}. Inflating...", "info")
+            f"{self._pipeline_label()} -- Level {self.subdivision_level}: Step 0.", "info")
         self._run_inflate_step()
+
+    def _current_root_to_vertex_id(self):
+        """Same {root_slot: vertex_id} shape as builder.root_to_vertex_id() (see its own
+        docstring for what a root_slot is/why it's stable) -- but every value is the REAL
+        vertex id self.base_faces/self.positions actually use RIGHT NOW, not a fresh export's
+        own deterministic sequential numbering. builder.root_to_vertex_id() reimplements
+        _faces_from_shapes' own numbering loop from scratch, with NO knowledge of a pendant's
+        own arbitrary _place_pendant_flat id_map remapping -- using its raw output directly as
+        a self.positions lookup key (as self.last_root_to_vertex_id used to, before this fix)
+        silently matched some UNRELATED vertex that happened to share the same small integer id
+        whenever a pendant/guest was involved (2026-09-29, explicit bug report, confirmed via
+        the debug replay slider: a guest promoted from pendant to insider mid-Diff-Inflate got
+        seeded from a random vertex on the opposite side of the mesh, "connected to the centre
+        of an opposite pentagon" -- the exact same class of stale-id mismatch as the earlier
+        _load_hippie_session fix, here in _diff_reexport_and_relax's own root-matched seeding
+        instead of the file-load path).
+
+        Walks self._pending_source_polygon_id/self.base_faces (this pane's own CURRENT, already
+        correct ids -- pendant-remapped or not, doesn't matter) group by group, matching each
+        group's shape id back to its own expanded_shapes/roots entry (same
+        central_shape_ids/_expand_folded_shapes/_vertex_roots pipeline root_to_vertex_id's own
+        traversal uses) -- then reads the REAL id straight off self.base_faces[group][corner]
+        instead of assigning a fresh sequential one. Ambiguous (silently skipped) for a Polygon-
+        Fold shape split into several expanded_shapes sharing one source_polygon_id -- same
+        known limitation _rebuild_open_edges/_connection_edge_segments already carry for a
+        Polygon-Fold group (see their own comments); out of scope for this fix."""
+        builder = self.builder_getter()
+        central_ids = builder.central_shape_ids()
+        if not central_ids or not self.base_faces or self._pending_source_polygon_id is None:
+            return {}
+        central_shapes = [s for s in builder.shapes if s["id"] in central_ids]
+        central_connections = [c for c in builder.connections
+                                if c["a_shape"] in central_ids and c["b_shape"] in central_ids]
+        expanded_shapes, expanded_connections, _spid = _expand_folded_shapes(
+            central_shapes, central_connections)
+        roots = _vertex_roots(expanded_shapes, expanded_connections)
+        shape_by_id = {s["id"]: s for s in expanded_shapes}
+        vertex_ids = {}
+        for group, spid in enumerate(self._pending_source_polygon_id):
+            if group >= len(self.base_faces):
+                continue
+            shape = shape_by_id.get(spid)
+            if shape is None:
+                continue
+            corners = _shape_face_corner_order(shape)
+            face = self.base_faces[group]
+            if len(corners) != len(face):
+                continue
+            for corner, real_id in zip(corners, face):
+                root = roots.get((shape["id"], corner))
+                if root is not None:
+                    vertex_ids[root] = real_id
+        return vertex_ids
 
     def _record_inflate_success(self):
         """Called only from _on_inflate_step_done's "Done" branch above (a clean Level-3
@@ -3978,17 +5983,20 @@ class InflaterPane:
         self._pending_source_polygon_id as the new self.last_source_polygon_id, and
         re-derives self.last_root_to_vertex_id FRESH from the builder's current state (cheap,
         and always correct at this exact moment -- no need to thread it through the async
-        pipeline the way source_polygon_id is). Deliberately does NOT clear
-        self._pending_source_polygon_id afterward -- it doubles as "the source_polygon_id
-        parallel to self.base_faces RIGHT NOW" (every pipeline path sets both together, see
-        each one's own assignment), which hover picking (_set_hover_group) needs available
-        even for a mesh that's currently displayed but not yet (or never) successfully
-        recorded."""
+        pipeline the way source_polygon_id is) via _current_root_to_vertex_id (NOT
+        builder.root_to_vertex_id() directly -- see that method's own docstring for why).
+        Deliberately does NOT clear self._pending_source_polygon_id afterward -- it doubles as
+        "the source_polygon_id parallel to self.base_faces RIGHT NOW" (every pipeline path sets
+        both together, see each one's own assignment), which hover picking (_set_hover_group)
+        needs available even for a mesh that's currently displayed but not yet (or never)
+        successfully recorded."""
         builder = self.builder_getter()
         (self.last_shapes_snapshot, self.last_connections_snapshot,
          self.last_anchor_snapshot) = builder.snapshot_state()
         self.last_source_polygon_id = self._pending_source_polygon_id
-        self.last_root_to_vertex_id = builder.root_to_vertex_id()
+        self.last_root_to_vertex_id = self._current_root_to_vertex_id()
+        if self.on_inflate_success is not None:
+            self.on_inflate_success()
 
     # ---- diff inflate ----
 
@@ -3998,26 +6006,218 @@ class InflaterPane:
         completed inflate -- see BuilderPane.classify_change) -- re-classifies once more here
         regardless, as a safety net against a stale enabled state (e.g. a builder edit landing
         between the button's last refresh and this click), and tells the user to use Full
-        Inflate instead if that's no longer true. A no-op while already running."""
+        Inflate instead if that's no longer true. A no-op while already running.
+
+        If the CLUB's own insiders were only ever geometrically placed, never really solved
+        (self.is_fully_inflated False -- e.g. a chain of pieces joined one single edge at a
+        time, each one just flat-attached, no real physics run yet), and this particular change
+        genuinely needs real physics (anything except another pendant-only add, which stays
+        flat-attached same as before), this redirects to a full on_full_inflate_clicked instead
+        of any of the incremental Diff Inflate paths below (2026-09-28, explicit user request:
+        "if a bunch of pieces have been flatly connected... and then i finally connect them in
+        a way that requires inflation, that initial inflation needs to be a Full Inflate") --
+        every incremental path assumes it's seeding a real relax/calibration pass from an
+        ALREADY relaxed/calibrated result, which a flat placement never was.
+
+        _diff_add_face/_diff_remove_face/_diff_connection_change below each run their OWN
+        pendant exclusion now (2026-09-28, explicit user request: "teach Diff Inflate to
+        exclude pendants too" -- an earlier version instead redirected to Full Inflate whenever
+        the post-edit mesh had ANY pendant at all, which correctly avoided handing an
+        unconstrained single-edge-hinged face to the real solver, but at the cost of discarding
+        the existing warm-started Level-3 result/pressure guess for a random Level-0 restart on
+        EVERY such edit -- slower, and for some topologies never converges at all: "it tried to
+        reinflate by starting at level 0... the inflate did not converge" when the saved session
+        already had a working Level-3 pressure to diff from). Each of those methods stages
+        whatever it excludes into self._pending_pendants itself, exactly like
+        on_full_inflate_clicked's own "solve" branch, so _on_inflate_step_done's existing
+        Level-3 "Done" branch reattaches them the same generic way regardless of which pipeline
+        path got there."""
         if self._running:
             return
         builder = self.builder_getter()
         kind, extra = builder.classify_change(
             self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
+        label = self._describe_change(kind, extra)
+        if kind == "add_face" and self._is_pendant_add(extra):
+            self._diff_attach_pendant_only(extra, label)
+            return
+        if (not self.is_fully_inflated
+                and kind in ("add_face", "add_connection", "remove_connection", "remove_face")):
+            # Marks this run as a REDIRECTED one so _revert_run's own "undo the triggering edit
+            # on failure" safety net still fires even though self._active_button will read
+            # "full", not "diff" (see this flag's own init comment for the infinite-retry
+            # hazard this closes) -- set here, not inside on_full_inflate_clicked itself, so a
+            # genuine manual Full Inflate/Reinflate click (which never runs through this
+            # redirect) correctly leaves it False.
+            self._diff_redirect_pending = True
+            self.on_full_inflate_clicked(change_label=label)
+            return
+        self._change_label = label
         if kind == "add_face":
             self._diff_add_face(extra)
         elif kind == "remove_face":
             self._diff_remove_face(extra)
         elif kind == "add_connection":
-            self._diff_connection_change("added a connection")
+            self._diff_connection_change()
         elif kind == "remove_connection":
-            self._diff_connection_change("removed a connection")
+            self._diff_connection_change()
         else:
             messagebox.showerror(
                 "Cannot Diff Inflate",
                 "The net has changed by more than a single added face/connection, or more than "
                 "one removed face/connection, since the last Inflate -- use Full Inflate "
                 "instead.")
+
+    def _is_pendant_add(self, new_shape_id):
+        """True iff `new_shape_id` (classify_change's own "add_face" `extra`, always a BRAND
+        NEW shape with no prior connections at all) currently has EXACTLY ONE connection in the
+        live builder net -- i.e. it would be a guest (0-or-1-connection member) were this
+        exported and inflated right now (see this module's own "Club terminology" section) --
+        AND that connection's OTHER end (the neighbor it's hinging onto) does NOT get PROMOTED
+        from guest to insider by gaining this one extra connection. Plain connection counting
+        for new_shape_id's own count is enough (no need for _pendant_face_attachments' own
+        face_edge_ids disambiguation): being brand new, EVERY connection touching it is
+        necessarily its own, so the count IS its own glued-edge count.
+
+        A guest is 0 OR 1 connections (2026-09-28, explicit correction: "Guests are members
+        with 0 or 1 connections") -- the neighbor's OWN prior connection count (excluding this
+        new one) decides what this edit does to IT: 0 -> stays a guest (0 -> 1, a mutual guest
+        pair, both flatly placed -- see _place_pendant_flat's own "chained onto another guest"
+        handling); exactly 1 -> PROMOTED to insider (1 -> 2), a real change to the club's
+        insiders needing a genuine reinflate (diff or full, per Rule 3), not the fast flat-
+        attach-only path _diff_attach_pendant_only takes when nothing about the insiders
+        actually changed; 2+ -> already an insider, unaffected either way."""
+        connections = self.builder_getter().connections
+        count = sum(1 for c in connections
+                    if c["a_shape"] == new_shape_id or c["b_shape"] == new_shape_id)
+        if count != 1:
+            return False
+        conn = next(c for c in connections
+                    if c["a_shape"] == new_shape_id or c["b_shape"] == new_shape_id)
+        neighbor_id = conn["b_shape"] if conn["a_shape"] == new_shape_id else conn["a_shape"]
+        neighbor_other_connections = sum(
+            1 for c in connections
+            if c["id"] != conn["id"] and (c["a_shape"] == neighbor_id or c["b_shape"] == neighbor_id))
+        return neighbor_other_connections != 1
+
+    def _diff_attach_pendant_only(self, new_shape_id, label="Guest added"):
+        """Skips the whole Diff Inflate relax/calibrate pipeline entirely when the just-added
+        shape is a pendant (2026-09-28, explicit user request: "since the new piece is not used
+        in the inflation algorithm... there hasn't actually been any change to the inflatable
+        model. so you don't need to re-inflate. just attach the new piece.") -- a pendant face
+        never participates in relax/inflate at all (see this module's own "pendant (single-
+        edge-attached) face exclusion" section), so adding one changes NOTHING about the
+        already-solved core mesh; _place_pendant_flat can attach it directly against the
+        EXISTING self.faces/self.positions, no re-export-and-reseed or recalibration pass
+        needed. No snapshot/revert/background thread either -- this is a plain, synchronous,
+        closed-form placement (same as _reattach_pendant_faces' own use after a real solve),
+        nothing here can fail to converge the way a relax/calibration pass could.
+
+        Re-exports the mesh once anyway (builder.export_mesh_dict) purely to read the new
+        shape's own vertex-id loop and its exact shared edge -- matched back to the EXISTING,
+        already-solved self.base_faces by SHAPE id (self._pending_source_polygon_id), not by
+        raw vertex/face index, since a fresh export can number things differently than
+        self.base_faces currently does."""
+        builder = self.builder_getter()
+        mesh, err = builder.export_mesh_dict()
+        if err:
+            messagebox.showerror("Cannot attach", err)
+            return
+        try:
+            fresh_base_faces, _fresh_base_edges, fresh_face_edge_ids = _load_mesh_from_dict(mesh)
+        except ValueError as e:
+            messagebox.showerror("Cannot attach", str(e))
+            return
+        fresh_source_polygon_id = mesh.get("source_polygon_id") or list(range(len(fresh_base_faces)))
+        attachments = _pendant_face_attachments(fresh_base_faces, fresh_face_edge_ids)
+        new_fresh_idx = next(
+            (i for i, sid in enumerate(fresh_source_polygon_id) if sid == new_shape_id), None)
+        existing_source_polygon_id = self._pending_source_polygon_id or []
+        neighbor_idx = None
+        shared_pair = None
+        if new_fresh_idx is not None and new_fresh_idx in attachments:
+            neighbor_fresh_idx, shared_pair = attachments[new_fresh_idx]
+            neighbor_shape_id = fresh_source_polygon_id[neighbor_fresh_idx]
+            neighbor_idx = next(
+                (i for i, sid in enumerate(existing_source_polygon_id) if sid == neighbor_shape_id),
+                None)
+        if neighbor_idx is None:
+            # Shouldn't happen (the caller already checked _is_pendant_add) -- fall back to the
+            # full, safe path rather than silently doing nothing. Sets self._change_label
+            # itself since on_diff_inflate_clicked's own caller never reaches its usual
+            # "self._change_label = label" line for this branch (it returned straight into
+            # here instead) -- _diff_add_face/_diff_reexport_and_relax read it via
+            # _pipeline_label without setting it themselves.
+            self._change_label = label
+            self._diff_add_face(new_shape_id)
+            return
+        # The fresh re-export's own ids for shared_pair are NOT guaranteed to already match
+        # self.base_faces' own stored ids for those same two corners -- true when the neighbor
+        # is an ORIGINAL core face (whose stored ids came from the very export numbering that
+        # hasn't since diverged), but false once the neighbor is ITSELF a pendant attached by an
+        # EARLIER call to this method: that call gave the neighbor's own "other" corners
+        # freshly-synthesized ids (see the next comment down) with no relation to what a brand
+        # new export numbers those same physical corners (2026-09-28, explicit bug report:
+        # chaining a new piece onto an already-pendant-attached piece produced a garbled
+        # attachment -- "the square got joined to v1v3 which is not even an edge" -- because the
+        # fresh export's raw id for the shared edge was used directly, silently colliding with
+        # whatever UNRELATED existing vertex happened to already own that number). Translated
+        # through a per-corner fresh-id -> real-id map built from the neighbor's own two
+        # parallel face loops instead -- safe because a shape's own corner-index order
+        # (_shape_face_corner_order) is a pure function of its n/flipped fields, identical in
+        # every export regardless of numbering, so corner k of fresh_base_faces[neighbor_fresh_idx]
+        # and corner k of self.base_faces[neighbor_idx] are always the SAME physical vertex.
+        neighbor_fresh_to_real = dict(zip(fresh_base_faces[neighbor_fresh_idx],
+                                           self.base_faces[neighbor_idx]))
+        real_shared_pair = tuple(neighbor_fresh_to_real[v] for v in shared_pair)
+        # The new shape's own OTHER corners are a different story, though: `fresh_base_faces`/`fresh_source_polygon_id`
+        # are numbered fresh at the BASE-MESH level (this net's handful of shapes), while
+        # self.positions is the EXISTING mesh's own Level-3 FINE mesh, with FAR more vertices --
+        # a brand-new base-level id (e.g. "4" for this net's 5th-ever corner) can easily collide
+        # with some UNRELATED subdivision-created vertex already using that same number in the
+        # existing fine mesh (caught by direct testing: a just-added pendant's own free corner
+        # silently overwrote an existing Level-3 midpoint that happened to share its raw id).
+        # Remapped to a guaranteed-fresh id here, relative to the EXISTING fine mesh's own full
+        # id space, before this pendant ever reaches _place_pendant_flat.
+        existing_ids = set(self.positions) | {v for p in self._pending_pendants for v in p["face"]}
+        next_id = 1 + max([*existing_ids, *fresh_base_faces[new_fresh_idx]], default=0)
+        # `remap` keys are the PENDANT's own fresh ids (matching fresh_base_faces[new_fresh_idx]
+        # directly) -- the shared pair's two fresh keys map to their translated REAL ids above,
+        # every other corner gets a brand-new synthetic one.
+        fresh_a, fresh_b = shared_pair
+        real_a, real_b = real_shared_pair
+        remap = {fresh_a: real_a, fresh_b: real_b}
+        for v in fresh_base_faces[new_fresh_idx]:
+            if v not in remap:
+                remap[v] = next_id
+                next_id += 1
+        pendant_face = [remap[v] for v in fresh_base_faces[new_fresh_idx]]
+        pendant = {"face": pendant_face, "neighbor_idx": neighbor_idx,
+                   "shared_pair": (real_a, real_b), "source_polygon_id": new_shape_id}
+        core_base_faces = self.base_faces
+        if self.base_face_edge_ids is not None:
+            next_edge_id = 1 + max(eid for ids in self.base_face_edge_ids for eid in ids)
+            new_row, _next_edge_id = _pendant_own_face_edge_ids(
+                pendant, core_base_faces, self.base_face_edge_ids, next_edge_id)
+            self.base_face_edge_ids = [*self.base_face_edge_ids, new_row]
+        self._pending_source_polygon_id = [*existing_source_polygon_id, new_shape_id]
+        self._pending_pendants = [*self._pending_pendants, pendant]
+        # A defensive copy, not self.positions itself -- _reattach_pendant_faces mutates its own
+        # `positions` argument in place (.update()), and self.positions may still be referenced
+        # by an EARLIER _snapshot_mesh_state() (e.g. self._pre_click_snapshot from a just-
+        # stopped run) that must not silently change out from under it. own_group is this
+        # pendant's own future trailing self.base_faces index (core_base_faces's own length,
+        # before the append below).
+        self.faces, self.positions, self.face_of_fine, remapped_base_faces = \
+            _reattach_pendant_faces(
+                [pendant], self.faces, dict(self.positions), self.face_of_fine, EDGE_LENGTH,
+                [len(core_base_faces)], core_base_faces)
+        # remapped_base_faces, NOT raw pendant["face"] -- see _reattach_pendant_faces' own
+        # docstring for why a pendant's own THIRD+ corner no longer keeps its raw id.
+        self.base_faces = [*core_base_faces, *remapped_base_faces]
+        self._render()
+        self._record_inflate_success()
+        self._set_status(f"{label}: no inflation needed.", "success")
 
     def _diff_remove_face(self, shape_ids):
         """Filters the STORED Level-3 mesh (self.faces/self.positions/self.face_of_fine) and
@@ -4030,9 +6230,23 @@ class InflaterPane:
         these shapes) rides along, so dropping them all in one filtering pass is exactly as safe
         as dropping the single-shape case always was. positions/edge_length are left as-is (a
         few now-orphaned entries are simply never read again -- relax/estimate_pressure derive
-        their own vertex/edge sets purely from `faces`, see stretchy_mesh._edge_setup). Then
-        runs ONE pressure-calibration pass at Level 3 (_run_inflate_step, already naturally a
-        single pass whenever self.subdivision_level == MAX_LEVEL going in)."""
+        their own vertex/edge sets purely from `faces`, see stretchy_mesh._edge_setup).
+
+        Also runs pendant exclusion on whatever survives the removal (2026-09-28, explicit user
+        request: "teach Diff Inflate to exclude pendants too" -- removing a face's own only
+        bracing neighbor can leave some OTHER face newly pendant, which used to force a cold
+        Full Inflate redirect purely because this method had no pendant-exclusion logic of its
+        own; that redirect discarded the perfectly good existing Level-3 result/pressure guess
+        for a random Level-0 restart, which is slower AND, for some topologies, doesn't even
+        converge). Filters `self.faces`/`self.face_of_fine`/`self.base_faces` a SECOND time
+        (past the shape-removal filtering above) down to just the surviving pendant-free core,
+        stages the excluded pieces in self._pending_pendants exactly like on_full_inflate_
+        clicked's own "solve" branch does -- _on_inflate_step_done's existing Level-3 "Done"
+        branch already reattaches them generically, no changes needed there. Then runs ONE
+        pressure-calibration pass at Level 3 (_run_inflate_step, already naturally a single pass
+        whenever self.subdivision_level == MAX_LEVEL going in) -- on the CORE only, still warm-
+        started from the existing Level-3 positions/pressure, same as before this pendant-
+        exclusion step was added."""
         removed_idxs = {i for i, spid in enumerate(self.last_source_polygon_id) if spid in shape_ids}
         keep_base_idxs = [i for i in range(len(self.base_faces)) if i not in removed_idxs]
         if not keep_base_idxs:
@@ -4040,33 +6254,56 @@ class InflaterPane:
             return
         old_to_new_base = {old_i: new_i for new_i, old_i in enumerate(keep_base_idxs)}
 
+        surviving_base_faces = [self.base_faces[i] for i in keep_base_idxs]
+        surviving_face_edge_ids = (None if self.base_face_edge_ids is None else
+                                    [self.base_face_edge_ids[i] for i in keep_base_idxs])
+        surviving_source_polygon_id = [self.last_source_polygon_id[i] for i in keep_base_idxs]
+        surviving_edges = self.base_edges
+        if surviving_edges is not None:
+            remaining_base_vertex_ids = {v for f in surviving_base_faces for v in f}
+            surviving_edges = [e for e in surviving_edges if e[0] in remaining_base_vertex_ids
+                                and e[1] in remaining_base_vertex_ids]
+
+        prepared = _prepare_mesh_for_inflate(
+            surviving_base_faces, surviving_edges, surviving_face_edge_ids,
+            surviving_source_polygon_id)
+        if prepared[0] == "place":
+            # Degenerate even before considering pendants (e.g. removing a face left only a
+            # mutual single-edge pair) -- no incremental core left for this method's own warm-
+            # start machinery to mean anything; on_full_inflate_clicked's own "place" branch
+            # already handles this cheaply (pure geometry, no relax/calibration at all).
+            self._diff_redirect_pending = True
+            self.on_full_inflate_clicked(change_label=self._change_label)
+            return
+        (_mode, core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id,
+         pendants) = prepared
+        attachments = _pendant_face_attachments(surviving_base_faces, surviving_face_edge_ids)
+        old_to_core = {old_i: core_i for core_i, old_i in
+                       enumerate(i for i in range(len(surviving_base_faces)) if i not in attachments)}
+
         self._pre_click_snapshot = self._snapshot_mesh_state()
         self._stop_event = threading.Event()
         self._stop_requested = False
 
-        self.base_faces = [self.base_faces[i] for i in keep_base_idxs]
-        if self.base_face_edge_ids is not None:
-            self.base_face_edge_ids = [self.base_face_edge_ids[i] for i in keep_base_idxs]
-        pending_source_polygon_id = [self.last_source_polygon_id[i] for i in keep_base_idxs]
-        remaining_base_vertex_ids = {v for f in self.base_faces for v in f}
-        if self.base_edges is not None:
-            self.base_edges = [e for e in self.base_edges if e[0] in remaining_base_vertex_ids
-                                and e[1] in remaining_base_vertex_ids]
+        self.base_faces = core_base_faces
+        self.base_face_edge_ids = core_face_edge_ids
+        self.base_edges = core_base_edges
+        pending_source_polygon_id = core_source_polygon_id
 
-        keep_fine = [i for i, bf in enumerate(self.face_of_fine) if bf not in removed_idxs]
+        keep_fine = [i for i, bf in enumerate(self.face_of_fine)
+                     if bf not in removed_idxs and old_to_new_base[bf] in old_to_core]
         self.faces = [self.faces[i] for i in keep_fine]
-        self.face_of_fine = [old_to_new_base[self.face_of_fine[i]] for i in keep_fine]
+        self.face_of_fine = [old_to_core[old_to_new_base[self.face_of_fine[i]]] for i in keep_fine]
         self.edges = None
         self.subdivision_level = MAX_LEVEL
         self._pending_source_polygon_id = pending_source_polygon_id
+        self._pending_pendants = pendants
         # Deliberately no self._render() here -- the mesh with the face just cut out hasn't
         # been recalibrated yet, so it's not a state worth showing (2026-09-19, explicit:
         # "never redraw anything" before real convergence) -- if it never converges,
         # _revert_run puts the panel straight back to self._pre_click_snapshot instead.
         self._set_running(True, active="diff")
-        face_word = "a face" if len(shape_ids) == 1 else f"{len(shape_ids)} faces"
-        self._set_status(
-            f"Diff Inflate: removed {face_word}, calibrating pressure at Level {MAX_LEVEL}...", "info")
+        self._set_status(f"{self._pipeline_label()} -- Level {MAX_LEVEL}: Step 0.", "info")
         self._run_inflate_step(initial_pressure_guess=self.last_pressure,
                                 tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
 
@@ -4076,12 +6313,12 @@ class InflaterPane:
         _diff_reexport_and_relax); the shape id itself isn't needed there (root-matching finds
         automatically that this shape's own corners have no prior root, and BFS-seeds them near
         whatever they got connected to)."""
-        self._diff_reexport_and_relax("Diff Inflate: added a face")
+        self._diff_reexport_and_relax()
 
-    def _diff_connection_change(self, verb_phrase):
-        self._diff_reexport_and_relax(f"Diff Inflate: {verb_phrase}")
+    def _diff_connection_change(self):
+        self._diff_reexport_and_relax()
 
-    def _diff_reexport_and_relax(self, status_verb_phrase):
+    def _diff_reexport_and_relax(self):
         """Shared by _diff_add_face/_diff_connection_change (see module docstring's "Full
         Inflate vs. Diff Inflate" section) -- re-exports the FULL current net, seeds the fresh
         base mesh's own Level-0 positions by matching each vertex's STABLE root identity
@@ -4095,7 +6332,17 @@ class InflaterPane:
         vertex with no matching old root (a genuinely new shape's own corners, or one half of a
         just-split connection), subdivides straight to Level 3 as pure interpolation
         (_subdivide_combined_to_level3 -- no solving), then runs ONE pressure-calibration pass
-        at Level 3."""
+        at Level 3.
+
+        Also runs pendant exclusion on the fresh export (2026-09-28, explicit user request --
+        see _diff_remove_face's own comment for the full rationale: without this, a connection
+        add/remove/face-add that leaves some face newly pendant used to force a cold Full
+        Inflate redirect, discarding the existing warm-start seed for a random Level-0 restart).
+        Root-matched seeding still runs against the FULL fresh export first (a pendant's own
+        corners may still be real, already-positioned vertices worth reusing, e.g. an unrelated
+        existing pendant that rode along unchanged) -- only the actual subdivide/calibrate step
+        below is restricted to the CORE, with the excluded pieces staged in self._pending_
+        pendants for _on_inflate_step_done's existing generic reattachment."""
         builder = self.builder_getter()
         mesh, err = builder.export_mesh_dict()
         if err:
@@ -4109,6 +6356,17 @@ class InflaterPane:
         source_polygon_id = mesh.get("source_polygon_id") or []
         new_root_to_id = builder.root_to_vertex_id()
 
+        prepared = _prepare_mesh_for_inflate(new_base_faces, new_base_edges, new_face_edge_ids,
+                                              source_polygon_id)
+        if prepared[0] == "place":
+            # Degenerate even before considering pendants -- see _diff_remove_face's own
+            # matching branch for why this redirects instead of trying to warm-start anything.
+            self._diff_redirect_pending = True
+            self.on_full_inflate_clicked(change_label=self._change_label)
+            return
+        (_mode, core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id,
+         pendants) = prepared
+
         self._pre_click_snapshot = self._snapshot_mesh_state()
         self._stop_event = threading.Event()
         self._stop_requested = False
@@ -4120,14 +6378,15 @@ class InflaterPane:
             if old_id is not None and old_id in self.positions:
                 seed[new_id] = self.positions[old_id]
         rng = np.random.default_rng(0)
-        _seed_unknown_by_bfs(new_base_faces, seed, rng)
+        _seed_unknown_by_bfs(core_base_faces, seed, rng)
 
-        self.base_faces = new_base_faces
-        self.base_edges = new_base_edges
-        self.base_face_edge_ids = new_face_edge_ids
-        self._pending_source_polygon_id = source_polygon_id
+        self.base_faces = core_base_faces
+        self.base_edges = core_base_edges
+        self.base_face_edge_ids = core_face_edge_ids
+        self._pending_source_polygon_id = core_source_polygon_id
+        self._pending_pendants = pendants
         self.faces, self.positions, self.edge_length, self.face_of_fine = \
-            _subdivide_combined_to_level3(new_base_faces, new_face_edge_ids, seed)
+            _subdivide_combined_to_level3(core_base_faces, core_face_edge_ids, seed)
         self.edges = None
         self.subdivision_level = MAX_LEVEL
         # Deliberately no self._render() here -- any freshly-seeded (as opposed to root-
@@ -4146,7 +6405,7 @@ class InflaterPane:
         # REAL, pressure-inclusive force law) starting fresh from these seeded positions each
         # time, so the old portion's already-correct geometry is respected from the very first
         # trial.
-        self._set_status(f"{status_verb_phrase}, calibrating pressure at Level {MAX_LEVEL}...", "info")
+        self._set_status(f"{self._pipeline_label()} -- Level {MAX_LEVEL}: Step 0.", "info")
         self._run_inflate_step(initial_pressure_guess=self.last_pressure,
                                 tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
 
@@ -4215,7 +6474,6 @@ def _scale_ui_fonts_once(root):
 class CombinedApp:
     def __init__(self, root):
         self.root = root
-        root.title("Interactive Inflater")
         # Smaller than this app's earlier 1500x900 (2026-09-19, explicit: "the window is too
         # big... make it smaller like the size of the polyhedron_inflater") -- close to that
         # sibling app's own ~1629x880, but this window also needs to fit a full builder pane
@@ -4223,9 +6481,30 @@ class CombinedApp:
         root.geometry("1280x760")
         root.minsize(900, 560)
 
+        # Window-title/unsaved-changes tracking (2026-09-29, explicit user request) --
+        # self.current_session_path is only ever a `.hippie` (Save Session/Load Session of a
+        # `.hippie`, specifically -- a plain "Load..." net or a loaded `.hippo` both leave this
+        # None, i.e. "[Untitled]", even though a load just happened: neither has a `.hippie`
+        # round-trip to associate the window with). Dirty state is TWO sources ORed together,
+        # not one flag: self.builder._dirty (inherited from InteractiveBuilderApp, already
+        # correctly revision-based -- undo/redo restore a snapshot's own ORIGINAL revision
+        # number, so undoing every change since the last save/load lands back on that exact
+        # number and correctly reads as clean again, not just "any edit happened" -- see its
+        # own docstring) covers every 2D net edit; self._mesh_dirty (this app's own, since the
+        # base class has no revision counter for it) covers a completed Full/Diff Inflate
+        # changing the MESH a Save Session would write even when the 2D net itself didn't
+        # change (e.g. a manual Reinflate after only a target-RMS/tolerance tweak). See
+        # _update_title/_mark_dirty/_mark_clean.
+        self.current_session_path = None
+        self._mesh_dirty = False
+
         sv_ttk.set_theme("dark")
         _scale_ui_fonts_once(root)
         self._build_menu(root)
+        # WM_DELETE_WINDOW (2026-09-29, explicit user request: "if the user tries to quit the
+        # program, also prompt them to save if there are any unsaved changes") -- same
+        # unsaved-work check File > New uses, see _confirm_discard_unsaved/_on_quit_request.
+        root.protocol("WM_DELETE_WINDOW", self._on_quit_request)
 
         # A plain 2-column grid with equal, UNIFORM weight (not tk.PanedWindow, which only
         # obeys its stretch="always" flags for LEFTOVER space beyond each pane's own requested
@@ -4249,28 +6528,149 @@ class CombinedApp:
         self.inflater = InflaterPane(right_frame, lambda: self.builder)
         # Wired AFTER both panes exist -- keeps Diff Inflate's enabled state live across every
         # builder edit (BuilderPane._refresh_vme_state's own hook), not just re-checked when
-        # Inflate is clicked.
-        self.builder.on_change = self.inflater.refresh_diff_eligibility
+        # Inflate is clicked. Also keeps the window title's own "*" current (2026-09-29,
+        # explicit user request) -- self.builder._dirty already reflects this same edit the
+        # instant _refresh_vme_state bumps self.builder._revision, so no separate dirty bit is
+        # needed for this half of it (see __init__'s own comment).
+        self.builder.on_change = self._on_builder_change
         # Reverse hover direction (2026-09-19, explicit) -- BuilderPane's own mouse hover
         # forwards to InflaterPane.set_hover_shape_from_builder via this, mirroring
         # InflaterPane's builder_getter above.
         self.builder.inflater_getter = lambda: self.inflater
         # 2026-09-19, explicit: "if auto inflate is enabled, as soon as i load a file, it
         # should also inflate" -- a fresh Load has no relation to whatever was inflated before
-        # (if anything), so this always means a FULL Inflate, never a diff.
-        self.builder.on_load_success = self.inflater.on_load_success
+        # (if anything), so this always means a FULL Inflate, never a diff. Wrapped (rather
+        # than wired straight to self.inflater.on_load_success) so a plain "Load..." ALSO
+        # resets the window title to "[Untitled]", clean (2026-09-29, explicit user request) --
+        # before InteractiveBuilderApp.on_load_clicked's own _saved_revision reset even runs,
+        # so self.builder._dirty already reads False by the time this fires; if Auto Inflate
+        # then re-solves the mesh, on_inflate_success (below) correctly marks it dirty again
+        # once that finishes.
+        self.builder.on_load_success = self._on_builder_load_success
+        # 2026-09-28, explicit -- InflaterPane's own release-vs-debug UI split (target-stretch/
+        # tolerance/Full/Diff/Auto Inflate vs. just Reinflate) reuses the SAME 'd'-key toggle
+        # BuilderPane already has, rather than a separate one; see BuilderPane.
+        # on_debug_mode_change/InflaterPane._apply_mode_visibility.
+        self.builder.on_debug_mode_change = self.inflater._apply_mode_visibility
+        # 2026-09-29, explicit user request -- see __init__'s own comment on self._mesh_dirty/
+        # self.current_session_path for why these three exist.
+        self.inflater.on_inflate_success = self._mark_dirty
+        self.inflater.on_session_saved = self._mark_clean
+        self.inflater.on_session_loaded = self._mark_clean
+
+        self._update_title()
+
+    def _on_builder_change(self):
+        self.inflater.refresh_diff_eligibility()
+        self._update_title()
+
+    def _on_builder_load_success(self):
+        self._mark_clean(path=None)
+        self.inflater.on_load_success()
+
+    def _update_title(self):
+        """Single source of truth for the window title (2026-09-29, explicit user request):
+        "[Untitled]" if self.current_session_path is None (started from scratch, or loaded from
+        anything other than a `.hippie` -- see __init__'s own comment), else that file's own
+        basename, plus a trailing "*" iff self.builder._dirty or self._mesh_dirty (unsaved
+        changes)."""
+        name = self.current_session_path.name if self.current_session_path else "[Untitled]"
+        star = "*" if (self.builder._dirty or self._mesh_dirty) else ""
+        self.root.title(f"{name}{star} - Interactive Inflater")
+
+    def _mark_dirty(self):
+        """Called from InflaterPane.on_inflate_success -- a completed Full/Diff Inflate (or the
+        flat-place pipeline) changed the mesh a Save Session would write, independent of
+        whatever self.builder._dirty already reflects (see __init__'s own comment)."""
+        self._mesh_dirty = True
+        self._update_title()
+
+    def _mark_clean(self, path=None):
+        """Called from InflaterPane.on_session_saved (a `.hippie` was just written to `path`)
+        or on_session_loaded (a session was just loaded -- `path` is that `.hippie`'s own path,
+        or None for a `.hippo`/plain "Load..." -- see _apply_loaded_session/
+        _on_builder_load_success's own comments), and from File > New. Resets BOTH dirty
+        sources to clean: self.builder._saved_revision = self.builder._revision (the SAME
+        mark-clean InteractiveBuilderApp's own on_new_clicked/on_save_as_clicked/on_load_clicked
+        do for their own `.poly` scheme -- reused here for the `.hippie` one instead, since it's
+        the exact same revision-comparison self.builder._dirty already reads) and
+        self._mesh_dirty = False."""
+        self.current_session_path = Path(path) if path else None
+        self.builder._saved_revision = self.builder._revision
+        self._mesh_dirty = False
+        self._update_title()
+
+    def _confirm_discard_unsaved(self):
+        """Returns True if it's safe to proceed with something that would discard the current
+        session (File > New, or closing the window) -- either nothing's unsaved, the user said
+        to discard it anyway ("No"), or they said to save first ("Yes") and
+        InflaterPane.on_save_session_clicked actually went through (it returns False on a
+        cancelled save dialog or a refused save, e.g. nothing's been inflated yet -- see its own
+        docstring). Returns False if the caller should abort instead: "Cancel", or "Yes"
+        followed by a save that didn't actually happen, since proceeding would still lose the
+        unsaved work (2026-09-29, explicit user request, same three-way prompt
+        InteractiveBuilderApp's own _confirm_discard_unsaved uses for its `.poly` scheme,
+        reimplemented here for `.hippie` Save Session instead of that class's own `.poly` Save
+        As -- interactive_builder_app/app.py is read-only from here)."""
+        if not (self.builder._dirty or self._mesh_dirty):
+            return True
+        answer = messagebox.askyesnocancel(
+            "Unsaved changes", "Save your changes before continuing?")
+        if answer is None:  # Cancel
+            return False
+        if not answer:  # No -- discard
+            return True
+        return self.inflater.on_save_session_clicked()  # Yes -- must actually succeed
+
+    def _on_new_clicked(self):
+        """File > New (2026-09-29, explicit user request) -- prompts to save first if anything's
+        unsaved (_confirm_discard_unsaved), then clears the LEFT pane's canvas back to empty
+        (same fields InteractiveBuilderApp's own on_new_clicked clears, plus this app's own
+        anchor concept) and resets the window title to "[Untitled]", clean. A no-op while an
+        inflate is running -- same "the net could still be changing underneath" reasoning
+        on_save_session_clicked's own guard has.
+
+        Deliberately does NOT touch self.inflater's own mesh fields directly -- clearing
+        self.builder.shapes/connections then calling _refresh_vme_state() (which fires
+        self.on_change -> refresh_diff_eligibility) already cascades into InflaterPane's own
+        "nothing's central anymore" branch, which clears self.faces/positions/base_faces/etc.
+        AND sets self.is_fully_inflated = False (Rule 2 -- explicit user request: "set
+        is_fully_inflated to false"), exactly the same way deleting every shape by hand already
+        does -- reusing that existing path instead of duplicating its field list here."""
+        if self.inflater._running:
+            return
+        if not self._confirm_discard_unsaved():
+            return
+        b = self.builder
+        if b.shapes or b.connections:
+            b._push_undo()
+        b.shapes.clear()
+        b.connections.clear()
+        b.selected_ids = set()
+        b.selected_connection_id = None
+        b._drag_state = None
+        b._anchor_shape_id = None
+        b._refresh_vme_state()
+        b._redraw()
+        self._mark_clean(path=None)
+
+    def _on_quit_request(self):
+        """WM_DELETE_WINDOW (the window's own close button, Alt+F4, etc. -- 2026-09-29, explicit
+        user request) -- same unsaved-work check File > New uses before actually closing."""
+        if self._confirm_discard_unsaved():
+            self.root.destroy()
 
     def _build_menu(self, root):
-        """A File menu with just Load... (no New/Save/Save As -- this app has no window-level
-        concept of "the current file" to Save back to, and Save isn't offered yet at all,
-        2026-09-19, explicit) -- replaces the earlier plain toolbar button so Load lives where
-        a user expects file operations to be. Same explicit-color kwargs as
-        interactive_builder_app's own _build_menu (MENU_BG/MENU_FG/etc, imported, not
-        duplicated) so this matches that app's look."""
+        """A File menu with New/Load.../Load Session.../Save Session... -- see New (below), and
+        InflaterPane.on_load_session_clicked/on_save_session_clicked's own docstrings for the
+        other two. Same explicit-color kwargs as interactive_builder_app's own _build_menu
+        (MENU_BG/MENU_FG/etc, imported, not duplicated) so this matches that app's look."""
         menu_kwargs = dict(bg=MENU_BG, fg=MENU_FG, activebackground=MENU_ACTIVE_BG,
                             activeforeground=MENU_FG, disabledforeground=MENU_DISABLED_FG)
         menubar = tk.Menu(root, **menu_kwargs)
         file_menu = tk.Menu(menubar, tearoff=False, **menu_kwargs)
+        # 2026-09-29, explicit user request -- see _on_new_clicked's own docstring.
+        file_menu.add_command(label="New", command=lambda: self._on_new_clicked())
         file_menu.add_command(label="Load...", command=lambda: self.builder.on_load_clicked())
         # 2026-09-26, explicit -- restores a full inflate_polyhedron_app .hippo session (net +
         # mesh + params + pressure) into this combined window; see InflaterPane.
