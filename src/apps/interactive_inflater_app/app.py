@@ -480,6 +480,28 @@ MATERIAL_DIFFUSE = 0.85
 MATERIAL_SPECULAR = 0.35
 MATERIAL_SPECULAR_POWER = 20
 
+# Explicit 2-light camera-relative rig, REPLACING the plotter's own default light kit
+# (2026-09-29, explicit bug report: "I don't see any shading" on a mesh that converges fine --
+# smooth_shading/material tuning alone weren't enough). A plain default VTK Plotter lights the
+# scene with a HEADLIGHT -- a light collocated with the camera, pointed straight down the view
+# axis -- which is exactly the lighting setup that looks flattest: every point on a convex
+# surface facing the camera receives close to the SAME light angle relative to its own normal,
+# so there's minimal brightness falloff across the visible surface regardless of how good
+# smooth_shading's own normal interpolation is (a shading MODEL can't manufacture contrast a
+# light rig never provides). `light_type='camera light'` positions a light in a coordinate
+# space where the camera itself sits at (0, 0, 1) looking at (0, 0, 0) with up=(0, 1, 0) --
+# OFFSETTING position away from (0, 0, 1) (unlike a headlight) puts the light off the view axis,
+# so there's always real angular falloff across a curved surface, and VTK automatically keeps
+# the light following the camera as the user rotates/pans -- no per-render recomputation needed,
+# unlike a world-space light that could leave one whole side permanently unlit. KEY (bright,
+# upper-right) does the actual shape-defining work; FILL (dim, opposite side) keeps the unlit
+# side from going flat black without washing out the key's own contrast -- classic 2-point
+# rig, cheaper than the default kit's 5 lights and deliberately more off-axis than any of them.
+KEY_LIGHT_POSITION = (0.55, 0.7, 0.85)
+KEY_LIGHT_INTENSITY = 1.0
+FILL_LIGHT_POSITION = (-0.6, -0.35, 0.5)
+FILL_LIGHT_INTENSITY = 0.35
+
 # Debug mode's "Show face normals"/"Show vertex normals"/"Show repulsive forces" toggles
 # (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a Diff
 # Inflate join) -- same colors/length convention as inflate_polyhedron_app's own identically-
@@ -2961,6 +2983,7 @@ class InflaterPane:
         self.panel_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.plotter = pv.Plotter(off_screen=True, window_size=list(self.panel_size))
         self.plotter.set_background(PLOT_THEME["bg"])
+        self._setup_plotter_lighting()
         self._photo = None
         self.panel_label.bind("<Configure>", self._on_panel_configure)
 
@@ -3842,6 +3865,7 @@ class InflaterPane:
         self.plotter.close()
         self.plotter = pv.Plotter(off_screen=True, window_size=[width, height])
         self.plotter.set_background(PLOT_THEME["bg"])
+        self._setup_plotter_lighting()
         self._render()
 
     # ---- camera (rotate/pan/zoom) ----
@@ -3860,6 +3884,26 @@ class InflaterPane:
         right /= np.linalg.norm(right)
         up = np.cross(direction, right)
         return Rotation.from_matrix(np.column_stack([direction, right, up]))
+
+    def _setup_plotter_lighting(self):
+        """Replaces self.plotter's own default light kit with the explicit KEY/FILL
+        camera-relative rig (see KEY_LIGHT_POSITION's own comment for why). Called right after
+        every `self.plotter = pv.Plotter(...)` (both _build_ui's initial one and
+        _apply_panel_resize's rebuild-on-resize one) AND at the top of every _render/
+        _render_replay_frame, right after plotter.clear() -- that call wipes every light, not
+        just actors (pyvista's own Renderer.clear() calls remove_all_lights() internally), so a
+        one-time setup right after construction was silently undone the moment the very first
+        real frame drew (2026-09-29, explicit bug report: "I don't see any shading" -- this was
+        the actual cause, not the lighting model itself). Cheap either way: two lightweight VTK
+        Light objects, no mesh work -- `light_type='camera light'` lights track the camera
+        automatically from here on, no re-positioning needed as the user rotates/pans/zooms."""
+        self.plotter.remove_all_lights()
+        key_light = pv.Light(light_type="camera light", intensity=KEY_LIGHT_INTENSITY)
+        key_light.position = KEY_LIGHT_POSITION
+        self.plotter.add_light(key_light)
+        fill_light = pv.Light(light_type="camera light", intensity=FILL_LIGHT_INTENSITY)
+        fill_light.position = FILL_LIGHT_POSITION
+        self.plotter.add_light(fill_light)
 
     def _apply_camera(self):
         """Positions the plotter's orthographic camera from self._camera (rotation/zoom/pan)
@@ -5045,6 +5089,13 @@ class InflaterPane:
         `command` firing; there's no separate throttle-to-release path to fall back to."""
         plotter = self.plotter
         plotter.clear()
+        # plotter.clear() wipes EVERY light too (Renderer.clear() calls its own
+        # remove_all_lights() internally, not just actors) -- re-applied every call, not just
+        # once at plotter construction (2026-09-29, explicit bug report: "I don't see any
+        # shading" -- the custom KEY/FILL rig was being silently wiped on the very first real
+        # render, long before the user ever saw a frame; see _setup_plotter_lighting's own
+        # docstring). Cheap: two lightweight VTK Light objects, no mesh work.
+        self._setup_plotter_lighting()
         self._actor_to_group = {}
         faces = frame["faces"]
         positions = frame["positions"]
@@ -5215,6 +5266,11 @@ class InflaterPane:
         after any edit."""
         plotter = self.plotter
         plotter.clear()
+        # plotter.clear() wipes EVERY light too (Renderer.clear() calls its own
+        # remove_all_lights() internally, not just actors) -- see _setup_plotter_lighting's own
+        # docstring for why this has to be reapplied on every render, not just once at plotter
+        # construction.
+        self._setup_plotter_lighting()
         self._actor_to_group = {}
         self._hover_actors = []
         self._selected_actors = []
