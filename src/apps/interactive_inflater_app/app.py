@@ -458,6 +458,28 @@ FRONT_EDGE_WEIGHT = 0.85
 BACK_EDGE_WEIGHT = 0.9
 SUBDIVISION_EDGE_LINE_WIDTH = 0.75
 
+# Lighting/shading for the two per-group face actors (2026-09-29, explicit user request: "add
+# some lighting and shading... performant") -- SMOOTH_SHADING is the actual visual win: VTK
+# interpolates PER-VERTEX normals (averaged from each vertex's own incident fine triangles)
+# across every triangle instead of using one flat per-triangle normal, so a subdivided face
+# reads as a smoothly curved/inflated surface instead of a faceted polyhedron made of visible
+# flat triangles -- exactly what an "inflated" mesh should look like, and cheap: VTK computes
+# these normals once per add_mesh call (a `vtkPolyDataNormals` pass over however many triangles
+# that one group's own PolyData has, not the whole scene, not per-frame), not a rendering-time
+# cost repeated every redraw. No new library needed -- this is PyVista/VTK's own existing Phong
+# lighting pipeline (already active with a default 3-light kit; add_mesh's default
+# smooth_shading=False was simply never overridden), not a swap to some heavier PBR/raytracing
+# path. The material constants below tone the default lighting down slightly from add_mesh's
+# own defaults (ambient=0.0, diffuse=1.0, specular=0.0) -- a touch of ambient keeps the shadowed
+# side of a face from ever going fully black/flat, and a modest specular highlight is what
+# actually SELLS the "smooth, slightly glossy inflated surface" look once combined with smooth
+# shading; SPECULAR_POWER keeps that highlight small/tight rather than a big soft blob.
+SMOOTH_SHADING = True
+MATERIAL_AMBIENT = 0.25
+MATERIAL_DIFFUSE = 0.85
+MATERIAL_SPECULAR = 0.35
+MATERIAL_SPECULAR_POWER = 20
+
 # Debug mode's "Show face normals"/"Show vertex normals"/"Show repulsive forces" toggles
 # (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a Diff
 # Inflate join) -- same colors/length convention as inflate_polyhedron_app's own identically-
@@ -5045,10 +5067,16 @@ class InflaterPane:
             mesh = pv.PolyData(points, face_conn)
             plotter.add_mesh(mesh, color=color, show_edges=True,
                               edge_color=_weighted_color(color, FRONT_EDGE_WEIGHT),
-                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back")
+                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back",
+                              smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                              diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                              specular_power=MATERIAL_SPECULAR_POWER)
             plotter.add_mesh(mesh, color=inside_color, show_edges=True,
                               edge_color=_weighted_color(inside_color, BACK_EDGE_WEIGHT),
-                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front")
+                              line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front",
+                              smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                              diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                              specular_power=MATERIAL_SPECULAR_POWER)
             front_rim, back_rim = self._frame_group_boundary_offset_lines(
                 faces, face_of_fine, positions, group)
             if len(front_rim):
@@ -5240,7 +5268,10 @@ class InflaterPane:
                 outside_actor = plotter.add_mesh(
                     mesh, color=color, show_edges=True,
                     edge_color=_weighted_color(color, FRONT_EDGE_WEIGHT),
-                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back")
+                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="back",
+                    smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                    diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                    specular_power=MATERIAL_SPECULAR_POWER)
                 inside_actor = plotter.add_mesh(
                     mesh, color=inside_color, show_edges=True,
                     # Blended from inside_color (the actor's OWN fill color) toward WHITE --
@@ -5248,7 +5279,10 @@ class InflaterPane:
                     # instead of the bright outward one (2026-09-19, explicit: "backside lines
                     # should be 85% backside face color and 15% white").
                     edge_color=_weighted_color(inside_color, BACK_EDGE_WEIGHT),
-                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front")
+                    line_width=SUBDIVISION_EDGE_LINE_WIDTH, culling="front",
+                    smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                    diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                    specular_power=MATERIAL_SPECULAR_POWER)
                 self._actor_to_group[outside_actor] = group
                 self._actor_to_group[inside_actor] = group
                 # The bold rim overlay -- both offset copies (_group_boundary_offset_lines, see
