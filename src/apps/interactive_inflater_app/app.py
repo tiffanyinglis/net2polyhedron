@@ -858,14 +858,26 @@ def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level
     return faces_out, positions_out, next_free_id
 
 
-def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length):
+def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length, own_groups):
     """Runs _place_pendant_flat for every excluded pendant against the just-solved CORE mesh's
     own final faces/positions/face_of_fine, and returns (faces, positions, face_of_fine) with
     every pendant's own flat Level-3 fine mesh concatenated on -- `face_of_fine` entries for a
-    pendant's own fine triangles are its own `neighbor_idx` (2026-09-28: they read as part of
-    the face they're attached to for coloring purposes, since they have no relaxed/inflated
-    identity of their own to color by). No-op (returns the inputs unchanged) if `pendants` is
-    empty.
+    pendant's own fine triangles are `own_groups`' own matching entry (parallel to `pendants`,
+    the caller's OWN reserved trailing self.base_faces/self._pending_source_polygon_id index
+    for that one pendant -- 2026-09-29, explicit bug report: "not able to select the guest
+    piece [in 3D]... only selectable together with the insider it's connected to... not able
+    to select any of the edges of the guest piece" -- an EARLIER version tagged a pendant's own
+    triangles with its `neighbor_idx` instead, folding it into the SAME pick/hover/rim group as
+    the real neighbor it's attached to: clicking anywhere on either one always resolved to the
+    neighbor's own shape id (self._pending_source_polygon_id has no entry for the pendant's own
+    id at all), and the boundary edge shared between them canceled out INSIDE that one merged
+    group instead of surviving as a rim (_group_boundary_edge_set counts an edge shared by TWO
+    triangles of the SAME group as interior, not a rim -- see its own docstring), so no seam
+    ever showed between a guest and its neighbor either. Giving the pendant its own group fixes
+    both: it's now its own independently pickable/hoverable actor, with a real rim of its own,
+    without changing `_place_pendant_flat`'s own geometry at all (`neighbor_face_idx`, read from
+    `pendant["neighbor_idx"]` below, is still what its PLACEMENT is computed against -- only the
+    OUTPUT tag changes). No-op (returns the inputs unchanged) if `pendants` is empty.
 
     Every `_place_pendant_flat` call below reads `neighbor_face_idx`'s own plane/normal from
     `core_faces`/`core_face_of_fine` -- a FIXED snapshot taken once, before this loop appends
@@ -898,14 +910,51 @@ def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_lengt
     # overwritten by a same-numbered subdivision vertex). Every pendant's own face is included
     # in this max too, so the count starts safely above every id that could ever appear here.
     next_free_id = 1 + max([*positions, *(v for p in pendants for v in p["face"])])
-    for pendant in pendants:
+    for pendant, own_group in zip(pendants, own_groups):
         pendant_faces, pendant_positions, next_free_id = _place_pendant_flat(
             pendant, positions, pendant["neighbor_idx"], core_face_of_fine, core_faces,
             edge_length, next_free_id)
         faces.extend(pendant_faces)
-        face_of_fine.extend([pendant["neighbor_idx"]] * len(pendant_faces))
+        face_of_fine.extend([own_group] * len(pendant_faces))
         positions.update(pendant_positions)
     return faces, positions, face_of_fine
+
+
+def _pendant_own_face_edge_ids(pendant, base_faces, base_face_edge_ids, next_id):
+    """Returns (row, next_id) -- `pendant["face"]`'s own face_edge_ids row (parallel to its
+    vertex loop, same convention as interactive_builder_app._face_edge_ids_from_shapes), for
+    appending alongside its own trailing self.base_faces entry (2026-09-29, explicit bug
+    report: appending a pendant to self.base_faces -- see _reattach_pendant_faces' own
+    docstring for why -- without a matching self.base_face_edge_ids row left that list one
+    entry SHORTER than self.base_faces, raising IndexError the next time _diff_remove_face
+    indexed it). `None` if `base_face_edge_ids` itself is None (this mesh has no disambiguation
+    data at all -- every OTHER reader already treats that as "fall back to plain vertex-pair
+    matching," so there's nothing to extend). The pendant's own SHARED edge reuses whatever id
+    the neighbor's own row already has for that exact edge, so the two still correctly count as
+    ONE glued connection (see _pendant_face_attachments' own owners-dict docstring) rather than
+    two independent free edges that merely happen to share a vertex pair; every other edge of
+    the pendant gets a fresh id, `next_id` and up (guaranteed not to collide with anything --
+    the caller seeds `next_id` past every id already in use)."""
+    if base_face_edge_ids is None:
+        return None, next_id
+    a, b = pendant["shared_pair"]
+    neighbor_face = base_faces[pendant["neighbor_idx"]]
+    neighbor_ids = base_face_edge_ids[pendant["neighbor_idx"]]
+    n = len(neighbor_face)
+    shared_id = next(
+        (neighbor_ids[k] for k in range(n)
+         if {neighbor_face[k], neighbor_face[(k + 1) % n]} == {a, b}),
+        None)
+    face = pendant["face"]
+    m = len(face)
+    row = []
+    for k in range(m):
+        if {face[k], face[(k + 1) % m]} == {a, b}:
+            row.append(shared_id)
+        else:
+            row.append(next_id)
+            next_id += 1
+    return row, next_id
 
 
 def _prepare_mesh_for_inflate(base_faces, base_edges, face_edge_ids, source_polygon_id=None):
@@ -999,8 +1048,12 @@ def _place_all_flat(reference_face, pendants, edge_length):
     faces = [[id_map[v] for v in face] for face in local_faces]
     positions = {id_map[v]: pos for v, pos in local_positions.items()}
     face_of_fine = [0] * len(faces)
+    # own_groups: reference_face is base_faces[0], each pendant its own trailing index (1..N)
+    # -- see this function's own base_faces line below, and _reattach_pendant_faces' own
+    # docstring for why each pendant needs a DISTINCT tag rather than sharing its neighbor's.
     faces, positions, face_of_fine = _reattach_pendant_faces(
-        pendants, faces, positions, face_of_fine, edge_length)
+        pendants, faces, positions, face_of_fine, edge_length,
+        list(range(1, 1 + len(pendants))))
     base_faces = [reference_face, *(p["face"] for p in pendants)]
     return faces, positions, face_of_fine, base_faces
 
@@ -4951,9 +5004,28 @@ class InflaterPane:
             # each excluded pendant's own neighbor position known -- reattach flat against it
             # (2026-09-28, explicit user request) before this level's own render/status, so the
             # very first thing shown at Level 3 already includes them, not a later redraw.
+            # Each pendant gets its OWN trailing self.base_faces/self._pending_source_polygon_id
+            # index (2026-09-29, explicit bug report -- see _reattach_pendant_faces' own
+            # docstring) -- same convention _diff_attach_pendant_only already used for its own
+            # single-pendant fast path, applied here too so a guest is independently pickable
+            # regardless of which pipeline path reattached it.
+            own_groups = list(range(len(self.base_faces),
+                                     len(self.base_faces) + len(self._pending_pendants)))
+            if self.base_face_edge_ids is not None:
+                next_edge_id = 1 + max(eid for ids in self.base_face_edge_ids for eid in ids)
+                new_edge_id_rows = []
+                for pendant in self._pending_pendants:
+                    row, next_edge_id = _pendant_own_face_edge_ids(
+                        pendant, self.base_faces, self.base_face_edge_ids, next_edge_id)
+                    new_edge_id_rows.append(row)
+                self.base_face_edge_ids = [*self.base_face_edge_ids, *new_edge_id_rows]
+            self.base_faces = [*self.base_faces, *(p["face"] for p in self._pending_pendants)]
+            self._pending_source_polygon_id = [
+                *self._pending_source_polygon_id,
+                *(p["source_polygon_id"] for p in self._pending_pendants)]
             self.faces, self.positions, self.face_of_fine = _reattach_pendant_faces(
                 self._pending_pendants, self.faces, self.positions, self.face_of_fine,
-                EDGE_LENGTH)
+                EDGE_LENGTH, own_groups)
         self._render()
         # Feeds _guess_pressure_from_history for whichever level runs next this SAME Full
         # Inflate pass (harmless to also record during a Diff Inflate run -- nothing reads
@@ -5213,15 +5285,22 @@ class InflaterPane:
         pendant_face = [remap[v] for v in fresh_base_faces[new_fresh_idx]]
         pendant = {"face": pendant_face, "neighbor_idx": neighbor_idx,
                    "shared_pair": (real_a, real_b), "source_polygon_id": new_shape_id}
+        if self.base_face_edge_ids is not None:
+            next_edge_id = 1 + max(eid for ids in self.base_face_edge_ids for eid in ids)
+            new_row, _next_edge_id = _pendant_own_face_edge_ids(
+                pendant, self.base_faces, self.base_face_edge_ids, next_edge_id)
+            self.base_face_edge_ids = [*self.base_face_edge_ids, new_row]
         self.base_faces = [*self.base_faces, pendant["face"]]
         self._pending_source_polygon_id = [*existing_source_polygon_id, new_shape_id]
         self._pending_pendants = [*self._pending_pendants, pendant]
         # A defensive copy, not self.positions itself -- _reattach_pendant_faces mutates its own
         # `positions` argument in place (.update()), and self.positions may still be referenced
         # by an EARLIER _snapshot_mesh_state() (e.g. self._pre_click_snapshot from a just-
-        # stopped run) that must not silently change out from under it.
+        # stopped run) that must not silently change out from under it. own_group is this
+        # pendant's own JUST-APPENDED trailing self.base_faces index, above.
         self.faces, self.positions, self.face_of_fine = _reattach_pendant_faces(
-            [pendant], self.faces, dict(self.positions), self.face_of_fine, EDGE_LENGTH)
+            [pendant], self.faces, dict(self.positions), self.face_of_fine, EDGE_LENGTH,
+            [len(self.base_faces) - 1])
         self._render()
         self._record_inflate_success()
         self._set_status(f"{label}: no inflation needed.", "success")
