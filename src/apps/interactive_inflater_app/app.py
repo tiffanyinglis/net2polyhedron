@@ -237,10 +237,10 @@ SAFETY_STEP_CAP = 50000
 DIFF_PRESSURE_GUESS_TOL_PCT = 5.0
 
 # Polygon-edge line width in the 3D panel (2026-09-19, explicit, most recently "make the rim
-# edge 3 for both sides and highlight width 4"). The yellow hover highlight stays visually
-# thicker still (HOVER_HIGHLIGHT_LINE_WIDTH) so it always reads as distinct from the ordinary
-# edges.
-POLYGON_EDGE_LINE_WIDTH = 3.0
+# edge 3 for both sides and highlight width 4"; thinned to 2.5 on 2026-09-29, explicit: "make
+# them a tad thinner"). The yellow hover highlight stays visually thicker still
+# (HOVER_HIGHLIGHT_LINE_WIDTH) so it always reads as distinct from the ordinary edges.
+POLYGON_EDGE_LINE_WIDTH = 2.5
 HOVER_HIGHLIGHT_LINE_WIDTH = 4.0
 SELECTED_HIGHLIGHT_LINE_WIDTH = 4.0
 
@@ -4718,6 +4718,22 @@ class InflaterPane:
             return self._pending_source_polygon_id[group]
         return None
 
+    def _group_polygon_n(self, group):
+        """Side count to key POLYGON_COLORS with for base face `group` -- the ORIGINAL 2D
+        shape's own `n` (via source_polygon_id), not `len(self.base_faces[group])`, since a
+        Polygon-Fold shape's fan triangles each have their OWN base face with only 3 sides,
+        which would otherwise color every fold-triangle as a triangle instead of as its real
+        source polygon (2026-09-29, explicit bug report: a self-joined hexagon showed green,
+        not the hexagon's own purple). Falls back to `len(self.base_faces[group])` whenever
+        the shape lookup fails (no source_polygon_id yet, or a shape_id the builder no longer
+        has -- both legitimate transient states, not errors)."""
+        shape_id = self._shape_id_of_group(group)
+        if shape_id is not None:
+            shape = next((s for s in self.builder_getter().shapes if s["id"] == shape_id), None)
+            if shape is not None:
+                return shape["n"]
+        return len(self.base_faces[group])
+
     def _groups_for_shape_ids(self, shape_ids):
         """Every 3D group whose own source_polygon_id is one of `shape_ids` -- usually one
         group per shape_id, but a Polygon-Fold shape's several triangle groups all share one
@@ -5210,7 +5226,7 @@ class InflaterPane:
             group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == group]
             if not group_faces:
                 continue
-            n = len(self.base_faces[group]) if group < len(self.base_faces) else 3
+            n = self._group_polygon_n(group) if group < len(self.base_faces) else 3
             color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
             inside_color = _darken_color(color)
             face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
@@ -5334,7 +5350,10 @@ class InflaterPane:
     def _render(self):
         """Redraws the single panel from whatever self.faces/self.positions/self.face_of_fine
         currently hold -- colored per ORIGINAL base face (face_of_fine) by POLYGON_COLORS[n]
-        (n = that base face's own vertex count), the SAME fixed per-shape-type color the left
+        (n = that base face's own SOURCE POLYGON's vertex count, via _group_polygon_n --
+        NOT len(self.base_faces[group]), since a Polygon-Fold shape's fan triangles each have
+        their own 3-sided base face and would otherwise color as a triangle instead of the
+        real source polygon), the SAME fixed per-shape-type color the left
         pane's canvas draws that shape with (POLYGON_COLORS is keyed by side count, not by
         instance -- see interactive_builder_app's own _draw_shape/_build_palette_entry), so a
         square on the left inflates into a square-colored patch on the right (2026-09-19,
@@ -5397,7 +5416,7 @@ class InflaterPane:
                 group_faces = [f for f, bf in zip(self.faces, face_of_fine) if bf == group]
                 if not group_faces:
                     continue
-                n = len(self.base_faces[group])
+                n = self._group_polygon_n(group)
                 color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
                 inside_color = _darken_color(color)
                 face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
