@@ -2600,6 +2600,19 @@ class InflaterPane:
         # nothing's been captured yet) -- see _on_replay_slider_moved's own docstring.
         self._replay_frames = []
         self._replay_scrub_index = None
+        # Window-title/unsaved-changes hooks (2026-09-29, explicit user request) -- all three
+        # None until CombinedApp.__init__ wires them, same optional-callback pattern as
+        # BuilderPane.on_load_success/on_debug_mode_change. on_inflate_success fires at the very
+        # end of _record_inflate_success (a completed Full/Diff Inflate/flat-place run changes
+        # what a Save Session would write even when the 2D net itself didn't change, e.g. a
+        # manual Reinflate after only a target-RMS/tolerance tweak -- CombinedApp's own
+        # BuilderPane-revision-based dirty tracking can't see that on its own).
+        # on_session_saved/on_session_loaded fire once a Save Session/Load Session actually
+        # completes (see on_save_session_clicked/_apply_loaded_session's own call sites) --
+        # CombinedApp wires both to its own _mark_clean.
+        self.on_inflate_success = None
+        self.on_session_saved = None
+        self.on_session_loaded = None
         # True for the duration of a Full Inflate run that on_diff_inflate_clicked itself
         # redirected into (self.is_fully_inflated False -- see that method's own docstring) --
         # lets _revert_run's own "undo the triggering edit
@@ -3376,7 +3389,7 @@ class InflaterPane:
             messagebox.showerror("Load session failed", str(e))
             return
         if "anchor_shape_id" in raw:
-            self._load_hippie_session(raw_text)
+            self._load_hippie_session(raw_text, path=path)
         else:
             self._load_hippo_session(raw_text)
 
@@ -3466,7 +3479,7 @@ class InflaterPane:
             # "place" (see this app's own is_fully_inflated docstring), so this is always True.
             is_fully_inflated=True)
 
-    def _load_hippie_session(self, raw_text):
+    def _load_hippie_session(self, raw_text, path=None):
         """Restores this app's OWN `.hippie` session (InflaterSessionStateModel) -- see
         on_load_session_clicked's own docstring for the format-dispatch. `net_file` here
         describes EVERY placed shape/connection (central or not, see
@@ -3545,18 +3558,27 @@ class InflaterPane:
             face_of_fine=face_of_fine, edge_length=edge_length,
             target_rms_pct=state.target_rms_pct, tolerance=state.tolerance,
             last_pressure=state.last_pressure, level_history=state.level_history,
-            session_label=state.net_name, is_fully_inflated=state.is_fully_inflated)
+            session_label=state.net_name, is_fully_inflated=state.is_fully_inflated,
+            session_path=path)
 
     def _apply_loaded_session(self, builder, net_file, base_faces, base_edges, base_face_edge_ids,
                                subdivision_level, faces, positions, face_of_fine, edge_length,
                                target_rms_pct, tolerance, last_pressure, level_history,
-                               session_label, is_fully_inflated):
+                               session_label, is_fully_inflated, session_path=None):
         """Shared tail of _load_hippo_session/_load_hippie_session -- everything past "the
         builder's own 2D net is already restored, and we have the central object's own base
         mesh/current mesh": populates every remaining InflaterPane field (see
         on_load_session_clicked's own docstring for the full list and WHY each one matters), then
         renders and refreshes Diff Inflate's own enabled state (harmless right after a load --
-        classify_change sees an identical snapshot and reports "none", so nothing auto-fires)."""
+        classify_change sees an identical snapshot and reports "none", so nothing auto-fires).
+
+        `session_path`, only ever given by _load_hippie_session (None from _load_hippo_session
+        -- 2026-09-29, explicit user request: "if loaded from a non-hippie file... say
+        '[Untitled]'"), is passed straight to self.on_session_loaded (CombinedApp's own
+        _mark_clean) at the very end, once every field above is genuinely consistent -- a
+        `.hippo` load's own None correctly resets the title to "[Untitled]" (still marked
+        CLEAN, not "started from scratch" dirty: nothing's unsaved immediately after a load,
+        only once the user actually changes something)."""
         self.base_faces = base_faces
         self.base_edges = base_edges
         self.base_face_edge_ids = base_face_edge_ids
@@ -3601,6 +3623,8 @@ class InflaterPane:
         self._render()
         self.refresh_diff_eligibility()
         self._set_status(f"Loaded session '{session_label}' at Level {subdivision_level}.", "info")
+        if self.on_session_loaded is not None:
+            self.on_session_loaded(session_path)
 
     def on_save_session_clicked(self):
         """File > Save Session... (2026-09-26, explicit) -- writes the CURRENT full session (the
@@ -3611,25 +3635,31 @@ class InflaterPane:
         vertex-merge/duplicate-edge validation (export_full_net_dict's own check), or if nothing
         has been inflated yet (self.faces/base_faces are None before any Inflate ever runs -- a
         `.hippie` always carries a real central-object mesh, never a placeholder one). A no-op
-        while an inflate is running (the net could still be changing underneath the save)."""
+        while an inflate is running (the net could still be changing underneath the save).
+
+        Returns True iff a file was actually written, False otherwise (refused, or the user
+        cancelled the save dialog) -- CombinedApp._confirm_discard_unsaved (2026-09-29, explicit
+        user request: File > New/window-close should offer to save first) reads this to know
+        whether "Yes" genuinely went through before it's safe to proceed with discarding the
+        current session."""
         if self._running:
-            return
+            return False
         builder = self.builder_getter()
         net_file, err = builder.export_full_net_dict()
         if err:
             messagebox.showerror("Save session failed", err)
-            return
+            return False
         if self.faces is None or self.base_faces is None or builder._anchor_shape_id is None:
             messagebox.showerror("Save session failed",
                                   "Nothing has been inflated yet -- run Full Inflate first.")
-            return
+            return False
         SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(
             title="Save session", initialdir=str(SESSION_OUTPUT_DIR),
             defaultextension=SESSION_FILE_EXTENSION,
             filetypes=[("Inflater session", f"*{SESSION_FILE_EXTENSION}"), ("All files", "*.*")])
         if not path:
-            return
+            return False
         mesh_state = LevelStateModel.from_mesh(self.faces, self.positions, self.face_of_fine,
                                                 self.edge_length)
         state = InflaterSessionStateModel(
@@ -3646,8 +3676,14 @@ class InflaterPane:
                 f.write(state.model_dump_json())
         except OSError as e:
             messagebox.showerror("Save session failed", str(e))
-            return
+            return False
         self._set_status(f"Session saved to {path}.", "info")
+        # 2026-09-29, explicit user request: the window title/dirty-tracking needs to know a
+        # `.hippie` was just successfully written to `path` -- CombinedApp.__init__ wires this
+        # to its own _mark_clean(path).
+        if self.on_session_saved is not None:
+            self.on_session_saved(Path(path))
+        return True
 
     def refresh_diff_eligibility(self):
         """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
@@ -5755,6 +5791,8 @@ class InflaterPane:
          self.last_anchor_snapshot) = builder.snapshot_state()
         self.last_source_polygon_id = self._pending_source_polygon_id
         self.last_root_to_vertex_id = self._current_root_to_vertex_id()
+        if self.on_inflate_success is not None:
+            self.on_inflate_success()
 
     # ---- diff inflate ----
 
@@ -6232,7 +6270,6 @@ def _scale_ui_fonts_once(root):
 class CombinedApp:
     def __init__(self, root):
         self.root = root
-        root.title("Interactive Inflater")
         # Smaller than this app's earlier 1500x900 (2026-09-19, explicit: "the window is too
         # big... make it smaller like the size of the polyhedron_inflater") -- close to that
         # sibling app's own ~1629x880, but this window also needs to fit a full builder pane
@@ -6240,9 +6277,30 @@ class CombinedApp:
         root.geometry("1280x760")
         root.minsize(900, 560)
 
+        # Window-title/unsaved-changes tracking (2026-09-29, explicit user request) --
+        # self.current_session_path is only ever a `.hippie` (Save Session/Load Session of a
+        # `.hippie`, specifically -- a plain "Load..." net or a loaded `.hippo` both leave this
+        # None, i.e. "[Untitled]", even though a load just happened: neither has a `.hippie`
+        # round-trip to associate the window with). Dirty state is TWO sources ORed together,
+        # not one flag: self.builder._dirty (inherited from InteractiveBuilderApp, already
+        # correctly revision-based -- undo/redo restore a snapshot's own ORIGINAL revision
+        # number, so undoing every change since the last save/load lands back on that exact
+        # number and correctly reads as clean again, not just "any edit happened" -- see its
+        # own docstring) covers every 2D net edit; self._mesh_dirty (this app's own, since the
+        # base class has no revision counter for it) covers a completed Full/Diff Inflate
+        # changing the MESH a Save Session would write even when the 2D net itself didn't
+        # change (e.g. a manual Reinflate after only a target-RMS/tolerance tweak). See
+        # _update_title/_mark_dirty/_mark_clean.
+        self.current_session_path = None
+        self._mesh_dirty = False
+
         sv_ttk.set_theme("dark")
         _scale_ui_fonts_once(root)
         self._build_menu(root)
+        # WM_DELETE_WINDOW (2026-09-29, explicit user request: "if the user tries to quit the
+        # program, also prompt them to save if there are any unsaved changes") -- same
+        # unsaved-work check File > New uses, see _confirm_discard_unsaved/_on_quit_request.
+        root.protocol("WM_DELETE_WINDOW", self._on_quit_request)
 
         # A plain 2-column grid with equal, UNIFORM weight (not tk.PanedWindow, which only
         # obeys its stretch="always" flags for LEFTOVER space beyond each pane's own requested
@@ -6266,33 +6324,149 @@ class CombinedApp:
         self.inflater = InflaterPane(right_frame, lambda: self.builder)
         # Wired AFTER both panes exist -- keeps Diff Inflate's enabled state live across every
         # builder edit (BuilderPane._refresh_vme_state's own hook), not just re-checked when
-        # Inflate is clicked.
-        self.builder.on_change = self.inflater.refresh_diff_eligibility
+        # Inflate is clicked. Also keeps the window title's own "*" current (2026-09-29,
+        # explicit user request) -- self.builder._dirty already reflects this same edit the
+        # instant _refresh_vme_state bumps self.builder._revision, so no separate dirty bit is
+        # needed for this half of it (see __init__'s own comment).
+        self.builder.on_change = self._on_builder_change
         # Reverse hover direction (2026-09-19, explicit) -- BuilderPane's own mouse hover
         # forwards to InflaterPane.set_hover_shape_from_builder via this, mirroring
         # InflaterPane's builder_getter above.
         self.builder.inflater_getter = lambda: self.inflater
         # 2026-09-19, explicit: "if auto inflate is enabled, as soon as i load a file, it
         # should also inflate" -- a fresh Load has no relation to whatever was inflated before
-        # (if anything), so this always means a FULL Inflate, never a diff.
-        self.builder.on_load_success = self.inflater.on_load_success
+        # (if anything), so this always means a FULL Inflate, never a diff. Wrapped (rather
+        # than wired straight to self.inflater.on_load_success) so a plain "Load..." ALSO
+        # resets the window title to "[Untitled]", clean (2026-09-29, explicit user request) --
+        # before InteractiveBuilderApp.on_load_clicked's own _saved_revision reset even runs,
+        # so self.builder._dirty already reads False by the time this fires; if Auto Inflate
+        # then re-solves the mesh, on_inflate_success (below) correctly marks it dirty again
+        # once that finishes.
+        self.builder.on_load_success = self._on_builder_load_success
         # 2026-09-28, explicit -- InflaterPane's own release-vs-debug UI split (target-stretch/
         # tolerance/Full/Diff/Auto Inflate vs. just Reinflate) reuses the SAME 'd'-key toggle
         # BuilderPane already has, rather than a separate one; see BuilderPane.
         # on_debug_mode_change/InflaterPane._apply_mode_visibility.
         self.builder.on_debug_mode_change = self.inflater._apply_mode_visibility
+        # 2026-09-29, explicit user request -- see __init__'s own comment on self._mesh_dirty/
+        # self.current_session_path for why these three exist.
+        self.inflater.on_inflate_success = self._mark_dirty
+        self.inflater.on_session_saved = self._mark_clean
+        self.inflater.on_session_loaded = self._mark_clean
+
+        self._update_title()
+
+    def _on_builder_change(self):
+        self.inflater.refresh_diff_eligibility()
+        self._update_title()
+
+    def _on_builder_load_success(self):
+        self._mark_clean(path=None)
+        self.inflater.on_load_success()
+
+    def _update_title(self):
+        """Single source of truth for the window title (2026-09-29, explicit user request):
+        "[Untitled]" if self.current_session_path is None (started from scratch, or loaded from
+        anything other than a `.hippie` -- see __init__'s own comment), else that file's own
+        basename, plus a trailing "*" iff self.builder._dirty or self._mesh_dirty (unsaved
+        changes)."""
+        name = self.current_session_path.name if self.current_session_path else "[Untitled]"
+        star = "*" if (self.builder._dirty or self._mesh_dirty) else ""
+        self.root.title(f"{name}{star} - Interactive Inflater")
+
+    def _mark_dirty(self):
+        """Called from InflaterPane.on_inflate_success -- a completed Full/Diff Inflate (or the
+        flat-place pipeline) changed the mesh a Save Session would write, independent of
+        whatever self.builder._dirty already reflects (see __init__'s own comment)."""
+        self._mesh_dirty = True
+        self._update_title()
+
+    def _mark_clean(self, path=None):
+        """Called from InflaterPane.on_session_saved (a `.hippie` was just written to `path`)
+        or on_session_loaded (a session was just loaded -- `path` is that `.hippie`'s own path,
+        or None for a `.hippo`/plain "Load..." -- see _apply_loaded_session/
+        _on_builder_load_success's own comments), and from File > New. Resets BOTH dirty
+        sources to clean: self.builder._saved_revision = self.builder._revision (the SAME
+        mark-clean InteractiveBuilderApp's own on_new_clicked/on_save_as_clicked/on_load_clicked
+        do for their own `.poly` scheme -- reused here for the `.hippie` one instead, since it's
+        the exact same revision-comparison self.builder._dirty already reads) and
+        self._mesh_dirty = False."""
+        self.current_session_path = Path(path) if path else None
+        self.builder._saved_revision = self.builder._revision
+        self._mesh_dirty = False
+        self._update_title()
+
+    def _confirm_discard_unsaved(self):
+        """Returns True if it's safe to proceed with something that would discard the current
+        session (File > New, or closing the window) -- either nothing's unsaved, the user said
+        to discard it anyway ("No"), or they said to save first ("Yes") and
+        InflaterPane.on_save_session_clicked actually went through (it returns False on a
+        cancelled save dialog or a refused save, e.g. nothing's been inflated yet -- see its own
+        docstring). Returns False if the caller should abort instead: "Cancel", or "Yes"
+        followed by a save that didn't actually happen, since proceeding would still lose the
+        unsaved work (2026-09-29, explicit user request, same three-way prompt
+        InteractiveBuilderApp's own _confirm_discard_unsaved uses for its `.poly` scheme,
+        reimplemented here for `.hippie` Save Session instead of that class's own `.poly` Save
+        As -- interactive_builder_app/app.py is read-only from here)."""
+        if not (self.builder._dirty or self._mesh_dirty):
+            return True
+        answer = messagebox.askyesnocancel(
+            "Unsaved changes", "Save your changes before continuing?")
+        if answer is None:  # Cancel
+            return False
+        if not answer:  # No -- discard
+            return True
+        return self.inflater.on_save_session_clicked()  # Yes -- must actually succeed
+
+    def _on_new_clicked(self):
+        """File > New (2026-09-29, explicit user request) -- prompts to save first if anything's
+        unsaved (_confirm_discard_unsaved), then clears the LEFT pane's canvas back to empty
+        (same fields InteractiveBuilderApp's own on_new_clicked clears, plus this app's own
+        anchor concept) and resets the window title to "[Untitled]", clean. A no-op while an
+        inflate is running -- same "the net could still be changing underneath" reasoning
+        on_save_session_clicked's own guard has.
+
+        Deliberately does NOT touch self.inflater's own mesh fields directly -- clearing
+        self.builder.shapes/connections then calling _refresh_vme_state() (which fires
+        self.on_change -> refresh_diff_eligibility) already cascades into InflaterPane's own
+        "nothing's central anymore" branch, which clears self.faces/positions/base_faces/etc.
+        AND sets self.is_fully_inflated = False (Rule 2 -- explicit user request: "set
+        is_fully_inflated to false"), exactly the same way deleting every shape by hand already
+        does -- reusing that existing path instead of duplicating its field list here."""
+        if self.inflater._running:
+            return
+        if not self._confirm_discard_unsaved():
+            return
+        b = self.builder
+        if b.shapes or b.connections:
+            b._push_undo()
+        b.shapes.clear()
+        b.connections.clear()
+        b.selected_ids = set()
+        b.selected_connection_id = None
+        b._drag_state = None
+        b._anchor_shape_id = None
+        b._refresh_vme_state()
+        b._redraw()
+        self._mark_clean(path=None)
+
+    def _on_quit_request(self):
+        """WM_DELETE_WINDOW (the window's own close button, Alt+F4, etc. -- 2026-09-29, explicit
+        user request) -- same unsaved-work check File > New uses before actually closing."""
+        if self._confirm_discard_unsaved():
+            self.root.destroy()
 
     def _build_menu(self, root):
-        """A File menu with just Load... (no New/Save/Save As -- this app has no window-level
-        concept of "the current file" to Save back to, and Save isn't offered yet at all,
-        2026-09-19, explicit) -- replaces the earlier plain toolbar button so Load lives where
-        a user expects file operations to be. Same explicit-color kwargs as
-        interactive_builder_app's own _build_menu (MENU_BG/MENU_FG/etc, imported, not
-        duplicated) so this matches that app's look."""
+        """A File menu with New/Load.../Load Session.../Save Session... -- see New (below), and
+        InflaterPane.on_load_session_clicked/on_save_session_clicked's own docstrings for the
+        other two. Same explicit-color kwargs as interactive_builder_app's own _build_menu
+        (MENU_BG/MENU_FG/etc, imported, not duplicated) so this matches that app's look."""
         menu_kwargs = dict(bg=MENU_BG, fg=MENU_FG, activebackground=MENU_ACTIVE_BG,
                             activeforeground=MENU_FG, disabledforeground=MENU_DISABLED_FG)
         menubar = tk.Menu(root, **menu_kwargs)
         file_menu = tk.Menu(menubar, tearoff=False, **menu_kwargs)
+        # 2026-09-29, explicit user request -- see _on_new_clicked's own docstring.
+        file_menu.add_command(label="New", command=lambda: self._on_new_clicked())
         file_menu.add_command(label="Load...", command=lambda: self.builder.on_load_clicked())
         # 2026-09-26, explicit -- restores a full inflate_polyhedron_app .hippo session (net +
         # mesh + params + pressure) into this combined window; see InflaterPane.
