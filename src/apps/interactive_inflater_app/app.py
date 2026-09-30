@@ -166,10 +166,12 @@ from interactive_inflater_app.session_state import InflaterSessionStateModel
 
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.inflate_polyhedron.stretchy_mesh import (
-    EDGE_LENGTH, estimate_pressure_for_target_stretch, load_stretchy_mesh,
+    EDGE_LENGTH, load_stretchy_mesh,
     load_stretchy_mesh_edges, mesh_edges, random_initial_positions,
-    relax_initial_configuration, repulsion_force,
+    repulsion_force,
 )
+from utils.inflate_polyhedron.pre_inflation_relaxer import relax_initial_configuration
+from utils.inflate_polyhedron.multi_trial_inflater import estimate_pressure_for_target_stretch
 
 # interactive_builder_app/app.py is NOT on the untouchable list, but per this app's own
 # instructions it's still read-only from here -- imported directly (a plain namespace-package

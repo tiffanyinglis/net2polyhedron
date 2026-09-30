@@ -2,27 +2,29 @@
 
 ## Abstract
 
-We describe a method for realizing a closed, combinatorially-specified
-polyhedral net — one whose faces may share more than one edge with a
-neighbor, precluding a rigid flat-faced embedding — as a physically
-plausible, inflated 3D shape. The method has two stages: (1) a
+We describe a method for realizing a closed or open, combinatorially-
+specified polyhedral net — one whose faces may share more than one edge
+with a neighbor, precluding a rigid flat-faced embedding — as a
+physically plausible, inflated 3D shape. The method has two stages: (1) a
 random-start spring relaxation that recovers a well-separated, roughly
 edge-length-correct embedding with no notion of pressure or face
 orientation, and (2) an explicit, pressure-driven force relaxation that
-inflates the embedding, subject only to a hardening (linear-plus-cubic)
-edge spring and a per-face outward pressure force, walked in small steps
-to avoid the spurious equilibria a Newton-style solver can converge to.
-A calibration
-procedure estimates, for a given mesh, the pressure that yields a target
-RMS edge stretch, exploiting an empirical near-linear relationship
-between pressure and total rest surface area.
+inflates the embedding, subject to a hardening (linear-plus-cubic)
+edge spring, an all-pairs short-range repulsion, and a per-face outward
+pressure force, walked in small steps to avoid the spurious equilibria a
+Newton-style solver can converge to. A calibration procedure estimates,
+for a given mesh, the pressure that yields a target RMS edge stretch,
+exploiting an empirical near-linear relationship between pressure and
+total rest surface area.
 
 ## 1. Problem statement
 
 **Input.** A set of faces $F = \{f_1, \dots, f_m\}$, each a cyclic list
-of vertex ids, together forming a closed, oriented, manifold mesh: every
-undirected edge is shared by exactly two faces, traversed in opposite
-directions by the winding convention (§2). No coordinates are given.
+of vertex ids, together forming an oriented, manifold mesh, closed or
+open: every undirected edge is shared by AT MOST two faces, traversed in
+opposite directions where shared, by the winding convention (§2). An
+edge with no second face is a free boundary edge, not an error. No
+coordinates are given.
 
 **Goal.** Produce vertex positions $p_v \in \mathbb{R}^3$ such that (a)
 every edge's length is close to a common rest length $\ell_0$
@@ -44,8 +46,9 @@ Faces are stored as vertex-id loops (an "indexed face set", as in an
 sharing multiple edges requires no special-casing. Every face is wound
 counterclockwise as seen from outside the intended solid: for every edge
 $(v, w)$ shared by two faces, one face's loop contains the directed edge
-$v \to w$ and the other contains $w \to v$. This is verified at load time
-by checking that every directed edge has exactly one reverse partner.
+$v \to w$ and the other contains $w \to v$; an edge referenced by only one
+face is a free boundary edge. This is verified at load time by checking
+that no directed edge appears more than once.
 
 ## 3. Stage 1: random-start spring relaxation
 
@@ -82,20 +85,29 @@ does not: with no pressure to resist, there is no large-stretch stability
 concern for a hardening term to address, and the plain linear form
 settles to a well-separated shape faster.
 
-### 3.4 Orientation
+### 3.4 Orientation and repulsion
 
 A pure spring force has no notion of "outward": the relaxation is exactly
-as likely to converge to a globally inside-out mesh as a right-side-out
-one. A *uniform* inversion is corrected for free by reflecting every
-vertex through the mesh centroid $\bar p$,
+as likely to converge to a globally inside-out mesh, or a mesh with some
+faces oriented one way and others the other, as a right-side-out one.
+No global correction is applied; orientation is left exactly as the
+physics settles it.
 
-$$p_v \leftarrow 2\bar p - p_v,$$
+Stage 1 also applies an all-pairs, short-range, inverse-square repulsion
+between every vertex (not just edge-connected ones) — the only force here
+with any opinion about vertex pairs with no edge between them — keeping
+the initial random cloud from leaving vertices piled on top of each other
+before the spring network can spread them out. Each vertex's own
+repulsion contribution is discarded whenever it points *inward* — its dot
+product against that vertex's own outward normal (defined from incident
+face winding, §4.1's face-normal convention) is negative — rather than
+letting repulsion push a vertex further into a local fold.
 
-a point reflection that preserves every pairwise distance (hence every
-edge's stretch) while flipping every face's outward-normal sign at once.
-A *mixed* result — some faces oriented one way, others the other — cannot
-be corrected this cheaply and is passed on unchanged to Stage 2, whose
-pressure term is relied on to resolve it.
+Every fixed number of steps, every vertex also receives a single bounded
+displacement kick along its own outward normal ("jiggle"), meant to jog a
+locally stuck or folded region loose; it is gated to never coincide with
+a convergence check, so a genuinely settled mesh is still reported
+converged without waiting for a kick to re-settle first.
 
 ## 4. Stage 2: pressure-driven inflation
 
@@ -132,7 +144,14 @@ $$
 
 ($\mathbf A$: the face's area-weighted outward normal via Newell's
 method, summed over its own — possibly non-planar — vertex loop), split
-evenly across its vertices.
+evenly across its vertices. A face may be flagged to receive no pressure
+force at all (an "open" wedge whose outer edge is not glued to another
+polygon) while remaining fully present for the spring, repulsion, and
+convergence terms. The same short-range all-pairs repulsion from Stage 1
+(§3.4) continues to act here, weak enough relative to the spring's own
+stiffness that it only meaningfully affects vertices already close
+together; it may be restricted to a fixed subset of vertices to keep its
+$O(n^2)$ cost from growing as the mesh is subdivided.
 
 ### 4.2 Integration
 
@@ -245,6 +264,14 @@ achieved stretch was ~0 (pressure genuinely had no effect at that level,
 e.g. before a later subdivision gives the mesh real degrees of freedom).
 Either way this only reduces the number of trials needed, never changes
 the final answer.
+
+If several consecutive rescaling trials land within a tiny tolerance of
+each other despite pressure being rescaled substantially each time, the
+mesh is judged unresponsive to pressure at this level (e.g. two
+identical, oppositely-wound faces whose pressure contributions cancel
+exactly) and the search stops rather than escalating pressure without
+bound; a later level's own starting guess then excludes this level's
+pressure from its history.
 
 ## 6. Incremental subdivision
 

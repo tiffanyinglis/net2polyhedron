@@ -28,6 +28,17 @@ work around it silently. Once user explicitly grants a change (by name or unambi
 description), that's a standing exception for that specific thing, not a general loosening.
 
 Exceptions granted so far (don't re-ask for these, but don't extend past what's listed):
+- `stretchy_mesh.py`, `mesh_levels.py`, `inflate_polyhedron_app/app.py`, `__init__.py`, + the
+  stretchy_mesh test: MODULARIZATION (2026-09-30, explicit — "modularize things more, split out
+  functionalities", 5 named pieces). `stretchy_mesh.py` split into `pre_inflation_relaxer.py`
+  (`relax_initial_configuration`), `multi_trial_inflater.py`
+  (`estimate_pressure_for_target_stretch`), `convergence_checker.py` (periodic stopping check),
+  `mesh_stretch_checker.py` (positions -> stretch %), and a new `self_join_triangulator.py` (see
+  physics.md's own header note) — `__init__.py` and the test file's import lines updated as a
+  direct, necessary consequence, same as prior renames. `inflate_polyhedron_app/app.py`'s
+  `on_select_net` also gained a new self-join check/split on load (explicit, scoped to THIS app
+  only — user said "do it for inflate_polyhedron_app for now" — not `interactive_inflater_app`,
+  whose own import lines were updated only mechanically to keep working, no new behavior there).
 - `stretchy_mesh.py` + its test: open-net support (boundary edges ok); `gtol` param on
   `estimate_pressure_for_target_stretch`; hardening spring + tuning; adaptive-step-term removal
   (now PERMANENT, re-declined 2026-09-16 — see physics.md), stall-check removal, chunking

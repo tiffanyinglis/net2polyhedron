@@ -43,27 +43,23 @@ Interaction model:
     otherwise a clipboard from an EARLIER Move-mode copy would still be
     pasteable here, landing a shape nothing could then select, move, or
     connect to anything).
-  - **Polygon Fold [P]**: the same click-click edge-handle gesture as
-    Join, but restricted to TWO DIFFERENT EDGES OF THE SAME SHAPE
-    instead of two different shapes -- models a polygon folded onto
-    itself (e.g. a pinched leg) rather than glued to a neighbor. Same
-    handle visibility/occupied-dot rules as Join (`_redraw`), and an
-    existing fold connection is selectable/deletable/bezier-draggable
-    exactly like any other connection. `_hit_test_any_edge_handle`'s
-    `require_shape_id`/`exclude_edge_index` params (used only from this
-    mode's own `_on_canvas_motion`/completion branch) are what restrict
-    the SECOND click's candidate set to "same shape, a different free
-    edge" -- the first click that arms a pending connection is
-    unrestricted, same as Join. A flat n-gon face can't literally glue
-    two of its own edges together (that's a face with a repeated
-    vertex, which `stretchy_mesh.py` disallows) -- see
-    `_expand_folded_shapes` for how this is resolved at Save time by
+  - **Polygon Fold**: not a separate mode -- Join's own click-click
+    edge-handle gesture also completes onto a SECOND edge of the SAME
+    shape (`_hit_test_any_edge_handle`'s `exclude_point`), modeling a
+    polygon folded onto itself (e.g. a pinched leg) rather than glued to
+    a neighbor. Same handle visibility/occupied-dot rules as an ordinary
+    join, and an existing fold connection is selectable/deletable/
+    bezier-draggable exactly like any other connection. A flat n-gon
+    face can't literally glue two of its own edges together (that's a
+    face with a repeated vertex, which `stretchy_mesh.py` disallows) --
+    see `_expand_folded_shapes` for how this is resolved at Save time by
     triangulating any shape with >=1 fold connection into `n` triangles
     fanned from its own centroid, so the two folded edges become a
     connection between two genuinely different (triangle) faces. No
     special validation exists for what edges may fold (adjacent edges
-    included) -- exactly like Join, `_validate_shapes_connections` is
-    the sole arbiter, now run against that triangulated form.
+    included) -- exactly like an ordinary join, `_validate_shapes_
+    connections` is the sole arbiter, now run against that triangulated
+    form.
   - **Flip Horizontal [H]** / **Flip Vertical [V]**: plain immediate
     ACTIONS on the current selection (`_flip_selected_shapes`), not
     modes -- clicking either never touches `self.tool_mode`. Mirrors the
@@ -446,8 +442,7 @@ from common.ui_theme import PLOT_THEME, STATUS_COLORS
 from ui.tooltip import Tooltip
 from utils.geometry.polygon_geom import attach_polygon, regular_polygon_vertices
 
-# This app's own File > Save/Save As extension (2026-09-16, explicit user
-# request), not ".json" -- still plain JSON content (see module
+# This app's own File > Save/Save As extension, not ".json" -- still plain JSON content (see module
 # docstring's "net JSON import/export" section), just a distinct
 # extension marking a file as this pipeline's own net format; also the
 # format inflate_polyhedron_app's own "Choose a net" combo scans for
@@ -652,7 +647,6 @@ TOOLBAR_ACTIVE_BORDER = "white"
 # SELECTION_OUTLINE_COLOR (red, solid) that a marquee in progress can't
 # be confused with an actual selected shape's outline.
 MARQUEE_OUTLINE_COLOR = "white"
-# 2026-09-26, explicit: "try (5,5)".
 MARQUEE_DASH = (5, 5)
 
 # A flipped shape (see "flipped" in the module docstring's Flip section)
@@ -1425,9 +1419,9 @@ def _connection_chain(shapes, connections, slot_a, slot_b):
 def _count_shape_components(shapes, connections):
     """Number of connected components among `shapes` via `connections` ("a_shape"/"b_shape"
     endpoints) -- a small union-find, used ONLY by _save_to_path's own multi-component Save
-    restriction below (2026-09-26, explicit: "let's explicitly forbid saving nets or models with
-    more than one connected component. So there's no issue of anchor pieces. Only .hippie files
-    allow more than one connected component") -- not shared with interactive_inflater_app's own
+    restriction below (this app forbids saving a net with more than one connected component,
+    so there's never an "anchor piece" ambiguity; only interactive_inflater_app's own session
+    files allow more than one component) -- not shared with interactive_inflater_app's own
     equivalent (which needs this for a different reason, finding which piece is the "central
     object" anchor), since that file already imports FROM this one; importing back would be
     circular, and this is a self-contained handful of lines either way. Returns 0 for an empty
@@ -1877,9 +1871,8 @@ class InteractiveBuilderApp:
         Photoshop/Illustrator-style. "Move"/"Join" SELECT a tool MODE
         (self.tool_mode, see _set_tool_mode) that gates what clicking on the canvas does --
         Join handles both an ordinary cross-shape connection and a polygon fold (a shape
-        connected to its own other edge) in one mode (2026-09-28, explicit user request:
-        "combine Join[J] and Polygon Fold[P] into just Join[J]" -- see
-        _hit_test_any_edge_handle's own `exclude_point`). "Flip Horizontal"/"Flip Vertical" are
+        connected to its own other edge) in one mode -- see
+        _hit_test_any_edge_handle's own `exclude_point`. "Flip Horizontal"/"Flip Vertical" are
         plain immediate ACTIONS on the current selection
         (_flip_selected_shapes) -- clicking either never changes
         self.tool_mode."""
@@ -2081,10 +2074,8 @@ class InteractiveBuilderApp:
         join is exactly what corrupted hippo.json (see _joined_points' own docstring).
 
         `exclude_point`, a `(shape_id, edge_index)` pair, additionally excludes exactly that
-        ONE edge -- used with a pending connection's own origin (2026-09-28, explicit user
-        request: "combine Join[J] and Polygon Fold[P] into just Join[J]... the same mode should
-        allow for both kinds of connections" -- Join mode no longer restricts a completing click
-        to a DIFFERENT shape the way it used to; the only edge that can never be the target is
+        ONE edge -- used with a pending connection's own origin. Join mode doesn't restrict a
+        completing click to a DIFFERENT shape; the only edge that can never be the target is
         the origin's own, since an edge can't join itself. This single exclusion is what lets
         one mode complete onto either a different shape's edge (an ordinary join) or the SAME
         shape's own different edge (a polygon fold, self._expand_folded_shapes' own concern at
@@ -2356,8 +2347,8 @@ class InteractiveBuilderApp:
         this.
 
         Refuses (no file written) if the net has more than one connected
-        piece (2026-09-26, explicit -- see _count_shape_components' own
-        docstring): a plain net file has no way to record which piece is
+        piece (see _count_shape_components' own docstring): a plain net
+        file has no way to record which piece is
         "central", so this app only ever saves a single connected net;
         interactive_inflater_app's own .hippie format is the one place a
         multi-piece net can be saved. Checked here, not inside
@@ -3081,8 +3072,8 @@ class InteractiveBuilderApp:
         actually changed, only which local index each shape happens to
         call it by.
 
-        A touched connection's own bezier handle (2026-09-19, explicit)
-        also gets its "t" component NEGATED (the "n" component is left
+        A touched connection's own bezier handle also gets its "t" component NEGATED
+        (the "n" component is left
         alone): mirroring reverses which physical direction "corner k ->
         corner k+1" actually points along a given edge (the same
         handedness reversal the edge-index remap above exists for), so a
@@ -3560,8 +3551,8 @@ class InteractiveBuilderApp:
                 self._draw_connection_line(anchor, self._pending_cursor_screen, selected=True)
 
         # EVERY placed shape's EVERY edge gets a handle -- but ONLY in
-        # Join/Polygon Fold mode, since those are the only modes a handle
-        # is actually selectable in at all (see module docstring's "Tool
+        # Join mode, the only mode a handle is actually selectable in at
+        # all (see module docstring's "Tool
         # modes" section) -- not just the selected one, so a connection can be
         # started with a single click straight onto any handle, with no
         # "select the shape first" step. A handle lights up red if its
@@ -3613,7 +3604,7 @@ class InteractiveBuilderApp:
         # The selected connection's own two bezier control handles --
         # ONLY that one connection (never one merely highlighted via an
         # endpoint shape's selection, see module docstring's bezier
-        # section) and only in Join/Polygon Fold mode, the only modes a
+        # section) and only in Join mode, the only mode a
         # connection can even BE selected in (self.selected_connection_id
         # is already always None otherwise -- see _set_tool_mode). Drawn
         # last (on top of everything else drawn so far) so a handle is
@@ -3644,18 +3635,15 @@ class InteractiveBuilderApp:
             x1, y1 = self._marquee_current
             # width=1 (not 2) -- Tk-on-Windows only honors a custom dash PATTERN precisely at
             # hairline width; a wider line silently falls back to a generic short dotted GDI pen
-            # regardless of the requested dash tuple (2026-09-26, explicit bug report: "your
-            # changes aren't working" -- the (8, 4) pattern set above had no visible effect at
-            # width=2, exactly this symptom).
+            # regardless of the requested dash tuple.
             #
             # Four separate create_line calls (one per edge), not one create_rectangle -- a
             # single closed-shape item (rectangle or polygon) resets Tk's own dash PHASE at each
             # corner based on where the previous edge's pattern happened to end, so the same
             # dash tuple can land completely differently at each corner depending on the
-            # rectangle's exact pixel dimensions -- a tiny dash-length change (e.g. (5, 4) ->
-            # (4, 4)) can then shift that phase landing enough to look like a much bigger visual
-            # change than the numbers suggest (2026-09-26, explicit bug report: "there's a big
-            # difference between (4,4) and (5,4)"). Each edge getting its OWN independent dash
+            # rectangle's exact pixel dimensions -- a tiny dash-length change can then shift that
+            # phase landing enough to look like a much bigger visual change than the numbers
+            # suggest. Each edge getting its OWN independent dash
             # run starting fresh (same fix already applied to the orphan-piece outline in
             # interactive_inflater_app.app) makes a dash-length change behave predictably.
             for (ax, ay), (bx, by) in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)),

@@ -9,9 +9,10 @@ from utils.inflate_polyhedron.stretchy_mesh import (
     load_stretchy_mesh, mesh_edges, mesh_to_polyhedron,
     _mesh_volume, _volume_indices,
     _orientation_signs, _is_orientation_consistent,
-    relax_once, relax_initial_configuration, random_initial_positions,
+    relax_once, random_initial_positions,
     EDGE_LENGTH, mesh_volume, per_face_volumes, is_orientation_consistent,
 )
+from utils.inflate_polyhedron.pre_inflation_relaxer import relax_initial_configuration
 from utils.geometry.polyhedron import Polyhedron
 from utils.inflate_polyhedron.mesh_levels import subdivide_once
 
@@ -45,7 +46,7 @@ def _relaxed_positions(faces, edge_length=EDGE_LENGTH, seed=0, max_nfev=None):
     """A real, non-degenerate embedding of `faces`, via the same
     random-start-plus-spring-relax pipeline inflate_polyhedron_app itself
     now uses for its own starting configuration (see
-    stretchy_mesh.relax_initial_configuration) -- used throughout this
+    pre_inflation_relaxer.relax_initial_configuration) -- used throughout this
     file wherever a test just needs SOME concrete positions to work with,
     in place of the old solve_wireframe fixture data. `max_nfev` caps the
     relax short of full convergence, for a test that specifically wants a

@@ -74,11 +74,15 @@ import sv_ttk
 from common.paths import STRETCHY_NETS_DIR, DATA_DIR
 from common.ui_theme import STATUS_COLORS, PLOT_THEME, FACE_COLORS
 from utils.inflate_polyhedron.stretchy_mesh import (
-    load_stretchy_mesh, load_stretchy_mesh_edges, relax_once, relax_initial_configuration,
-    random_initial_positions, estimate_pressure_for_target_stretch, level0_jiggle_distance,
-    mesh_edges, EDGE_LENGTH,
+    load_stretchy_mesh, load_stretchy_mesh_edges, relax_once,
+    random_initial_positions, mesh_edges, EDGE_LENGTH,
     CONVERGENCE_GTOL, REPULSION_STRENGTH, repulsion_force,
 )
+from utils.inflate_polyhedron.pre_inflation_relaxer import (
+    relax_initial_configuration, level0_jiggle_distance,
+)
+from utils.inflate_polyhedron.multi_trial_inflater import estimate_pressure_for_target_stretch
+from utils.inflate_polyhedron.self_join_triangulator import has_self_join, split_self_joined_faces
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
 from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
@@ -116,8 +120,7 @@ def _midpoint_color(color_a, color_b):
 
 # A face's INSIDE (its backface, as seen through the mesh) is drawn this fraction darker than
 # its own outward-facing color (_draw_level_panel's own add_mesh backface_params) -- lets a
-# user tell outside from inside at a glance (2026-09-19, explicit: "i'd like the inside of the
-# polygon face to be a shade dark[er] than the outside").
+# user tell outside from inside at a glance.
 INSIDE_FACE_DARKEN_FACTOR = 0.65
 
 
@@ -180,12 +183,9 @@ RUNNING_ROW_COLOR = "#e0b400"
 # correctly. Pixel size matches the Net panel's own matplotlib figsize*dpi so every panel is
 # the same size as its neighbors.
 NET_PANEL_SIZE = (320, 450)
-# Level 0's panel used to be narrower (60% of Levels 1-3's own width, with the freed width
-# split evenly across Levels 1-3) -- now the same width as every other level (2026-09-28,
-# explicit user request). Height unchanged for every panel; `_level_panel_size(level)` returns
-# the right (width, height) pair -- kept as a per-level lookup (not a bare constant) since
-# other code still calls it per level, and a future re-split would only need to change these
-# two values again.
+# All "Level N" panels are the same width. `_level_panel_size(level)` returns the right
+# (width, height) pair -- kept as a per-level lookup (not a bare constant) in case that
+# ever needs to differ again.
 LEVEL_PANEL_HEIGHT = 450
 LEVEL_PANEL_WIDTH_LEVEL_0 = 320
 LEVEL_PANEL_WIDTH_LEVELS_1_3 = 320
@@ -269,11 +269,10 @@ DEFAULT_TOLERANCE = 1e-4
 # (on_select_net -> _reset_target_rms_defaults). No entry for Level 0 -- it has no target RMS
 # stretch at all (relax_initial_configuration is pure springs, not calibrated toward a target).
 #
-# 2026-09-28, explicit user request: depends on whether the WHOLE net is closed (no free/open
-# edge anywhere -- see _open_base_edges) -- a fully closed net (e.g. any Platonic solid) can
-# take a higher target comfortably; an open one (any free rim edge left ungled) defaults lower.
-# Uniform across levels 1-3 within each case (no longer tapered down by level, superseded by
-# this same-day request).
+# Depends on whether the WHOLE net is closed (no free/open edge anywhere -- see
+# _open_base_edges): a fully closed net (e.g. any Platonic solid) can take a higher target
+# comfortably; an open one (any free rim edge left unglued) defaults lower. Uniform across
+# levels 1-3 within each case.
 LEVEL_DEFAULT_TARGET_RMS_PCT_CLOSED = {1: 10.0, 2: 10.0, 3: 10.0}
 LEVEL_DEFAULT_TARGET_RMS_PCT_OPEN = {1: 5.0, 2: 5.0, 3: 5.0}
 
@@ -326,10 +325,10 @@ def _open_base_edges(base_faces, face_edge_ids):
     """Returns {base_face_idx: {frozenset(rim-edge vertex pair), ...}} -- for each original
     polygon, which of ITS OWN edges have no partner elsewhere in the net (a genuine
     free/boundary edge) rather than being glued to some other piece. Per-EDGE, not per-whole-
-    polygon (2026-09-27, explicit user request: an n-gon connected at 2 of its own edges
-    triangulates into 2 "closed" wedges and n-2 "open" ones -- see
-    InflatePolyhedronApp._level1_is_open, which uses this to classify each individual wedge
-    rather than opting an entire polygon out just because ONE of its edges is free).
+    polygon: an n-gon connected at 2 of its own edges triangulates into 2 "closed" wedges and
+    n-2 "open" ones -- see InflatePolyhedronApp._level1_is_open, which uses this to classify
+    each individual wedge rather than opting an entire polygon out just because ONE of its
+    edges is free.
 
     Adjacency is found via `face_edge_ids` when given (an edge id used by exactly ONE
     base_faces entry across the whole net is that entry's own free edge) -- same
@@ -550,11 +549,10 @@ class InflatePolyhedronApp:
         # _get_or_generate_seed) -- blank (the default) means "pick a fresh random one each
         # time", a typed integer pins that exact seed for the next net load. Only ever edited
         # via debug mode's own "Seed" entry, but the VALUE itself isn't debug-only -- release
-        # mode gets the same randomize-by-default behavior, just without a way to see/set it
-        # (2026-09-27, explicit user request: the previous hardcoded seed=0 meant a net's own
-        # random starting embedding -- and thus which of several very different-looking local
-        # equilibria it settles into, see composite_spider_leg.poly's own investigation -- was
-        # always exactly the same, run after run).
+        # mode gets the same randomize-by-default behavior, just without a way to see/set it:
+        # a fixed seed would mean a net's own random starting embedding -- and thus which of
+        # several very different-looking local equilibria it settles into -- was always
+        # exactly the same, run after run.
         self.seed_var = tk.StringVar(value="")
 
         # ---- Setup: net picker + target RMS stretch + tolerance, all
@@ -691,9 +689,9 @@ class InflatePolyhedronApp:
             self.mode_row, text="Show vertex normals",
             variable=self.show_vertex_normals_var, command=self.draw)
         self.show_vertex_normals_check.pack(side=tk.LEFT)
-        # Draws each repulsive vertex's own CURRENT force from _repulsion_force (2026-09-27,
-        # explicit user request) -- see _draw_level_panel's own repulsion block for the color/
-        # scale convention, matching "Show normals"' own pattern.
+        # Draws each repulsive vertex's own CURRENT force from _repulsion_force -- see
+        # _draw_level_panel's own repulsion block for the color/scale convention, matching
+        # "Show normals"' own pattern.
         self.show_repulsive_forces_var = tk.BooleanVar(value=False)
         self.show_repulsive_forces_check = ttk.Checkbutton(
             self.mode_row, text="Show repulsive forces",
@@ -839,13 +837,10 @@ class InflatePolyhedronApp:
         self.level_photos = {}
         self._level_center = {}
         self._level_half = {}
-        # ONE shared camera group across every level (0-3, 2026-09-28, explicit user request:
-        # "sync up the rotation/translation/scale of level 0 with the rest of the levels" --
-        # previously Level 0 had its own independent rotation/zoom/pan since an early
-        # random-start-then-relax result looked very different from an actual settling/settled
-        # solid; now every level's panel rotates/pans/zooms together). `_level_camera(level)`
-        # returns the mutable, in-place-updated dict (`level` is accepted for a uniform call
-        # signature across every caller, even though every level now maps to the same dict);
+        # ONE shared camera group across every level (0-3) -- every level's panel rotates/
+        # pans/zooms together. `_level_camera(level)` returns the mutable, in-place-updated
+        # dict (`level` is accepted for a uniform call signature across every caller, even
+        # though every level now maps to the same dict);
         # `_camera_group_levels(level)` returns every panel that needs re-rendering when the
         # shared state changes -- currently always every built level, but keeps the same
         # call shape a future re-split would need.
@@ -1023,13 +1018,13 @@ class InflatePolyhedronApp:
         # gave up on a level that wouldn't converge after one attempt -- either way, ran to a
         # natural end on its own), or "stopped" (aborted by an explicit Stop click, or a
         # worker-thread failure -- see _abort_auto). Read by _update_auto_button to choose the
-        # Auto button's own label/action (2026-09-27, explicit user request): "completed"/None
-        # both read "Run Simulation" and restart fresh from Level 0 (on_auto_clicked);
+        # Auto button's own label/action: "completed"/None both read "Run Simulation" and
+        # restart fresh from Level 0 (on_auto_clicked);
         # "stopped" reads "Continue Simulation" and resumes from the START of whatever level
         # was interrupted (on_auto_continue_clicked), not from its own mid-run progress.
         self._auto_end_state = None
-        # Run > Run All's own state (2026-09-28, explicit user request -- see
-        # on_run_all_clicked): whether it's currently working through self._run_all_paths (a
+        # Run > Run All's own state (see on_run_all_clicked): whether it's currently
+        # working through self._run_all_paths (a
         # fixed [(label, path), ...] snapshot of self.label_to_path taken at kickoff, so a net
         # added/removed mid-run doesn't change the list underway) and which index it's on --
         # read by _update_window_title for the "(m/n)" suffix.
@@ -1099,8 +1094,8 @@ class InflatePolyhedronApp:
     def _build_menu(self):
         """This app's only menu bar -- File > Load.../Save..., Load above Save as the more
         common entry point (opening a previously-saved session before continuing it); Run >
-        Run All (2026-09-28, explicit user request -- see on_run_all_clicked). See
-        on_save_clicked/on_load_clicked for what the File items actually do.
+        Run All (see on_run_all_clicked). See on_save_clicked/on_load_clicked for what the
+        File items actually do.
 
         Explicit `font=` on every Menu/add_command call here: Windows renders the native menu
         bar via its own chrome, which ignores "TkMenuFont"'s configured size regardless of
@@ -1114,7 +1109,7 @@ class InflatePolyhedronApp:
         file_menu.add_command(label="Load...", command=self.on_load_session_clicked, font=menu_font)
         # "accelerator" is display-only (the menu label's own right-aligned hint text) -- Tk
         # never wires it up as an actual key binding, so bind_all below is what makes Ctrl+S
-        # really work (2026-09-28, explicit user request).
+        # really work.
         file_menu.add_command(label="Save...", command=self.on_save_session_clicked,
                                accelerator="Ctrl+S", font=menu_font)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -1136,10 +1131,10 @@ class InflatePolyhedronApp:
 
     def _update_window_title(self):
         """The window's own title: APP_TITLE, plus " (debug mode)" while debug mode is on, plus
-        " (m/n)" while Run All is working through the net list (2026-09-28, explicit user
-        request -- see on_run_all_clicked) -- e.g. "...  (debug mode) (2/11)" if both apply at
-        once. The single place either suffix gets composed, so toggling debug mode mid-Run-All
-        (or vice versa) never drops the other one."""
+        " (m/n)" while Run All is working through the net list (see on_run_all_clicked) --
+        e.g. "...  (debug mode) (2/11)" if both apply at once. The single place either suffix
+        gets composed, so toggling debug mode mid-Run-All (or vice versa) never drops the
+        other one."""
         suffix = " (debug mode)" if self.debug_mode else ""
         if self._run_all_active:
             suffix += f" ({self._run_all_index + 1}/{len(self._run_all_paths)})"
@@ -1488,9 +1483,9 @@ class InflatePolyhedronApp:
 
             if self.show_normals_var.get():
                 # Skips every OPEN triangle (see _is_open_of_fine/_pressure_exclude_faces) --
-                # those genuinely feel NO pressure force at all (2026-09-27, explicit user
-                # report: an open triangle showing a face normal reads as "this face is being
-                # pushed outward", which isn't true for it), reusing the exact same is_open
+                # those genuinely feel NO pressure force at all, so showing a face normal on
+                # one would misleadingly read as "this face is being pushed outward" when it
+                # isn't. Reuses the exact same is_open
                 # flag stretchy_mesh._face_index_groups itself excludes that triangle with, not
                 # an independent display-only check that could drift out of sync with it.
                 is_open = self._is_open_of_fine(level)
@@ -1529,8 +1524,7 @@ class InflatePolyhedronApp:
                 # Scaled by ACTUAL relative magnitude, NOT direction-only at a fixed length
                 # (unlike "Show normals" above) -- a unit-length arrow would look identical for
                 # a full-strength vertex and one weakened by _repulsion_vertex_multipliers,
-                # defeating the entire point of this toggle (2026-09-27, explicit user report:
-                # "i'm not seeing this change with cannoli"). The STRONGEST vertex drawn here
+                # defeating the entire point of this toggle. The STRONGEST vertex drawn here
                 # gets the usual EDGE_LENGTH*NORMAL_LENGTH_FRACTION reference length, every
                 # other one scaled down proportionally against it -- absolute force magnitude
                 # depends heavily on inter-vertex distance, which varies a lot net to net, so
@@ -1589,9 +1583,9 @@ class InflatePolyhedronApp:
 
     def _capture_level_image(self, level):
         """The actual pixels _render_level_pv blits into self.level_labels[level] -- factored
-        out as its own PIL Image return (2026-09-28, added so on_save_session_clicked can save
-        Level 3's own view as a .jpg alongside a .hippo without duplicating this camera-setup
-        logic). Positions an orthographic (parallel-projection) camera from `level`'s own
+        out as its own PIL Image return so on_save_session_clicked can save Level 3's own view
+        as a .jpg alongside a .hippo without duplicating this camera-setup logic. Positions an
+        orthographic (parallel-projection) camera from `level`'s own
         camera group's rotation at a distance derived from this level's own current bounding
         box (self._level_center/_level_half, set by _draw_level_panel -- necessary since
         neither a pure-spring relax nor a pressure inflation keeps the result near the origin
@@ -1802,6 +1796,16 @@ class InflatePolyhedronApp:
         # its "faces" already are level 0.
         legacy_coarse_faces, _, _ = load_fabric_spec(path)
         self.base_faces = legacy_coarse_faces if legacy_coarse_faces is not None else faces
+        # Guards a RAW/hand-authored net against a self-joined face (see
+        # self_join_triangulator's own docstring) -- interactive_builder_app already resolves
+        # this at Save time, so a net produced there never reaches here with one; this only
+        # matters for a file that wasn't. Only applies to the ordinary (non-legacy-fabric) case:
+        # legacy_coarse_faces' own re-derived vertex-id space is unrelated to what "faces" (and
+        # any self-join within it) would mean here.
+        self_join_split = legacy_coarse_faces is None and any(
+            has_self_join(f) for f in self.base_faces)
+        if self_join_split:
+            self.base_faces = split_self_joined_faces(self.base_faces)
         # The raw parsed file is kept as self._net_file_json, read here up front since
         # self.colors below needs its "source_polygon_id" section, so on_save_session_clicked
         # can embed a full copy of it, letting on_load_session_clicked reproduce this exact
@@ -1811,9 +1815,10 @@ class InflatePolyhedronApp:
         # base_edges/base_face_edge_ids and "source_polygon_id" are all keyed to the file's own
         # "faces" vertex-id/index space -- only meaningful when self.base_faces IS that same
         # "faces" (the ordinary case); a legacy fabric net's re-derived coarse_faces use a
-        # different vertex-id space, so these stay None (the always-safe fallbacks every
-        # consumer already has).
-        if legacy_coarse_faces is not None:
+        # different vertex-id space, and a self-join split changes both the face COUNT and the
+        # vertex-id space (a fresh centroid id per split face), so both stay None (the
+        # always-safe fallbacks every consumer already has).
+        if legacy_coarse_faces is not None or self_join_split:
             base_edges = base_face_edge_ids = None
             source_polygon_id = None
         else:
@@ -1824,11 +1829,8 @@ class InflatePolyhedronApp:
         # CHANGES, not on every on_select_net call -- on_select_net also re-runs for the SAME
         # net (e.g. on_auto_clicked's own "Run Simulation again after a completed run restarts
         # fresh from Level 0" case), and unconditionally resetting here was wiping out a user's
-        # own already-typed Target RMS value on every one of those re-runs (2026-09-28,
-        # explicit user report: "I'm not able to change the target %... it should be allowed
-        # even though I've specified defaults" -- root cause was this reset firing far more
-        # often than "a genuinely different net was just loaded"). self.current_path (from the
-        # PREVIOUS call, not yet overwritten at this point) is None on the very first load, so
+        # own already-typed Target RMS value on every one of those re-runs. self.current_path
+        # (from the PREVIOUS call, not yet overwritten at this point) is None on the very first load, so
         # that first call still gets its defaults applied.
         if getattr(self, "current_path", None) != path:
             self._reset_target_rms_defaults()
@@ -1844,7 +1846,7 @@ class InflatePolyhedronApp:
         # net_layout (no per-entry "shape_id") must still match `faces`' length; a new-format
         # one never will (by design, once a fold exists), so that check doesn't apply to it.
         net_layout = self._net_file_json.get("net_layout")
-        if net_layout is not None and (
+        if net_layout is not None and not self_join_split and (
                 _net_layout_is_new_format(net_layout) or len(net_layout) == len(self.base_faces)):
             self.target_layout = _layout_from_net_layout(self.base_faces, net_layout)
             # Only present alongside the exact "net_layout" it was saved with -- the BFS
@@ -1906,11 +1908,10 @@ class InflatePolyhedronApp:
         SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         # ".hippo" -- still plain JSON underneath (model_dump_json below), just a distinct
         # extension so a saved session doesn't look like an ordinary net .json in a file picker.
-        # self.mesh_name is always the loaded net FILE's own basename now (load_stretchy_mesh no
-        # longer reads any "name" field from inside the file -- 2026-09-28, explicit user
-        # request, after a stale internal "name" field caused the wrong default here once), so
-        # it's safe to use directly -- works the same whether this session came from picking a
-        # net or from loading a PREVIOUS session (self.mesh_name is restored either way).
+        # self.mesh_name is always the loaded net FILE's own basename now (load_stretchy_mesh
+        # never reads a "name" field from inside the file), so it's safe to use directly --
+        # works the same whether this session came from picking a net or from loading a
+        # PREVIOUS session (self.mesh_name is restored either way).
         path = filedialog.asksaveasfilename(
             title="Save session", initialdir=str(SESSION_OUTPUT_DIR),
             initialfile=self.mesh_name,
@@ -1926,7 +1927,7 @@ class InflatePolyhedronApp:
         each panel's own camera view) to `path` via session_state.SessionStateModel, enough for
         on_load_session_clicked to reopen it exactly as left with no re-solving -- shared by
         on_save_session_clicked (path from the Save dialog) and on_run_all_clicked (path
-        computed automatically per net, no dialog -- 2026-09-28, explicit user request).
+        computed automatically per net, no dialog).
         self.level_snapshots holds every level already left behind; the current frontier
         level's own live faces/positions/face_of_fine/edge_length aren't in there yet, so this
         adds them under self.subdivision_level before writing. Camera rotation (a scipy
@@ -1961,7 +1962,7 @@ class InflatePolyhedronApp:
             level_history={level: LevelHistoryRecordModel(**rec)
                            for level, rec in self.level_history.items()},
             levels=levels,
-            # Every level shares one camera now (2026-09-28) -- written into BOTH the
+            # Every level shares one camera now -- written into BOTH the
             # "level_*" and "level0_*" fields (same values) rather than dropping the latter,
             # so the SessionStateModel schema/file format doesn't need to change and an older
             # saved file's own level0_* fields stay meaningful to read back (on_load_session_
@@ -2217,9 +2218,8 @@ class InflatePolyhedronApp:
     def _record_level_history(self):
         """Records/updates the current level's row: pressure last calibrated for it at Level
         1+, or the jiggle/burst strength actually used at Level 0 (level0_jiggle_distance --
-        2026-09-28, explicit user request: "now that we're using bursts in level 0, you can put
-        the pressure used in the convergence history" -- see that function's own docstring for
-        why a displacement, not a literal pressure, ends up in that column), steps so far this
+        see that function's own docstring for why a displacement, not a literal pressure, ends
+        up in that column), steps so far this
         level, stretch stats, and the stopping-condition `optimality` -- all from
         self.last_stats, plus the "Simulation Time"/"Cumulative Time" columns' own backing
         state. Called on every subdivide/promotion, every live progress update, and when a run
@@ -2339,7 +2339,7 @@ class InflatePolyhedronApp:
             # run's RMS isn't known yet (filled in the instant it's known, before replay
             # starts). Level 0 has no TARGET (it's pure springs, not calibrated toward
             # anything), but its actual achieved RMS stretch % is shown same as every other
-            # level (2026-09-28, explicit user request).
+            # level.
             rms_str = "--" if rec["rms_stretch_pct"] is None else f"{rec['rms_stretch_pct']:.1f}"
             # "(target: ...)" is debug-mode-only.
             if self.debug_mode and level != 0 and rec.get("target_rms_pct") is not None:
@@ -2503,7 +2503,7 @@ class InflatePolyhedronApp:
         first entered: on_select_net (Level 0), _finish_relax's own promotion to Level 1, and
         _subdivide_step (Level 2+). on_auto_continue_clicked restores exactly this to resume a
         STOPPED level from its own beginning rather than wherever its partial Relax/Inflate
-        progress left off (2026-09-27, explicit user request)."""
+        progress left off."""
         self._level_start_state = {
             "faces": self.faces, "positions": self.positions,
             "face_of_fine": self.face_of_fine, "edge_length": self.edge_length,
@@ -2513,30 +2513,27 @@ class InflatePolyhedronApp:
     def _repulsion_vertex_ids(self):
         """The vertex ids repulsion acts on: each ORIGINAL polygon's own raw corners, straight
         from self.base_faces -- e.g. a hexagon's own 6 vertices, not the extra fan-hub centroid
-        _build_level1_topology's own triangulation would add on top (2026-09-27, explicit user
-        request: "the only vertices that are repulsive are the vertices of the original
-        polygons"). A SELF-JOINED polygon (already exported as several base_faces triangle
-        pieces, e.g. a folded hexagon's own 6 wedges -- see mesh_levels.py's own docstring)
-        has no single well-defined "original polygon" left to speak of, so its own
-        already-triangular pieces' own raw corners are used instead -- exactly what reading
-        self.base_faces directly gives regardless, with no special-casing needed either way
-        (an ordinary, non-folded polygon is always exactly one base_faces entry already).
+        _build_level1_topology's own triangulation would add on top. A SELF-JOINED polygon
+        (already exported as several base_faces triangle pieces, e.g. a folded hexagon's own 6
+        wedges -- see mesh_levels.py's own docstring) has no single well-defined "original
+        polygon" left to speak of, so its own already-triangular pieces' own raw corners are
+        used instead -- exactly what reading self.base_faces directly gives regardless, with no
+        special-casing needed either way (an ordinary, non-folded polygon is always exactly one
+        base_faces entry already).
 
         A small, FIXED set -- computed from self.base_faces, unaffected by whatever the
         CURRENT subdivision_level actually is, so it stays correct even after later Subdivides
         add their own finer vertices on top. Passed as every level's own `repulsion_vertex_ids`
-        in on_inflate_clicked ("let's use the same set of points... for all the levels" --
-        repulsion's own O(n^2) cost against Level 2/3's much larger full vertex count was too
-        slow in practice; restricting it to this always-small population keeps the cost
-        constant regardless of level)."""
+        in on_inflate_clicked, keeping the population (and thus repulsion's own O(n^2) cost)
+        constant regardless of level, rather than growing with Level 2/3's own much larger
+        full vertex count."""
         return sorted({v for face in self.base_faces for v in face})
 
     def _closed_repulsion_vertex_ids(self):
         """The subset of _repulsion_vertex_ids that are "closed": NOT an endpoint of any free
-        (unglued) base-polygon edge (2026-09-27, explicit user request: "if a vertices borders
-        n edges and n faces, then it's closed. if not then it's open" -- for an ordinary
-        manifold vertex this is exactly equivalent to that edges-vs-faces count, since a
-        complete fan has one face per edge while an incomplete one has one fewer).
+        (unglued) base-polygon edge -- for an ordinary manifold vertex this is exactly
+        equivalent to "borders as many edges as faces", since a complete fan has one face per
+        edge while an incomplete one has one fewer.
 
         Deliberately reuses _open_base_edges (the SAME face_edge_ids-disambiguated free-edge
         detection _level1_is_open already relies on) rather than counting edges/faces directly
@@ -2559,12 +2556,10 @@ class InflatePolyhedronApp:
     def _repulsion_vertex_multipliers(self):
         """{vertex_id: multiplier} for every CLOSED repulsion vertex (see
         _closed_repulsion_vertex_ids) -- 1.0 at Level 0/1, halved at every level after that:
-        full strength at Level 1, half at Level 2, a quarter at Level 3 (2026-09-27, explicit
-        user request: "make the repulsive forces weaker at level 2 and then weaker again at
-        level 3... for vertices that are closed" -- an OPEN vertex is simply absent from this
-        dict, defaulting to its own full multiplier of 1 wherever it's looked up, unaffected by
-        level). None (rather than an all-1.0 dict) when every repulsion vertex is open, so
-        callers can skip the machinery entirely."""
+        full strength at Level 1, half at Level 2, a quarter at Level 3. An OPEN vertex is
+        simply absent from this dict, defaulting to its own full multiplier of 1 wherever it's
+        looked up, unaffected by level. None (rather than an all-1.0 dict) when every repulsion
+        vertex is open, so callers can skip the machinery entirely."""
         closed = self._closed_repulsion_vertex_ids()
         if not closed:
             return None
@@ -2576,9 +2571,8 @@ class InflatePolyhedronApp:
         `faces` would be), independent of self.subdivision_level -- whether THAT SPECIFIC
         wedge's own outer rim edge (the one opposite the fan hub, corresponding to exactly one
         edge of its own original polygon) is free ("open") rather than glued to a neighbor
-        ("closed") (2026-09-27, explicit user request: an n-gon connected at 2 of its own
-        edges triangulates into 2 closed wedges and n-2 open ones -- classified per WEDGE, not
-        per whole polygon, unlike the earlier, superseded version of this feature).
+        ("closed"). Classified per WEDGE, not per whole polygon: an n-gon connected at 2 of
+        its own edges triangulates into 2 closed wedges and n-2 open ones.
 
         The fan hub is found the same way fan_hub_vertices used to (before the C2C springs
         work that introduced it was reverted): the one vertex every one of a base polygon's
@@ -2622,10 +2616,10 @@ class InflatePolyhedronApp:
     def _rms_exclude_edges(self):
         """(a, b) sorted vertex-id-pair tuples, at the CURRENT subdivision level, to exclude
         from the RMS Stretch % calculation -- every edge of every OPEN fine triangle (see
-        _is_open_of_fine), not just its own free edge (2026-09-27, explicit user request: an
-        open wedge triangle doesn't participate in the RMS stretch % calculation at all).
-        None (rather than an empty set) when nothing in the net is open, so callers can skip
-        the exclusion machinery entirely."""
+        _is_open_of_fine), not just its own free edge: an open wedge triangle doesn't
+        participate in the RMS stretch % calculation at all. None (rather than an empty set)
+        when nothing in the net is open, so callers can skip the exclusion machinery
+        entirely."""
         is_open = self._is_open_of_fine()
         if not any(is_open):
             return None
@@ -2640,11 +2634,9 @@ class InflatePolyhedronApp:
     def _pressure_exclude_faces(self):
         """Boolean list parallel to self.faces AT THE CURRENT subdivision_level -- True for
         every OPEN fine triangle (see _is_open_of_fine), which should feel NO pressure/
-        inflation force at all (2026-09-27, explicit user request: an open wedge triangle
-        "should not experience inflation forces"), while still fully existing for springs/
-        repulsion/edges/convergence. None when nothing in the net is open, so callers can skip
-        the exclusion machinery (and stretchy_mesh._face_index_groups' own per-face check)
-        entirely."""
+        inflation force at all, while still fully existing for springs/repulsion/edges/
+        convergence. None when nothing in the net is open, so callers can skip the exclusion
+        machinery (and stretchy_mesh._face_index_groups' own per-face check) entirely."""
         is_open = self._is_open_of_fine()
         return is_open if any(is_open) else None
 
@@ -3013,8 +3005,8 @@ class InflatePolyhedronApp:
         "completed" -- reached MAX_LEVEL and converged, OR gave up on a level that wouldn't
         converge), this is "Run Simulation" clicked again after that: restarts fresh from
         Level 0 (on_select_net, which also draws a new random seed unless one's pinned) rather
-        than doing nothing/erroring on an already-finished run (2026-09-27, explicit user
-        request). `_auto_end_state is None` (never run at all yet) skips that reset -- the
+        than doing nothing/erroring on an already-finished run. `_auto_end_state is None`
+        (never run at all yet) skips that reset -- the
         current state already IS Level 0's own fresh start, nothing to redo."""
         if self.positions is None or self._auto_active:
             return
@@ -3147,7 +3139,7 @@ class InflatePolyhedronApp:
     # ---- Run > Run All ----
 
     def on_run_all_clicked(self):
-        """Run > Run All (2026-09-28, explicit user request): runs the exact same unattended
+        """Run > Run All: runs the exact same unattended
         pipeline "Run Simulation" (on_auto_clicked) drives for ONE net, for EVERY net currently
         listed in "Choose a net", one after another, through the real UI (each one actually
         selected, relaxed/inflated/subdivided on screen, not some separate headless
