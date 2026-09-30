@@ -9,14 +9,16 @@ Left pane (BuilderPane): reuses interactive_builder_app.app.InteractiveBuilderAp
 directly (imported, not copied -- that file is read-only here, see the
 net-fold-project skill's untouchable.md) via a small subclass that only
 overrides layout (_build_ui/_build_palette_entry: shape palette moved to a
-TOP row, centered; the Move/Join/Polygon-Fold tool strip moved to the LEFT,
-matching this app's own required layout) and drops the pieces that only make
-sense for a standalone window (its own File menu/window title/WM_DELETE_
-WINDOW/font-scaling pass -- CombinedApp builds ONE File menu, with just
-Load... (no Save yet, 2026-09-19, explicit), for the whole window instead).
-Every canvas interaction (place/drag/select/delete/rotate/pan, Move/Join/
-Fold modes, bezier connections, Polygon Fold, undo/redo, flip, debug mode)
-is exactly interactive_builder_app's own, unmodified.
+TOP row, centered; no left tool strip at all -- Edit is this app's only tool
+mode, so a mode-switch button/strip for it would be pure vestigial UI,
+2026-09-29 explicit user request -- the canvas fills that space instead) and
+drops the pieces that only make sense for a standalone window (its own File
+menu/window title/WM_DELETE_WINDOW/font-scaling pass -- CombinedApp builds
+ONE File menu, with just Load... (no Save yet, 2026-09-19, explicit), for the
+whole window instead).
+Every canvas interaction (place/drag/select/delete/rotate/pan, Edit mode,
+bezier connections, Polygon Fold, undo/redo, flip, debug mode) is exactly
+interactive_builder_app's own, unmodified.
 
 Right pane (InflaterPane): a from-scratch, deliberately much simpler sibling
 of inflate_polyhedron_app -- one PyVista off-screen-rendered panel (not four
@@ -196,9 +198,32 @@ UI_FONT_SCALE = 1.0
 # app's own window width to work with (half the window is the inflater pane). _ICON_VERTICES
 # (imported from interactive_builder_app, fixed at ICON_RADIUS=30 regardless of ICON_SIZE) is
 # scaled down by INFLATER_ICON_SIZE/ICON_SIZE to match, preserving the same padding ratio.
-INFLATER_ICON_SIZE = 48
+# 56, not the original 48 (2026-09-29, explicit user request: "make the polygon shapes at the
+# top bigger, without increasing the overall toolbar size") -- paired with _build_ui's own
+# palette-row padding drop from 8 to 4 top/bottom, so the row's total height (padding + icon
+# widget, including its own highlightthickness border) comes out EXACTLY the same as before:
+# old 8 + (48 + 2*2) + 8 = 68, new 4 + (56 + 2*2) + 4 = 68.
+INFLATER_ICON_SIZE = 56
 
 # ---- right pane (InflaterPane) constants, adapted from inflate_polyhedron_app ----
+
+# Release mode's button row (2026-09-29, explicit user request: "replace the reinflate button
+# with an icon button like the refresh button in browsers. also have an undo and redo button
+# to the left of it", then "the buttons should look like [a flat browser nav bar]") -- plain
+# Unicode glyphs on flat, borderless plain tk.Button widgets (own docstring on their
+# construction has why plain tk over ttk) rather than hand-drawn canvas icons (the convention
+# the now-removed left tool strip used, see interactive_builder_app's own _new_toolbar_icon) --
+# simpler, and these buttons live in InflaterPane's own root, not BuilderPane's, so that helper
+# isn't available here anyway.
+REFRESH_ICON_TEXT = "↻"  # clockwise open circle arrow -- Reinflate's new icon.
+# Plain straight arrows, not curved undo/redo hooks (2026-09-29, explicit user request, second
+# reference image: a browser-style back/forward/refresh trio) -- back == undo, forward == redo.
+UNDO_ICON_TEXT = "←"
+REDO_ICON_TEXT = "→"
+# Text color for a disabled icon button (undo/redo when their own stack is empty) -- a plain
+# tk.Button (see _build_icon_button) takes this directly as `disabledforeground`, no per-theme
+# ttk style/state map needed.
+ICON_BUTTON_DISABLED_FG = "#555555"
 
 DEFAULT_TOLERANCE = 1e-4
 # Per-level Target RMS stretch % defaults -- auto-picked from whether the CENTRAL object is
@@ -251,8 +276,9 @@ SELECTED_HIGHLIGHT_LINE_WIDTH = 4.0
 CLICK_MOVE_TOLERANCE_PX = 3
 
 # The "central object" anchor's own on-canvas marker color -- white (2026-09-26, explicit: "make
-# the anchor white instead of red"), same as the Anchor TOOLBAR icon's own TOOLBAR_ICON_COLOR
-# (white/PLOT_THEME["fg"]), so the tool and what it marks now read as the same color throughout.
+# the anchor white instead of red"). Only shown in debug mode (2026-09-29, explicit: "show the
+# anchor only in debug mode" -- the anchor is now purely automatic, see _plan_anchor_deletion/
+# _on_delete_key, so there's no longer a user-facing reason to always keep it on screen).
 ANCHOR_MARKER_COLOR = "white"
 # The actual glyph drawn (2026-09-26, explicit: "use this ⚓︎") -- U+2693 ANCHOR, plus
 # the U+FE0E "text presentation" variation selector so a font/platform that would otherwise
@@ -293,13 +319,11 @@ DISCONNECTED_SELECTED_OUTLINE_LINE_COUNT = 3
 
 def _draw_anchor_symbol(canvas, cx, cy, radius, color):
     """The anchor glyph ANCHOR_SYMBOL_CHAR ("⚓︎"), rendered as text centered at
-    (cx, cy) -- shared by the Anchor toolbar icon and the on-canvas anchor marker
-    (_draw_anchor_tool_icon/BuilderPane._redraw) so both draw the exact same glyph, just at
-    different sizes/colors (2026-09-26, explicit: "use this ⚓︎" -- replaces an earlier
+    (cx, cy) -- the on-canvas anchor marker's own glyph (BuilderPane._redraw; formerly also
+    shared with an "Anchor [A]" toolbar icon, removed 2026-09-29, explicit: "remove the
+    Anchor[A] mode") (2026-09-26, explicit: "use this ⚓︎" -- replaces an earlier
     hand-drawn ring/shaft/crossbar glyph, which itself replaced a plain 5-point star). Font size
-    scaled off `radius` the same way the earlier hand-drawn version's proportions were, so both
-    call sites (a small on-canvas marker, a toolbar icon roughly toolbar-icon-sized) need no
-    changes of their own.
+    scaled off `radius` the same way the earlier hand-drawn version's proportions were.
 
     No explicit font FAMILY (2026-09-26, explicit bug report: "the tool button is not displaying
     properly" -- a literal "Segoe UI Symbol" isn't guaranteed present under that exact name on
@@ -334,17 +358,6 @@ def _draw_dashed_edge(canvas, x1, y1, x2, y2, color, dash, line_count):
         ox, oy = perp_x * offset, perp_y * offset
         canvas.create_line(x1 + ox, y1 + oy, x2 + ox, y2 + oy, fill=color, width=1, dash=dash)
 
-
-def _draw_anchor_tool_icon(canvas, size, color):
-    """"Anchor" tool icon -- an anchor glyph in the ordinary TOOLBAR_ICON_COLOR (white/
-    PLOT_THEME["fg"]), the same `color` every other mode icon is drawn in (2026-09-26, explicit:
-    "the tool symbol should change to a white anchor" -- the on-canvas marker itself, drawn by
-    BuilderPane._redraw, stays red; only the tool button is white now). `size * 0.4 * 0.7`
-    (2026-09-26, explicit: "the toolbar icon is a bit big. make it about 70% of what it is
-    currently") -- only this call site's own radius shrinks; the on-canvas marker's own size
-    (ANCHOR_MARKER_RADIUS_PX) is independent and unaffected."""
-    cx, cy = size / 2, size / 2
-    _draw_anchor_symbol(canvas, cx, cy, size * 0.4 * 0.7, color)
 
 # Join-mode 3D edge hover/click (2026-09-19, explicit: "hovering over the 3d edge highlights
 # the corresponding 2d connection") picks the nearest connection's glued seam to wherever the
@@ -440,6 +453,41 @@ def _point_segment_distance_3d(point, a, b):
         return float(np.linalg.norm(point - a))
     t = max(0.0, min(1.0, np.dot(point - a, ab) / denom))
     return float(np.linalg.norm(point - (a + t * ab)))
+
+
+def _boundary_vertex_offsets(boundary, positions, nudge):
+    """{vertex_id: offset_vector} -- the Z-fighting nudge _group_boundary_offset_lines/
+    _frame_group_boundary_offset_lines give a group's own boundary rim, computed PER VERTEX
+    (one shared owning-triangle-normal AVERAGE across every boundary edge that touches it) --
+    NOT per edge, each along its own single owning triangle's normal, the way an earlier
+    version of both callers did (2026-09-29, explicit bug report: "when zoomed in close, the
+    thick polygon outlines are drawn twice and a bit broken" -- two boundary edges meeting at
+    a shared vertex can easily have DIFFERENT owning triangles with genuinely different
+    normals, especially where the subdivided surface curves -- nudging each edge independently
+    along its own triangle's normal pushed the two edges' endpoints AT THAT SAME VERTEX in
+    slightly different directions, so they no longer landed on the same point -- a visible gap
+    right at the joint, worse the more the surface curves there, plus the two nudged copies
+    (front/back) reading as genuinely doubled instead of a single crisp line wherever that gap
+    was wide enough to resolve at all when zoomed in). Every edge sharing a vertex now nudges
+    that vertex by the exact same amount, in the exact same direction, so they still meet
+    exactly -- `boundary`: [((u, v), (ta, tb, tc)), ...] (_group_boundary_owners' own return
+    shape); `positions`: {vertex_id: np.ndarray(3,)}."""
+    vertex_normals = {}
+    for (u, v), (ta, tb, tc) in boundary:
+        pa, pb, pc = positions[ta], positions[tb], positions[tc]
+        normal = np.cross(pb - pa, pc - pa)
+        length = np.linalg.norm(normal)
+        if length <= 1e-12:
+            continue
+        unit = normal / length
+        vertex_normals.setdefault(u, []).append(unit)
+        vertex_normals.setdefault(v, []).append(unit)
+    offsets = {}
+    for vertex_id, normals in vertex_normals.items():
+        avg = np.mean(normals, axis=0)
+        avg_length = np.linalg.norm(avg)
+        offsets[vertex_id] = (avg / avg_length * nudge) if avg_length > 1e-12 else np.zeros(3)
+    return offsets
 
 
 # The FINE subdivision mesh's own wireframe -- much fainter than the bold polygon-outline
@@ -664,6 +712,39 @@ def _seed_unknown_by_bfs(faces, seed, rng):
             break
         unknown -= set(progressed)
     return seed
+
+
+def _fine_vertex_local_order(faces, face_of_fine, group):
+    """The raw fine vertex ids belonging to base group `group`, in FIRST-SEEN order while
+    scanning `faces` (filtered to that group) in emitted order -- a purely LOCAL identity
+    (2026-09-29, explicit bug report: "when I ... delete one connection, then did the replay
+    of the diff inflate, I saw that the inflation started with all the faces flat, which is
+    wrong because it should start from the inflated model we already have" -- traced to
+    _diff_reexport_and_relax seeding only the coarse BASE (Level-0) vertices from the last
+    completed inflate, then re-deriving every FINE vertex fresh via _subdivide_combined_to_
+    level3's pure geometric interpolation -- which discards the old, already pressure-
+    calibrated curvature for the WHOLE mesh, not just near the edit, producing flat-faceted
+    polygons at the seed even for faces nowhere near the changed connection).
+
+    subdivide_once's own fan (Level 0->1) + quarter (1->2->3) recursion is a deterministic
+    function of a base face's own (n, corner-id traversal order) alone -- unaffected by which
+    OTHER faces exist, their processing order, or the raw integer ids assigned (only WHICH
+    vertices get created/reused, never the sequence subdividing THIS face's own triangles
+    visits them in). So for a base face group whose shape/corner order is unchanged (see
+    _diff_reexport_and_relax's own "matched_base_ids" check), the SAME local index here always
+    names the SAME logical corner/edge-fraction/interior point in both the OLD and NEW mesh,
+    even though the raw ids differ -- letting the caller copy that point's OLD, already-curved
+    3D position across exactly, instead of re-interpolating it flat."""
+    seen = set()
+    order = []
+    for tri, g in zip(faces, face_of_fine):
+        if g != group:
+            continue
+        for v in tri:
+            if v not in seen:
+                seen.add(v)
+                order.append(v)
+    return order
 
 
 def _fan_level_edges(faces, base_edges):
@@ -1271,8 +1352,10 @@ def _place_all_flat(reference_face, pendants, edge_length):
 # It alone is exported/inflated/shown in the 3D pane (BuilderPane.export_mesh_dict/
 # root_to_vertex_id); every other shape is drawn at reduced opacity in the 2D pane instead
 # (BuilderPane._draw_shape) so it's still visible to attach later. See BuilderPane's own anchor-
-# lifecycle methods (_refresh_vme_state's anchor-assignment branch, _on_delete_key's anchor
-# delete-guard, the "Anchor [A]" tool mode) for how the anchor itself moves/persists.
+# lifecycle methods (_refresh_vme_state's anchor-assignment branch, _on_delete_key's/
+# _plan_anchor_deletion's own anchor delete-guard/reassignment) for how the anchor itself
+# moves/persists -- purely automatically now, 2026-09-29 explicit ("remove the Anchor[A]
+# mode"), never user-picked.
 def _shape_connected_components(shapes, connections):
     """shapes: list of shape dicts with an "id"; connections: list of connection dicts with
     "a_shape"/"b_shape". Returns a list of sets of shape ids, one per connected component
@@ -1309,6 +1392,18 @@ def _central_shape_ids(shapes, connections, anchor_shape_id):
     return frozenset()
 
 
+def _connection_key(conn):
+    """A connection's own two (shape_id, edge_index) endpoints, as a frozenset (so a<->b/b<->a
+    order doesn't matter) -- BuilderPane.classify_change's own comparison key for "is this the
+    SAME connection across two snapshots", hoisted out of that method (used to be a local
+    nested function there) so InflaterPane._stage_kept_selection can also use it, to re-find a
+    connection classify_change already identified by endpoints alone (its own `extra`) back in
+    a shapes/connections snapshot (2026-09-29, explicit user request: "if there's a connection
+    being deleted, then keep that connection/edge selected... if two edges are being joined,
+    the two edges remain selected")."""
+    return frozenset([(conn["a_shape"], conn["a_edge"]), (conn["b_shape"], conn["b_edge"])])
+
+
 # ---- left pane ----
 
 class BuilderPane(InteractiveBuilderApp):
@@ -1338,11 +1433,6 @@ class BuilderPane(InteractiveBuilderApp):
     # shape of the loaded net -- rather than hooking every individual creation site. A class
     # attribute for the same before-__init__-finishes reason as on_change above.
     _anchor_shape_id = None
-
-    # Snapshot of _anchor_shape_id taken the moment Anchor mode ([A]) is entered (_set_tool_mode
-    # below) -- compared against the (possibly moved) anchor when the user leaves Anchor mode, to
-    # decide whether a confirm-and-re-inflate popup is needed (see _set_tool_mode's own docstring).
-    _anchor_before_anchor_mode = None
 
     # Same idea as on_change -- a class attribute so it exists before the inherited
     # InteractiveBuilderApp.__init__ makes its own first _redraw() call. Which shape (if any)
@@ -1604,29 +1694,47 @@ class BuilderPane(InteractiveBuilderApp):
         explicit: "now make the opposite true", mirroring InflaterPane's own 3D->2D
         _on_panel_hover_motion) picks whichever shape/connection/open-edge-handle is under the
         cursor and forwards it to InflaterPane so it highlights the matching 3D geometry too.
-        Move mode picks a whole shape (face selection is Move-only, 2026-09-19 explicit); Join
-        mode (idle, i.e. not currently dragging out a NEW pending connection) picks a connection
-        OR an open edge's own handle (mutually exclusive by construction -- an edge is always
-        exactly one or the other) -- in either OTHER case (Fold, or Join mid-drag) none of these
-        hovers apply, so all three are cleared. The open-edge pick reuses
-        InteractiveBuilderApp's own _hit_test_any_edge_handle with no exclude/require args --
-        EXACTLY the nearest-unjoined-handle-within-HANDLE_HIT_RADIUS lookup its own _redraw
-        already uses to decide what to reveal, so "visible in 2D" and "forwarded to 3D" can
-        never disagree (2026-09-19, explicit: "in 2d, i need to hover near the edge midpoint
-        for the midpoint to show" -- unchanged, this just ALSO mirrors that same rule's result)."""
+        Edit mode (idle, i.e. no palette shape armed and no NEW pending connection being dragged
+        out) picks WHICHEVER of an open edge's own handle, an existing connection line, or a
+        whole shape body is under the cursor -- same priority order _on_canvas_press_edit uses
+        to decide what a CLICK there would hit (handle first, since a handle's hit area can sit
+        right on top of a shape's own edge; then a connection line; only a shape body falling
+        through to the last -- these three are mutually exclusive per pixel by construction, so
+        exactly one (or none) ever lights up) -- since Edit mode merged what used to be separate
+        Move-only (shape hover) and Join-only (connection/open-edge hover) behavior into one mode
+        (2026-09-29, explicit: "combine Move mode with Join mode to make Edit[E] mode"). While a
+        palette shape is armed, or a new connection is actively being dragged out, none of these
+        hovers apply, so all three are cleared -- same as the old Move-mid-arm/Join-mid-drag
+        exclusions. The open-edge pick reuses InteractiveBuilderApp's own
+        _hit_test_any_edge_handle with no exclude/require args -- EXACTLY the nearest-unjoined-
+        handle-within-HANDLE_HIT_RADIUS lookup its own _redraw already uses to decide what to
+        reveal, so "visible in 2D" and "forwarded to 3D" can never disagree (2026-09-19, explicit:
+        "in 2d, i need to hover near the edge midpoint for the midpoint to show" -- unchanged,
+        this just ALSO mirrors that same rule's result).
+
+        All three hovers are also forced clear while locked (2026-09-29, explicit user request:
+        "disable hovering highlight and selecting while inflating is ongoing"), same as an
+        armed palette shape/in-progress pending connection above -- an inflate in progress is
+        exactly when self.base_faces/self._pending_source_polygon_id (what a forwarded hover
+        would be resolved against on the 3D side) can be mid-flight ahead of what's still on
+        screen (see InflaterPane._display_pending_source_polygon_id's own docstring), so
+        blocking the hover at its SOURCE here is simpler and more robust than trying to keep
+        every downstream consumer correct."""
         super()._on_canvas_motion(event)
         shape_id = None
         conn_id = None
         open_edge_key = None
-        if self.tool_mode == "move" and self.armed_n is None:
-            wx, wy = self._screen_to_world(event.x, event.y)
-            hit = self._hit_test(wx, wy)
-            shape_id = None if hit is None else hit["id"]
-        elif self.tool_mode == "join" and self._connection_pending is None:
-            conn_id = self._hit_test_connection(event.x, event.y)
+        if (not self._locked and self.tool_mode == "edit" and self.armed_n is None
+                and self._connection_pending is None):
             handle = self._hit_test_any_edge_handle(event.x, event.y)
             if handle is not None:
                 open_edge_key = (handle["shape_id"], handle["edge_index"])
+            else:
+                conn_id = self._hit_test_connection(event.x, event.y)
+                if conn_id is None:
+                    wx, wy = self._screen_to_world(event.x, event.y)
+                    hit = self._hit_test(wx, wy)
+                    shape_id = None if hit is None else hit["id"]
         self._set_mouse_hover_shape(shape_id)
         self._set_mouse_hover_connection(conn_id)
         self._set_mouse_hover_open_edge(open_edge_key)
@@ -1724,17 +1832,60 @@ class BuilderPane(InteractiveBuilderApp):
 
         Also forwards self.selected_ids to InflaterPane whenever it's changed since the last
         forward (see _last_forwarded_selected_ids' own docstring for why this diff-on-redraw
-        approach, rather than hooking every mutation site, is used)."""
-        self._draw_shape_index = 0
-        super()._redraw()
+        approach, rather than hooking every mutation site, is used).
 
-        # The anchor's own red anchor-symbol marker (2026-09-26, explicit) -- centered on the
-        # anchor shape's own world position, drawn in SCREEN-FIXED size (not scaled by the
-        # shape's own size/zoom) so it stays a clear, legible marker regardless of polygon type
-        # or zoom level -- same glyph the Anchor toolbar icon uses (_draw_anchor_symbol), just
-        # red here instead of the toolbar's white, and placed in world space instead of icon
-        # space.
-        if self._anchor_shape_id is not None:
+        InteractiveBuilderApp's own _redraw (called via super() below) only draws edge handles/
+        the selected connection's own bezier handles while `self.tool_mode == "join"` -- Edit
+        mode merges Move+Join (2026-09-29, explicit), so it needs both showing too, but this app
+        never actually sets self.tool_mode to "join" (see _build_ui/_set_tool_mode -- "join"
+        no longer exists as a real mode here at all). Rather than duplicating that base method's
+        ~90 lines just to change two `== "join"` checks (interactive_builder_app.app is kept
+        read-only from this file, see its own import comment up top), this temporarily SWAPS
+        self.tool_mode to "join" for just the duration of the super() call, restoring it right
+        after -- safe because the whole call is synchronous with no event/callback that could
+        observe the swapped value in between."""
+        self._draw_shape_index = 0
+        if self.tool_mode == "edit":
+            self.tool_mode = "join"
+            try:
+                super()._redraw()
+            finally:
+                self.tool_mode = "edit"
+        else:
+            super()._redraw()
+
+        # Ghost outline for whatever face/connection deletion just triggered the run currently
+        # locking this pane (2026-09-29, explicit user request -- see stage_locked_ghost's own
+        # docstring for how these two fields get populated, set_locked's own unlock branch for
+        # how they get cleared). Gated on self._locked alone, not on whether a run is a diff or
+        # a redirected full inflate -- either way it's still the same triggering edit. Drawn the
+        # same SELECTION_OUTLINE_COLOR/CONNECTION_SELECTED_WIDTH the base class's own (still-
+        # live) selection outline uses, so a ghost reads as "still selected", not as some new,
+        # different kind of highlight -- _shape_world_vertices/_connection_screen_curve only
+        # need the dict itself, never a live self.shapes/self.connections lookup, so a shape/
+        # connection already removed from those still outlines correctly from its own snapshot
+        # copy (a connection's own two endpoint SHAPES are never removed by a plain connection
+        # deletion, so _connection_screen_curve's own shape lookups inside it still succeed).
+        if self._locked:
+            for ghost_shape in self._locked_ghost_shapes:
+                screen_vertices = [self._world_to_screen(*wv)
+                                   for wv in self._shape_world_vertices(ghost_shape)]
+                flat = [coord for point in screen_vertices for coord in point]
+                self.canvas.create_polygon(flat, outline=SELECTION_OUTLINE_COLOR, fill="", width=3)
+            if self._locked_ghost_connection is not None:
+                curve = self._connection_screen_curve(self._locked_ghost_connection)
+                if curve is not None:
+                    flat = [coord for point in curve for coord in point]
+                    self.canvas.create_line(*flat, fill=SELECTION_OUTLINE_COLOR,
+                                             width=CONNECTION_SELECTED_WIDTH)
+
+        # The anchor's own on-canvas marker (2026-09-26, explicit) -- centered on the anchor
+        # shape's own world position, drawn in SCREEN-FIXED size (not scaled by the shape's own
+        # size/zoom) so it stays a clear, legible marker regardless of polygon type or zoom
+        # level. Debug-mode only (2026-09-29, explicit: "show the anchor only in debug mode" --
+        # the anchor is now purely automatic, see _plan_anchor_deletion/_on_delete_key, so it's
+        # an implementation detail most users have no reason to see).
+        if self.debug_mode and self._anchor_shape_id is not None:
             anchor_shape = self._shape_by_id(self._anchor_shape_id)
             if anchor_shape is not None:
                 sx, sy = self._world_to_screen(anchor_shape["cx"], anchor_shape["cy"])
@@ -1823,9 +1974,9 @@ class BuilderPane(InteractiveBuilderApp):
         # cursor itself isn't anywhere near it. Suppressed while a REAL pending connection is
         # active (its own origin/target already draw a LIT circle for whichever edges matter;
         # forcing an unfilled one on top would be redundant at best, wrong at worst) or outside
-        # Join mode (where this whole concept doesn't apply, and the shape it names may not even
-        # still exist as placed).
-        if (self._forced_hover_open_edge is not None and self.tool_mode == "join"
+        # Edit mode (formerly Join -- where this whole concept doesn't apply, and the shape it
+        # names may not even still exist as placed).
+        if (self._forced_hover_open_edge is not None and self.tool_mode == "edit"
                 and self._connection_pending is None):
             forced_shape_id, forced_edge_index = self._forced_hover_open_edge
             forced_shape = self._shape_by_id(forced_shape_id)
@@ -1854,19 +2005,37 @@ class BuilderPane(InteractiveBuilderApp):
     # before-__init__-finishes reason as on_change/_hover_shape_id above. True for the whole
     # duration of ANY running inflate (InflaterPane._set_running wires this via set_locked),
     # so a mid-computation edit can never invalidate the mesh the background thread is
-    # actively working from. Move/rotate/pan/zoom stay allowed throughout -- none of them are
-    # guarded below, and none of them affect the exported mesh at all (classify_change ignores
-    # cx/cy/rotation entirely) -- only actions that ADD/REMOVE a shape or connection, or an
-    # UNDO/REDO/LOAD that could do either, are blocked.
+    # actively working from. Only camera-equivalent view changes -- 2D pan/zoom (_on_zoom/
+    # _on_right_press/_on_right_drag/_on_right_release, always tool_mode/lock-agnostic) and the
+    # 3D panel's own rotate/pan/zoom (InflaterPane, never gated on this flag at all) -- stay
+    # allowed throughout (2026-09-29, explicit user request: "disable all types of editing.
+    # only allow view changes like rotating/panning/zooming"). Everything else that reads as
+    # "interacting with the model" is blocked while locked: shape/connection ADD/REMOVE/DRAG,
+    # UNDO/REDO/LOAD, and now also plain SELECTION and HOVER highlighting in both panes
+    # (_on_canvas_press_edit/_on_canvas_motion here, _on_panel_click/_on_panel_hover_motion on
+    # InflaterPane's own side) -- an earlier version of this left selection/hover live on the
+    # theory that they're read-only and harmless, but they were still "editing" in the sense
+    # that mattered to this request, and 3D hover/select in particular could resolve against a
+    # mid-flight NEW mesh while the panel still showed the OLD one (see InflaterPane.
+    # _display_pending_source_polygon_id's own docstring for that particular failure mode).
+    # EXCEPTION (2026-09-29, explicit user request): whatever single edit actually TRIGGERED the
+    # run stays visibly outlined the whole time it's in progress -- a deleted face or connection
+    # (self._locked_ghost_shapes/_locked_ghost_connection, own docstrings on stage_locked_ghost/
+    # _redraw's own ghost-outline block) or a just-made connection (plain self.selected_
+    # connection_id, already handled by the ordinary unlocked-or-not selection draw) -- so the
+    # user can still see exactly what they just changed while it recomputes, without that
+    # reading as "selection is back on".
     _locked = False
+    _locked_ghost_shapes = []
+    _locked_ghost_connection = None
 
     def set_locked(self, locked):
-        """Called by InflaterPane._set_running. Does NOT force the tool mode back to "move"
+        """Called by InflaterPane._set_running. Does NOT force the tool mode back to "edit"
         (2026-09-19, explicit: "after deleting a connection, it went back to Move mode. It
-        should remain in the same mode" -- deleting a connection while in Join mode is exactly
-        what triggers the auto-Diff-Inflate that locks the pane) -- staying in Join/Fold while
-        locked is safe on its own, since their own click-click connection gesture is blocked
-        directly, at the gesture level (_on_canvas_press_join below), not by kicking the user
+        should remain in the same mode" -- deleting a connection while in what's now Edit mode
+        is exactly what triggers the auto-Diff-Inflate that locks the pane) -- staying in Edit
+        while locked is safe on its own, since its own click-click connection gesture is blocked
+        directly, at the gesture level (_on_canvas_press_edit above), not by kicking the user
         out of the mode that gesture lives in. Swaps the bottom status line to a fixed
         explanatory message -- unlocking hands the status line back to the ordinary
         vertex-merge-error display (_refresh_vme_state, which every edit already keeps
@@ -1878,7 +2047,30 @@ class BuilderPane(InteractiveBuilderApp):
             self.status_label.config(text="Model is not editable until inflation is complete.",
                                       foreground=PLOT_THEME["fg"])
         else:
+            # The run is over (success, stop, or revert) -- whatever ghost was kept outlined for
+            # it is no longer meaningful (a success's own fresh _redraw draws the REAL, current
+            # net instead; a stop/revert's own _refresh_vme_state call below does too) -- see
+            # stage_locked_ghost's own docstring.
+            self._locked_ghost_shapes = []
+            self._locked_ghost_connection = None
             self._refresh_vme_state()
+        self._redraw()
+
+    def stage_locked_ghost(self, shapes=(), connection=None):
+        """Called by InflaterPane._stage_kept_selection, right as a Diff (or redirected Full)
+        Inflate run is about to start, for the two kinds of triggering edit that remove
+        something from self.shapes/self.connections outright (2026-09-29, explicit user
+        request: "if the change is a face deletion, then keep that face selected... if there's
+        a connection being deleted, then keep that connection/edge selected") -- `shapes`/
+        `connection` are full dict copies (from InflaterPane.last_shapes_snapshot/last_
+        connections_snapshot, the net as of the last completed inflate, i.e. right before
+        THIS edit), stashed here since _redraw's own selection-outline pass only ever knows how
+        to outline something still IN self.shapes/self.connections -- a deleted shape/connection
+        needs its geometry carried along separately instead. See _redraw's own ghost-outline
+        block for how these get drawn (gated on self._locked, so they never show once the run
+        that asked for them ends)."""
+        self._locked_ghost_shapes = list(shapes)
+        self._locked_ghost_connection = connection
         self._redraw()
 
     def _drop_shape(self, n, wx, wy):
@@ -1896,59 +2088,116 @@ class BuilderPane(InteractiveBuilderApp):
         self._refresh_vme_state()
 
     def _on_palette_clicked(self, n):
-        """Same as the inherited palette click, except it first switches to Move mode if some
+        """Same as the inherited palette click, except it first switches to Edit mode if some
         OTHER tool mode is currently active (2026-09-28, explicit user request: "when one of
-        the shapes at the top are clicked, we should automatically switch to Move mode") --
-        the inherited implementation silently no-ops on a palette click made from any mode but
-        Move ("dropping a new shape only makes sense in Move mode" -- its own comment), which
-        otherwise makes a palette click look like it did nothing at all from Join/Fold/Anchor
-        mode. _set_tool_mode("move") is always allowed even while locked (see its own
-        docstring), so this doesn't need its own separate locked-check for that part."""
+        the shapes at the top are clicked, we should automatically switch to Move mode" -- Move
+        no longer exists as its own mode here, see _build_ui's own docstring; Edit is what
+        it was folded into) -- the inherited implementation silently no-ops on a palette click
+        made from any mode but Move ("dropping a new shape only makes sense in Move mode" --
+        its own comment). Reimplements the inherited body directly, checking `self.tool_mode !=
+        "edit"` instead of calling super() (whose own `!= "move"` gate would always fail here,
+        since this app never sets self.tool_mode to "move" at all) -- small enough (unlike
+        _redraw's ~90-line base method) that duplicating it beats the temporary-tool_mode-swap
+        trick _redraw uses. _set_tool_mode("edit") is always allowed even while locked (see its
+        own docstring), so this doesn't need its own separate locked-check for that part."""
         if self._locked:
             return
-        if self.tool_mode != "move":
-            self._set_tool_mode("move")
-        super()._on_palette_clicked(n)
+        if self.tool_mode != "edit":
+            self._set_tool_mode("edit")
+        self.armed_n = None if self.armed_n == n else n
+        self._ghost_world_xy = None
+        if self.armed_n is not None:
+            self.selected_ids = set()
+            self.selected_connection_id = None
+        for other_n, icon in self._palette_canvases.items():
+            icon.configure(highlightbackground=(
+                "white" if other_n == self.armed_n else PLOT_THEME["bg"]))
+        self._redraw()
 
     def _on_canvas_press(self, event):
-        """Runs InteractiveBuilderApp's own Move/Join/Fold press dispatch unchanged (a no-op for
-        any OTHER tool_mode, including "anchor" -- see its own docstring), then adds the Anchor
-        mode's own gesture (2026-09-26, explicit): a plain click on a shape moves the central-
-        object anchor there -- same hit-test Move mode's own press handler uses, but no
-        selection/drag, just self._anchor_shape_id. Blocked while locked, same as every other
-        mode's own click-driven edit."""
-        super()._on_canvas_press(event)
-        if self.tool_mode == "anchor" and not self._locked:
-            wx, wy = self._screen_to_world(event.x, event.y)
-            hit = self._hit_test(wx, wy)
-            if hit is not None and hit["id"] != self._anchor_shape_id:
-                self._anchor_shape_id = hit["id"]
-                self._redraw()
+        """Dispatches to _on_canvas_press_edit for Edit mode (base InteractiveBuilderApp's own
+        dispatch only knows "move"/"join", neither of which this app ever sets self.tool_mode
+        to any more -- see _build_ui's own docstring; super()._on_canvas_press(event) is
+        still called as a harmless no-op fallback for any OTHER mode string, same defensive
+        shape the base class's own dispatch has -- though Edit is in fact the only mode this
+        app has left at all). There used to be an "Anchor [A]" mode's own gesture here too (a
+        plain click on a shape moved the central-object anchor there) -- removed 2026-09-29,
+        explicit ("remove the Anchor[A] mode"): the anchor is now assigned purely automatically
+        (see _plan_anchor_deletion), never picked by the user."""
+        if self.tool_mode == "edit":
+            self._on_canvas_press_edit(event)
+        else:
+            super()._on_canvas_press(event)
 
-    def _on_canvas_press_join(self, event):
-        # Blocks Join/Polygon Fold's own click-click gesture while locked -- it's the one
-        # remaining way those modes could still create/edit a connection (hover/selection
-        # there stay read-only and are left alone). Since set_locked no longer forces the tool
-        # mode back to "move", this is now the ONLY thing standing between a mid-computation
-        # click and a corrupted mesh the background thread is actively working from.
+    def _on_canvas_press_edit(self, event):
+        """Edit mode's own press handler (2026-09-29, explicit: "combine Move mode with Join
+        mode to make Edit[E] mode") -- merges InteractiveBuilderApp's separate Move
+        (_on_canvas_press_move: drop/select/drag/marquee shapes) and Join
+        (_on_canvas_press_join: click-click/drag-and-drop connect, select a connection line) own
+        press handlers into ONE gesture, reusing Join's own internal priority among ITSELF (a
+        bezier-handle drag beats completing/arming a pending connection, which beats an edge
+        handle, which beats a connection line) -- but where Join's own last resort was just
+        "deselect", this one falls all the way through to Move's OWN shape hit-test/drag/marquee
+        logic instead, via super()._on_canvas_press_move(event) (inherited, unchanged, and
+        itself tool_mode-agnostic -- it only reads self.armed_n and runs hit tests, never checks
+        self.tool_mode), rather than duplicating that whole method here.
+
+        Nothing here fires at all while locked (2026-09-29, explicit user request: "disable
+        hovering highlight and selecting while inflating is ongoing... disable all types of
+        editing. only allow view changes like rotating/panning/zooming" -- an earlier version
+        blocked only connection editing/selection here, deliberately leaving the shape hit-test/
+        drag/marquee fallback below live, matching Move's own historical never-lock-guarded
+        behavior; that fallback is now blocked too, since a shape SELECT -- not just a drag --
+        counts as "editing" for this purpose. A palette shape can't even get armed while locked
+        in the first place, since _on_palette_clicked's own lock-check already blocks that
+        upstream, so the self.armed_n branch below is unreachable while locked anyway -- this
+        guard is what actually stops the trailing super()._on_canvas_press_move(event) fallback.
+        The drag-and-drop connection convention (arm on press, resolve on release) is similarly
+        blocked at the source -- it lives entirely in _on_canvas_drag/_on_canvas_release below,
+        which are already tool_mode-agnostic (they only look at self._connection_pending/
+        self._bezier_handle_drag/self._drag_state/self._marquee_start, never self.tool_mode
+        itself) and only ever get INTO one of those states via a press that this guard now
+        blocks from ever starting one while locked."""
         if self._locked:
             return
-        # InteractiveBuilderApp's own press handling still ARMS a pending connection from
-        # whichever handle was clicked (unchanged) -- the actual behavior change (2026-09-19,
-        # explicit: "let's use drag-and-drop to connect midpoints... right now it's
-        # click-and-click in 2d") lives entirely in _on_canvas_drag/_on_canvas_release below,
-        # which resolve that pending connection at RELEASE instead of waiting for a SEPARATE
-        # second click. Its "complete a pending connection" branch (a genuine second click,
-        # with the mouse button not held since the first) is dead in practice now -- release
-        # always already cleared self._connection_pending by the time any later press could
-        # reach it -- but left alone rather than touching this untouchable base method's own
-        # call.
-        super()._on_canvas_press_join(event)
+        if self.armed_n is not None:
+            super()._on_canvas_press_move(event)
+            return
+        if self._connection_pending is None:
+            end = self._hit_test_bezier_handle(event.x, event.y)
+            if end is not None:
+                self._begin_undoable_change()
+                self._bezier_handle_drag = {"conn_id": self.selected_connection_id, "end": end}
+                return
+        if self._connection_pending is not None:
+            if self._complete_or_cancel_pending_connection():
+                self._redraw()
+                return
+        handle = self._hit_test_any_edge_handle(event.x, event.y)
+        if handle is not None:
+            self._connection_pending = {"from_shape": handle["shape_id"],
+                                         "from_edge": handle["edge_index"]}
+            self._pending_cursor_screen = (event.x, event.y)
+            self.selected_connection_id = None
+            # Unlike old Join mode (where shapes were never selectable at all, so this
+            # never mattered), Edit mode can have a shape selected when a handle gets
+            # clicked -- clear it so a stale red shape outline doesn't sit next to the new
+            # in-progress connection line.
+            self.selected_ids = set()
+            self._redraw()
+            return
+        conn_hit = self._hit_test_connection(event.x, event.y)
+        if conn_hit is not None:
+            self.selected_connection_id = conn_hit
+            self.selected_ids = set()
+            self._redraw()
+            return
+        super()._on_canvas_press_move(event)
 
     def _on_canvas_drag(self, event):
         """Runs InteractiveBuilderApp's own drag handling (shape-move/bezier-handle-drag/
-        marquee) UNCHANGED for everything except an active Join/Fold pending connection
-        (2026-09-19, explicit: drag-and-drop, see _on_canvas_press_join above) -- for that one
+        marquee) UNCHANGED for everything except an active pending connection (2026-09-19,
+        explicit: drag-and-drop, see _on_canvas_press_edit above) -- for that one
         case, calls its own _on_canvas_motion instead, which is what recomputes
         _hover_shape_id/_hover_edge_index/_pending_cursor_screen for a pending connection
         (bound to plain <Motion>, which never fires while a button is held -- this is what
@@ -2041,21 +2290,17 @@ class BuilderPane(InteractiveBuilderApp):
             self.inflater_getter().set_open_edge_drag_cancelled_from_builder()
 
     def _set_tool_mode(self, mode):
-        # Blocks switching INTO Join/Polygon Fold/Anchor while locked -- their own click-driven
-        # gestures are blocked directly too (_on_canvas_press_join/_on_canvas_press above), but a
-        # user who wasn't already in one of those modes when the lock kicked in still shouldn't
-        # be able to enter one now (there'd be nothing useful to do there anyway). A user who WAS
-        # already there stays there -- this only blocks the transition INTO one of them, not
-        # staying put.
-        if self._locked and mode != "move" and mode != self.tool_mode:
-            return
         # 2026-09-19, explicit: "when switching between modes, everything is deselected" --
         # super()._set_tool_mode already clears self.selected_ids/selected_connection_id (its
         # own _redraw, called at the end, diff-forwards those to InflaterPane -- see
         # _last_forwarded_selected_ids/_last_forwarded_selected_connection_id), but the HOVER
         # attributes below aren't covered by that diff (hover isn't "state", just a transient
         # highlight) and aren't reset by the base class at all, so they're cleared here
-        # explicitly, both this pane's own copies and InflaterPane's.
+        # explicitly, both this pane's own copies and InflaterPane's. (There used to be an
+        # "Anchor [A]" mode with its own enter/leave bookkeeping here too -- removed 2026-09-29,
+        # explicit ("remove the Anchor[A] mode"); Edit is this app's only tool mode now, so
+        # `mode != self.tool_mode` below is effectively unreachable in practice, but left as
+        # ordinary defensive code rather than assuming that can never change.)
         if mode != self.tool_mode:
             self._mouse_hover_shape_id = None
             self._face_hover_shape_id = None
@@ -2069,78 +2314,77 @@ class BuilderPane(InteractiveBuilderApp):
                 inflater.set_hover_connection_from_builder(None)
                 inflater.set_open_edge_hover_from_builder(None, None)
                 inflater.set_open_edge_drag_cancelled_from_builder()
-        # Anchor mode's own enter/leave bookkeeping (2026-09-26, explicit) -- captured BEFORE
-        # super() changes self.tool_mode. Entering snapshots the current anchor
-        # (_anchor_before_anchor_mode) so leaving can tell whether the anchor actually moved to a
-        # DIFFERENT connected piece while the user was in this mode (see
-        # _handle_anchor_mode_exit's own docstring) -- moving it within the same piece, or not at
-        # all, needs no confirmation and no re-inflate.
-        entering_anchor_mode = mode == "anchor" and mode != self.tool_mode
-        leaving_anchor_mode = self.tool_mode == "anchor" and mode != self.tool_mode
-        anchor_before = self._anchor_before_anchor_mode
         super()._set_tool_mode(mode)
-        if entering_anchor_mode:
-            self._anchor_before_anchor_mode = self._anchor_shape_id
-        elif leaving_anchor_mode:
-            self._handle_anchor_mode_exit(anchor_before)
 
-    def _handle_anchor_mode_exit(self, previous_anchor_id):
-        """Called right after the user switches OUT of Anchor mode into some other mode
-        (_set_tool_mode above), with `previous_anchor_id` = the anchor as it was the moment
-        Anchor mode was ENTERED. 2026-09-26, explicit: "once the user chooses a different mode,
-        if the anchor is no longer in the same connected piece as the previous anchor, show a pop
-        up asking if the user is sure... as it will do a full inflate of a different set of
-        pieces. if they confirm, then do the full inflate. if cancelled, then go back to the
-        previous anchor."
+    def _plan_anchor_deletion(self, deleted_ids):
+        """Called from _on_delete_key when `deleted_ids` (about to be deleted) contains the
+        CURRENT anchor -- decides whether that's allowed and, if so, who the new anchor should
+        be. Simulates the deletion against the CURRENT self.shapes/self.connections (both still
+        intact at call time, since this runs BEFORE anything is actually removed): every
+        component the OLD central object's own SURVIVING members fall into, post-deletion, gets
+        checked -- more than one means deleting the anchor would split the club into two or more
+        separate pieces, which is never allowed (2026-09-29, explicit: "if the user tries to
+        delete the anchor and it splits the club into two, then it's not allowed. show a dialog
+        explaining why").
 
-        A no-op if the anchor never actually changed, OR changed but stayed within the SAME
-        connected component (moving the anchor to a different shape of the piece already central
-        doesn't change what gets exported/inflated at all, so nothing needs confirming)."""
-        if previous_anchor_id is None or self._anchor_shape_id == previous_anchor_id:
-            return
-        components = _shape_connected_components(self.shapes, self.connections)
-
-        def component_of(shape_id):
-            return next((c for c in components if shape_id in c), frozenset({shape_id}))
-
-        if component_of(previous_anchor_id) == component_of(self._anchor_shape_id):
-            return
-        if messagebox.askyesno(
-                "Change central piece?",
-                "Moving the anchor here makes a different connected piece central and will "
-                "re-inflate it from scratch. Continue?"):
-            if self.inflater_getter is not None:
-                self.inflater_getter().on_full_inflate_clicked()
-        else:
-            self._anchor_shape_id = previous_anchor_id
-            self._redraw()
+        Returns (allowed, new_anchor_id):
+        - (False, None): blocked -- a split. Caller shows the explanatory dialog and leaves the
+          anchor out of the deletion.
+        - (True, None): allowed, and nothing of the old central object survives at all (the
+          whole club is being deleted along with the anchor) -- no replacement anchor is needed;
+          _refresh_vme_state's own fallback (or the next shape placed, if the canvas ends up
+          fully empty) takes it from here.
+        - (True, some_id): allowed, with `some_id` the shape that should become the new anchor
+          -- "assign another insider piece as the anchor... the insider with the most
+          connections" (2026-09-29, explicit), i.e. the surviving member of the (still intact)
+          club with >= 2 remaining connections and the highest connection count among those;
+          falling back to the best-connected survivor overall if no insider survives (e.g. the
+          club shrinks to a single piece, or to two guests only connected to each other)."""
+        old_central = self.central_shape_ids()
+        surviving_central = old_central - deleted_ids
+        if not surviving_central:
+            return True, None
+        surviving_shapes = [s for s in self.shapes if s["id"] not in deleted_ids]
+        surviving_connections = [
+            c for c in self.connections
+            if c["a_shape"] not in deleted_ids and c["b_shape"] not in deleted_ids]
+        components = _shape_connected_components(surviving_shapes, surviving_connections)
+        if len([comp for comp in components if comp & surviving_central]) > 1:
+            return False, None
+        connection_counts = {}
+        for c in surviving_connections:
+            connection_counts[c["a_shape"]] = connection_counts.get(c["a_shape"], 0) + 1
+            connection_counts[c["b_shape"]] = connection_counts.get(c["b_shape"], 0) + 1
+        insiders = [sid for sid in surviving_central if connection_counts.get(sid, 0) >= 2]
+        pool = insiders or list(surviving_central)
+        new_anchor_id = max(pool, key=lambda sid: (connection_counts.get(sid, 0), -sid))
+        return True, new_anchor_id
 
     def _on_delete_key(self, _event):
-        """Runs InteractiveBuilderApp's own multi-shape/connection delete unchanged, except the
-        anchor shape (see _anchor_shape_id's own docstring) is excluded from a multi-shape
-        deletion set (with an explanatory popup -- 2026-09-26, explicit: "when the user tries to
-        delete the anchor piece, have a popup saying why it's not allowed") whenever any OTHER
-        shape would survive it AND ISN'T ALSO part of this same deletion ("the anchor piece
-        cannot be deleted while any OTHER piece would be left orphaned behind" -- 2026-09-28,
-        explicit user request: "if the user chooses everything to delete, including the anchor,
-        that's fine" -- deleting the anchor alongside literally everything else leaves nothing
-        behind to be orphaned, so there's nothing left to warn about). It can still be deleted
-        once it's the ONLY shape left, or once every OTHER shape is being deleted in this same
-        selection, at which point _refresh_vme_state's own anchor-assignment fallback
-        (self.shapes being empty) resets _anchor_shape_id to None, ready for the next placed
-        shape to become the new anchor."""
+        """Runs InteractiveBuilderApp's own multi-shape/connection delete unchanged, except when
+        the current anchor is among the shapes about to be deleted: _plan_anchor_deletion decides
+        whether that's allowed (deleting it mustn't split the club into two or more pieces,
+        2026-09-29 explicit) and, if so, who the new anchor should be. When blocked, the anchor
+        is dropped from this deletion (an explanatory popup says why, 2026-09-26 explicit) but
+        whatever ELSE was selected is still deleted normally. When allowed, self._anchor_shape_id
+        is updated to the chosen replacement BEFORE the actual deletion runs (so
+        _refresh_vme_state's own "current anchor id no longer names a real shape" fallback --
+        which would otherwise pick an arbitrary self.shapes[0], not necessarily even a survivor
+        of the OLD central object -- never has anything to correct)."""
         if self._locked:
             return
-        deleting_everything = all(s["id"] in self.selected_ids for s in self.shapes)
-        if (self._anchor_shape_id in self.selected_ids and len(self.shapes) > 1
-                and not deleting_everything):
-            self.selected_ids = self.selected_ids - {self._anchor_shape_id}
-            messagebox.showerror(
-                "Cannot delete the anchor piece",
-                "The anchor (the central object's own marker piece) can't be deleted while "
-                "another piece not also being deleted is still on the canvas -- move the "
-                "anchor to a different piece first (Anchor tool), or select every other piece "
-                "for deletion too.")
+        if self.selected_ids and self._anchor_shape_id in self.selected_ids:
+            allowed, new_anchor_id = self._plan_anchor_deletion(self.selected_ids)
+            if not allowed:
+                self.selected_ids = self.selected_ids - {self._anchor_shape_id}
+                messagebox.showerror(
+                    "Cannot delete the anchor piece",
+                    "Deleting the anchor here would split the central object into two or more "
+                    "separate pieces, which isn't allowed -- select every piece on the other "
+                    "side of the split for deletion too, or leave the anchor out of this "
+                    "selection.")
+            elif new_anchor_id is not None:
+                self._anchor_shape_id = new_anchor_id
         super()._on_delete_key(_event)
 
     def _flip_selected_shapes(self, axis):
@@ -2150,6 +2394,26 @@ class BuilderPane(InteractiveBuilderApp):
         if self._locked:
             return
         super()._flip_selected_shapes(axis)
+
+    def _call_super_in_move_mode(self, bound_super_method, _event):
+        """Temporarily treats Edit mode as "move" for the duration of one base-class method
+        call, then restores it -- InteractiveBuilderApp's own on_copy_key/on_paste_key each
+        gate on `if self.tool_mode != "move": return`, which would otherwise always fail here,
+        since this app never sets self.tool_mode to "move" at all (see _build_ui's own
+        docstring: Move+Join merged into Edit, 2026-09-29 explicit). Same swap-and-restore trick
+        _redraw uses above, for the same reason -- avoiding a duplicate of either base method's
+        own body just to change one string comparison (interactive_builder_app.app is kept
+        read-only from this file). `bound_super_method` is a bound super() method (e.g.
+        `super().on_copy_key`), so this works for both callers below without needing its own
+        copy of the swap logic."""
+        if self.tool_mode == "edit":
+            self.tool_mode = "move"
+            try:
+                bound_super_method(_event)
+            finally:
+                self.tool_mode = "edit"
+        else:
+            bound_super_method(_event)
 
     def on_copy_key(self, _event=None):
         """Blocks a MULTI-shape copy (2026-09-29, explicit: "multiselect copy paste should be
@@ -2164,7 +2428,9 @@ class BuilderPane(InteractiveBuilderApp):
         clipboard can never hold more than one shape to begin with, no separate paste-time
         guard needed. A single-shape copy is unaffected (its own clipboard entry can never
         carry a connection either way -- classify_change's underlying set is what would still
-        show as an outsider, isolated, after paste)."""
+        show as an outsider, isolated, after paste). See _call_super_in_move_mode's own
+        docstring for why the actual super() call goes through that helper rather than a plain
+        super().on_copy_key(_event)."""
         if self._locked:
             return
         if len(self.selected_ids) > 1:
@@ -2174,12 +2440,12 @@ class BuilderPane(InteractiveBuilderApp):
                 "the club (outsiders) must stay isolated from each other, and pasting more than "
                 "one at once would paste them still connected to each other.")
             return
-        super().on_copy_key(_event)
+        self._call_super_in_move_mode(super().on_copy_key, _event)
 
     def on_paste_key(self, _event=None):
         if self._locked:
             return
-        super().on_paste_key(_event)
+        self._call_super_in_move_mode(super().on_paste_key, _event)
 
     def on_undo_key(self, _event=None):
         if self._locked:
@@ -2306,17 +2572,14 @@ class BuilderPane(InteractiveBuilderApp):
             if a["n"] != b["n"] or a.get("flipped", False) != b.get("flipped", False):
                 return "complex", None
 
-        def conn_key(c):
-            return frozenset([(c["a_shape"], c["a_edge"]), (c["b_shape"], c["b_edge"])])
-
         def touches(key, shape_id):
             return any(sid == shape_id for sid, _edge in key)
 
         def touches_any(key, shape_ids):
             return any(sid in shape_ids for sid, _edge in key)
 
-        old_conns = {conn_key(c) for c in old_connections}
-        new_conns = {conn_key(c) for c in new_connections}
+        old_conns = {_connection_key(c) for c in old_connections}
+        new_conns = {_connection_key(c) for c in new_connections}
         conn_added, conn_removed = new_conns - old_conns, old_conns - new_conns
 
         if len(added) == 1 and not removed:
@@ -2347,24 +2610,65 @@ class BuilderPane(InteractiveBuilderApp):
         self.status_label = ttk.Label(self.root, anchor="w", padding=(8, 3))
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
 
-        top = ttk.Frame(self.root, padding=8)
+        # padding=(8, 2, 8, 2) -- horizontal unchanged, top/bottom both dropped 8 -> 4 -> 2
+        # (2026-09-29, explicit user request: "the shape buttons need to be shifted a bit lower
+        # to have even top/bottom margins", then "there's too much space between the button bar
+        # and the drawing area. close that up", then "still too much" -- both sides shrunk
+        # together each time, so top/bottom stay equal to each other, just narrower than before).
+        # The WHOLE visual gap below the icons
+        # (down to self.canvas's own border) lives inside this frame's own bottom padding; self.
+        # canvas's own pady is (0, 8) (top 0), not (8, 8), specifically so there's no SEPARATE
+        # gap stacked on top of this one -- see its own comment for why that second gap would
+        # also break header-height matching below, not just the margins look.
+        # self._header_frame (not just a local `top`) + pack_propagate(False): InflaterPane's
+        # own _apply_mode_visibility keeps this frame's HEIGHT in lockstep with its own header
+        # (self._setup_frame) right after every (re)pack, in BOTH directions, so self.canvas's
+        # own top border always lands exactly where InflaterPane.panel_label's does regardless
+        # of which mode InflaterPane happens to be showing (2026-09-29, explicit user request:
+        # "the 2d and 3d canvas boxes are not aligned at the top" -- hand-tuning padding/pady on
+        # each side to match by ARITHMETIC, tried first, broke again the moment either side's
+        # own content needed to change -- pack_propagate(False) here (this frame stops sizing
+        # itself to its own content, so setting its height from outside actually sticks) is what
+        # makes an explicit, ALWAYS-current height assignment possible at all). This only works
+        # cleanly because self.canvas's own pady has NO top component either (see its own
+        # comment) -- otherwise this frame's reqheight and InflaterPane._setup_frame's own
+        # wouldn't correspond to the same "header top to box top" distance any more, and this
+        # method's own height assignment would need to compensate for that mismatch instead of
+        # just copying the number across.
+        self._header_frame = top = ttk.Frame(self.root, padding=(8, 2, 8, 2))
+        top.pack_propagate(False)
         top.pack(side=tk.TOP, fill=tk.X)
         # Icons packed into an INNER frame that itself is centered in `top` (pack's default
         # anchor="center" centers a non-filling child within its parcel) -- packing the icons
         # straight into `top` (which fills X) would leave them flush left instead
         # (2026-09-19, explicit: "centre-align the n-gon buttons").
         palette_row = ttk.Frame(top)
-        palette_row.pack(side=tk.TOP)
+        # pady=(4, 0) -- nudges the icons down a bit within `top`'s own (fixed-height, see
+        # pack_propagate(False) above) box (2026-09-29, explicit user request: "just move the
+        # polygon buttons down a bit") -- purely a shift within the row's own existing space,
+        # not a change to that space itself, so it doesn't reopen the header-height-matching
+        # this frame's own height assignment (_apply_mode_visibility's tail) relies on.
+        palette_row.pack(side=tk.TOP, pady=(4, 0))
         for n in POLYGON_NS:
             self._build_palette_entry(palette_row, n)
 
-        toolbar = ttk.Frame(self.root, padding=8)
-        toolbar.pack(side=tk.LEFT, fill=tk.Y)
-        self._build_toolbar(toolbar)
+        # No left tool strip (2026-09-29, explicit user request: "get rid of the Edit mode
+        # button and the left toolbar since we're always in Edit mode") -- Edit has been this
+        # app's only tool mode for a while now (see _build_toolbar's own former docstring, kept
+        # below on self.tool_mode's own assignment), so a mode-switch button/strip for a mode
+        # that can never be switched away from was pure vestigial UI; the canvas now simply
+        # starts flush against the left edge instead.
+        self.tool_mode = "edit"
 
         self.canvas = tk.Canvas(self.root, bg=PLOT_THEME["bg"],
                                  highlightthickness=1, highlightbackground=PLOT_THEME["fg"])
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
+        # padx=8 (was (0, 8), no left margin -- a leftover from when the now-removed left tool
+        # strip used to occupy that space) -- both views get a left/right margin now (2026-09-29,
+        # explicit user request: "both views should have some margins on the left/right sides").
+        # pady=(0, 8), not a plain 8 -- top's own bottom padding already provides the gap above
+        # this border (see top's own comment); a second one stacked here would both look uneven
+        # and throw off the header-height match _apply_mode_visibility relies on.
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<Leave>", self._on_canvas_leave)
         self.canvas.bind("<Button-1>", self._on_canvas_press)
@@ -2386,11 +2690,7 @@ class BuilderPane(InteractiveBuilderApp):
         self._bind_all_guarded("<Delete>", self._on_delete_key)
         self._bind_all_guarded("<KeyPress-d>", self._on_toggle_debug_mode)
         self._bind_all_guarded("<KeyPress-f>", self._on_flip_key)
-        self._bind_all_guarded("<KeyPress-m>", lambda _e: self._set_tool_mode("move"))
-        self._bind_all_guarded("<KeyPress-j>", lambda _e: self._set_tool_mode("join"))
-        self._bind_all_guarded("<KeyPress-a>", lambda _e: self._set_tool_mode("anchor"))
-        self._bind_all_guarded("<KeyPress-h>", lambda _e: self._flip_selected_shapes("horizontal"))
-        self._bind_all_guarded("<KeyPress-v>", lambda _e: self._flip_selected_shapes("vertical"))
+        self._bind_all_guarded("<KeyPress-e>", lambda _e: self._set_tool_mode("edit"))
         self._bind_all_guarded("<Control-c>", self.on_copy_key)
         self._bind_all_guarded("<Control-v>", self.on_paste_key)
         self._bind_all_guarded("<Control-z>", self.on_undo_key)
@@ -2405,29 +2705,32 @@ class BuilderPane(InteractiveBuilderApp):
             return handler(event)
         self.root.bind_all(sequence, wrapped)
 
-    def _build_toolbar(self, parent):
-        """Runs InteractiveBuilderApp's own Move/Join/Polygon-Fold/Flip toolbar unchanged, then
-        adds a 4th mode button, "Anchor [A]" (2026-09-26, explicit) -- clicking a shape while in
-        this mode moves the central-object anchor there (see _on_canvas_press's own anchor
-        branch) instead of selecting/dragging it. Uses the same _add_toolbar_mode_button the base
-        class's own three mode buttons go through, so it gets the same active-mode highlight ring
-        (_update_toolbar_highlight, keyed by self.toolbar_buttons) for free."""
-        super()._build_toolbar(parent)
-        self._add_toolbar_mode_button(parent, "anchor", "Anchor [A]", _draw_anchor_tool_icon)
-        self._update_toolbar_highlight()
-
     def _build_palette_entry(self, parent, n):
         """Same icon construction as InteractiveBuilderApp's own _build_palette_entry, but
         packed LEFT-to-right (a horizontal top row) instead of top-to-bottom (a vertical left
         column), and scaled down to INFLATER_ICON_SIZE (see module docstring) instead of that
-        app's own ICON_SIZE -- this app's own required layout."""
+        app's own ICON_SIZE -- this app's own required layout.
+
+        Centered by its own BOUNDING BOX, not by _ICON_VERTICES' shared circumradius/circumcenter
+        (2026-09-29, explicit user request: "make the triangle aligned with the rest of the
+        shapes") -- every n-gon in POLYGON_NS shares one circumradius (interactive_builder_app's
+        own ICON_RADIUS) so they read as "evenly sized", but a triangle's own bounding box is far
+        from centered on that shared circumcenter the way an even-sided (or higher-n) polygon's
+        is: one vertex reaches the full radius on one side, while the OPPOSITE flat edge only
+        reaches half that -- drawn at the circumcenter, it visibly sat higher than the rest of
+        the row. Recentering every shape by its own bbox instead fixes the triangle and is a
+        no-op (or near enough) for the others, which were already close to bbox-centered."""
         icon = tk.Canvas(parent, width=INFLATER_ICON_SIZE, height=INFLATER_ICON_SIZE,
                           bg=PLOT_THEME["bg"], highlightthickness=2,
                           highlightbackground=PLOT_THEME["bg"])
         icon.pack(side=tk.LEFT, padx=2)
         cx, cy = INFLATER_ICON_SIZE / 2, INFLATER_ICON_SIZE / 2
         scale = INFLATER_ICON_SIZE / ICON_SIZE
-        screen_vertices = [(vx * scale + cx, vy * scale + cy) for vx, vy in _ICON_VERTICES[n]]
+        verts = _ICON_VERTICES[n]
+        xs, ys = [v[0] for v in verts], [v[1] for v in verts]
+        bbox_cx, bbox_cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        screen_vertices = [((vx - bbox_cx) * scale + cx, (vy - bbox_cy) * scale + cy)
+                            for vx, vy in verts]
         photo, (left, top) = _rasterize_polygon(screen_vertices, POLYGON_COLORS[n])
         self._icon_photos[n] = photo
         icon.create_image(left, top, anchor="nw", image=photo)
@@ -2874,8 +3177,31 @@ class InflaterPane:
 
     # ---- UI ----
 
+    def _build_icon_button(self, parent, text, command):
+        """A flat, borderless icon button -- plain tk.Button, not ttk (2026-09-29, explicit user
+        request, reference image: a browser-style back/forward/refresh trio, just the glyphs
+        themselves with no visible button box/border around them) -- sv_ttk's own dark theme
+        draws every ttk.Button with its own bordered/boxed look that isn't reachable through
+        plain style options (would need a custom ttk element/layout), while tk's own Button
+        takes flat/no-border/matching-background directly. `self._icon_font` (set once, right
+        before the first of these three gets built) is a scaled-up copy of the ordinary default
+        font -- big enough that the glyph itself reads as an icon, not a tiny character.
+        Disabled state uses `disabledforeground` (plain tk.Button's own built-in dimming, not a
+        ttk state map) -- see ICON_BUTTON_DISABLED_FG's own comment."""
+        return tk.Button(
+            parent, text=text, font=self._icon_font, command=command,
+            bg=PLOT_THEME["bg"], fg=PLOT_THEME["fg"],
+            activebackground=PLOT_THEME["bg"], activeforeground=PLOT_THEME["fg"],
+            disabledforeground=ICON_BUTTON_DISABLED_FG,
+            bd=0, relief=tk.FLAT, highlightthickness=0, padx=6, pady=0, cursor="hand2")
+
     def _build_ui(self):
-        setup = ttk.Frame(self.root, padding=8)
+        # padding=(8, 2, 8, 2), not a plain 8 -- top/bottom dropped 8 -> 4 -> 2 (2026-09-29,
+        # explicit user request: "there's too much space between the button bar and the drawing
+        # area. close that up (for both left and right panels)", then "still too much"),
+        # matching BuilderPane's own header frame so the two stay in lockstep (see
+        # _apply_mode_visibility's own tail, which copies this frame's reqheight onto that one).
+        self._setup_frame = setup = ttk.Frame(self.root, padding=(8, 2, 8, 2))
         setup.pack(side=tk.TOP, fill=tk.X)
 
         # One row -- "Target stretch: L1 __ L2 __ L3 __  Tolerance: ___" -- short enough
@@ -2972,14 +3298,47 @@ class InflaterPane:
         # Release-mode-only (see _apply_mode_visibility): "basically Full Inflate" (2026-09-28,
         # explicit user request) -- same command, just the one button a release-mode user needs,
         # since auto-inflate already keeps the mesh current without any button in that mode.
-        self.reinflate_button = ttk.Button(
-            button_row, text="Reinflate", command=self.on_full_inflate_clicked)
+        # A plain Unicode glyph (REFRESH_ICON_TEXT), not the word "Reinflate" (2026-09-29,
+        # explicit user request: "replace the reinflate button with an icon button like the
+        # refresh button in browsers") -- _set_running's own text swap to "Stop"/back is
+        # unaffected (still plain text, just a different idle-state string, see its own
+        # docstring). self._icon_font (own docstring on _build_icon_button) is what actually
+        # makes the glyph read as a real icon instead of a tiny default-size character -- sized
+        # (2026-09-29, explicit user request: "make the undo/redo/refresh button icons bigger,
+        # about the size of the polygon buttons") so the resulting button widget lands close to
+        # INFLATER_ICON_SIZE (56px) square, same as one of the palette icons above, not just a
+        # fixed multiple of the ordinary UI text size -- a plain scale factor undershot badly
+        # once actually measured (1.6x the default 9pt only produced a ~20px-tall button).
+        self._icon_font = tkfont.nametofont("TkDefaultFont").copy()
+        self._icon_font.configure(size=20)
+        # Undo/redo (2026-09-29, explicit user request: "also have an undo and redo button to
+        # the left of it. the undo/redo buttons are greyed out when there's nothing to undo/
+        # redo") -- BuilderPane.on_undo_key/on_redo_key are the exact same actions Ctrl+Z/Ctrl+Y
+        # already call (see _build_ui's own _bind_all_guarded calls); already lock-guarded on
+        # their own (BuilderPane.on_undo_key/on_redo_key each start with `if self._locked:
+        # return`), so a stray click while an inflate is running is harmless even before
+        # _refresh_undo_redo_buttons' own disabling below takes effect. Enabled state itself is
+        # kept current by _refresh_undo_redo_buttons, called after every builder edit
+        # (refresh_diff_eligibility) and on every _set_running transition -- starts disabled
+        # here (both stacks are empty on a fresh pane) until that first real call.
+        self.undo_button = self._build_icon_button(
+            button_row, UNDO_ICON_TEXT, lambda: self.builder_getter().on_undo_key())
+        self.redo_button = self._build_icon_button(
+            button_row, REDO_ICON_TEXT, lambda: self.builder_getter().on_redo_key())
+        self.undo_button.config(state=tk.DISABLED)
+        self.redo_button.config(state=tk.DISABLED)
+        self.reinflate_button = self._build_icon_button(
+            button_row, REFRESH_ICON_TEXT, self.on_full_inflate_clicked)
 
         self.status_label = ttk.Label(self.root, anchor="w", padding=(8, 3))
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # highlightthickness=1/highlightbackground (2026-09-29, explicit user request: "the 3d
+        # view should also have a box around it") -- same border convention BuilderPane's own
+        # 2D canvas already uses, so both panes read as matching framed panels.
         self.panel_label = tk.Label(self.root, bg=PLOT_THEME["bg"], bd=0,
-                                     width=PANEL_SIZE[0], height=PANEL_SIZE[1])
+                                     width=PANEL_SIZE[0], height=PANEL_SIZE[1],
+                                     highlightthickness=1, highlightbackground=PLOT_THEME["fg"])
         self.panel_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.plotter = pv.Plotter(off_screen=True, window_size=list(self.panel_size))
         self.plotter.set_background(PLOT_THEME["bg"])
@@ -3028,6 +3387,11 @@ class InflaterPane:
         (release mode is the startup default) and again every time debug mode flips."""
         debug = self.builder_getter().debug_mode
         if debug:
+            # button_row's own pady back to its ORIGINAL (8, 0) -- debug mode has _setup_row
+            # (the target-stretch/tolerance row) packed above it, so it still needs its own gap
+            # underneath that row; see the `else` branch's own comment for why release mode
+            # needs something different here.
+            self._button_row.pack_configure(pady=(8, 0))
             self._setup_row.pack(side=tk.TOP, anchor=tk.W)
             self.full_inflate_button.pack(side=tk.LEFT)
             self.diff_inflate_button.pack(side=tk.LEFT, padx=(8, 0))
@@ -3037,6 +3401,8 @@ class InflaterPane:
             self._show_normals_check.pack(side=tk.LEFT)
             self._show_vertex_normals_check.pack(side=tk.LEFT, padx=(8, 0))
             self._show_repulsive_forces_check.pack(side=tk.LEFT, padx=(8, 0))
+            self.undo_button.pack_forget()
+            self.redo_button.pack_forget()
             self.reinflate_button.pack_forget()
         else:
             self._setup_row.pack_forget()
@@ -3045,6 +3411,20 @@ class InflaterPane:
             self._auto_inflate_check.pack_forget()
             self._replay_slider.pack_forget()
             self._debug_overlay_row.pack_forget()
+            # button_row's own pady dropped to (0, 0) here (2026-09-29, explicit user request:
+            # "the 3 buttons on the right need to be shifted a bit higher", then "decrease the
+            # margin below the buttons so the space above and below the buttons are equal") --
+            # release mode has no _setup_row above it to leave a gap under, so this pane's own
+            # header only needs self._setup_frame's own outer padding (top/bottom both 4, see
+            # its own comment) above/below button_row -- with no extra pady of its own on either
+            # side, that margin is already equal top vs bottom by construction. The two panes'
+            # header HEIGHTS still get kept equal regardless (see this method's own tail), so
+            # BuilderPane's palette row shrinks its own gap to match automatically.
+            self._button_row.pack_configure(pady=(0, 0))
+            # Undo/redo to the LEFT of the refresh-icon Reinflate button (2026-09-29, explicit
+            # user request) -- release mode's own button row, in this order.
+            self.undo_button.pack(side=tk.LEFT)
+            self.redo_button.pack(side=tk.LEFT, padx=(4, 8))
             self.reinflate_button.pack(side=tk.LEFT)
             # Off, not just hidden, when leaving debug mode -- same as inflate_polyhedron_app's
             # own _apply_mode_visibility -- so a stale overlay never lingers into release mode.
@@ -3059,6 +3439,19 @@ class InflaterPane:
                 redraw_needed = True
             if redraw_needed and self.faces is not None:
                 self._render()
+        # Keeps BuilderPane's own header frame (self._header_frame, the palette row's own
+        # container) exactly as tall as THIS pane's own header (self._setup_frame) -- whichever
+        # is taller right now (2026-09-29, explicit user request: "the 2d and 3d canvas boxes
+        # are not aligned at the top") -- so self.canvas's own top border and self.panel_label's
+        # own always land on the same row, regardless of which mode is showing here (debug's own
+        # extra rows make this header taller than release's). winfo_reqheight() needs a fresh
+        # geometry pass first (update_idletasks, not a full update -- no event processing, just
+        # geometry) to reflect the packing changes just made above, not whatever it measured
+        # last time. BuilderPane._build_ui's own pack_propagate(False) on that frame is what
+        # makes an externally-assigned height actually stick instead of being overridden back to
+        # fit its own content on the next redraw.
+        self.root.update_idletasks()
+        self.builder_getter()._header_frame.configure(height=self._setup_frame.winfo_reqheight())
 
     def _register_numeric_entry(self, entry, allow_exponent, allow_decimal=True):
         vcmd = self.root.register(lambda proposed: _is_valid_numeric_partial(
@@ -3358,9 +3751,12 @@ class InflaterPane:
             # "Stop" regardless of whether THIS run is "full" or "diff" -- release mode has no
             # separate Diff Inflate button of its own to show a Stop on, so an auto-fired Diff
             # Inflate (see _effective_auto_inflate) needs Reinflate itself to double as the only
-            # visible way to interrupt it, not just runs it itself started.
-            self.reinflate_button.config(text="Stop", command=self._on_stop_clicked)
-            self.reinflate_button.state(["!disabled"])
+            # visible way to interrupt it, not just runs it itself started. The ordinary default
+            # font (not self._icon_font) while it reads "Stop" -- that word in the icon's own
+            # oversized font would look wrong; back to the icon font once idle, below.
+            self.reinflate_button.config(text="Stop", command=self._on_stop_clicked,
+                                          font=tkfont.nametofont("TkDefaultFont"))
+            self.reinflate_button.config(state=tk.NORMAL)
         else:
             self._active_button = None
             # Cleared here, not in _revert_run alone, so it can't leak into a LATER, unrelated
@@ -3373,9 +3769,27 @@ class InflaterPane:
             self.full_inflate_button.config(text="Full Inflate", command=self.on_full_inflate_clicked)
             self.full_inflate_button.state(["!disabled"])
             self.diff_inflate_button.config(text="Diff Inflate", command=self.on_diff_inflate_clicked)
-            self.reinflate_button.config(text="Reinflate", command=self.on_full_inflate_clicked)
-            self.reinflate_button.state(["!disabled"])
+            self.reinflate_button.config(text=REFRESH_ICON_TEXT, command=self.on_full_inflate_clicked,
+                                          font=self._icon_font)
+            self.reinflate_button.config(state=tk.NORMAL)
+        if not running:
+            # Drops whatever _stage_kept_selection staged directly into these two fields for
+            # the run that just ended (2026-09-29, explicit user request -- see that method's
+            # own docstring) -- BuilderPane.set_locked's own unlock branch (called right below)
+            # clears its OWN parallel ghost fields the same way, for the same reason: the run is
+            # over, so there's nothing left to keep specially outlined. Harmless no-op if
+            # nothing was ever staged (the common case, every OTHER kind of run).
+            self._selected_shape_ids = set()
+            self._selected_connection_id = None
+            self._apply_selection_highlight()
+            self._apply_connection_selection_highlight()
         self.builder_getter().set_locked(running)
+        # Undo/redo need refreshing on BOTH transitions (2026-09-29, explicit user request: "the
+        # undo/redo buttons are greyed out when there's nothing to undo/redo") -- set_locked's
+        # own call to _refresh_vme_state (which cascades into refresh_diff_eligibility, see its
+        # own _refresh_undo_redo_buttons call) only fires on UNLOCK, never on lock, so this would
+        # otherwise leave both buttons wrongly enabled for the whole duration of a run.
+        self._refresh_undo_redo_buttons()
         if not running:
             self.refresh_diff_eligibility()
 
@@ -3400,7 +3814,16 @@ class InflaterPane:
         A plain shallow copy is safe: every pipeline step REASSIGNS these fields wholesale
         (subdivide_once/relax_once/estimate_pressure_for_target_stretch all return fresh
         list/dict objects) rather than mutating one in place, so the objects this snapshot
-        still points at never change out from under it."""
+        still points at never change out from under it.
+
+        Also carries "builder_connections" -- the LIVE builder's own connections list, copied
+        here too (never restored by _restore_mesh_state, which only touches this pane's own
+        mesh fields) purely so _display_connections has something to serve while the run is in
+        flight: the ONE 2D edit that made a Diff Inflate run eligible has already been applied
+        to the live builder net by the time this snapshot is taken, so `builder.connections`
+        itself is already the NEW list -- same "computed but not yet shown" mismatch as
+        self._pending_source_polygon_id (see _display_pending_source_polygon_id's own
+        docstring), just on the BuilderPane side instead of this one's."""
         return {
             "base_faces": self.base_faces, "base_edges": self.base_edges,
             "base_face_edge_ids": self.base_face_edge_ids, "faces": self.faces,
@@ -3410,6 +3833,7 @@ class InflaterPane:
             "pending_source_polygon_id": self._pending_source_polygon_id,
             "pending_pendants": self._pending_pendants,
             "is_fully_inflated": self.is_fully_inflated,
+            "builder_connections": list(self.builder_getter().connections),
         }
 
     def _restore_mesh_state(self, snapshot):
@@ -3743,6 +4167,26 @@ class InflaterPane:
             # on the identical invariant for its own anchor-by-index lookup) -- so group i's
             # real shape id is builder.shapes[i]["id"], not i itself.
             source_polygon_id = [s["id"] for s in builder.shapes[:len(base_faces)]]
+        else:
+            # A `.hippie`'s own "source_polygon_id" entries are SAVE-TIME shape ids (2026-09-29,
+            # explicit bug report: "the two .hippie files, when i load them, i can't select the
+            # edges" -- traced to exactly this: `_load_faces` always reassigns FRESH live ids in
+            # net_layout order on every load (see _load_hippie_session's own docstring, "the
+            # saved integer itself is not a valid live id after this Load"), so a save-time id
+            # here is only STILL a valid live id by coincidence -- whenever a session's shapes
+            # weren't all placed fresh starting from id 1 with none ever deleted (e.g. bird_
+            # feeder.hippie's own ids run 13-30, hippo_tumour.hippie's skip one), reloading
+            # leaves self._pending_source_polygon_id pointing at shape ids that no longer exist,
+            # so _groups_for_shape_ids/_shape_id_of_group can never find those groups again --
+            # every hover/select/3D-edge-highlight path silently finds nothing for them.
+            # Remapped here exactly the same way anchor_shape_id already is, just for every
+            # entry instead of one: by INDEX into net_layout (whose own "shape_id" is the SAME
+            # save-time id, in the SAME order _load_faces built builder.shapes in), reading the
+            # fresh live id back off builder.shapes at that index.
+            net_layout = (net_file or {}).get("net_layout") or []
+            old_to_live_id = {entry.get("shape_id"): builder.shapes[i]["id"]
+                               for i, entry in enumerate(net_layout) if i < len(builder.shapes)}
+            source_polygon_id = [old_to_live_id.get(spid, spid) for spid in source_polygon_id]
         self._pending_source_polygon_id = source_polygon_id
         self.last_source_polygon_id = source_polygon_id
         # 2026-09-28, explicit user request: a save now records is_fully_inflated (True if the
@@ -3829,6 +4273,21 @@ class InflaterPane:
             self.on_session_saved(Path(path))
         return True
 
+    def _refresh_undo_redo_buttons(self):
+        """Greys the undo/redo icon buttons out whenever there's nothing to undo/redo, or while
+        an inflate is running (2026-09-29, explicit user request: "the undo/redo buttons are
+        greyed out when there's nothing to undo/redo" -- extended to the running case too, same
+        "only view changes while inflating" reasoning as every other editing action, see
+        BuilderPane._locked's own docstring). Reads the builder's raw _undo_stack/_redo_stack
+        lists directly (BuilderPane.on_undo_key/on_redo_key already read the exact same lists to
+        decide their own no-op case) -- cheap, and always current since this is called after
+        every builder edit (refresh_diff_eligibility) and every _set_running transition."""
+        builder = self.builder_getter()
+        can_undo = bool(builder._undo_stack) and not builder._locked
+        can_redo = bool(builder._redo_stack) and not builder._locked
+        self.undo_button.config(state=tk.NORMAL if can_undo else tk.DISABLED)
+        self.redo_button.config(state=tk.NORMAL if can_redo else tk.DISABLED)
+
     def refresh_diff_eligibility(self):
         """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
         current net differs from that completed state by exactly one added/removed shape or
@@ -3841,6 +4300,7 @@ class InflaterPane:
         [topological] change to the model... it automatically does a Diff Inflate" (a plain
         move/rotate never reaches here as anything but "none", since classify_change already
         ignores cx/cy/rotation entirely -- see its own docstring)."""
+        self._refresh_undo_redo_buttons()
         if self._loading_session:
             # A session load is still MID-restoration (see self._loading_session's own init
             # comment for the crash this prevents) -- builder.shapes/connections already
@@ -3927,8 +4387,7 @@ class InflaterPane:
             # inflate apply as soon as i put down the first piece" -- _prepare_mesh_for_inflate
             # itself reduces this to a plain flat "place", never real physics, for a lone face,
             # see its own docstring, so this is cheap even on the very first piece).
-            if (self._effective_auto_inflate() and self.builder_getter().tool_mode != "anchor"
-                    and self.builder_getter().central_shape_ids()):
+            if self._effective_auto_inflate() and self.builder_getter().central_shape_ids():
                 # Same infinite-retry hazard as on_diff_inflate_clicked's own redirect (see its
                 # own docstring/_diff_redirect_pending's init comment) if this auto-triggered
                 # run fails to converge -- e.g. several pieces placed and braced together before
@@ -3940,7 +4399,7 @@ class InflaterPane:
             self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
         eligible = kind in self.DIFF_ELIGIBLE_KINDS
         self.diff_inflate_button.state(["!disabled"] if eligible else ["disabled"])
-        if eligible and self._effective_auto_inflate() and self.builder_getter().tool_mode != "anchor":
+        if eligible and self._effective_auto_inflate():
             self.on_diff_inflate_clicked()
 
     def _on_panel_configure(self, event):
@@ -4096,12 +4555,18 @@ class InflaterPane:
         self._dragging = True
         self._last_xy = (event.x, event.y)
         self._drag_moved = False
-        # A ButtonPress-1 landing while an open edge is currently revealed (Join mode's own
+        # A ButtonPress-1 landing while an open edge is currently revealed (Edit mode's own
         # hover-reveal, see _set_hover_open_edge) starts a drag-to-connect instead of a camera
         # rotate-drag (2026-09-19, explicit: "hover over an open edge... drag to connect to
         # another edge midpoint... clicking is distinct from press-drag-release, which is used
         # for rotation" -- the same distinction, extended to a second drag-triggering gesture).
-        if self.builder_getter().tool_mode == "join" and self._hover_open_edge_key is not None:
+        # `not self._running` is belt-and-suspenders here (2026-09-29, explicit user request:
+        # "disable all types of editing [while inflating]... only allow view changes") --
+        # self._hover_open_edge_key is already forced None for the whole duration of a run by
+        # _on_panel_hover_motion's own running-guard, so this branch is unreachable while
+        # running regardless, but the explicit check keeps that invariant from being silent.
+        if (not self._running and self.builder_getter().tool_mode == "edit"
+                and self._hover_open_edge_key is not None):
             self._start_connection_drag(event)
 
     def _on_drag_motion(self, event):
@@ -4181,24 +4646,57 @@ class InflaterPane:
         OWN motion events (<B1-Motion>/<B3-Motion>), never this plain <Motion> one, so hover
         picking never fights the camera gestures. Dispatches by the LEFT pane's own tool mode
         (2026-09-19, explicit: "select faces... should only be possible in Move[M] mode... in
-        Join[J] mode, hovering over the 3d edge highlights the corresponding 2d connection") --
-        Move picks a whole face (_set_hover_group); Join picks the nearest connection seam
-        (_hover_edge_at); any other mode (Fold) clears both, since neither gesture applies
-        there."""
+        Join[J] mode, hovering over the 3d edge highlights the corresponding 2d connection";
+        Move+Join merged into Edit mode 2026-09-29, explicit -- so Edit mode now does BOTH: the
+        nearest connection seam/open edge AND a whole face, same as the 2D canvas's own merged
+        Edit-mode hover) -- Edit is this app's only tool mode now (2026-09-29, explicit: "remove
+        the Anchor[A] mode"), so the `else` branch below (clearing both) is purely defensive at
+        this point, not reachable in practice.
+
+        Edge wins over face (2026-09-29, explicit bug report: "first check if i'm near any
+        edges... if not, then check faces -- right now it's checking faces first so edges never
+        get highlighted"): an edge (existing connection seam or open edge) is looked up FIRST,
+        within its own pick tolerance around the cursor's world position; only when neither is
+        found does the face under the cursor get the yellow hover outline instead. The two are
+        mutually exclusive so there's no double highlight.
+
+        No hover picking at all while an inflate is running (2026-09-29, explicit user request:
+        "disable hovering highlight and selecting while inflating is ongoing... only allow view
+        changes like rotating/panning/zooming") -- self._running is exactly the window where
+        self.base_faces/self._pending_source_polygon_id can already describe the NEW mesh while
+        the panel is still showing the OLD one (see _display_pending_source_polygon_id's own
+        docstring), so a picked group can resolve to the wrong shape; more fundamentally, hover/
+        select are themselves a form of interacting with the model, which this request narrows
+        down to view-only (camera rotate/pan/zoom, still handled by the drag/pan/scroll bindings
+        below, none of which route through here) for the whole duration of a run."""
+        if self._running:
+            self._set_hover_group(None)
+            self._set_hover_connection(None)
+            self._set_hover_open_edge(None)
+            return
         if not self._actor_to_group:
             return
         mode = self.builder_getter().tool_mode
-        if mode == "move":
-            width, height = self.panel_size
-            # VTK's own pixel origin is bottom-left; Tk's (event.x/event.y) is top-left.
-            self._picker.Pick(event.x, height - 1 - event.y, 0, self.plotter.renderer)
-            group = self._actor_to_group.get(self._picker.GetActor())
-            self._set_hover_group(group)
-        elif mode == "join":
-            self._hover_edge_at(event)
-        else:
+        if mode != "edit":
             self._set_hover_group(None)
             self._set_hover_connection(None)
+            return
+        if self._connection_drag is not None:
+            self._update_connection_drag(event)
+            return
+        width, height = self.panel_size
+        # VTK's own pixel origin is bottom-left; Tk's (event.x/event.y) is top-left.
+        hit = self._picker.Pick(event.x, height - 1 - event.y, 0, self.plotter.renderer)
+        group = self._actor_to_group.get(self._picker.GetActor())
+        pos = np.array(self._picker.GetPickPosition()) if hit else None
+        picked_shape_id = self._shape_id_of_group(group)
+        conn_id = self._nearest_connection_at_position(pos, shape_id=picked_shape_id)
+        open_edge_key = None
+        if not self.builder_getter()._locked:
+            open_edge_key = self._nearest_open_edge_at_position(pos, shape_id=picked_shape_id)
+        self._set_hover_group(None if (conn_id is not None or open_edge_key is not None) else group)
+        self._set_hover_connection(conn_id)
+        self._set_hover_open_edge(open_edge_key)
 
     def _on_panel_hover_leave(self, _event=None):
         self._set_hover_group(None)
@@ -4246,7 +4744,7 @@ class InflaterPane:
         best_id, best_dist = None, tolerance
         connections_by_id = None
         if shape_id is not None:
-            connections_by_id = {c["id"]: c for c in self.builder_getter().connections}
+            connections_by_id = {c["id"]: c for c in self._display_connections()}
         for conn_id, segments in self._connection_edge_cache.items():
             if shape_id is not None:
                 conn = connections_by_id.get(conn_id)
@@ -4456,34 +4954,6 @@ class InflaterPane:
             return
         key = None if shape_id is None else (shape_id, raw_edge)
         self._apply_hover_open_edge_highlight(key)
-
-    def _hover_edge_at(self, event):
-        """Join-mode 3D hover: an in-progress drag reads its own live target instead
-        (_update_connection_drag); otherwise picks whichever's closer between an EXISTING
-        connection's seam (for selecting it, _nearest_connection_at_position) and an OPEN
-        edge (for starting a NEW one, _nearest_open_edge_at_position) -- an edge is always
-        exactly one or the other, never both, so there's no real ambiguity, just two
-        independent lookups against the same pick position. Locked (an inflate is running)
-        suppresses the open-edge side entirely, matching _on_canvas_press_join's own lock check
-        on the 2D side -- both are how this app blocks starting a NEW connection mid-computation
-        (an EXISTING connection's hover/select stays read-only and harmless throughout).
-
-        Both lookups are restricted to whatever shape is ACTUALLY under the cursor
-        (self._picker's own hit, read via self._actor_to_group right after _pick_world_
-        position's own Pick() call -- the picker keeps its last result until the next one) --
-        see _nearest_connection_at_position's own docstring for why a plain nearest-in-3D-space
-        search isn't enough on its own."""
-        if self._connection_drag is not None:
-            self._update_connection_drag(event)
-            return
-        pos = self._pick_world_position(event)
-        picked_shape_id = self._shape_id_of_group(self._actor_to_group.get(self._picker.GetActor()))
-        self._set_hover_connection(self._nearest_connection_at_position(pos, shape_id=picked_shape_id))
-        if self.builder_getter()._locked:
-            self._set_hover_open_edge(None)
-        else:
-            self._set_hover_open_edge(
-                self._nearest_open_edge_at_position(pos, shape_id=picked_shape_id))
 
     def _start_connection_drag(self, event):
         """Called from _on_drag_start when a ButtonPress-1 lands while an open edge is
@@ -4712,10 +5182,52 @@ class InflaterPane:
         highlights itself; this only drives the 3D side."""
         self._apply_hover_highlight(self._groups_for_shape_ids({shape_id} if shape_id is not None else set()))
 
+    def _display_pending_source_polygon_id(self):
+        """self._pending_source_polygon_id, or -- while an inflate is actively RUNNING -- the
+        FROZEN value from self._pre_click_snapshot instead (2026-09-29, explicit bug report:
+        "when i make a change, while inflation is still going, sometimes hovering over objects
+        will yield weird results... when inflation is still ongoing, selection/hovering should
+        use the model BEFORE the change was made"). on_full_inflate_clicked/_diff_remove_face/
+        _diff_reexport_and_relax all reassign self._pending_source_polygon_id (and self.
+        base_faces/face_of_fine) SYNCHRONOUSLY, well before the run's own background thread
+        even starts -- deliberately, so the mesh is fully staged for the NEXT _render() once the
+        run finishes (see _diff_reexport_and_relax's own "Deliberately no self._render() here"
+        comment) -- but that means for the WHOLE remaining duration of the run, these fields
+        describe the NEW (post-edit) mesh while the panel is still actually SHOWING the OLD one
+        (self._actor_to_group/_connection_edge_cache/_open_edges were all last rebuilt by the
+        PREVIOUS real _render() call, and stay exactly as they were until the next one). Hover/
+        click during that window must resolve a picked group index against whichever mesh is
+        ACTUALLY on screen, not the one being computed underneath it -- self._pre_click_snapshot
+        (captured by every pipeline entry point right before it touches anything, see
+        _snapshot_mesh_state) is exactly that OLD, still-displayed state."""
+        if self._running and self._pre_click_snapshot is not None:
+            return self._pre_click_snapshot["pending_source_polygon_id"]
+        return self._pending_source_polygon_id
+
+    def _display_face_of_fine(self):
+        """Same "frozen while running" rule as _display_pending_source_polygon_id (own
+        docstring has the full reasoning), for self.face_of_fine -- used by _groups_present to
+        validate a picked group index against whichever mesh is actually on screen."""
+        if self._running and self._pre_click_snapshot is not None:
+            return self._pre_click_snapshot["face_of_fine"]
+        return self.face_of_fine
+
+    def _display_connections(self):
+        """Same "frozen while running" rule as _display_pending_source_polygon_id (own
+        docstring has the full reasoning), for self.builder_getter().connections -- the live
+        builder net already reflects the ONE edit that made this run eligible, so during the
+        run it's the NEW list, not the one _connection_edge_cache's own (still-displayed, OLD)
+        seams actually belong to. Used by _nearest_connection_at_position's own shape_id
+        restriction, so a mid-run hover doesn't get excluded by looking up an old connection id
+        against the wrong (already-edited) live list."""
+        if self._running and self._pre_click_snapshot is not None:
+            return self._pre_click_snapshot["builder_connections"]
+        return self.builder_getter().connections
+
     def _shape_id_of_group(self, group):
-        if (group is not None and self._pending_source_polygon_id is not None
-                and group < len(self._pending_source_polygon_id)):
-            return self._pending_source_polygon_id[group]
+        spid_list = self._display_pending_source_polygon_id()
+        if group is not None and spid_list is not None and group < len(spid_list):
+            return spid_list[group]
         return None
 
     def _group_polygon_n(self, group):
@@ -4737,13 +5249,19 @@ class InflaterPane:
     def _groups_for_shape_ids(self, shape_ids):
         """Every 3D group whose own source_polygon_id is one of `shape_ids` -- usually one
         group per shape_id, but a Polygon-Fold shape's several triangle groups all share one
-        source_polygon_id, so this can return more entries than `shape_ids` has."""
-        if not shape_ids or self._pending_source_polygon_id is None:
+        source_polygon_id, so this can return more entries than `shape_ids` has. Reads via
+        _display_pending_source_polygon_id (own docstring), not the live field directly, so
+        this still resolves against whichever mesh is actually on screen while an inflate is
+        running."""
+        spid_list = self._display_pending_source_polygon_id()
+        if not shape_ids or spid_list is None:
             return set()
-        return {g for g, sid in enumerate(self._pending_source_polygon_id) if sid in shape_ids}
+        return {g for g, sid in enumerate(spid_list) if sid in shape_ids}
 
     def _groups_present(self):
-        """Every group index that actually exists in self.face_of_fine RIGHT NOW -- used to
+        """Every group index that actually exists in self.face_of_fine RIGHT NOW (or, while an
+        inflate is running, in the FROZEN pre-click self.face_of_fine still actually on screen
+        -- see _display_face_of_fine) -- used to
         filter out STALE group numbers before they reach _group_boundary_offset_lines/
         _group_boundary_lines (2026-09-19, explicit crash report: deleting two faces from a
         dodecahedron sometimes raised "Empty meshes cannot be plotted", then left hover
@@ -4760,7 +5278,7 @@ class InflaterPane:
         longer exists at all -- the actual crash, in _add_rounded_lines' own add_mesh call) or,
         worse, silently highlights whatever DIFFERENT face now happens to occupy that same
         index in the renumbered mesh."""
-        return set(self.face_of_fine or ())
+        return set(self._display_face_of_fine() or ())
 
     def _apply_hover_highlight(self, groups):
         """Shared by both hover directions above -- swaps the current set of highlighted
@@ -4877,16 +5395,33 @@ class InflaterPane:
         """A plain click (press+release with no meaningful motion -- see _on_drag_end) on the
         3D panel. Dispatches by the LEFT pane's own tool mode (2026-09-19, explicit: "select
         faces... should only be possible in Move[M] mode... clicking on the [3d] connection
-        selects it in both 2d and 3d"): Move selects a whole face (_click_select_face); Join
-        selects the nearest connection seam (_click_select_edge); any other mode (Fold) does
-        nothing here, since neither gesture applies there."""
+        selects it in both 2d and 3d"; Move+Join merged into Edit mode 2026-09-29, explicit):
+        Edit mode selects a connection seam if the click landed within
+        CONNECTION_PICK_TOLERANCE_FRACTION of one (_click_select_edge's own tolerance, same
+        priority the 2D canvas's own merged Edit-mode click gives a handle/connection line over
+        a shape body), else falls through to selecting a whole face (_click_select_face); Edit is
+        this app's only tool mode now (2026-09-29, explicit: "remove the Anchor[A] mode"), so the
+        `if mode == "edit":` guard below is purely defensive at this point, not reachable in
+        practice.
+
+        No selection at all while an inflate is running (2026-09-29, explicit user request:
+        "disable hovering highlight and selecting while inflating is ongoing... only allow view
+        changes like rotating/panning/zooming") -- same reasoning as _on_panel_hover_motion's
+        own running-guard."""
+        if self._running:
+            return
         if not self._actor_to_group:
             return
         mode = self.builder_getter().tool_mode
-        if mode == "move":
-            self._click_select_face(event)
-        elif mode == "join":
-            self._click_select_edge(event)
+        if mode == "edit":
+            if not self._click_select_edge(event):
+                # No seam close enough -- falls through to face selection, same as the 2D
+                # canvas's own merged press handler does (super()._on_canvas_press_move always
+                # clears any prior connection selection at its own top, regardless of what it
+                # then hits) -- a stale red connection highlight shouldn't survive a click that
+                # was clearly aimed at something else.
+                self._select_connection(None)
+                self._click_select_face(event)
 
     def _click_select_face(self, event):
         """Selects whichever face is under the cursor, deselecting any other previously
@@ -4914,15 +5449,23 @@ class InflaterPane:
         self._select_shape_ids(new_ids)
 
     def _click_select_edge(self, event):
-        """Selects whichever connection's seam is nearest the cursor (2026-09-19, explicit:
-        "multiselect is not available in this mode" -- always REPLACES the selection, no Ctrl-
-        toggle at all, unlike face selection in Move mode). Clicking somewhere with no seam
-        within CONNECTION_PICK_TOLERANCE_FRACTION clears the selection, same as clicking empty
-        space in Move mode. Restricted to the shape actually under the cursor, same as
-        _hover_edge_at -- see _nearest_connection_at_position's own docstring for why."""
+        """Selects whichever connection's seam is nearest the cursor, if one is within
+        CONNECTION_PICK_TOLERANCE_FRACTION (2026-09-19, explicit: "multiselect is not available
+        in this mode" -- always REPLACES the selection, no Ctrl-toggle at all, unlike face
+        selection). Restricted to the shape actually under the cursor, same as
+        _on_panel_hover_motion's own edge lookups --
+        see _nearest_connection_at_position's own docstring for why. Returns True (a connection
+        WAS selected) or False (nothing within tolerance, selection untouched) -- _on_panel_click
+        (Edit mode, 2026-09-29, explicit: Move+Join merged) uses this to decide whether to fall
+        through to a face-select click instead, the same "handle/connection line beats a shape
+        body" priority the 2D canvas's own merged press handler uses."""
         pos = self._pick_world_position(event)
         picked_shape_id = self._shape_id_of_group(self._actor_to_group.get(self._picker.GetActor()))
-        self._select_connection(self._nearest_connection_at_position(pos, shape_id=picked_shape_id))
+        conn_id = self._nearest_connection_at_position(pos, shape_id=picked_shape_id)
+        if conn_id is None:
+            return False
+        self._select_connection(conn_id)
+        return True
 
     def _select_shape_ids(self, shape_ids):
         shape_ids = set(shape_ids)
@@ -5040,18 +5583,34 @@ class InflaterPane:
                 edge_count[key] = edge_count.get(key, 0) + 1
         return {e for e, count in edge_count.items() if count == 1}
 
-    def _connection_edge_segments(self, a_shape_id, b_shape_id):
-        """Best-effort 3D geometry for a Join-mode connection between shapes `a_shape_id` and
-        `b_shape_id`: every fine-mesh segment that's a boundary edge of BOTH shapes' own 3D
-        group(s) at once, i.e. wherever the two shapes' currently-displayed patches are glued
-        together. Empty (no 3D highlight, 2D still works fine on its own) when: `a_shape_id ==
-        b_shape_id` (a Polygon-Fold self-connection glues two edges of the SAME shape, so a
-        boundary-intersection can't tell its seam apart from that shape's own ordinary outer
-        rim -- out of scope here); either shape isn't currently in the displayed mesh at all
-        (net edited since the last Inflate); or -- a known limitation -- there's more than one
-        connection between this exact pair of shapes, in which case every one of their shared
-        seams comes back together, undistinguished, since this only looks at the SHAPE pair,
-        not which specific edge a particular connection glues."""
+    def _connection_edge_segments(self, conn):
+        """Best-effort 3D geometry for Join-mode connection `conn`: the fine-mesh boundary
+        segments where `conn["a_shape"]`/`conn["b_shape"]`'s own currently-displayed 3D patches
+        are glued together. Empty (no 3D highlight, 2D still works fine on its own) when:
+        `a_shape == b_shape` (a Polygon-Fold self-connection glues two edges of the SAME shape,
+        so a boundary-intersection can't tell its seam apart from that shape's own ordinary
+        outer rim -- out of scope here), or either shape isn't currently in the displayed mesh
+        at all (net edited since the last Inflate).
+
+        The raw intersection of the two shapes' own boundary edge sets can trace out MORE than
+        just this one connection's own seam -- two shapes glued by several distinct connections
+        at once, ones whose base edges happen to share a corner, leave the WHOLE glued boundary
+        between that shape pair as one continuous chain, not one separate piece per connection
+        (2026-09-29, explicit bug report: "when i select one connection... the 3d view shows 3
+        edges selected" -- neighboring connections along that same chain were being highlighted
+        right along with the one actually clicked, since nothing here previously distinguished
+        one connection's own fine-mesh sub-segments from a NEIGHBORING connection's, once their
+        two base edges turned out to share an endpoint). Narrowed down to just the segments
+        actually BETWEEN `conn`'s own two base-mesh endpoints -- found via
+        _connection_base_vertex_endpoints (this connection's own two BASE/coarse vertex ids,
+        read straight off self.base_faces the same way _current_root_to_vertex_id does) and
+        _boundary_edge_path (the shortest path between them through the raw intersection,
+        stopping at the far endpoint rather than continuing into whatever ELSE happens to be
+        reachable from it) -- unless either endpoint can't be found at all, or no path between
+        them exists (both: a stale connection whose shape/edge no longer matches the currently-
+        displayed mesh), in which case every shared seam is returned exactly as before, rather
+        than showing nothing."""
+        a_shape_id, b_shape_id = conn["a_shape"], conn["b_shape"]
         if a_shape_id is None or b_shape_id is None or a_shape_id == b_shape_id:
             return np.empty((0, 3))
         a_edges, b_edges = set(), set()
@@ -5060,11 +5619,83 @@ class InflaterPane:
         for group in self._groups_for_shape_ids({b_shape_id}):
             b_edges |= self._group_boundary_edge_set(group)
         shared = a_edges & b_edges
+        if shared:
+            endpoints = self._connection_base_vertex_endpoints(conn)
+            if endpoints is not None:
+                isolated = self._boundary_edge_path(shared, *endpoints)
+                if isolated:
+                    shared = isolated
         segments = np.empty((2 * len(shared), 3))
         for i, (u, v) in enumerate(shared):
             segments[2 * i] = self.positions[u]
             segments[2 * i + 1] = self.positions[v]
         return segments
+
+    def _connection_base_vertex_endpoints(self, conn):
+        """The two BASE (coarse) vertex ids `conn`'s own glued edge (its `a_shape`'s `a_edge`,
+        running corner `a_edge` -> corner `(a_edge + 1) % n`, same convention _vertex_roots'
+        own docstring uses) runs between right now -- via the SAME shape/corner -> base-id
+        lookup _current_root_to_vertex_id already establishes for the whole mesh, restricted to
+        just this one shape/edge -- or None if `a_shape` isn't currently in the displayed mesh,
+        or its corner count no longer matches self.base_faces (both: net edited since the last
+        Inflate)."""
+        shape_id, edge_index = conn["a_shape"], conn["a_edge"]
+        groups = self._groups_for_shape_ids({shape_id})
+        if not groups:
+            return None
+        group = next(iter(groups))
+        shape = next((s for s in self.builder_getter().shapes if s["id"] == shape_id), None)
+        if shape is None or group >= len(self.base_faces):
+            return None
+        corners = _shape_face_corner_order(shape)
+        face = self.base_faces[group]
+        if len(corners) != len(face) or edge_index >= len(corners):
+            return None
+        corner_to_base_id = dict(zip(corners, face))
+        n = len(corners)
+        u = corner_to_base_id.get(edge_index)
+        v = corner_to_base_id.get((edge_index + 1) % n)
+        return None if u is None or v is None else (u, v)
+
+    def _boundary_edge_path(self, edges, start, end):
+        """The sequence of `edges` ({(u, v), ...}) along the SHORTEST path from vertex `start`
+        to vertex `end`, walking edge to edge -- isolates ONE specific glued seam out of
+        _connection_edge_segments' own raw `shared` set when it traces out more than just that
+        one connection's own edge (own docstring has the full reasoning). A plain BFS with
+        predecessor tracking, stopping the instant `end` is reached rather than exploring
+        the rest of the graph -- deliberately NOT "every edge reachable from `start`": a
+        neighboring connection's own edge, sharing a corner with this one, is reachable from
+        `start` too, but lies off to the side of the direct start->end path, not on it, so a
+        plain reachability walk wouldn't have excluded it. Empty if `start`/`end` aren't both
+        endpoints of a connected path through `edges` at all (the caller falls back to the
+        unfiltered set in that case, rather than showing nothing)."""
+        if start == end:
+            return set()
+        adjacency = {}
+        for u, v in edges:
+            adjacency.setdefault(u, []).append(v)
+            adjacency.setdefault(v, []).append(u)
+        if start not in adjacency or end not in adjacency:
+            return set()
+        predecessor = {start: None}
+        frontier = [start]
+        while frontier and end not in predecessor:
+            next_frontier = []
+            for node in frontier:
+                for neighbor in adjacency[node]:
+                    if neighbor not in predecessor:
+                        predecessor[neighbor] = node
+                        next_frontier.append(neighbor)
+            frontier = next_frontier
+        if end not in predecessor:
+            return set()
+        path_edges = set()
+        node = end
+        while predecessor[node] is not None:
+            prev = predecessor[node]
+            path_edges.add((prev, node) if prev < node else (node, prev))
+            node = prev
+        return path_edges
 
     def _group_boundary_owners(self, group):
         """{(u, v) sorted: owning_face} for every boundary edge of `group` -- used by
@@ -5084,10 +5715,12 @@ class InflaterPane:
         return [(edge, tris[0]) for edge, tris in edge_owner.items() if len(tris) == 1]
 
     def _group_boundary_offset_lines(self, group):
-        """(front_segs, back_segs) -- every boundary edge of `group`, nudged a hair along its
-        own owning triangle's outward normal (front) or the opposite way (back), so the two
-        copies don't Z-fight when drawn co-located on the real surface. Used for BOTH the
-        ordinary polygon-rim overlay and the yellow hover highlight (_render/_set_hover_group)
+        """(front_segs, back_segs) -- every boundary edge of `group`, nudged a hair along a
+        PER-VERTEX averaged owning-triangle normal (front) or the opposite way (back) --
+        _boundary_vertex_offsets' own docstring has the full reasoning for why per-vertex,
+        not per-edge -- so the two copies don't Z-fight when drawn co-located on the real
+        surface. Used for BOTH the ordinary polygon-rim overlay and the yellow hover highlight
+        (_render/_set_hover_group)
         -- a ribbon-mesh, exactly-culled version of the rim was tried in between (giving the
         front/back copies genuinely distinct colors with no grazing-angle bleed at all), but
         came out visibly messier overall (2026-09-19, explicit: "the front/backside rims are
@@ -5100,17 +5733,15 @@ class InflaterPane:
         # fighting reliably, small enough that the rim still reads as sitting right on the
         # surface rather than visibly floating off it.
         nudge = self._half * 0.002
+        vertex_offsets = _boundary_vertex_offsets(boundary, self.positions, nudge)
         front_pairs, back_pairs = [], []
-        for (u, v), (ta, tb, tc) in boundary:
-            pa, pb, pc = self.positions[ta], self.positions[tb], self.positions[tc]
-            normal = np.cross(pb - pa, pc - pa)
-            length = np.linalg.norm(normal)
-            offset = (normal / length * nudge) if length > 1e-12 else np.zeros(3)
+        for (u, v), _owner in boundary:
+            off_u, off_v = vertex_offsets[u], vertex_offsets[v]
             # NOT named `pv` -- that would shadow the module-level `pyvista as pv` import (bit
             # us once already in the sibling ribbon method this replaced).
             p_u, p_v = self.positions[u], self.positions[v]
-            front_pairs.append((p_u + offset, p_v + offset))
-            back_pairs.append((p_u - offset, p_v - offset))
+            front_pairs.append((p_u + off_u, p_v + off_v))
+            back_pairs.append((p_u - off_u, p_v - off_v))
 
         def to_segments(pairs):
             segments = np.empty((2 * len(pairs), 3))
@@ -5328,15 +5959,13 @@ class InflaterPane:
                 edge_owner.setdefault(key, []).append(face)
         boundary = [(edge, tris[0]) for edge, tris in edge_owner.items() if len(tris) == 1]
         nudge = self._half * 0.002
+        vertex_offsets = _boundary_vertex_offsets(boundary, positions, nudge)
         front_pairs, back_pairs = [], []
-        for (u, v), (ta, tb, tc) in boundary:
-            pa, pb, pc = positions[ta], positions[tb], positions[tc]
-            normal = np.cross(pb - pa, pc - pa)
-            length = np.linalg.norm(normal)
-            offset = (normal / length * nudge) if length > 1e-12 else np.zeros(3)
+        for (u, v), _owner in boundary:
+            off_u, off_v = vertex_offsets[u], vertex_offsets[v]
             p_u, p_v = positions[u], positions[v]
-            front_pairs.append((p_u + offset, p_v + offset))
-            back_pairs.append((p_u - offset, p_v - offset))
+            front_pairs.append((p_u + off_u, p_v + off_v))
+            back_pairs.append((p_u - off_u, p_v - off_v))
 
         def to_segments(pairs):
             segments = np.empty((2 * len(pairs), 3))
@@ -5402,7 +6031,7 @@ class InflaterPane:
         self._edge_highlight_actors = {}
         self._pending_made_connection_actors = []
         self._connection_edge_cache = {
-            conn["id"]: self._connection_edge_segments(conn["a_shape"], conn["b_shape"])
+            conn["id"]: self._connection_edge_segments(conn)
             for conn in self.builder_getter().connections
         }
         self._rebuild_open_edges()
@@ -5992,6 +6621,43 @@ class InflaterPane:
                     vertex_ids[root] = real_id
         return vertex_ids
 
+    def _old_atomic_slot_to_id(self):
+        """{(shape_id, corner): real_vertex_id} for every ATOMIC corner slot in the net as of
+        the last completed inflate (self.last_shapes_snapshot/last_connections_snapshot/
+        last_anchor_snapshot, the SAME triple _current_root_to_vertex_id's own caller snapshots
+        alongside it -- see _record_inflate_success) -- unlike self.last_root_to_vertex_id
+        itself (keyed by ROOT slot only, one entry per glued GROUP), this has one entry per
+        individual corner, letting _diff_reexport_and_relax's own seeding recover a vertex's old
+        position even when that corner's group didn't keep the same root slot across the edit
+        (2026-09-29, explicit bug report -- see _diff_reexport_and_relax's own docstring for the
+        full "why root-to-root matching under-seeds" explanation).
+
+        Re-expands self.last_shapes_snapshot/last_connections_snapshot (restricted to their OWN
+        central object, exactly like _current_root_to_vertex_id's live equivalent) rather than
+        reusing any of THIS pane's current-state fields -- the whole point is a snapshot of the
+        net as it stood at the LAST successful inflate, independent of whatever's been edited
+        since. Every slot's root is looked up in self.last_root_to_vertex_id (unaffected by this
+        method's own re-expansion -- that map's REAL ids were already recorded at the time, see
+        _current_root_to_vertex_id) to get its real id; a root with no entry there (shouldn't
+        normally happen -- every root _vertex_roots produces here comes from the exact same
+        expansion _current_root_to_vertex_id used to build that map in the first place) is
+        silently skipped rather than raising."""
+        if not self.last_shapes_snapshot or self.last_root_to_vertex_id is None:
+            return {}
+        old_central = _central_shape_ids(
+            self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
+        if not old_central:
+            return {}
+        old_shapes = [s for s in self.last_shapes_snapshot if s["id"] in old_central]
+        old_connections = [c for c in self.last_connections_snapshot
+                            if c["a_shape"] in old_central and c["b_shape"] in old_central]
+        expanded_shapes, expanded_connections, _spid = _expand_folded_shapes(
+            old_shapes, old_connections)
+        roots = _vertex_roots(expanded_shapes, expanded_connections)
+        old_root_to_id = self.last_root_to_vertex_id
+        return {slot: old_root_to_id[root] for slot, root in roots.items()
+                if root in old_root_to_id}
+
     def _record_inflate_success(self):
         """Called only from _on_inflate_step_done's "Done" branch above (a clean Level-3
         finish -- never a mid-pipeline stop/failure, so a warn/error outcome leaves Diff
@@ -6018,6 +6684,56 @@ class InflaterPane:
             self.on_inflate_success()
 
     # ---- diff inflate ----
+
+    def _stage_kept_selection(self, kind, extra):
+        """Keeps exactly the ONE thing that triggered this run visibly outlined/selected (2D
+        and 3D) for its WHOLE duration, even though hover/selection are otherwise fully disabled
+        while locked (2026-09-29, explicit user request: "if the change is a face deletion, then
+        keep that face selected... if there's a connection being deleted, then keep that
+        connection/edge selected... if two edges are being joined, the two edges remain selected
+        ... with 3d showing the line between the two edges as well"). A no-op for every other
+        `kind` (add_face, complex, none) -- nothing else asked for this treatment. Called from
+        on_diff_inflate_clicked right before it locks the pane (directly, or via its own Full
+        Inflate redirect -- either way still the SAME triggering edit).
+
+        "remove_face"/"remove_connection": the shape(s)/connection are already gone from the
+        LIVE builder.shapes/connections by this point, so self.last_shapes_snapshot/last_
+        connections_snapshot (the net as of the last completed inflate, i.e. right before this
+        edit) is where their own geometry has to come from instead -- handed to BuilderPane.
+        stage_locked_ghost (own docstring has the rest), which is what actually keeps them
+        outlined in 2D. The 3D side sets self._selected_shape_ids/_selected_connection_id (and
+        re-derives their own highlight actors) directly, bypassing _select_shape_ids/
+        _select_connection's own forward-to-BuilderPane step -- forwarding would set the
+        BUILDER's live self.selected_ids/selected_connection_id to an id it no longer has any
+        record of, which BuilderPane.stage_locked_ghost's own separate, dedicated ghost fields
+        make unnecessary anyway.
+
+        "add_connection": the new connection, unlike the two cases above, is very much still
+        live in builder.connections -- its own 3D "two edges in red plus a connecting line"
+        indicator already exists independently of this method (BuilderPane._on_canvas_release/
+        InflaterPane._finish_connection_drag's own persistent self._pending_made_connection_
+        actors, made the instant the join itself completes, well before this ever runs), so only
+        the 2D side needs anything here: a plain BuilderPane.set_selected_connection, the same
+        ordinary (non-ghost) selection path _click_select_edge already uses, since the
+        connection is real and still there to select."""
+        builder = self.builder_getter()
+        if kind == "remove_face":
+            removed_shapes = [s for s in self.last_shapes_snapshot if s["id"] in extra]
+            builder.stage_locked_ghost(shapes=removed_shapes)
+            self._selected_shape_ids = set(extra)
+            self._apply_selection_highlight()
+        elif kind == "remove_connection":
+            removed_conn = next(
+                (c for c in self.last_connections_snapshot if _connection_key(c) == extra), None)
+            builder.stage_locked_ghost(connection=removed_conn)
+            if removed_conn is not None:
+                self._selected_connection_id = removed_conn["id"]
+                self._apply_connection_selection_highlight()
+        elif kind == "add_connection":
+            made_conn = next(
+                (c for c in builder.connections if _connection_key(c) == extra), None)
+            if made_conn is not None:
+                builder.set_selected_connection(made_conn["id"])
 
     def on_diff_inflate_clicked(self):
         """Only meaningful once refresh_diff_eligibility has already enabled this button (an
@@ -6060,6 +6776,7 @@ class InflaterPane:
         if kind == "add_face" and self._is_pendant_add(extra):
             self._diff_attach_pendant_only(extra, label)
             return
+        self._stage_kept_selection(kind, extra)
         if (not self.is_fully_inflated
                 and kind in ("add_face", "add_connection", "remove_connection", "remove_face")):
             # Marks this run as a REDIRECTED one so _revert_run's own "undo the triggering edit
@@ -6340,18 +7057,14 @@ class InflaterPane:
     def _diff_reexport_and_relax(self):
         """Shared by _diff_add_face/_diff_connection_change (see module docstring's "Full
         Inflate vs. Diff Inflate" section) -- re-exports the FULL current net, seeds the fresh
-        base mesh's own Level-0 positions by matching each vertex's STABLE root identity
-        (BuilderPane.root_to_vertex_id, comparable across exports even when a connection
-        add/remove has MERGED or SPLIT vertex groups and shifted raw integer ids -- unlike
-        appending one new shape, which never renumbers anything else, a connection edit can
-        renumber vertices anywhere after the affected group in traversal order, so a plain
-        `self.positions[v]` id lookup isn't safe here the way it was for _diff_remove_face's
-        pure filtering) against self.last_root_to_vertex_id (the SAME map from the last
+        base mesh's own Level-0 positions by matching each vertex's ATOMIC (shape_id, corner)
+        slot (2026-09-29, explicit bug report -- see this method's own second docstring
+        paragraph below for why this replaced a plain NEW-root-to-OLD-root match) against
+        self._old_atomic_slot_to_id() (the same slot's own real vertex id as of the last
         completed inflate), falling back to a neighbor-BFS fill (_seed_unknown_by_bfs) for any
-        vertex with no matching old root (a genuinely new shape's own corners, or one half of a
-        just-split connection), subdivides straight to Level 3 as pure interpolation
-        (_subdivide_combined_to_level3 -- no solving), then runs ONE pressure-calibration pass
-        at Level 3.
+        slot that didn't exist in the old net at all (a genuinely new shape's own corners),
+        subdivides straight to Level 3 as pure interpolation (_subdivide_combined_to_level3 --
+        no solving), then runs ONE pressure-calibration pass at Level 3.
 
         Also runs pendant exclusion on the fresh export (2026-09-28, explicit user request --
         see _diff_remove_face's own comment for the full rationale: without this, a connection
@@ -6361,7 +7074,48 @@ class InflaterPane:
         corners may still be real, already-positioned vertices worth reusing, e.g. an unrelated
         existing pendant that rode along unchanged) -- only the actual subdivide/calibrate step
         below is restricted to the CORE, with the excluded pieces staged in self._pending_
-        pendants for _on_inflate_step_done's existing generic reattachment."""
+        pendants for _on_inflate_step_done's existing generic reattachment.
+
+        Matching by NEW-root-to-OLD-root alone (an earlier version of this method) under-seeds:
+        union-find's own root choice for a group that DIDN'T lose or gain any of its own glued
+        vertices can still shift just because a DIFFERENT, unrelated connection nearby was
+        edited (_vertex_roots picks whichever slot a union() call happens to leave as the
+        survivor, not a fixed canonical one) -- so a group's new root can come out as a slot
+        that was never the OLD group's own chosen root, silently missing an old-position match
+        for a vertex that never actually moved. Worse, for the ONE group a connection edit
+        genuinely does split (its own two now-unglued corners), root-to-root matching can never
+        succeed at all -- each newly-solo corner's own root is brand new, never the OLD merged
+        group's root either -- even though each of those corners individually DOES still have a
+        perfectly good old position (they were exactly coincident, at the old merged vertex,
+        right up until this edit). Matching per ATOMIC SLOT instead (self._old_atomic_slot_to_
+        id, keyed by the raw (shape_id, corner) pair alone, before any union) sidesteps both: a
+        slot's OWN old root -- whatever the OLD net's union-find gave it -- is looked up
+        directly, independent of what the NEW net's root happens to be, so every slot that
+        existed in the old net recovers its old position, split or not (2026-09-29, explicit bug
+        report: "you did fix the problem of all the faces being flat, but now most of the faces
+        are inflated while the affected faces look weird at the start of that inflation... The
+        inflation's initial configuration should just be what the model is like before the
+        change" -- with root-to-root matching, the two corners right at a just-deleted
+        connection, and any other slot whose group's root happened to shift, fell through to
+        _seed_unknown_by_bfs's crude neighbor-jitter guess instead of their own perfectly good
+        old position).
+
+        Base-level slot-matching alone only seeds the COARSE (Level-0) corners from history --
+        every FINE vertex below that gets re-derived fresh by _subdivide_combined_to_level3's
+        pure interpolation, discarding the old, already pressure-calibrated curvature for the
+        WHOLE mesh, not just near the edit (2026-09-29, explicit bug report: "the inflation
+        started with all the faces flat, which is wrong because it should start from the
+        inflated model we already have"). old_faces/old_face_of_fine/old_positions/
+        old_source_polygon_id (captured here, before any of self.faces/positions/
+        _pending_source_polygon_id below get overwritten) let the snap-back after subdividing
+        (see this method's own tail, _fine_vertex_local_order) copy the OLD fine positions
+        across exactly for every base face group whose own shape/corner order didn't change --
+        now including the group(s) touching the edit too, since slot-matching (above) gives
+        them a real old position for every one of their own corners as well."""
+        old_faces = self.faces
+        old_face_of_fine = self.face_of_fine
+        old_positions = self.positions
+        old_source_polygon_id = self._pending_source_polygon_id
         builder = self.builder_getter()
         mesh, err = builder.export_mesh_dict()
         if err:
@@ -6390,12 +7144,27 @@ class InflaterPane:
         self._stop_event = threading.Event()
         self._stop_requested = False
 
+        central_ids = builder.central_shape_ids()
+        central_shapes = [s for s in builder.shapes if s["id"] in central_ids]
+        central_connections = [c for c in builder.connections
+                                if c["a_shape"] in central_ids and c["b_shape"] in central_ids]
+        new_expanded_shapes, new_expanded_connections, _spid = _expand_folded_shapes(
+            central_shapes, central_connections)
+        new_slot_roots = _vertex_roots(new_expanded_shapes, new_expanded_connections)
+        old_slot_to_id = self._old_atomic_slot_to_id()
+
         seed = {}
-        old_roots = self.last_root_to_vertex_id or {}
-        for root, new_id in new_root_to_id.items():
-            old_id = old_roots.get(root)
-            if old_id is not None and old_id in self.positions:
-                seed[new_id] = self.positions[old_id]
+        for shape in new_expanded_shapes:
+            for corner in _shape_face_corner_order(shape):
+                slot = (shape["id"], corner)
+                root = new_slot_roots.get(slot)
+                new_id = new_root_to_id.get(root) if root is not None else None
+                if new_id is None or new_id in seed:
+                    continue
+                old_id = old_slot_to_id.get(slot)
+                if old_id is not None and old_id in self.positions:
+                    seed[new_id] = self.positions[old_id]
+        matched_base_ids = set(seed)
         rng = np.random.default_rng(0)
         _seed_unknown_by_bfs(core_base_faces, seed, rng)
 
@@ -6406,6 +7175,9 @@ class InflaterPane:
         self._pending_pendants = pendants
         self.faces, self.positions, self.edge_length, self.face_of_fine = \
             _subdivide_combined_to_level3(core_base_faces, core_face_edge_ids, seed)
+        self._snap_unchanged_groups_to_old_fine_positions(
+            core_base_faces, core_source_polygon_id, matched_base_ids,
+            old_faces, old_face_of_fine, old_positions, old_source_polygon_id)
         self.edges = None
         self.subdivision_level = MAX_LEVEL
         # Deliberately no self._render() here -- any freshly-seeded (as opposed to root-
@@ -6427,6 +7199,42 @@ class InflaterPane:
         self._set_status(f"{self._pipeline_label()} -- Level {MAX_LEVEL}: Step 0.", "info")
         self._run_inflate_step(initial_pressure_guess=self.last_pressure,
                                 tol_pct=DIFF_PRESSURE_GUESS_TOL_PCT)
+
+    def _snap_unchanged_groups_to_old_fine_positions(
+            self, core_base_faces, core_source_polygon_id, matched_base_ids,
+            old_faces, old_face_of_fine, old_positions, old_source_polygon_id):
+        """Mutates self.positions in place, right after _diff_reexport_and_relax's own
+        _subdivide_combined_to_level3 call -- for every NEW base face group whose own corners
+        ALL root-matched (every id in matched_base_ids, i.e. this shape's own gluing pattern is
+        completely unaffected by the edit), replaces its freshly-interpolated FINE vertices with
+        the OLD mesh's own already-curved ones, via _fine_vertex_local_order's local-index
+        identity (own docstring has the full "why this is safe" reasoning) -- a no-op fallback
+        (leaves the flatter interpolated guess in place) for any group that's new, unmatched, or
+        whose fine vertex COUNT doesn't line up with its old counterpart (should never happen
+        for a genuinely unchanged shape, but cheap to guard rather than assume).
+
+        `old_source_polygon_id`, only ever None for a session with no prior successful inflate
+        at all, short-circuits immediately -- _diff_reexport_and_relax is never reached without
+        one (Diff Inflate stays disabled until self.last_shapes_snapshot exists), so this is
+        purely defensive."""
+        if not old_source_polygon_id:
+            return
+        old_group_by_spid = {spid: g for g, spid in enumerate(old_source_polygon_id)}
+        for group, base_face in enumerate(core_base_faces):
+            if any(v not in matched_base_ids for v in base_face):
+                continue
+            spid = core_source_polygon_id[group] if core_source_polygon_id else None
+            old_group = old_group_by_spid.get(spid)
+            if old_group is None:
+                continue
+            new_order = _fine_vertex_local_order(self.faces, self.face_of_fine, group)
+            old_order = _fine_vertex_local_order(old_faces, old_face_of_fine, old_group)
+            if len(new_order) != len(old_order):
+                continue
+            for new_id, old_id in zip(new_order, old_order):
+                pos = old_positions.get(old_id)
+                if pos is not None:
+                    self.positions[new_id] = pos
 
     # ---- background thread/progress-poll pattern (same idea as both sibling apps' own
     # _run_background) ----
