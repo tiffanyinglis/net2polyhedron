@@ -124,6 +124,42 @@ def _midpoint_color(color_a, color_b):
 # user tell outside from inside at a glance.
 INSIDE_FACE_DARKEN_FACTOR = 0.65
 
+# Lighting/shading for every "Level N"/viewer-quadrant face actor -- ported from
+# interactive_inflater_app (2026-09-29 there, explicit: "add some lighting and shading...
+# performant"), same constants/rationale. SMOOTH_SHADING makes VTK interpolate per-vertex
+# normals across each triangle instead of flat per-triangle shading, so a subdivided face reads
+# as a smoothly curved surface; the MATERIAL_* constants tone add_mesh's own flat defaults
+# (ambient=0, diffuse=1, specular=0) down slightly so the shadowed side never goes fully black
+# and a modest specular highlight sells the "glossy inflated surface" look.
+SMOOTH_SHADING = True
+MATERIAL_AMBIENT = 0.25
+MATERIAL_DIFFUSE = 0.85
+MATERIAL_SPECULAR = 0.35
+MATERIAL_SPECULAR_POWER = 20
+
+# Explicit 2-light camera-relative rig, replacing the plotter's own default headlight kit (same
+# rationale as interactive_inflater_app's KEY_LIGHT_POSITION -- a headlight lights a convex
+# surface almost uniformly regardless of smooth_shading, so there's no real contrast to shade
+# with). `light_type="camera light"` tracks the camera automatically as the user rotates/pans.
+KEY_LIGHT_POSITION = (0.55, 0.7, 0.85)
+KEY_LIGHT_INTENSITY = 1.0
+FILL_LIGHT_POSITION = (-0.6, -0.35, 0.5)
+FILL_LIGHT_INTENSITY = 0.35
+
+
+def _setup_plotter_lighting(plotter):
+    """Replaces `plotter`'s own default light kit with the explicit KEY/FILL camera-relative
+    rig. Must be called after every `pv.Plotter(...)` construction AND after every
+    `plotter.clear()` -- clear() calls remove_all_lights() internally, so a one-time setup
+    right after construction is silently undone by the first real draw."""
+    plotter.remove_all_lights()
+    key_light = pv.Light(light_type="camera light", intensity=KEY_LIGHT_INTENSITY)
+    key_light.position = KEY_LIGHT_POSITION
+    plotter.add_light(key_light)
+    fill_light = pv.Light(light_type="camera light", intensity=FILL_LIGHT_INTENSITY)
+    fill_light.position = FILL_LIGHT_POSITION
+    plotter.add_light(fill_light)
+
 
 def _darken_color(color, factor=INSIDE_FACE_DARKEN_FACTOR):
     """`color` scaled toward black by `factor` (an (r, g, b) tuple in [0, 1]) -- same
@@ -1174,6 +1210,7 @@ class InflatePolyhedronApp:
             self._viewer_photos[level] = None
             plotter = pv.Plotter(off_screen=True, window_size=list(VIEWER_SUBPANEL_SIZE))
             plotter.set_background(PLOT_THEME["bg"])
+            _setup_plotter_lighting(plotter)
             self._viewer_plotters[level] = plotter
             self._viewer_centers[level] = np.zeros(3)
             self._viewer_halves[level] = 1.0
@@ -1323,6 +1360,7 @@ class InflatePolyhedronApp:
         `level` -- blanks the quadrant rather than erroring."""
         plotter = self._viewer_plotters[level]
         plotter.clear()
+        _setup_plotter_lighting(plotter)
         if faces is None:
             self._viewer_centers[level] = np.zeros(3)
             self._viewer_halves[level] = 1.0
@@ -1347,7 +1385,10 @@ class InflatePolyhedronApp:
             plotter.add_mesh(mesh, color=face_color, show_edges=True,
                               edge_color=_midpoint_color("white", face_color),
                               line_width=SUBDIVISION_EDGE_WIDTH,
-                              backface_params=dict(color=_darken_color(face_color)))
+                              backface_params=dict(color=_darken_color(face_color)),
+                              smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                              diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                              specular_power=MATERIAL_SPECULAR_POWER)
 
         lo, hi = points.min(axis=0), points.max(axis=0)
         self._viewer_centers[level] = (lo + hi) / 2
@@ -1785,6 +1826,7 @@ class InflatePolyhedronApp:
         label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         plotter = pv.Plotter(off_screen=True, window_size=list(_level_panel_size(level)))
         plotter.set_background(PLOT_THEME["bg"])
+        _setup_plotter_lighting(plotter)
         self.level_labels[level] = label
         self._level_of_label[label] = level
         self.level_plotters[level] = plotter
@@ -1976,6 +2018,7 @@ class InflatePolyhedronApp:
         only, not the force's own actual magnitude)."""
         plotter = self.level_plotters[level]
         plotter.clear()
+        _setup_plotter_lighting(plotter)
         if faces is not None:
             vertex_ids = sorted(positions)
             idx = {v: i for i, v in enumerate(vertex_ids)}
@@ -1999,7 +2042,10 @@ class InflatePolyhedronApp:
                 plotter.add_mesh(mesh, color=face_color, show_edges=True,
                                   edge_color=_midpoint_color("white", face_color),
                                   line_width=SUBDIVISION_EDGE_WIDTH,
-                                  backface_params=dict(color=_darken_color(face_color)))
+                                  backface_params=dict(color=_darken_color(face_color)),
+                                  smooth_shading=SMOOTH_SHADING, ambient=MATERIAL_AMBIENT,
+                                  diffuse=MATERIAL_DIFFUSE, specular=MATERIAL_SPECULAR,
+                                  specular_power=MATERIAL_SPECULAR_POWER)
 
             if self.show_normals_var.get():
                 # Skips every OPEN triangle (see _is_open_of_fine/_pressure_exclude_faces) --

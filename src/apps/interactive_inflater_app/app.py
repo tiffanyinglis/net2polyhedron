@@ -173,6 +173,48 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 from utils.inflate_polyhedron.pre_inflation_relaxer import relax_initial_configuration
 from utils.inflate_polyhedron.multi_trial_inflater import estimate_pressure_for_target_stretch
 
+# Pendant/guest flat-attach pipeline (2026-09-30 modularization -- moved out verbatim, see that
+# module's own docstring) -- aliased to their old underscored names so every existing call site
+# below is unchanged.
+from interactive_inflater_app.logic.flat_face_attacher import (
+    pendant_face_attachments as _pendant_face_attachments,
+    prepare_mesh_for_inflate as _prepare_mesh_for_inflate,
+    reattach_pendant_faces as _reattach_pendant_faces,
+    pendant_own_face_edge_ids as _pendant_own_face_edge_ids,
+    place_all_flat as _place_all_flat,
+)
+
+# Club/member/guest/insider/outsider classification + the inflate-pipeline dispatch decision
+# (2026-09-30 modularization -- moved out, see each module's own docstring) -- aliased to their
+# old underscored names so every existing call site below is unchanged.
+from interactive_inflater_app.logic import club_member_classifier, inflation_type_chooser
+from interactive_inflater_app.logic.club_member_classifier import (
+    shape_connected_components as _shape_connected_components,
+    central_shape_ids as _central_shape_ids,
+    connection_key as _connection_key,
+)
+
+# Group<->shape_id and base-edge<->fine-mesh identity mapping (2026-09-30 modularization) -- what
+# keeps the 2D canvas and the 3D panel "matching", see each module's own docstring.
+from interactive_inflater_app.logic import face_indexer, edge_indexer
+
+# Pure hover/selection set arithmetic (2026-09-30 modularization) -- the VTK actor-building
+# stays here; _point_segment_distance_3d (used to hit-test the 3D panel's own Join-mode cursor
+# ray against a connection's glued seam) moved into edge_selecter.py alongside the nearest-
+# connection/nearest-open-edge search it supports, aliased to its old name.
+from interactive_inflater_app.logic import face_selecter, edge_selecter
+from interactive_inflater_app.logic.edge_selecter import (
+    point_segment_distance_3d as _point_segment_distance_3d,
+)
+
+# Connection validity + vertex-identity continuity across edits, and face-removal mesh
+# arithmetic (2026-09-30 modularization) -- see each module's own docstring.
+from interactive_inflater_app.logic import edge_modifier, face_modifier
+
+# The one pure decision inside the full-cold-reinflate pipeline (2026-09-30 modularization) --
+# see that module's own docstring for why the rest of the pipeline stays here.
+from interactive_inflater_app.logic import reinflater
+
 # interactive_builder_app/app.py is NOT on the untouchable list, but per this app's own
 # instructions it's still read-only from here -- imported directly (a plain namespace-package
 # import, src/apps/ already being on sys.path) rather than copied, so its ~3700 lines of net-
@@ -444,17 +486,6 @@ def _weighted_color(color, weight, other="white"):
     return tuple(weight * a + (1 - weight) * b)
 
 
-def _point_segment_distance_3d(point, a, b):
-    """Shortest distance from `point` to the 3D line SEGMENT a->b (not the infinite line) --
-    the 3D counterpart of interactive_builder_app's own 2D _point_segment_distance, used to
-    hit-test the 3D panel's own Join-mode cursor ray against a connection's glued seam (a thin
-    line with no interior to pick a mesh face against)."""
-    ab = b - a
-    denom = np.dot(ab, ab)
-    if denom < 1e-18:
-        return float(np.linalg.norm(point - a))
-    t = max(0.0, min(1.0, np.dot(point - a, ab) / denom))
-    return float(np.linalg.norm(point - (a + t * ab)))
 
 
 def _boundary_vertex_offsets(boundary, positions, nudge):
@@ -792,551 +823,6 @@ def _load_mesh_from_dict(mesh_dict):
     return faces, base_edges, face_edge_ids
 
 
-# ---- pendant (single-edge-attached) face exclusion (2026-09-28, explicit user request) ----
-#
-# "when a face is attached to the central group by only one edge, it is going to flop around
-# because it's too unconstrained. that face should be excluded from the relaxation/inflation
-# process completely. it should be attached to the face it's connected to after the relaxation/
-# inflation is done, and it should be attached parallel to that face." A face hinged to the rest
-# of the mesh along exactly one of its own edges has one whole rotational degree of freedom
-# (around that hinge) the spring/pressure network does nothing to pin down -- exactly the
-# "loosely-attached or floppy face" _on_relax_done/_on_inflate_step_done already warn about by
-# name. Rather than solve it (unconstrained by construction, so any solved position is as
-# arbitrary as any other), on_full_inflate_clicked drops it from the mesh entirely before
-# relax/inflate ever runs, then _reattach_pendant_faces lays it back on, flat/coplanar
-# ("parallel") against whichever face it's hinged to, once that neighbor's own final position is
-# known -- a closed-form placement, not a physics step.
-
-def _pendant_face_attachments(base_faces, face_edge_ids):
-    """Returns {pendant_face_idx: (neighbor_face_idx, (a, b))} for every one of `base_faces`
-    attached to the rest of the mesh by EXACTLY one glued edge -- `(a, b)` that edge's own
-    vertex-id pair, in the SAME order `base_faces[pendant_face_idx]`'s own loop lists it.
-    `neighbor_face_idx` is whichever OTHER base face shares that exact edge. A face with ZERO
-    glued edges (not attached to anything -- nothing to exclude it against or reattach it to,
-    e.g. a lone anchor with nothing placed yet) or TWO OR MORE (braced by more than one point of
-    contact, not the "flops around" case this targets) is not included.
-
-    Same owners-dict disambiguation as _open_base_edges (an edge id used by exactly one
-    base_faces entry is a free edge; used by exactly two is a genuine glued edge between
-    them) -- reimplemented here rather than extending that function, since this needs BOTH
-    sides of a glued pair, not just which edges are free."""
-    owners = {}
-    if face_edge_ids is not None:
-        for i, ids in enumerate(face_edge_ids):
-            face = base_faces[i]
-            n = len(face)
-            for k, eid in enumerate(ids):
-                owners.setdefault(eid, []).append((i, (face[k], face[(k + 1) % n])))
-    else:
-        for i, face in enumerate(base_faces):
-            n = len(face)
-            for k in range(n):
-                pair = (face[k], face[(k + 1) % n])
-                owners.setdefault(frozenset(pair), []).append((i, pair))
-    glued_count = {}
-    glued_partner = {}
-    for group in owners.values():
-        if len(group) != 2:
-            continue
-        (i0, pair0), (i1, pair1) = group
-        glued_count[i0] = glued_count.get(i0, 0) + 1
-        glued_count[i1] = glued_count.get(i1, 0) + 1
-        glued_partner[i0] = (i1, pair0)
-        glued_partner[i1] = (i0, pair1)
-    return {i: glued_partner[i] for i, count in glued_count.items() if count == 1}
-
-
-def _exclude_pendant_faces(base_faces, base_edges, face_edge_ids, source_polygon_id=None):
-    """Returns (core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id,
-    pendants) -- `base_faces`/`face_edge_ids`/`source_polygon_id` with every pendant
-    (_pendant_face_attachments) face index dropped (all three stay index-parallel to each
-    other, same as the caller's own), and `base_edges` filtered down to pairs whose BOTH
-    endpoints survive (a stray reference to a now-excluded vertex would otherwise KeyError deep
-    in _edge_setup's own index arrays). `pendants` is a list of {"face": <original vertex-id
-    loop>, "neighbor_idx": <index into the RETURNED core_base_faces -- already remapped from
-    the original list, since face_of_fine values _reattach_pendant_faces later compares against
-    are themselves built from core_base_faces>, "shared_pair": (a, b)} dicts, everything
-    _reattach_pendant_faces needs once the core mesh has been solved. Falls back to
-    (base_faces, base_edges, face_edge_ids, source_polygon_id, []) UNCHANGED if excluding every
-    detected pendant would leave nothing left to solve (e.g. the whole central object is just a
-    2-face hinge, so each is the other's only neighbor -- the only way a pendant's own neighbor
-    can ALSO be a pendant, since the central object is always one connected component: if that
-    pair weren't the WHOLE object, whatever connects them to whatever else contains the anchor
-    would itself be a second connection for at least one of them, contradicting "exactly one
-    glued edge") -- an empty core mesh has nothing for relax_initial_configuration to do, so
-    there's no safe way to exclude here."""
-    attachments = _pendant_face_attachments(base_faces, face_edge_ids)
-    if not attachments or len(attachments) >= len(base_faces):
-        return base_faces, base_edges, face_edge_ids, source_polygon_id, []
-    keep = [i for i in range(len(base_faces)) if i not in attachments]
-    orig_to_core = {orig_i: core_i for core_i, orig_i in enumerate(keep)}
-    pendants = [{"face": base_faces[i], "neighbor_idx": orig_to_core[neighbor_idx],
-                 "shared_pair": pair,
-                 "source_polygon_id": (source_polygon_id[i] if source_polygon_id is not None
-                                        else i)}
-                for i, (neighbor_idx, pair) in attachments.items()]
-    core_base_faces = [base_faces[i] for i in keep]
-    core_face_edge_ids = ([face_edge_ids[i] for i in keep] if face_edge_ids is not None else None)
-    core_source_polygon_id = ([source_polygon_id[i] for i in keep]
-                               if source_polygon_id is not None else None)
-    core_vertex_ids = {v for face in core_base_faces for v in face}
-    core_base_edges = (None if base_edges is None else
-                        [e for e in base_edges if e[0] in core_vertex_ids and e[1] in core_vertex_ids])
-    return core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id, pendants
-
-
-def _regular_polygon_rest_positions(face, edge_length):
-    """{vertex_id: np.array([x, y, 0.0])} for `face`'s own n corners, laid out as a REGULAR
-    n-gon of side length `edge_length` in the z=0 plane -- vertex k (in `face`'s own listed,
-    CCW order) at angle 2*pi*k/n, radius edge_length/(2*sin(pi/n)) (the standard circumradius
-    that makes every EDGE exactly `edge_length` long, not just every vertex equidistant from
-    the center). The canonical REST frame _flat_pendant_fine_mesh/_place_pendant_flat build on."""
-    n = len(face)
-    radius = edge_length / (2 * math.sin(math.pi / n))
-    return {v: np.array([radius * math.cos(2 * math.pi * k / n),
-                          radius * math.sin(2 * math.pi * k / n), 0.0])
-            for k, v in enumerate(face)}
-
-
-def _flat_pendant_fine_mesh(pendant_face, edge_length):
-    """Returns (faces_lvl3, positions_lvl3) -- `pendant_face` alone, fan-triangulated then
-    quartered twice (subdivide_once, level 0->1->2) up to Level 3, EXACTLY as a real Full
-    Inflate pipeline would, but starting from _regular_polygon_rest_positions instead of a
-    random Level-0 start and with NO relax/calibration call in between: every one of
-    subdivide_once's own position updates is pure linear interpolation (a new vertex is a
-    corner mean or an edge midpoint of whatever's already there -- see mesh_levels.py's own
-    _fan_level_0_to_1/_quarter_triangles), which keeps an already-flat (z=0) input exactly flat
-    the whole way through. `faces_lvl3`/`positions_lvl3` still use `pendant_face`'s OWN vertex
-    ids for its 3 corners plus freshly local-to-this-call ids (from
-    `next_id = 1 + max(positions)`, mesh_levels.py's own convention) for every hub/midpoint --
-    the caller (_exclude_pendant_faces' own pendant reattachment) is responsible for remapping
-    those local ids into the real mesh's own global vertex-id space before merging anything in,
-    since they're only guaranteed unique within this one call."""
-    positions = _regular_polygon_rest_positions(pendant_face, edge_length)
-    faces, positions, edge_len, face_of_fine = subdivide_once(
-        [pendant_face], positions, edge_length, [0], 0)
-    for level in (1, 2):
-        faces, positions, edge_len, face_of_fine = subdivide_once(
-            faces, positions, edge_len, face_of_fine, level)
-    return faces, positions
-
-
-def _fine_group_boundary_edges(faces, face_of_fine, group):
-    """{(u, v) sorted, ...} for every boundary edge of `group` within `faces`/`face_of_fine` --
-    a free function twin of InflaterPane._group_boundary_edge_set (same counting rule: a
-    spoke/internal-to-the-fan edge is shared by two triangles of the SAME group and cancels
-    out; only a true rim edge, whose other triangle is in a different group (or doesn't exist
-    at all), survives) -- needed here because _place_pendant_flat runs before any InflaterPane
-    group state exists for a pendant's own new group."""
-    edge_count = {}
-    for face, bf in zip(faces, face_of_fine):
-        if bf != group:
-            continue
-        a, b, c = face
-        for u, v in ((a, b), (b, c), (c, a)):
-            key = (u, v) if u < v else (v, u)
-            edge_count[key] = edge_count.get(key, 0) + 1
-    return {e for e, count in edge_count.items() if count == 1}
-
-
-def _rim_vertex_chain(u, v, boundary_edges, original_corners):
-    """Ordered fine-mesh vertex ids from `u` to `v` along one rim (walking `boundary_edges`,
-    stopping at `v` or any other of `original_corners`) -- a free function twin of
-    InflaterPane._base_edge_vertex_chain (see its own docstring for the full walk rationale:
-    `u` has exactly two neighbors within a closed rim loop, one toward `v` via this one edge,
-    the other around the rest of the polygon, and the two can't be told apart by which reaches
-    `v` sooner). Falls back to the plain `[u, v]` pair if neither direction ever reaches `v`."""
-    neighbors = {}
-    for a, b in boundary_edges:
-        neighbors.setdefault(a, []).append(b)
-        neighbors.setdefault(b, []).append(a)
-    for first_step in neighbors.get(u, []):
-        chain = [u, first_step]
-        prev, cur = u, first_step
-        while cur != v and cur not in original_corners:
-            options = [n for n in neighbors.get(cur, []) if n != prev]
-            if not options:
-                break
-            prev, cur = cur, options[0]
-            chain.append(cur)
-        if cur == v:
-            return chain
-    return [u, v]
-
-
-def _place_pendant_flat(pendant, final_positions_by_id, neighbor_face_idx, level3_face_of_fine,
-                         level3_faces, edge_length, next_free_id, neighbor_base_face):
-    """Computes final 3D positions for one excluded pendant's ENTIRE Level-3 fine mesh, laid
-    out flat/coplanar ("parallel") against whichever face it's hinged to, once that neighbor's
-    own final positions are known -- see this section's own header comment for why this is a
-    closed-form placement, not another relax pass. Returns (faces, positions, next_free_id,
-    remapped_face) -- `faces`/`positions` already in the REAL mesh's global vertex-id space
-    (remapped from _flat_pendant_fine_mesh's own local ids, `next_free_id` the next unused one
-    after this call), ready to concatenate straight onto the core's own self.faces/
-    self.positions/self.face_of_fine (face_of_fine value: neighbor_face_idx -- see this
-    function's own caller). `remapped_face` is `pendant["face"]` (the ORIGINAL, base-export-
-    level corner loop) passed through this SAME id_map -- needed because a third+ corner (see
-    its own comment below) no longer keeps its raw id, so it's the only correct record of what
-    this pendant's own corners are actually CALLED in the mesh just built (the caller uses it
-    for its own self.base_faces entry -- self.base_faces[group] must list ids that genuinely
-    exist in self.positions, not stale pre-remap ones, or _rebuild_open_edges/
-    _base_edge_vertex_chain silently walk from a vertex id that was never actually placed,
-    2026-09-29, explicit bug report: "highlighted a non-edge that connects a vertex to the
-    centre of an opposite face" -- _base_edge_vertex_chain's own "never found a path" fallback,
-    a straight [u, v] chord, dead code until then).
-
-    The pendant's own SHARED edge's intermediate (subdivision-created) vertices are PINNED to
-    the core's own EXISTING ones for that same edge -- same id, same (already-solved) position,
-    never independently recomputed -- not just the two endpoints `shared_pair` already reused
-    (2026-09-29, explicit bug report: "not able to select any of the edges of the guest
-    piece... some non-edges are highlighted when hovered over" -- _flat_pendant_fine_mesh builds
-    the pendant's own fine mesh as a totally SEPARATE subdivide_once run, with no way to know
-    the core's own existing midpoint ids for that same physical edge, so every earlier version
-    independently re-synthesized fresh ones instead -- two DIFFERENT vertex ids at the same
-    physical location, which `_group_boundary_edge_set`'s own by-id matching (everything reading
-    a "shared seam" ultimately goes through it) could never recognize as the same edge at all).
-    `neighbor_base_face` (`self.base_faces[neighbor_face_idx]`) bounds the walk that finds the
-    core's own existing chain (see _rim_vertex_chain's own docstring for why that bound is
-    needed at all). Also more accurate than the old recompute: a rim edge of an already-solved,
-    possibly-curved neighbor isn't necessarily straight, so reusing its own real intermediate
-    positions (rather than a pendant-side straight-line guess between the two endpoints) avoids
-    a hairline gap/crease at the seam.
-
-    The neighbor's own plane/normal is estimated from the MEAN of only the fine triangles
-    actually touching the SHARED EDGE's own two endpoints (a local fan around the attachment
-    point), not its whole fine mesh -- a neighbor face can be meaningfully curved once it's a
-    real solved part of a multi-face core (unlike a lone flat "place", pressure genuinely bends
-    it), and when several pendants hang off DIFFERENT edges of the SAME curved neighbor, a
-    single face-wide average plane is a poor stand-in for any one of their own local tangent
-    planes -- each pendant would flatten against the same blurred "average" direction instead
-    of its own edge's actual local orientation, landing them overlapping/crossing each other
-    instead of fanning out with the neighbor's real curvature (2026-09-28, explicit bug report:
-    a pentagon core with 3 pendants on 3 different edges came out visibly tangled -- caught by
-    restricting this to the local neighborhood and comparing). Falls back to the WHOLE
-    neighbor's own fine mesh only if the local fan is somehow empty (shouldn't happen: `a`/`b`
-    are always real neighbor vertices). The OUTWARD side (which half-plane, split by the shared
-    edge, the pendant extends into) is whichever side is AWAY from this SAME local centroid, so
-    the flap extends past the shared edge rather than folding back on top of the piece it's
-    hinged to."""
-    a, b = pendant["shared_pair"]
-    p0, p1 = final_positions_by_id[a], final_positions_by_id[b]
-    all_neighbor_tri_idx = [i for i, bf in enumerate(level3_face_of_fine) if bf == neighbor_face_idx]
-    local_tri_idx = [i for i in all_neighbor_tri_idx if a in level3_faces[i] or b in level3_faces[i]]
-    neighbor_tri_idx = local_tri_idx or all_neighbor_tri_idx
-    neighbor_vertex_ids = {v for i in neighbor_tri_idx for v in level3_faces[i]}
-    neighbor_normal = np.zeros(3)
-    for i in neighbor_tri_idx:
-        va, vb, vc = (final_positions_by_id[v] for v in level3_faces[i])
-        n = np.cross(vb - va, vc - va)
-        norm = np.linalg.norm(n)
-        if norm > 1e-9:
-            neighbor_normal += n / norm
-    plane_normal = neighbor_normal / max(np.linalg.norm(neighbor_normal), 1e-9)
-    neighbor_centroid = np.mean([final_positions_by_id[v] for v in neighbor_vertex_ids], axis=0)
-
-    edge_dir = (p1 - p0) / max(np.linalg.norm(p1 - p0), 1e-9)
-    in_plane_perp = np.cross(plane_normal, edge_dir)
-    in_plane_perp /= max(np.linalg.norm(in_plane_perp), 1e-9)
-    edge_mid = (p0 + p1) / 2
-    if np.dot(neighbor_centroid - edge_mid, in_plane_perp) > 0:
-        in_plane_perp = -in_plane_perp  # flip so it points AWAY from the neighbor, not into it
-    actual_length = np.linalg.norm(p1 - p0)
-    scale = actual_length / edge_length
-
-    local_faces, local_positions = _flat_pendant_fine_mesh(pendant["face"], edge_length)
-    rest_p0, rest_p1 = local_positions[a], local_positions[b]
-    rest_edge_dir = (rest_p1 - rest_p0)[:2] / edge_length  # unit, since |rest_p1-rest_p0|==edge_length
-    # [-y, x] for (x, y) = cross([0, 0, 1], (rest_edge_dir, 0))[:2] -- [0,0,1] being the REST
-    # frame's own fixed normal (`pendant["face"]`'s vertex k sits at angle 2*pi*k/n, INCREASING
-    # with k, i.e. CCW as seen from +z, by construction -- see _regular_polygon_rest_positions).
-    # Deliberately NOT independently sign-flipped by some rest-side "away from centroid" test:
-    # using this SAME cross-product FORM on both this side and in_plane_perp's own (rest normal
-    # here, plane_normal there) is what makes the rest->target mapping a pure rotation+scale,
-    # never a reflection -- a separate flip on EACH side (an earlier version of this function
-    # had one here too) can disagree about which way is "outward" and land the pendant
-    # MIRRORED, folded back onto the neighbor instead of extending past it (caught by direct
-    # numeric testing: a symmetric pendant landed exactly on top of the core's own opposite
-    # corner instead of on the far side of the shared edge). The single "which of the two
-    # coplanar sides" decision belongs ENTIRELY to in_plane_perp's own flip above, since that's
-    # the only side with real information (the neighbor's actual position) to decide it from.
-    rest_outward = np.array([-rest_edge_dir[1], rest_edge_dir[0]])
-
-    # The core's own EXISTING chain of vertex ids from a to b along the neighbor's rim, and the
-    # pendant's own ANALOGOUS chain along its own (separately-subdivided) rim -- see this
-    # function's own docstring for why these get PINNED together below instead of the pendant's
-    # own chain getting fresh ids/recomputed positions like everything else. Same subdivision
-    # scheme (fan then quarter to the same MAX_LEVEL) on both sides always produces the same
-    # NUMBER of intermediate points for one original edge regardless of curvature -- the `len`
-    # guard is just defensive (never actually expected to differ).
-    core_boundary = _fine_group_boundary_edges(level3_faces, level3_face_of_fine, neighbor_face_idx)
-    core_chain = _rim_vertex_chain(a, b, core_boundary, set(neighbor_base_face))
-    pendant_boundary = _fine_group_boundary_edges(local_faces, [0] * len(local_faces), 0)
-    pendant_chain = _rim_vertex_chain(a, b, pendant_boundary, set(pendant["face"]))
-    shared_chain_map = (dict(zip(pendant_chain, core_chain))
-                         if len(pendant_chain) == len(core_chain) else {})
-
-    # Every corner except the two literally SHARED with the neighbor (a, b, already real
-    # global ids) gets a FRESH id here -- including a pendant's own THIRD+ original corner
-    # (n > 3, e.g. every pentagon), not just _flat_pendant_fine_mesh's own genuinely-new
-    # subdivision vertices. An earlier version kept a third+ corner's own original (base-
-    # export-level) id as-is, on the theory that it was already a real, reserved global id --
-    # but that id space belongs to the WHOLE original net export, while the CORE's own Level-3
-    # fine mesh numbers its subdivision-created vertices independently (starting fresh from
-    # its own "1 + max" at build time, with no idea some small integer is "reserved" by a
-    # pendant not even part of its own solve) -- the two can and do collide on an unrelated
-    # vertex (2026-09-29, explicit bug report: "spiky artifacts" persisting through
-    # re-inflate/rotation -- traced to exactly this: a core face's own fine-mesh vertex
-    # silently got its position overwritten by an unrelated pendant corner that happened to
-    # reuse the same numeric id, stretching that core triangle into a giant sliver). Exactly
-    # the same bug _diff_attach_pendant_only's own docstring already documents and fixes for
-    # its own separate code path ("a just-added pendant's own free corner silently overwrote
-    # an existing Level-3 midpoint that happened to share its raw id") -- this path just never
-    # got the same fix.
-    id_map = {a: a, b: b}
-    faces_out = []
-    positions_out = {a: p0, b: p1}
-    for v in local_positions:
-        if v in id_map:
-            continue
-        if v in shared_chain_map:
-            id_map[v] = shared_chain_map[v]
-        else:
-            id_map[v] = next_free_id
-            next_free_id += 1
-    for v, local_pos in local_positions.items():
-        if v in (a, b) or v in shared_chain_map:
-            continue
-        rel = local_pos[:2] - rest_p0[:2]
-        along = np.dot(rel, rest_edge_dir)
-        perp = np.dot(rel, rest_outward)
-        positions_out[id_map[v]] = p0 + edge_dir * along * scale + in_plane_perp * perp * scale
-    for local_v, core_v in shared_chain_map.items():
-        positions_out[core_v] = final_positions_by_id[core_v]
-    for face in local_faces:
-        faces_out.append([id_map[v] for v in face])
-    # The pendant's own ORIGINAL corner loop (pendant["face"]), remapped through id_map --
-    # since a THIRD+ corner (above) no longer keeps its own raw id, this is the ONLY correct
-    # way to know what its corners are actually CALLED in the output mesh (positions_out/
-    # faces_out) -- see this function's own caller for why that distinction matters.
-    remapped_face = [id_map[v] for v in pendant["face"]]
-    return faces_out, positions_out, next_free_id, remapped_face
-
-
-def _reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length, own_groups,
-                             core_base_faces):
-    """Runs _place_pendant_flat for every excluded pendant against the just-solved CORE mesh's
-    own final faces/positions/face_of_fine, and returns (faces, positions, face_of_fine) with
-    every pendant's own flat Level-3 fine mesh concatenated on -- `face_of_fine` entries for a
-    pendant's own fine triangles are `own_groups`' own matching entry (parallel to `pendants`,
-    the caller's OWN reserved trailing self.base_faces/self._pending_source_polygon_id index
-    for that one pendant -- 2026-09-29, explicit bug report: "not able to select the guest
-    piece [in 3D]... only selectable together with the insider it's connected to... not able
-    to select any of the edges of the guest piece" -- an EARLIER version tagged a pendant's own
-    triangles with its `neighbor_idx` instead, folding it into the SAME pick/hover/rim group as
-    the real neighbor it's attached to: clicking anywhere on either one always resolved to the
-    neighbor's own shape id (self._pending_source_polygon_id has no entry for the pendant's own
-    id at all), and the boundary edge shared between them canceled out INSIDE that one merged
-    group instead of surviving as a rim (_group_boundary_edge_set counts an edge shared by TWO
-    triangles of the SAME group as interior, not a rim -- see its own docstring), so no seam
-    ever showed between a guest and its neighbor either. Giving the pendant its own group fixes
-    both: it's now its own independently pickable/hoverable actor, with a real rim of its own,
-    without changing `_place_pendant_flat`'s own geometry at all (`neighbor_face_idx`, read from
-    `pendant["neighbor_idx"]` below, is still what its PLACEMENT is computed against -- only the
-    OUTPUT tag changes). No-op (returns the inputs unchanged) if `pendants` is empty.
-
-    Every `_place_pendant_flat` call below reads `neighbor_face_idx`'s own plane/normal from
-    `core_faces`/`core_face_of_fine` -- a FIXED snapshot taken once, before this loop appends
-    anything -- never from the growing `faces`/`face_of_fine` themselves (2026-09-28, explicit
-    bug report: "a pentagon anchor with 2+ guests hinged on ADJACENT edges of it came out
-    tangled"). Two pendants hinged on the SAME neighbor face share that neighbor's own
-    `neighbor_idx` value; once pendant #1 is appended, its own flat triangles are tagged with
-    that SAME `neighbor_idx` too (previous paragraph) -- reading the growing lists for pendant
-    #2's own neighbor-plane lookup would then also sweep up pendant #1's own already-placed
-    (flat, differently-oriented) triangles as if they were more of the neighbor's real curved
-    surface, corrupting pendant #2's placement whenever it happens to share a corner vertex with
-    pendant #1 (caught by direct testing: `_place_pendant_flat`'s own `local_tri_idx` filter,
-    which restricts to triangles touching the pendant's shared-edge vertices, isn't enough to
-    exclude this -- a shared CORNER vertex between two adjacent pendants means some of pendant
-    #1's own triangles pass that filter for pendant #2 too). Every pendant is independently
-    flat/coplanar against the neighbor's own TRUE (already fully solved) surface regardless of
-    how many other pendants also hang off it, so this snapshot is always correct, never stale.
-
-    `core_base_faces` (the CORE's own self.base_faces, one entry per `core_face_of_fine` value)
-    is threaded straight through to `_place_pendant_flat` as each pendant's own
-    `neighbor_base_face` -- see its own docstring for why.
-
-    Also returns `remapped_base_faces` (parallel to `pendants`) -- each pendant's own
-    `remapped_face` from `_place_pendant_flat` (see its own docstring), for the caller to use
-    as that pendant's OWN self.base_faces entry instead of its raw, pre-remap `pendant["face"]`
-    (2026-09-29, explicit bug report: "highlighted a non-edge that connects a vertex to the
-    centre of an opposite face" -- self.base_faces[group] listing an id that was never actually
-    placed sent _base_edge_vertex_chain's own rim walk nowhere, falling back to a straight
-    chord across the polygon)."""
-    if not pendants:
-        return faces, positions, face_of_fine, []
-    core_faces = list(faces)
-    core_face_of_fine = list(face_of_fine)
-    faces = list(faces)
-    face_of_fine = list(face_of_fine)
-    # NOT just `1 + max(positions)` -- `positions` only has the CORE's own vertex ids at this
-    # point, but every pendant's own ORIGINAL corners (real, already-reserved ids from the
-    # whole original net, just not present in the core-only solve) can be numerically LOWER
-    # than that max while still being live ids _place_pendant_flat needs to keep as-is -- a
-    # "fresh" id counter that only looked at the core would collide with one of those (a real
-    # bug, caught by direct numeric testing: a pendant's own un-transformed corner silently got
-    # overwritten by a same-numbered subdivision vertex). Every pendant's own face is included
-    # in this max too, so the count starts safely above every id that could ever appear here.
-    next_free_id = 1 + max([*positions, *(v for p in pendants for v in p["face"])])
-    remapped_base_faces = []
-    for pendant, own_group in zip(pendants, own_groups):
-        pendant_faces, pendant_positions, next_free_id, remapped_face = _place_pendant_flat(
-            pendant, positions, pendant["neighbor_idx"], core_face_of_fine, core_faces,
-            edge_length, next_free_id, core_base_faces[pendant["neighbor_idx"]])
-        faces.extend(pendant_faces)
-        face_of_fine.extend([own_group] * len(pendant_faces))
-        positions.update(pendant_positions)
-        remapped_base_faces.append(remapped_face)
-    return faces, positions, face_of_fine, remapped_base_faces
-
-
-def _pendant_own_face_edge_ids(pendant, base_faces, base_face_edge_ids, next_id):
-    """Returns (row, next_id) -- `pendant["face"]`'s own face_edge_ids row (parallel to its
-    vertex loop, same convention as interactive_builder_app._face_edge_ids_from_shapes), for
-    appending alongside its own trailing self.base_faces entry (2026-09-29, explicit bug
-    report: appending a pendant to self.base_faces -- see _reattach_pendant_faces' own
-    docstring for why -- without a matching self.base_face_edge_ids row left that list one
-    entry SHORTER than self.base_faces, raising IndexError the next time _diff_remove_face
-    indexed it). `None` if `base_face_edge_ids` itself is None (this mesh has no disambiguation
-    data at all -- every OTHER reader already treats that as "fall back to plain vertex-pair
-    matching," so there's nothing to extend). The pendant's own SHARED edge reuses whatever id
-    the neighbor's own row already has for that exact edge, so the two still correctly count as
-    ONE glued connection (see _pendant_face_attachments' own owners-dict docstring) rather than
-    two independent free edges that merely happen to share a vertex pair; every other edge of
-    the pendant gets a fresh id, `next_id` and up (guaranteed not to collide with anything --
-    the caller seeds `next_id` past every id already in use)."""
-    if base_face_edge_ids is None:
-        return None, next_id
-    a, b = pendant["shared_pair"]
-    neighbor_face = base_faces[pendant["neighbor_idx"]]
-    neighbor_ids = base_face_edge_ids[pendant["neighbor_idx"]]
-    n = len(neighbor_face)
-    shared_id = next(
-        (neighbor_ids[k] for k in range(n)
-         if {neighbor_face[k], neighbor_face[(k + 1) % n]} == {a, b}),
-        None)
-    face = pendant["face"]
-    m = len(face)
-    row = []
-    for k in range(m):
-        if {face[k], face[(k + 1) % m]} == {a, b}:
-            row.append(shared_id)
-        else:
-            row.append(next_id)
-            next_id += 1
-    return row, next_id
-
-
-def _prepare_mesh_for_inflate(base_faces, base_edges, face_edge_ids, source_polygon_id=None):
-    """Returns ("solve", core_base_faces, core_base_edges, core_face_edge_ids,
-    core_source_polygon_id, pendants) for the ordinary case -- exactly _exclude_pendant_faces'
-    own return shape, just tagged with which mode applies -- or ("place", reference_face,
-    pendants) when there's nothing worth running relax/inflate on AT ALL (2026-09-28, explicit
-    user request: "when only one piece is on the canvas, it is also considered unstable... just
-    place the piece flat. and if a second piece is joined to it at only one edge, then both are
-    unstable... both should just be placed instead of inflated").
-
-    "solve" needs the CORE (every ordinary pendant excluded) to have at least 2 faces -- with
-    fewer than that, there's no genuine bracing left for physics to mean anything: a single
-    core face has no neighbor to relax against at all. Checking `core_base_faces`' own size
-    ALONE isn't enough to decide this, though -- _exclude_pendant_faces' own fallback (excluding
-    every detected pendant would leave nothing, i.e. the WHOLE object is a mutual single-edge
-    pair with nothing else) returns a 2-face "core" that LOOKS large enough, but whose own two
-    faces are STILL only single-edge-hinged to EACH OTHER, exactly as unconstrained as a lone
-    face -- so this checks _pendant_face_attachments directly first, to tell "nothing was
-    excluded because nothing needed to be" (attachments empty -- a genuinely braced mesh, e.g.
-    a closed net) apart from "nothing was excluded because excluding it all would leave
-    nothing" (attachments covers every face -- always degenerate).
-
-    "place" picks a fixed reference face (placed flat/centered with no neighbor to hinge
-    against) and folds every OTHER face into ONE combined `pendants` list, all hinged directly
-    on that SAME reference -- `_place_all_flat` lays every one of them out with no physics at
-    all. A degenerate mesh can only ever have the reference plus pendants hinged DIRECTLY on
-    it, never a deeper chain: a connected graph where every node but one has degree <= 1 can
-    only be a star centered on that one node (any OTHER shape would need a path of length >= 2
-    to reach it, which would force an intermediate node to degree >= 2, making that node's own
-    -- and every node's -- "core" at least 2 faces, taking the "solve" path instead)."""
-    attachments = _pendant_face_attachments(base_faces, face_edge_ids)
-    if attachments and len(attachments) < len(base_faces):
-        core_base_faces, core_base_edges, core_face_edge_ids, core_source_polygon_id, pendants = \
-            _exclude_pendant_faces(base_faces, base_edges, face_edge_ids, source_polygon_id)
-        if len(core_base_faces) >= 2:
-            return ("solve", core_base_faces, core_base_edges, core_face_edge_ids,
-                    core_source_polygon_id, pendants)
-        # Excluding every ordinary pendant left a LONE core face (e.g. a 3-face straight chain,
-        # A-B-C: A and C are each pendant to hub B, and B alone is left with no surviving
-        # neighbor of its own) -- still degenerate; B becomes the reference below, A/C its
-        # pendants (already correctly attached to core index 0, i.e. B, by
-        # _exclude_pendant_faces' own neighbor_idx remapping).
-        reference_face = core_base_faces[0]
-        reference_spid = core_source_polygon_id[0] if core_source_polygon_id is not None else 0
-        return "place", reference_face, reference_spid, pendants
-    if not attachments and len(base_faces) >= 2:
-        # No pendant relationship detected at all -- a genuinely braced mesh (every face has
-        # either 0 glued edges, impossible for a connected multi-face object, or >= 2).
-        return "solve", base_faces, base_edges, face_edge_ids, source_polygon_id, []
-    # Degenerate: a lone face (attachments empty, len(base_faces) == 1), or a mutual single-edge
-    # pair (attachments covers both, len(base_faces) == 2).
-    reference_face = base_faces[0]
-    reference_spid = source_polygon_id[0] if source_polygon_id is not None else 0
-    extra_pendants = []
-    if len(base_faces) == 2:
-        second = base_faces[1]
-        second_spid = source_polygon_id[1] if source_polygon_id is not None else 1
-        shared = set(reference_face) & set(second)
-        n = len(second)
-        shared_pair = next((second[k], second[(k + 1) % n]) for k in range(n)
-                            if {second[k], second[(k + 1) % n]} == shared)
-        extra_pendants.append({"face": second, "neighbor_idx": 0, "shared_pair": shared_pair,
-                                "source_polygon_id": second_spid})
-    return "place", reference_face, reference_spid, extra_pendants
-
-
-def _place_all_flat(reference_face, pendants, edge_length):
-    """Builds a full Level-3 mesh (faces, positions, face_of_fine, base_faces,
-    source_polygon_id) with NO physics at all -- 2026-09-28, explicit user request, see
-    _prepare_mesh_for_inflate's own docstring for when this applies. `reference_face` is placed
-    flat/centered as a fixed reference (base index 0, via _flat_pendant_fine_mesh -- the exact
-    same flat construction a pendant's own fine mesh uses); every one of `pendants` (all hinged
-    directly on `reference_face` -- see _prepare_mesh_for_inflate's own proof) is then flat-
-    attached against it via _reattach_pendant_faces, the SAME closed-form geometry a real
-    pendant uses post-solve."""
-    local_faces, local_positions = _flat_pendant_fine_mesh(reference_face, edge_length)
-    # Local hub/midpoint ids from _flat_pendant_fine_mesh are only guaranteed unique WITHIN
-    # that one call (see its own docstring) -- remapped here to ids guaranteed safe against
-    # every pendant's own real corners too, same "keep real corners, remap the rest" pattern
-    # _place_pendant_flat's own id_map uses.
-    all_real_ids = set(reference_face) | {v for p in pendants for v in p["face"]}
-    next_id = 1 + max([*all_real_ids, *local_positions])
-    id_map = {}
-    for v in local_positions:
-        if v in reference_face:
-            id_map[v] = v
-        else:
-            id_map[v] = next_id
-            next_id += 1
-    faces = [[id_map[v] for v in face] for face in local_faces]
-    positions = {id_map[v]: pos for v, pos in local_positions.items()}
-    face_of_fine = [0] * len(faces)
-    # own_groups: reference_face is base_faces[0], each pendant its own trailing index (1..N)
-    # -- see this function's own base_faces line below, and _reattach_pendant_faces' own
-    # docstring for why each pendant needs a DISTINCT tag rather than sharing its neighbor's.
-    faces, positions, face_of_fine, remapped_base_faces = _reattach_pendant_faces(
-        pendants, faces, positions, face_of_fine, edge_length,
-        list(range(1, 1 + len(pendants))), [reference_face])
-    # remapped_base_faces, NOT raw p["face"] -- see _reattach_pendant_faces' own docstring for
-    # why a pendant's own THIRD+ corner no longer keeps its raw id.
-    base_faces = [reference_face, *remapped_base_faces]
-    return faces, positions, face_of_fine, base_faces
 
 
 # "Central object" concept (2026-09-26, explicit: "if i add polygon and its not attached to
@@ -1358,54 +844,6 @@ def _place_all_flat(reference_face, pendants, edge_length):
 # _plan_anchor_deletion's own anchor delete-guard/reassignment) for how the anchor itself
 # moves/persists -- purely automatically now, 2026-09-29 explicit ("remove the Anchor[A]
 # mode"), never user-picked.
-def _shape_connected_components(shapes, connections):
-    """shapes: list of shape dicts with an "id"; connections: list of connection dicts with
-    "a_shape"/"b_shape". Returns a list of sets of shape ids, one per connected component
-    (union-find over the connection graph -- a shape with no connection at all is its own
-    singleton component)."""
-    parent = {shape["id"]: shape["id"] for shape in shapes}
-
-    def find(x):
-        while parent[x] != x:
-            x = parent[x]
-        return x
-
-    for conn in connections:
-        a, b = find(conn["a_shape"]), find(conn["b_shape"])
-        if a != b:
-            parent[a] = b
-
-    components = {}
-    for shape in shapes:
-        root = find(shape["id"])
-        components.setdefault(root, set()).add(shape["id"])
-    return list(components.values())
-
-
-def _central_shape_ids(shapes, connections, anchor_shape_id):
-    """The "central object" (see above) among `shapes`/`connections`: the connected component
-    containing `anchor_shape_id`. Empty frozenset if `shapes` is empty or `anchor_shape_id` isn't
-    (or is no longer) one of `shapes`' own ids -- callers needing a fallback (e.g. a freshly
-    loaded net whose anchor hasn't been assigned yet) handle that themselves, see
-    BuilderPane._refresh_vme_state."""
-    for component in _shape_connected_components(shapes, connections):
-        if anchor_shape_id in component:
-            return frozenset(component)
-    return frozenset()
-
-
-def _connection_key(conn):
-    """A connection's own two (shape_id, edge_index) endpoints, as a frozenset (so a<->b/b<->a
-    order doesn't matter) -- BuilderPane.classify_change's own comparison key for "is this the
-    SAME connection across two snapshots", hoisted out of that method (used to be a local
-    nested function there) so InflaterPane._stage_kept_selection can also use it, to re-find a
-    connection classify_change already identified by endpoints alone (its own `extra`) back in
-    a shapes/connections snapshot (2026-09-29, explicit user request: "if there's a connection
-    being deleted, then keep that connection/edge selected... if two edges are being joined,
-    the two edges remain selected")."""
-    return frozenset([(conn["a_shape"], conn["a_edge"]), (conn["b_shape"], conn["b_edge"])])
-
-
 # ---- left pane ----
 
 class BuilderPane(InteractiveBuilderApp):
@@ -1622,10 +1060,8 @@ class BuilderPane(InteractiveBuilderApp):
         change which PIECES are connected to which at all, so it's excluded outright rather than
         risk a same-shape false positive (a non-central shape folding onto itself would otherwise
         look like "both endpoints are the same non-central piece")."""
-        if a_shape_id == b_shape_id:
-            return False
-        central_ids = self.central_shape_ids()
-        return a_shape_id not in central_ids and b_shape_id not in central_ids
+        return edge_modifier.is_orphan_to_orphan_join(
+            a_shape_id, b_shape_id, self.central_shape_ids())
 
     def _show_orphan_join_error(self):
         messagebox.showerror(
@@ -2342,25 +1778,8 @@ class BuilderPane(InteractiveBuilderApp):
           club with >= 2 remaining connections and the highest connection count among those;
           falling back to the best-connected survivor overall if no insider survives (e.g. the
           club shrinks to a single piece, or to two guests only connected to each other)."""
-        old_central = self.central_shape_ids()
-        surviving_central = old_central - deleted_ids
-        if not surviving_central:
-            return True, None
-        surviving_shapes = [s for s in self.shapes if s["id"] not in deleted_ids]
-        surviving_connections = [
-            c for c in self.connections
-            if c["a_shape"] not in deleted_ids and c["b_shape"] not in deleted_ids]
-        components = _shape_connected_components(surviving_shapes, surviving_connections)
-        if len([comp for comp in components if comp & surviving_central]) > 1:
-            return False, None
-        connection_counts = {}
-        for c in surviving_connections:
-            connection_counts[c["a_shape"]] = connection_counts.get(c["a_shape"], 0) + 1
-            connection_counts[c["b_shape"]] = connection_counts.get(c["b_shape"], 0) + 1
-        insiders = [sid for sid in surviving_central if connection_counts.get(sid, 0) >= 2]
-        pool = insiders or list(surviving_central)
-        new_anchor_id = max(pool, key=lambda sid: (connection_counts.get(sid, 0), -sid))
-        return True, new_anchor_id
+        return club_member_classifier.plan_anchor_deletion(
+            self.shapes, self.connections, self.central_shape_ids(), deleted_ids)
 
     def _on_delete_key(self, _event):
         """Runs InteractiveBuilderApp's own multi-shape/connection delete unchanged, except when
@@ -2554,53 +1973,9 @@ class BuilderPane(InteractiveBuilderApp):
         else below runs, so placing (or removing) a shape that never joins the central object at
         all classifies as "none": it doesn't change what actually gets exported/inflated, so it
         shouldn't disable Diff Inflate or fire an unnecessary Auto Inflate re-run either."""
-        if old_shapes is None:
-            return "complex", None
-        old_central = _central_shape_ids(old_shapes, old_connections, old_anchor_shape_id)
-        old_shapes = [s for s in old_shapes if s["id"] in old_central]
-        old_connections = [c for c in old_connections
-                            if c["a_shape"] in old_central and c["b_shape"] in old_central]
-        new_central = self.central_shape_ids()
-        new_shapes = [s for s in self.shapes if s["id"] in new_central]
-        new_connections = [c for c in self.connections
-                            if c["a_shape"] in new_central and c["b_shape"] in new_central]
-
-        old_by_id = {s["id"]: s for s in old_shapes}
-        new_by_id = {s["id"]: s for s in new_shapes}
-        old_ids, new_ids = set(old_by_id), set(new_by_id)
-        added, removed, common = new_ids - old_ids, old_ids - new_ids, old_ids & new_ids
-        for sid in common:
-            a, b = old_by_id[sid], new_by_id[sid]
-            if a["n"] != b["n"] or a.get("flipped", False) != b.get("flipped", False):
-                return "complex", None
-
-        def touches(key, shape_id):
-            return any(sid == shape_id for sid, _edge in key)
-
-        def touches_any(key, shape_ids):
-            return any(sid in shape_ids for sid, _edge in key)
-
-        old_conns = {_connection_key(c) for c in old_connections}
-        new_conns = {_connection_key(c) for c in new_connections}
-        conn_added, conn_removed = new_conns - old_conns, old_conns - new_conns
-
-        if len(added) == 1 and not removed:
-            (new_id,) = added
-            if conn_removed or any(not touches(k, new_id) for k in conn_added):
-                return "complex", None
-            return "add_face", new_id
-        if removed and not added:
-            if conn_added or any(not touches_any(k, removed) for k in conn_removed):
-                return "complex", None
-            return "remove_face", frozenset(removed)
-        if not added and not removed:
-            if not conn_added and not conn_removed:
-                return "none", None
-            if len(conn_added) == 1 and not conn_removed:
-                return "add_connection", next(iter(conn_added))
-            if len(conn_removed) == 1 and not conn_added:
-                return "remove_connection", next(iter(conn_removed))
-        return "complex", None
+        return club_member_classifier.classify_change(
+            old_shapes, old_connections, old_anchor_shape_id,
+            self.shapes, self.connections, self._anchor_shape_id)
 
     def _scale_ui_fonts(self):
         """No-op override -- the combined app scales every named font ONCE, centrally
@@ -3903,7 +3278,7 @@ class InflaterPane:
         if popup_text is not None:
             messagebox.showwarning("Inflate did not converge", popup_text)
 
-    DIFF_ELIGIBLE_KINDS = ("add_face", "remove_face", "add_connection", "remove_connection")
+    DIFF_ELIGIBLE_KINDS = inflation_type_chooser.DIFF_ELIGIBLE_KINDS
 
     def on_load_success(self):
         """Wired from BuilderPane.on_load_success (CombinedApp.__init__) -- fires right after a
@@ -4740,23 +4115,12 @@ class InflaterPane:
         The caller passes the shape actually under the cursor (`_actor_to_group`'s own hit),
         so a hover only ever finds an edge genuinely belonging to what's actually being
         pointed at."""
-        if pos is None or not self._connection_edge_cache:
-            return None
-        tolerance = CONNECTION_PICK_TOLERANCE_FRACTION * self._half
-        best_id, best_dist = None, tolerance
         connections_by_id = None
         if shape_id is not None:
             connections_by_id = {c["id"]: c for c in self._display_connections()}
-        for conn_id, segments in self._connection_edge_cache.items():
-            if shape_id is not None:
-                conn = connections_by_id.get(conn_id)
-                if conn is None or shape_id not in (conn["a_shape"], conn["b_shape"]):
-                    continue
-            for i in range(0, len(segments), 2):
-                dist = _point_segment_distance_3d(pos, segments[i], segments[i + 1])
-                if dist < best_dist:
-                    best_id, best_dist = conn_id, dist
-        return best_id
+        return edge_selecter.nearest_connection(
+            pos, self._connection_edge_cache, CONNECTION_PICK_TOLERANCE_FRACTION * self._half,
+            connections_by_id, shape_id)
 
     def _nearest_open_edge_at_position(self, pos, exclude_shape_id=None, shape_id=None):
         """The (shape_id, raw_edge) key in self._open_edges whose own segments come closest to
@@ -4770,21 +4134,9 @@ class InflaterPane:
         connects a shape to itself (that's Fold's job). `shape_id`, when given, restricts
         candidates to that ONE shape's own edges -- see _nearest_connection_at_position's own
         docstring for why (same fold-brings-unrelated-shapes-close issue, same fix)."""
-        if pos is None or not self._open_edges:
-            return None
-        tolerance = OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half
-        best_key, best_dist = None, tolerance
-        for key, info in self._open_edges.items():
-            if exclude_shape_id is not None and info["shape_id"] == exclude_shape_id:
-                continue
-            if shape_id is not None and info["shape_id"] != shape_id:
-                continue
-            segments = info["segments"]
-            for i in range(0, len(segments), 2):
-                dist = _point_segment_distance_3d(pos, segments[i], segments[i + 1])
-                if dist < best_dist:
-                    best_key, best_dist = key, dist
-        return best_key
+        return edge_selecter.nearest_open_edge(
+            pos, self._open_edges, OPEN_EDGE_PICK_TOLERANCE_FRACTION * self._half,
+            exclude_shape_id, shape_id)
 
     def _rebuild_open_edges(self):
         """Rebuilds self._open_edges -- see its own docstring in __init__. Deliberately reads
@@ -4792,45 +4144,10 @@ class InflaterPane:
         snapshot), since "is this edge already used" is a pure 2D-data-model question that
         should update the instant a connection is made, even before the 3D mesh itself catches
         up at the next Diff/Full Inflate."""
-        self._open_edges = {}
-        if not self.base_faces or self.positions is None or self._pending_source_polygon_id is None:
-            return
         builder = self.builder_getter()
-        used = set()
-        for conn in builder.connections:
-            used.add((conn["a_shape"], conn["a_edge"]))
-            used.add((conn["b_shape"], conn["b_edge"]))
-        shapes_by_id = {s["id"]: s for s in builder.shapes}
-        for group, shape_id in enumerate(self._pending_source_polygon_id):
-            if group >= len(self.base_faces):
-                continue
-            face = self.base_faces[group]
-            shape = shapes_by_id.get(shape_id)
-            # A deleted shape, or one whose group is actually several Polygon-Fold triangles
-            # (len(face) == 3 always, regardless of the original shape's own side count) --
-            # either way there's no reliable raw-edge<->loop-position mapping to offer a handle
-            # through, so this shape's edges are simply never made available here (a Polygon-
-            # Fold self-connection stays a 2D-only, Fold-mode-only gesture, same limitation as
-            # _connection_edge_segments' own).
-            if shape is None or len(face) != shape["n"]:
-                continue
-            n = shape["n"]
-            flipped = shape.get("flipped", False)
-            for raw_edge in range(n):
-                if (shape_id, raw_edge) in used:
-                    continue
-                # raw_edge_for_loop_position (interactive_builder_app._face_edge_ids_from_shapes,
-                # untouchable) is its own inverse for this formula, so the same expression maps
-                # loop position -> raw edge and back.
-                k = raw_edge if not flipped else (n - 2 - raw_edge) % n
-                u, v = face[k], face[(k + 1) % n]
-                if u not in self.positions or v not in self.positions:
-                    continue
-                midpoint, segments = self._open_edge_geometry(group, u, v)
-                self._open_edges[(shape_id, raw_edge)] = {
-                    "shape_id": shape_id, "raw_edge": raw_edge, "midpoint": midpoint,
-                    "segments": segments,
-                }
+        self._open_edges = edge_indexer.open_edges_for_mesh(
+            self.base_faces, self._pending_source_polygon_id, builder.shapes, builder.connections,
+            self.positions, self._open_edge_geometry)
 
     def _base_edge_vertex_chain(self, group, u, v):
         """Ordered fine-mesh vertex ids from corner `u` to corner `v` along THIS ONE base edge
@@ -4859,22 +4176,8 @@ class InflaterPane:
         neither direction ever reaches `v` (shouldn't happen for a genuine edge of this group,
         but stays safe if it ever doesn't)."""
         original_corners = set(self.base_faces[group])
-        neighbors = {}
-        for a, b in self._group_boundary_edge_set(group):
-            neighbors.setdefault(a, []).append(b)
-            neighbors.setdefault(b, []).append(a)
-        for first_step in neighbors.get(u, []):
-            chain = [u, first_step]
-            prev, cur = u, first_step
-            while cur != v and cur not in original_corners:
-                options = [n for n in neighbors.get(cur, []) if n != prev]
-                if not options:
-                    break
-                prev, cur = cur, options[0]
-                chain.append(cur)
-            if cur == v:
-                return chain
-        return [u, v]
+        boundary = self._group_boundary_edge_set(group)
+        return edge_indexer.base_edge_vertex_chain(u, v, boundary, original_corners)
 
     def _open_edge_geometry(self, group, u, v):
         """(midpoint, segments) for base edge (u, v) of `group`'s own rim, AT THE CURRENT
@@ -4888,17 +4191,7 @@ class InflaterPane:
         (2026-09-19, explicit bug report: "the edge... is not straight so you need to look at
         the subdivisions")."""
         chain = self._base_edge_vertex_chain(group, u, v)
-        points = [self.positions[vid] for vid in chain if vid in self.positions]
-        if len(points) < 2:
-            p_u, p_v = self.positions[u], self.positions[v]
-            return (p_u + p_v) / 2, np.array([p_u, p_v])
-        mid = len(points) // 2
-        midpoint = points[mid] if len(points) % 2 == 1 else (points[mid - 1] + points[mid]) / 2
-        segments = np.empty((2 * (len(points) - 1), 3))
-        for i in range(len(points) - 1):
-            segments[2 * i] = points[i]
-            segments[2 * i + 1] = points[i + 1]
-        return midpoint, segments
+        return edge_indexer.open_edge_geometry(chain, self.positions, u, v)
 
     def _set_edge_highlight_actors(self, role, key, color):
         """Swaps out `role`'s own actors ("hover"/"origin"/"target"/"connecting_line" in
@@ -5202,17 +4495,16 @@ class InflaterPane:
         ACTUALLY on screen, not the one being computed underneath it -- self._pre_click_snapshot
         (captured by every pipeline entry point right before it touches anything, see
         _snapshot_mesh_state) is exactly that OLD, still-displayed state."""
-        if self._running and self._pre_click_snapshot is not None:
-            return self._pre_click_snapshot["pending_source_polygon_id"]
-        return self._pending_source_polygon_id
+        return face_indexer.resolve_display_state(
+            self._pending_source_polygon_id, self._running, self._pre_click_snapshot,
+            "pending_source_polygon_id")
 
     def _display_face_of_fine(self):
         """Same "frozen while running" rule as _display_pending_source_polygon_id (own
         docstring has the full reasoning), for self.face_of_fine -- used by _groups_present to
         validate a picked group index against whichever mesh is actually on screen."""
-        if self._running and self._pre_click_snapshot is not None:
-            return self._pre_click_snapshot["face_of_fine"]
-        return self.face_of_fine
+        return face_indexer.resolve_display_state(
+            self.face_of_fine, self._running, self._pre_click_snapshot, "face_of_fine")
 
     def _display_connections(self):
         """Same "frozen while running" rule as _display_pending_source_polygon_id (own
@@ -5222,15 +4514,12 @@ class InflaterPane:
         seams actually belong to. Used by _nearest_connection_at_position's own shape_id
         restriction, so a mid-run hover doesn't get excluded by looking up an old connection id
         against the wrong (already-edited) live list."""
-        if self._running and self._pre_click_snapshot is not None:
-            return self._pre_click_snapshot["builder_connections"]
-        return self.builder_getter().connections
+        return face_indexer.resolve_display_state(
+            self.builder_getter().connections, self._running, self._pre_click_snapshot,
+            "builder_connections")
 
     def _shape_id_of_group(self, group):
-        spid_list = self._display_pending_source_polygon_id()
-        if group is not None and spid_list is not None and group < len(spid_list):
-            return spid_list[group]
-        return None
+        return face_indexer.shape_id_of_group(group, self._display_pending_source_polygon_id())
 
     def _group_polygon_n(self, group):
         """Side count to key POLYGON_COLORS with for base face `group` -- the ORIGINAL 2D
@@ -5241,24 +4530,17 @@ class InflaterPane:
         not the hexagon's own purple). Falls back to `len(self.base_faces[group])` whenever
         the shape lookup fails (no source_polygon_id yet, or a shape_id the builder no longer
         has -- both legitimate transient states, not errors)."""
-        shape_id = self._shape_id_of_group(group)
-        if shape_id is not None:
-            shape = next((s for s in self.builder_getter().shapes if s["id"] == shape_id), None)
-            if shape is not None:
-                return shape["n"]
-        return len(self.base_faces[group])
+        return face_indexer.group_polygon_n(
+            group, self._display_pending_source_polygon_id(), self.builder_getter().shapes,
+            self.base_faces)
 
     def _groups_for_shape_ids(self, shape_ids):
-        """Every 3D group whose own source_polygon_id is one of `shape_ids` -- usually one
-        group per shape_id, but a Polygon-Fold shape's several triangle groups all share one
-        source_polygon_id, so this can return more entries than `shape_ids` has. Reads via
+        """Every 3D group whose own source_polygon_id is one of `shape_ids`. Reads via
         _display_pending_source_polygon_id (own docstring), not the live field directly, so
         this still resolves against whichever mesh is actually on screen while an inflate is
         running."""
-        spid_list = self._display_pending_source_polygon_id()
-        if not shape_ids or spid_list is None:
-            return set()
-        return {g for g, sid in enumerate(spid_list) if sid in shape_ids}
+        return face_indexer.groups_for_shape_ids(
+            shape_ids, self._display_pending_source_polygon_id())
 
     def _groups_present(self):
         """Every group index that actually exists in self.face_of_fine RIGHT NOW (or, while an
@@ -5280,7 +4562,7 @@ class InflaterPane:
         longer exists at all -- the actual crash, in _add_rounded_lines' own add_mesh call) or,
         worse, silently highlights whatever DIFFERENT face now happens to occupy that same
         index in the renumbered mesh."""
-        return set(self._display_face_of_fine() or ())
+        return face_indexer.groups_present(self._display_face_of_fine())
 
     def _apply_hover_highlight(self, groups):
         """Shared by both hover directions above -- swaps the current set of highlighted
@@ -5299,8 +4581,9 @@ class InflaterPane:
         can otherwise reach here (a diff pipeline path renumbering self.face_of_fine out from
         under a cached self._hover_target_groups)."""
         self._hover_target_groups = frozenset(groups)
-        effective = ((self._hover_target_groups & self._groups_present())
-                     - self._groups_for_shape_ids(self._selected_shape_ids))
+        effective = face_selecter.effective_hover_groups(
+            self._hover_target_groups, self._groups_present(),
+            self._groups_for_shape_ids(self._selected_shape_ids))
         if effective == self._hover_groups:
             return
         self._hover_groups = effective
@@ -5443,11 +4726,8 @@ class InflaterPane:
             if ctrl_held:
                 return
             new_ids = set()
-        elif ctrl_held:
-            new_ids = set(self._selected_shape_ids)
-            new_ids.symmetric_difference_update({shape_id})
         else:
-            new_ids = {shape_id}
+            new_ids = face_selecter.toggle_selection(self._selected_shape_ids, shape_id, ctrl_held)
         self._select_shape_ids(new_ids)
 
     def _click_select_edge(self, event):
@@ -5575,15 +4855,7 @@ class InflaterPane:
         the identity half of _group_boundary_lines (see its own docstring for the counting
         rule), split out so _connection_edge_segments can intersect two groups' own boundary
         sets to find their SHARED seam without caring about actual positions."""
-        edge_count = {}
-        for face, bf in zip(self.faces, self.face_of_fine):
-            if bf != group:
-                continue
-            a, b, c = face
-            for u, v in ((a, b), (b, c), (c, a)):
-                key = (u, v) if u < v else (v, u)
-                edge_count[key] = edge_count.get(key, 0) + 1
-        return {e for e, count in edge_count.items() if count == 1}
+        return edge_indexer.group_boundary_edge_set(self.faces, self.face_of_fine, group)
 
     def _connection_edge_segments(self, conn):
         """Best-effort 3D geometry for Join-mode connection `conn`: the fine-mesh boundary
@@ -6364,23 +5636,8 @@ class InflaterPane:
         EVERY level instead of just the first, needing far more total steps by Level 3
         (2026-09-19, explicit: "when inflating hippo, in level 3, interactive_inflater took
         34000 steps... but polyhedron_inflater only took ~7k")."""
-        best = None
-        for level, record in self.level_history.items():
-            if level >= self.subdivision_level or not record:
-                continue
-            if not record.get("pressure_found", True):
-                continue
-            prior_pressure = record.get("pressure")
-            prior_rms = record.get("rms_stretch_pct")
-            if not prior_pressure or prior_rms is None:
-                continue
-            error = abs(prior_rms - target_rms_pct)
-            if best is None or error < best[0]:
-                best = (error, level, prior_pressure)
-        if best is None:
-            return None
-        _, level, prior_pressure = best
-        return prior_pressure * (2 ** (self.subdivision_level - level))
+        return reinflater.guess_pressure_from_history(
+            self.level_history, self.subdivision_level, target_rms_pct)
 
     def _run_inflate_step(self, initial_pressure_guess=None, tol_pct=None):
         """`initial_pressure_guess`/`tol_pct`, if given (only ever by the Diff Inflate paths --
@@ -6596,32 +5853,9 @@ class InflaterPane:
         known limitation _rebuild_open_edges/_connection_edge_segments already carry for a
         Polygon-Fold group (see their own comments); out of scope for this fix."""
         builder = self.builder_getter()
-        central_ids = builder.central_shape_ids()
-        if not central_ids or not self.base_faces or self._pending_source_polygon_id is None:
-            return {}
-        central_shapes = [s for s in builder.shapes if s["id"] in central_ids]
-        central_connections = [c for c in builder.connections
-                                if c["a_shape"] in central_ids and c["b_shape"] in central_ids]
-        expanded_shapes, expanded_connections, _spid = _expand_folded_shapes(
-            central_shapes, central_connections)
-        roots = _vertex_roots(expanded_shapes, expanded_connections)
-        shape_by_id = {s["id"]: s for s in expanded_shapes}
-        vertex_ids = {}
-        for group, spid in enumerate(self._pending_source_polygon_id):
-            if group >= len(self.base_faces):
-                continue
-            shape = shape_by_id.get(spid)
-            if shape is None:
-                continue
-            corners = _shape_face_corner_order(shape)
-            face = self.base_faces[group]
-            if len(corners) != len(face):
-                continue
-            for corner, real_id in zip(corners, face):
-                root = roots.get((shape["id"], corner))
-                if root is not None:
-                    vertex_ids[root] = real_id
-        return vertex_ids
+        return edge_modifier.current_root_to_vertex_id(
+            builder.central_shape_ids(), builder.shapes, builder.connections, self.base_faces,
+            self._pending_source_polygon_id)
 
     def _old_atomic_slot_to_id(self):
         """{(shape_id, corner): real_vertex_id} for every ATOMIC corner slot in the net as of
@@ -6644,21 +5878,9 @@ class InflaterPane:
         normally happen -- every root _vertex_roots produces here comes from the exact same
         expansion _current_root_to_vertex_id used to build that map in the first place) is
         silently skipped rather than raising."""
-        if not self.last_shapes_snapshot or self.last_root_to_vertex_id is None:
-            return {}
-        old_central = _central_shape_ids(
-            self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
-        if not old_central:
-            return {}
-        old_shapes = [s for s in self.last_shapes_snapshot if s["id"] in old_central]
-        old_connections = [c for c in self.last_connections_snapshot
-                            if c["a_shape"] in old_central and c["b_shape"] in old_central]
-        expanded_shapes, expanded_connections, _spid = _expand_folded_shapes(
-            old_shapes, old_connections)
-        roots = _vertex_roots(expanded_shapes, expanded_connections)
-        old_root_to_id = self.last_root_to_vertex_id
-        return {slot: old_root_to_id[root] for slot, root in roots.items()
-                if root in old_root_to_id}
+        return edge_modifier.old_atomic_slot_to_id(
+            self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot,
+            self.last_root_to_vertex_id)
 
     def _record_inflate_success(self):
         """Called only from _on_inflate_step_done's "Done" branch above (a clean Level-3
@@ -6775,12 +5997,13 @@ class InflaterPane:
         kind, extra = builder.classify_change(
             self.last_shapes_snapshot, self.last_connections_snapshot, self.last_anchor_snapshot)
         label = self._describe_change(kind, extra)
-        if kind == "add_face" and self._is_pendant_add(extra):
+        is_pendant = kind == "add_face" and self._is_pendant_add(extra)
+        action = inflation_type_chooser.choose_action(kind, extra, self.is_fully_inflated, is_pendant)
+        if action == inflation_type_chooser.PENDANT_ATTACH:
             self._diff_attach_pendant_only(extra, label)
             return
         self._stage_kept_selection(kind, extra)
-        if (not self.is_fully_inflated
-                and kind in ("add_face", "add_connection", "remove_connection", "remove_face")):
+        if action == inflation_type_chooser.FULL_INFLATE_REDIRECT:
             # Marks this run as a REDIRECTED one so _revert_run's own "undo the triggering edit
             # on failure" safety net still fires even though self._active_button will read
             # "full", not "diff" (see this flag's own init comment for the infinite-retry
@@ -6791,13 +6014,11 @@ class InflaterPane:
             self.on_full_inflate_clicked(change_label=label)
             return
         self._change_label = label
-        if kind == "add_face":
+        if action == inflation_type_chooser.DIFF_ADD_FACE:
             self._diff_add_face(extra)
-        elif kind == "remove_face":
+        elif action == inflation_type_chooser.DIFF_REMOVE_FACE:
             self._diff_remove_face(extra)
-        elif kind == "add_connection":
-            self._diff_connection_change()
-        elif kind == "remove_connection":
+        elif action == inflation_type_chooser.DIFF_CONNECTION_CHANGE:
             self._diff_connection_change()
         else:
             messagebox.showerror(
@@ -6825,18 +6046,8 @@ class InflaterPane:
         insiders needing a genuine reinflate (diff or full, per Rule 3), not the fast flat-
         attach-only path _diff_attach_pendant_only takes when nothing about the insiders
         actually changed; 2+ -> already an insider, unaffected either way."""
-        connections = self.builder_getter().connections
-        count = sum(1 for c in connections
-                    if c["a_shape"] == new_shape_id or c["b_shape"] == new_shape_id)
-        if count != 1:
-            return False
-        conn = next(c for c in connections
-                    if c["a_shape"] == new_shape_id or c["b_shape"] == new_shape_id)
-        neighbor_id = conn["b_shape"] if conn["a_shape"] == new_shape_id else conn["a_shape"]
-        neighbor_other_connections = sum(
-            1 for c in connections
-            if c["id"] != conn["id"] and (c["a_shape"] == neighbor_id or c["b_shape"] == neighbor_id))
-        return neighbor_other_connections != 1
+        return club_member_classifier.is_pendant_add(
+            self.builder_getter().connections, new_shape_id)
 
     def _diff_attach_pendant_only(self, new_shape_id, label="Guest added"):
         """Skips the whole Diff Inflate relax/calibrate pipeline entirely when the just-added
@@ -6985,22 +6196,18 @@ class InflaterPane:
         whenever self.subdivision_level == MAX_LEVEL going in) -- on the CORE only, still warm-
         started from the existing Level-3 positions/pressure, same as before this pendant-
         exclusion step was added."""
-        removed_idxs = {i for i, spid in enumerate(self.last_source_polygon_id) if spid in shape_ids}
-        keep_base_idxs = [i for i in range(len(self.base_faces)) if i not in removed_idxs]
-        if not keep_base_idxs:
+        removal = face_modifier.remove_faces_from_mesh(
+            self.base_faces, self.base_face_edge_ids, self.base_edges, self.last_source_polygon_id,
+            shape_ids)
+        if removal is None:
             messagebox.showerror("Cannot Diff Inflate", "That was the last face -- nothing left to inflate.")
             return
-        old_to_new_base = {old_i: new_i for new_i, old_i in enumerate(keep_base_idxs)}
-
-        surviving_base_faces = [self.base_faces[i] for i in keep_base_idxs]
-        surviving_face_edge_ids = (None if self.base_face_edge_ids is None else
-                                    [self.base_face_edge_ids[i] for i in keep_base_idxs])
-        surviving_source_polygon_id = [self.last_source_polygon_id[i] for i in keep_base_idxs]
-        surviving_edges = self.base_edges
-        if surviving_edges is not None:
-            remaining_base_vertex_ids = {v for f in surviving_base_faces for v in f}
-            surviving_edges = [e for e in surviving_edges if e[0] in remaining_base_vertex_ids
-                                and e[1] in remaining_base_vertex_ids]
+        removed_idxs = removal["removed_idxs"]
+        old_to_new_base = {old_i: new_i for new_i, old_i in enumerate(removal["keep_base_idxs"])}
+        surviving_base_faces = removal["surviving_base_faces"]
+        surviving_face_edge_ids = removal["surviving_face_edge_ids"]
+        surviving_source_polygon_id = removal["surviving_source_polygon_id"]
+        surviving_edges = removal["surviving_edges"]
 
         prepared = _prepare_mesh_for_inflate(
             surviving_base_faces, surviving_edges, surviving_face_edge_ids,
@@ -7028,10 +6235,8 @@ class InflaterPane:
         self.base_edges = core_base_edges
         pending_source_polygon_id = core_source_polygon_id
 
-        keep_fine = [i for i, bf in enumerate(self.face_of_fine)
-                     if bf not in removed_idxs and old_to_new_base[bf] in old_to_core]
-        self.faces = [self.faces[i] for i in keep_fine]
-        self.face_of_fine = [old_to_core[old_to_new_base[self.face_of_fine[i]]] for i in keep_fine]
+        self.faces, self.face_of_fine = face_modifier.remap_fine_mesh_after_removal(
+            self.faces, self.face_of_fine, removed_idxs, old_to_new_base, old_to_core)
         self.edges = None
         self.subdivision_level = MAX_LEVEL
         self._pending_source_polygon_id = pending_source_polygon_id

@@ -111,6 +111,12 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   `add_mesh` call per base-face GROUP (see above) rather than one call for the whole mesh, since
   VTK's `edge_color` is a single uniform color per call; still one scene/depth buffer, so
   cross-group occlusion works the same as a single-call version would.
+- **Lighting/shading** (2026-09-30, explicit — ported from `interactive_inflater_app`'s own
+  identical feature): every `add_mesh` call (both "Level N" panels and the Viewer's 2x2 quadrants)
+  passes `smooth_shading`/`ambient`/`diffuse`/`specular`/`specular_power` (module constants), and
+  every plotter uses the module-level `_setup_plotter_lighting(plotter)` helper — a 2-light
+  camera-relative KEY/FILL rig replacing VTK's default headlight — called right after each
+  `pv.Plotter(...)` construction AND after every `plotter.clear()` (which wipes lights too).
 - **Pan/zoom**: right-click-drag pans. Level panels share ONE pan (`self.level_pan`, a 2D NDC
   offset applied via `vtkCamera.SetWindowCenter` — a pure post-projection viewport shift, not
   added to focal_point/position, which would otherwise desync panels of different scale and move
@@ -242,6 +248,30 @@ else Full Inflate; (4) undo/redo fall under the same rules for free, via the sam
 every edit funnels through. Status messages always say which pipeline (Full/Diff Inflate) and
 level is running (`_pipeline_label`), including when Diff Inflate redirects into a real Full
 Inflate because the insiders were never really solved yet.
+
+**Modularization** (2026-09-30, explicit — "apply [the stretchy_mesh.py-style] refactoring... to
+interactive_inflater_app"): `src/apps/interactive_inflater_app/logic/` holds 10 pure (no Tkinter/
+VTK/`self`) modules factored out of `app.py`'s `BuilderPane`/`InflaterPane`; `app.py` keeps only
+Tk events, VTK actors, and threading, calling into these by name (most aliased to their old
+underscored method names so every call site stayed unchanged):
+- `face_indexer.py` / `edge_indexer.py` — group⟷shape_id and base-edge⟷fine-mesh identity
+  mapping, what keeps the 2D canvas and 3D panel "matching".
+- `face_selecter.py` / `edge_selecter.py` — pure hover/selection set arithmetic (ctrl-toggle,
+  nearest-point search); the VTK highlight actors stay in `app.py`.
+- `flat_face_attacher.py` — the pendant/guest flat-attach pipeline (mechanical move, already
+  pure); also owns `prepare_mesh_for_inflate`, the solve-vs-place dispatcher.
+- `club_member_classifier.py` — club/member/guest/insider/outsider classification,
+  `classify_change`'s diff core, anchor-deletion planning.
+- `inflation_type_chooser.py` — the decision tree choosing pendant-attach/full-inflate-redirect/
+  diff-add/diff-remove/diff-connection-change/unsupported after an edit.
+- `edge_modifier.py` — connection-join validity + vertex-identity continuity across edits
+  (root/atomic-slot remapping for diff re-solve seeding).
+- `face_modifier.py` — face-removal-from-mesh filtering/reindexing (`_diff_remove_face`'s pure
+  core).
+- `reinflater.py` — deliberately minimal: only the warm-start pressure guess
+  (`guess_pressure_from_history`) is pure/extractable; the rest of the full-reinflate pipeline is
+  an inherently stateful multi-callback background-threaded state machine, left in `app.py`.
+Unit tests: `tests/unit/interactive_inflater_app/`.
 
 ## interactive_builder_app (`src/apps/interactive_builder_app/app.py`)
 Unrelated 2D shape-placement canvas, no relation to solving. Palette of regular polygons

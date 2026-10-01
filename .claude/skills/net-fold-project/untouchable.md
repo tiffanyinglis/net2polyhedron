@@ -130,7 +130,24 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   `add_mesh` call now also sets `backface_params=dict(color=_darken_color(face_color))` (new
   `_darken_color`/`INSIDE_FACE_DARKEN_FACTOR=0.65`, alongside `_midpoint_color`) so a face's
   INSIDE renders darker than its outside (2026-09-19, explicit, named this app by its
-  "polyhedron_inflater" nickname — still active). See `apps.md`.
+  "polyhedron_inflater" nickname — still active). Lighting/shading ported from
+  `interactive_inflater_app` (2026-09-30, explicit — "add the shading from interactive_inflater
+  to polyhedron_inflater"): new `_setup_plotter_lighting` helper + `SMOOTH_SHADING`/`MATERIAL_*`/
+  `KEY_LIGHT_*`/`FILL_LIGHT_*` constants, wired into both plotter-construction sites and both
+  `add_mesh` call sites (Level panels + Viewer quadrants). See `apps.md`.
+
+`interactive_inflater_app/app.py`: MODULARIZATION (2026-09-30, explicit — "apply [the
+stretchy_mesh.py-style] refactoring... to interactive_inflater_app", 10 named pieces). New
+`src/apps/interactive_inflater_app/logic/` package: `face_indexer`, `edge_indexer`,
+`face_selecter`, `edge_selecter`, `flat_face_attacher`, `club_member_classifier`,
+`inflation_type_chooser`, `edge_modifier`, `face_modifier`, `reinflater` — see `apps.md`'s own
+section for what each owns. `app.py`'s own methods became thin wrappers calling these (most
+aliased to their old underscored names at import time, so behavior/call sites are unchanged);
+duplicate pure functions (`fine_group_boundary_edges`/`rim_vertex_chain` vs.
+`edge_indexer.group_boundary_edge_set`/`base_edge_vertex_chain`) were deduped onto the new
+canonical copy. Verified via `tests/unit/interactive_inflater_app/` (new) plus an in-process
+smoke test (place/connect/flat-attach/anchor-delete/diff-remove through `CombinedApp` without
+`mainloop()`) — not asked to re-verify every existing hand-tested behavior beyond that.
 
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.
