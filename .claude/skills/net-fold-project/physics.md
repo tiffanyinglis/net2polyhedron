@@ -58,6 +58,24 @@ pieces, in `pre_inflation_relaxer.py`:
   can come from a different seed than requested -- callers that display/store a seed
   (`inflate_polyhedron_app`'s own Seed field) must update it to this value.
 
+  **Time-bounded + shared with `interactive_inflater_app`** (2026-10-01, explicit: "create a
+  class called seed_selecter... this logic should apply to interactive_inflater as well when
+  running full inflate... have a time cutoff, say 10s"). The attempt-budget loop itself was
+  factored out into `seed_selecter.SeedSelecter` (`select(seed, attempt_fn, score_fn,
+  on_attempt=, should_stop=)`) — a generic, mesh-agnostic "try N seeded attempts, keep the best,
+  stop early on a good-enough score or a time/count budget" policy; `relax_initial_configuration_
+  with_orientation_retry` supplies the orientation-specific `attempt_fn`/`score_fn`/print
+  diagnostics and is otherwise unchanged. New `max_search_time` param
+  (`LEVEL0_ORIENTATION_MAX_SEARCH_TIME=10.0`s, aliasing `SeedSelecter`'s own default): the FIRST
+  attempt always runs in full regardless of duration, but attempt 2+ only starts if cumulative
+  time so far is still under budget — a model slow enough for one attempt to approach 10s gets
+  exactly one attempt. Deliberate, not just a safety valve: a bigger/more-braced mesh is
+  empirically unlikely to hit the all-faces-flipped failure mode this retry targets, so spending
+  MORE search time on the inputs that need it least would be wasted. `interactive_inflater_app`'s
+  own `on_full_inflate_clicked` now calls this same function (`LEVEL0_SEED=0` as the fixed
+  starting seed — that app has no seed display/entry of its own) instead of calling
+  `relax_initial_configuration` directly with no retry at all, as it did before.
+
   **Checks the BASE (macro) faces, not the fan-triangulated ones** (`base_faces` param, checked
   instead of `faces` when given). Diagnosed 2026-09-30: checking the fan-triangulated mesh
   directly is unreliable -- a macro face's own fan HUB vertex (added purely so a spring-only

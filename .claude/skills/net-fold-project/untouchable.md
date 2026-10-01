@@ -87,8 +87,10 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   before repulsion starts. New `relax_initial_configuration_with_orientation_retry`
   (`LEVEL0_ORIENTATION_MAX_RETRIES=5`) is the seed-retry backstop; `app.py`'s `_run_relax_stream`
   now calls it instead of `relax_initial_configuration` directly and writes the actual seed used
-  back into `self.seed_var` in `_finish_relax` — `interactive_inflater_app` untouched, still
-  calls plain `relax_initial_configuration` (its own signature/behavior unchanged by this).
+  back into `self.seed_var` in `_finish_relax` — `interactive_inflater_app` untouched at the
+  time, still called plain `relax_initial_configuration` (its own signature/behavior unchanged by
+  this). (2026-10-01: `interactive_inflater_app` now uses the retry too — see the dedicated
+  entry below.)
   Corrected the SAME session (still 2026-09-30, explicit, user reported the fix didn't work and
   provided the exact failing seed): the orientation check was reading the fan-triangulated mesh,
   not the macro polygons, and missed a real "caved-in" case entirely (see physics.md) — added a
@@ -209,3 +211,171 @@ resurrect here; don't treat references to it in git history as still-live code.
 
 `polygon_subdivision_app` / `utils/subdivisions/` — separate, finished, unrelated 2D demo. Not
 part of the stretchy pipeline.
+
+`pre_inflation_relaxer.py`, `interactive_inflater_app/app.py` (2026-10-01, explicit — "create a
+class called seed_selecter that chooses the best seed from our 5 attempts. first, this logic
+should apply to interactive_inflater as well when running full inflate. second... a time cutoff,
+say 10s (max_search_time)... up to 5... (max_attempts) attempts"). New
+`utils/inflate_polyhedron/seed_selecter.py` (`SeedSelecter`, `DEFAULT_MAX_ATTEMPTS=5`,
+`DEFAULT_MAX_SEARCH_TIME=10.0`s) — a generic, mesh-agnostic time/count-bounded "try N seeded
+attempts, keep the best" policy; `relax_initial_configuration_with_orientation_retry` refactored
+to delegate its own attempt loop to it (own `attempt_fn`/`score_fn`/print diagnostics supplied,
+behavior otherwise unchanged — verified against the known tetrahedron seed-19 case, still
+retries to seed 20). New `max_search_time` param on that function
+(`LEVEL0_ORIENTATION_MAX_SEARCH_TIME`, aliasing `SeedSelecter`'s own default) — see physics.md's
+own Level 0 orientation retry section for the exact time-budget semantics.
+`interactive_inflater_app/app.py`'s `on_full_inflate_clicked` now calls
+`relax_initial_configuration_with_orientation_retry` (new `_run_level0_relax_with_seed_retry`
+helper, `LEVEL0_SEED=0` as the fixed starting seed — this app has no seed display/entry of its
+own) instead of calling `relax_initial_configuration` directly with no retry at all; the
+now-unused `self.positions = random_initial_positions(...)` pre-assignment and the `relax_
+initial_configuration`/`random_initial_positions` imports it was the last user of were removed.
+Verified via new `tests/unit/inflate_polyhedron/test_seed_selecter.py` (6 tests: early accept,
+exhausts attempts keeping least-bad, time-cutoff-to-one-attempt, runs-all-when-fast,
+on_attempt callback, should_stop) plus in-process smoke tests with a real `mainloop()` for both
+apps (tetrahedron seed 19 retry in isolation; a full `interactive_inflater_app` Full Inflate run
+reaching `is_fully_inflated=True` with seed 0→1 retry logged; `inflate_polyhedron_app`'s own
+Relax still works unchanged).
+
+`inflate_polyhedron_app/app.py`, `interactive_inflater_app/app.py`: shading lighting retune
+(2026-10-01, explicit bug report: "there's a possible bug with the shading. it seems like every
+face, regardless of how it's subdivided and inflated, all get one phong lighting? shouldn't the
+individual subdivisions get different lighting/shading (try tetrahedron for example)").
+Investigated thoroughly before touching anything — NOT a shading-computation bug: direct
+inspection confirmed VTK's per-vertex normals and Phong interpolation were already both correct
+(real normal variation up to 50+ degrees measured within one subdivided macro face; an isolated
+high-res render of one face showed a clean gradient). Root cause: `KEY_LIGHT_POSITION` (0.55,
+0.7, 0.85) sat close enough to the camera's own view axis ("camera light" space has the camera
+at (0, 0, 1)) that lighting a roughly dome-shaped inflated face from nearly the angle it's
+VIEWED from produces a radially-symmetric "glow" (bright center fading evenly toward the rim in
+every direction) rather than a directional gradient — reads as "basically flat plus a highlight
+blob" at a small panel size even though the underlying shading is genuinely varying. Fix (both
+apps, identical constants in each — same as the original shading port): `KEY_LIGHT_POSITION` ->
+`(1.3, 0.2, -0.3)` (genuinely off-axis/grazing), `KEY_LIGHT_INTENSITY` 1.0->1.1,
+`FILL_LIGHT_POSITION` -> `(-1.0, -0.3, 0.6)`, `FILL_LIGHT_INTENSITY` 0.35->0.45,
+`MATERIAL_AMBIENT` 0.25->0.18 (more shadow depth/contrast). Verified via a real tetrahedron
+Full-Inflate/Auto run in both apps, screenshotted before and after — before: each face reads as
+one soft radial glow; after: each face shows an obviously directional, clearly-per-subdivision
+gradient. No constant/behavior other than these five touched.
+Follow-up, same day, explicit ("might be because you didn't implement diffuse lighting. so try
+adding lighting that depends on face normals. turn off phong for now"): `SMOOTH_SHADING`
+True->False (flat per-face shading -- each triangle lit by its OWN true face normal, no per-
+vertex interpolation across neighbors) and `MATERIAL_SPECULAR` 0.35->0.0 (drops the specular
+term -- the actual "Phong" part of the Blinn-Phong model; ambient+diffuse alone is plain
+Lambertian) in both apps. Verified via the same tetrahedron Full-Inflate/Auto run, screenshotted
+at both debug resolution and the app's own native small panel size: produces an obviously
+faceted, triangle-by-triangle brightness step rather than a smooth gradient -- a stronger
+"every subdivision clearly shaded differently" effect, at the cost of the smoothly-curved-
+surface look `SMOOTH_SHADING` was originally added for. Revert `SMOOTH_SHADING`/
+`MATERIAL_SPECULAR` to `True`/`0.35` in both apps to go back to smooth Phong shading.
+Follow-up, same day, explicit ("make things a tad brighter"): `MATERIAL_AMBIENT` 0.18->0.26,
+`KEY_LIGHT_INTENSITY` 1.1->1.25, `FILL_LIGHT_INTENSITY` 0.45->0.55, in both apps -- raises the
+floor/overall brightness a bit without flattening the per-facet contrast the flat-shading
+change above was for.
+Follow-up, same day, explicit ("make the phong lighting brighter"): `MATERIAL_SPECULAR`
+0.0->0.5 in both apps -- the specular term is literally the "Phong" part of Blinn-Phong
+(ambient+diffuse alone is plain Lambertian, see the flat-shading entry above), so this brings
+back a glossy per-facet highlight (brighter than the original pre-"turn off phong" 0.35) while
+`SMOOTH_SHADING` stays False -- still flat per-face normals, not a return to smooth
+interpolation.
+Follow-up, same day, explicit ("i still want the diffuse and phong lighting to be brighter"):
+`MATERIAL_DIFFUSE` 0.85->1.0 (its max) and `MATERIAL_SPECULAR` 0.5->0.75 in both apps --
+`MATERIAL_AMBIENT`/light intensities left alone since the request named diffuse and Phong
+(specular) specifically.
+Follow-up, same day, explicit ("it's not actually brighter. maybe what i want is for the light
+source to be more from the viewer's eyes" -- the diffuse/specular bump above wasn't visibly
+brighter). Root cause: KEY_LIGHT/FILL_LIGHT sit at a deliberate side/grazing angle (see their own
+comment, added to fix a prior "all one flat shade" bug), so the diffuse dot-product against a
+camera-FACING surface is small regardless of the material's diffuse coefficient -- raising the
+coefficient alone can't fix a weak incidence angle. Added a third light, `HEADLIGHT_POSITION =
+(0.0, 0.0, 1.0)` / `HEADLIGHT_INTENSITY = 0.6`, essentially AT the camera (camera-light space has
+the camera at (0, 0, 1) looking at the origin), in both apps' `_setup_plotter_lighting`. Kept
+separate from, not a replacement for, KEY/FILL -- those still provide the off-axis directional
+gradient that makes individual subdivisions read as differently-shaded; HEADLIGHT only adds
+overall brightness on top. Verified with an off-screen icosphere render: front-facing surface is
+visibly brighter while the side lights' directional facet gradient is still clearly visible.
+Follow-up, same day, explicit ("now let's a bit too bright. make the other headlights less
+intense" -- HEADLIGHT pushed overall brightness past where the user wanted). `KEY_LIGHT_INTENSITY`
+1.25->1.0 and `FILL_LIGHT_INTENSITY` 0.55->0.4 in both apps; `HEADLIGHT_INTENSITY` left at 0.6.
+Verified with the same off-screen icosphere render: toned down from the prior screenshot but
+still brighter overall than before HEADLIGHT was added, directional gradient still intact.
+Follow-up, same day, explicit ("drop key light to 0.4"): `KEY_LIGHT_INTENSITY` 1.0->0.4 in both
+apps; `FILL_LIGHT_INTENSITY`/`HEADLIGHT_INTENSITY` left unchanged.
+Follow-up, same day, explicit ("change fill_light to 0.2"): `FILL_LIGHT_INTENSITY` 0.4->0.2 in
+both apps; `KEY_LIGHT_INTENSITY`/`HEADLIGHT_INTENSITY` left unchanged.
+Follow-up, same day, explicit ("lower diffuse and specular to before"): `MATERIAL_DIFFUSE` and
+`MATERIAL_SPECULAR` reverted 1.0/0.75 -> their pre-bump 0.85/0.5 in both apps, now that HEADLIGHT
+plus the KEY/FILL retuning above actually address overall brightness -- the earlier material
+bump (see its own entry) is no longer wanted on top of it.
+Follow-up, same day, explicit ("lower ambient"): `MATERIAL_AMBIENT` reverted 0.26 -> its own
+pre-bump 0.18 in both apps, same reasoning as the diffuse/specular revert above.
+Follow-up, same day, explicit ("ok now bump up the key_light, fill_light, headlight"):
+`KEY_LIGHT_INTENSITY` 0.4->0.6, `FILL_LIGHT_INTENSITY` 0.2->0.3, `HEADLIGHT_INTENSITY` 0.6->0.9,
+all in both apps.
+Follow-up, same day, explicit ("undo the bumping for fill light and key light"):
+`KEY_LIGHT_INTENSITY` and `FILL_LIGHT_INTENSITY` reverted 0.6/0.3 -> 0.4/0.2 in both apps;
+`HEADLIGHT_INTENSITY` stays at 0.9 (not mentioned, not touched).
+Follow-up, same day, explicit ("can you move the phong lights closer?", clarified via follow-up
+question -- "Narrow the angle a bit"). Position DISTANCE is a no-op for `light_type="camera
+light"` lights (VTK Positional=False by default -- directional, only the direction to the
+position matters, never how far away it is), confirmed by rendering with the position scaled to
+30% of its length and diffing pixel output (identical). Instead narrowed the ANGLE: both
+`KEY_LIGHT_POSITION` and `FILL_LIGHT_POSITION` blended 30% of the way toward `(0, 0, 1)` (the
+camera's own position in camera-light space) -- KEY's off-axis angle ~103 -> ~84 degrees, FILL's
+~60 -> ~45 degrees. `KEY_LIGHT_POSITION` (1.3, 0.2, -0.3) -> (0.9, 0.15, 0.1); `FILL_LIGHT_
+POSITION` (-1.0, -0.3, 0.6) -> (-0.7, -0.2, 0.7), both apps. Verified with an off-screen
+icosphere render: brighter overall with the bright patch shifted toward the viewer, directional
+per-subdivision gradient still clearly visible (not reverted to the earlier "uniform glow" bug).
+Follow-up, same day, explicit ("ok looks now. now dim all the key/fill/headlights a bit"):
+`KEY_LIGHT_INTENSITY` 0.4->0.3, `FILL_LIGHT_INTENSITY` 0.2->0.15, `HEADLIGHT_INTENSITY` 0.9->0.75,
+all in both apps.
+
+Feature (2026-10-01, explicit: "allow undo/redo in Viewer mode for the current model you're
+adjusting. if you switch to a new model, then the undo stack resets", `inflate_polyhedron_app`
+only -- `interactive_inflater_app` has no equivalent Viewer mode). Camera (rotation/pan/zoom) is
+the only thing Viewer mode lets the user change, so undo/redo covers that. A SINGLE stack
+(`ViewerPane._viewer_undo_stack`/`_viewer_redo_stack`), not one per file, per the user's own
+framing ("for the current model") -- cleared by a new `_viewer_reset_undo_stack` whenever the
+file on screen changes: `_on_viewer_prev_clicked`/`_on_viewer_next_clicked`, and a file-changing
+`_viewer_rescan` (current file deleted from disk, falls back to index 0). Each stack entry is a
+camera-state snapshot (`_viewer_camera_snapshot`) from BEFORE one change: a whole drag/pan
+gesture collapses to ONE undo step, captured at `_on_viewer_drag_start`/`_on_viewer_pan_start`
+into `_viewer_gesture_start_camera` and only actually pushed at `_on_viewer_drag_end`/
+`_on_viewer_pan_end` (`_viewer_commit_gesture_undo`) if the camera ended up different -- not one
+per motion tick, and a click-without-moving leaves no undo entry. A scroll-wheel zoom tick and
+the middle-click pan-reset each push their own single step directly, since those are already one
+discrete action. Bound to Ctrl+Z (undo) / Ctrl+Y (redo), `root.bind_all` same as the existing
+Left/Right/A/D viewer navigation, same `view_mode_var` guard inside the handlers so they no-op
+in Inflater mode. Verified with an in-process smoke test: a scroll-zoom + a multi-tick drag
+gesture each produce exactly one undo step; undoing unwinds rotation then zoom independently;
+redoing restores both; switching to the next file resets both stacks to empty.
+
+Bug fix (2026-10-01, explicit bug report: "in HIPPO Viewer, i can't switch between images" with
+an `AttributeError: 'ViewerPane' object has no attribute 'view_mode_var'` traceback from
+`_on_viewer_next_clicked`). A regression from the `ViewerPane` extraction (see its own entry
+above): `_on_viewer_prev_clicked`/`_on_viewer_next_clicked` read `self.view_mode_var` (a guard
+against the globally-bound Left/Right/A/D keys firing while Inflater mode is showing, since
+Inflater mode never binds those keys itself) — moved verbatim into `ViewerPane` without also
+moving (or otherwise supplying) `view_mode_var` itself, which stayed on the shell
+`InflatePolyhedronApp`. Fixed by passing the shell's own `view_mode_var` (a `tk.StringVar`) into
+`ViewerPane.__init__` and storing it as `self.view_mode_var`, same attribute name, just now
+constructor-injected instead of living on the enclosing class. Audited every other `self.*`
+reference inside `ViewerPane` for the same class of bug (grep of the whole class body) — this
+was the only one. Verified: Right/Left navigation actually advances/returns the current file,
+and the guard still correctly no-ops while in Inflater mode.
+
+Bug fix (2026-10-01, explicit bug report: "when switching back to Inflater mode, the window
+size should change", user-confirmed symptom: "Stays at the Viewer's square size"). `_on_view_
+mode_changed` captured `self._inflater_geometry = self.root.geometry()` before switching to
+Viewer and replayed that string when switching back — but `wm geometry()` can report stale
+(pre-maximize) dimensions while the window is zoomed (a known Tk/Windows gap), so a maximized
+Inflater window's captured geometry could be a small, stale, near-square string instead of its
+real maximized size. Fixed by also recording `self._inflater_was_zoomed = self.root.state() ==
+"zoomed"` alongside the geometry capture, explicitly `self.root.state("normal")` before applying
+`VIEWER_WINDOW_GEOMETRY`, and on the way back re-zooming via `self.root.state("zoomed")` instead
+of replaying the captured geometry string whenever `_inflater_was_zoomed` is set (falls back to
+the old geometry-string replay otherwise, unchanged for the non-maximized case). Verified via an
+in-process smoke test simulating `root.state("zoomed")` before switching: Viewer mode correctly
+un-maximizes to the square geometry, and switching back correctly restores `state() == "zoomed"`
+at the original maximized dimensions; a separate smoke test confirms the plain manual-resize
+(non-maximized) path still round-trips the captured geometry string exactly as before.

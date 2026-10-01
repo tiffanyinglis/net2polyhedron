@@ -5,7 +5,7 @@ subdivision level it last reached, every parameter spinner, and the pressure/lev
 needed to seed a later Diff Inflate.
 
 A .hippie deliberately mirrors inflate_polyhedron_app's own .hippo (SessionStateModel, imported
-from inflate_polyhedron_app.session_state and reused here for the single current-level mesh --
+from inflate_polyhedron_app.state.session_state and reused here for the single current-level mesh --
 LevelStateModel is a plain, app-agnostic schema, see its own docstring) rather than replacing it:
 this app only ever tracks ONE flat mesh (the central object's) at a time, not one per
 subdivision level reached, so there is no `levels: Dict[int, LevelStateModel]` here the way
@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from inflate_polyhedron_app.session_state import LevelStateModel
+from inflate_polyhedron_app.state.session_state import LevelStateModel
 
 
 class InflaterSessionStateModel(BaseModel):

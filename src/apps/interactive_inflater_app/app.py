@@ -155,20 +155,22 @@ import common.paths  # noqa: F401 -- side effect: puts src/ and src/apps/ on sys
 from common.paths import DATA_DIR
 from common.ui_theme import FACE_COLORS, PLOT_THEME, STATUS_COLORS
 
-# inflate_polyhedron_app/session_state.py is a plain pydantic module with no Tkinter/app-object
-# dependency (see its own module docstring) -- safe to import cross-app to read the SAME .hippo
-# session format that app's own File > Save writes, rather than re-declaring an equivalent schema
-# here (2026-09-26, explicit: "you need to implement loading of .hippo files").
-from inflate_polyhedron_app.session_state import LevelStateModel, SessionStateModel
+# inflate_polyhedron_app/state/session_state.py is a plain pydantic module with no Tkinter/
+# app-object dependency (see its own module docstring) -- safe to import cross-app to read the
+# SAME .hippo session format that app's own File > Save writes, rather than re-declaring an
+# equivalent schema here (2026-09-26, explicit: "you need to implement loading of .hippo files").
+from inflate_polyhedron_app.state.session_state import LevelStateModel, SessionStateModel
 from interactive_inflater_app.state.session_state import InflaterSessionStateModel
 
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.inflate_polyhedron.stretchy_mesh import (
     EDGE_LENGTH, load_stretchy_mesh,
-    load_stretchy_mesh_edges, mesh_edges, random_initial_positions,
+    load_stretchy_mesh_edges, mesh_edges,
     repulsion_force,
 )
-from utils.inflate_polyhedron.pre_inflation_relaxer import relax_initial_configuration
+from utils.inflate_polyhedron.pre_inflation_relaxer import (
+    relax_initial_configuration_with_orientation_retry,
+)
 from utils.inflate_polyhedron.multi_trial_inflater import estimate_pressure_for_target_stretch
 
 # Pendant/guest flat-attach pipeline (2026-09-30 modularization -- moved out verbatim, see that
@@ -566,10 +568,34 @@ SUBDIVISION_EDGE_LINE_WIDTH = 0.75
 # side of a face from ever going fully black/flat, and a modest specular highlight is what
 # actually SELLS the "smooth, slightly glossy inflated surface" look once combined with smooth
 # shading; SPECULAR_POWER keeps that highlight small/tight rather than a big soft blob.
-SMOOTH_SHADING = True
-MATERIAL_AMBIENT = 0.25
+#
+# SMOOTH_SHADING temporarily OFF, MATERIAL_SPECULAR temporarily 0 (2026-10-01, explicit: "might
+# be because you didn't implement diffuse lighting. so try adding lighting that depends on face
+# normals. turn off phong for now" -- see inflate_polyhedron_app's own identical change for the
+# full rationale/verification). FLAT per-face shading (each triangle lit by its OWN true face
+# normal) with specular (the actual "Phong" part of Blinn-Phong) off, so only face-normal-
+# dependent ambient+diffuse brightness is visible -- an obviously faceted, triangle-by-triangle
+# look rather than a smoothly curved one. Revert both to True/0.35 to go back to smooth Phong
+# shading if this reads as too faceted/low-poly instead. MATERIAL_AMBIENT bumped 0.18->0.26
+# (2026-10-01, explicit: "make things a tad brighter", alongside KEY_LIGHT_INTENSITY/
+# FILL_LIGHT_INTENSITY below) -- raises the floor brightness a bit without flattening the
+# per-facet contrast this whole change was for. MATERIAL_SPECULAR brought back 0.0->0.5
+# (2026-10-01, explicit: "make the phong lighting brighter" -- the specular term IS the "Phong"
+# part of Blinn-Phong, see this comment's own opening line) -- a brighter glossy highlight per
+# flat-shaded facet than the original (pre-"turn off phong") 0.35, still combined with FLAT
+# per-face normals (SMOOTH_SHADING still False), not a return to smooth interpolation.
+# MATERIAL_DIFFUSE 0.85->1.0 and MATERIAL_SPECULAR 0.5->0.75 (2026-10-01, explicit: "i still
+# want the diffuse and phong lighting to be brighter") -- diffuse at its max brightens the
+# per-facet directional gradient this whole flat-shading change was for; specular (the "Phong"
+# term) raised further for a stronger glossy highlight, still flat-shaded (SMOOTH_SHADING False).
+# Reverted back to 0.85/0.5 (2026-10-01, explicit: "lower diffuse and specular to before") --
+# once HEADLIGHT and the KEY/FILL retuning below actually fixed overall brightness, the material
+# bump was no longer needed/wanted on top of it. MATERIAL_AMBIENT reverted back to its own
+# pre-bump 0.18 (2026-10-01, explicit: "lower ambient"), same reasoning.
+SMOOTH_SHADING = False
+MATERIAL_AMBIENT = 0.18
 MATERIAL_DIFFUSE = 0.85
-MATERIAL_SPECULAR = 0.35
+MATERIAL_SPECULAR = 0.5
 MATERIAL_SPECULAR_POWER = 20
 
 # Explicit 2-light camera-relative rig, REPLACING the plotter's own default light kit
@@ -589,10 +615,62 @@ MATERIAL_SPECULAR_POWER = 20
 # upper-right) does the actual shape-defining work; FILL (dim, opposite side) keeps the unlit
 # side from going flat black without washing out the key's own contrast -- classic 2-point
 # rig, cheaper than the default kit's 5 lights and deliberately more off-axis than any of them.
-KEY_LIGHT_POSITION = (0.55, 0.7, 0.85)
-KEY_LIGHT_INTENSITY = 1.0
-FILL_LIGHT_POSITION = (-0.6, -0.35, 0.5)
-FILL_LIGHT_INTENSITY = 0.35
+#
+# Pushed FURTHER off-axis, and MATERIAL_AMBIENT lowered 0.25->0.18 (2026-10-01, explicit bug
+# report: "every face, regardless of how it's subdivided and inflated, all get one phong
+# lighting... shouldn't the individual subdivisions get different lighting/shading"). Diagnosed,
+# NOT a shading-computation bug: per-vertex normals and Phong interpolation were already both
+# correct (direct inspection confirmed real normal variation up to 50+ degrees within one
+# subdivided macro face). The PREVIOUS position (0.55, 0.7, 0.85), despite the "off the view
+# axis" reasoning above, was still close enough to the camera's own (0, 0, 1) that lighting a
+# roughly dome-shaped inflated face from nearly the angle it's VIEWED from produces a radially-
+# symmetric "glow" (bright center fading evenly toward the rim in every direction) rather than a
+# left-to-right/top-to-bottom directional gradient -- which at a small panel size reads as
+# "basically one flat shade plus a highlight blob" even though the underlying per-vertex shading
+# genuinely varies. A real side/grazing angle makes the SAME underlying curvature produce an
+# obviously directional, clearly-per-subdivision-varying gradient instead. Intensities bumped
+# 1.1->1.25 / 0.45->0.55 (2026-10-01, explicit: "make things a tad brighter"), then brought back
+# down 1.25->1.0 / 0.55->0.4 (2026-10-01, explicit: "now let's a bit too bright. make the other
+# headlights less intense" -- after HEADLIGHT below was added and pushed overall brightness past
+# where the user wanted it), then KEY_LIGHT_INTENSITY further down 1.0->0.4 (2026-10-01, explicit:
+# "drop key light to 0.4") and FILL_LIGHT_INTENSITY further down 0.4->0.2 (2026-10-01, explicit:
+# "change fill_light to 0.2"), then both bumped back up 0.4->0.6 / 0.2->0.3 (2026-10-01,
+# explicit: "ok now bump up the key_light, fill_light, headlight"), then that bump undone back to
+# 0.4/0.2 (2026-10-01, explicit: "undo the bumping for fill light and key light" -- HEADLIGHT's
+# own bump to 0.9 stays, only KEY/FILL's bump was reverted).
+#
+# Positions narrowed partway back toward the camera axis (2026-10-01, explicit: "can you move
+# the phong lights closer?", clarified via follow-up question -- "Narrow the angle a bit", since
+# position DISTANCE is a no-op for these: `light_type="camera light"` lights are directional
+# (VTK Positional=False by default), so only the direction to the position matters, never how
+# far away it is -- confirmed by rendering the same scene with the position scaled to 30% of its
+# length and diffing pixel output (identical). KEY_LIGHT_POSITION blended 30% of the way toward
+# (0, 0, 1) -- the camera's own position in this space, see the "camera light" note above --
+# taking its off-axis angle from ~103 degrees to ~84 degrees; FILL_LIGHT_POSITION blended the
+# same way, ~60 degrees to ~45 degrees. Still off-axis enough to preserve the directional
+# per-subdivision gradient the original repositioning (above) was for, just less extreme.
+# Dimmed a bit (2026-10-01, explicit: "ok looks now. now dim all the key/fill/headlights a bit",
+# alongside HEADLIGHT_INTENSITY below): 0.4->0.3 / 0.2->0.15.
+KEY_LIGHT_POSITION = (0.9, 0.15, 0.1)
+KEY_LIGHT_INTENSITY = 0.3
+FILL_LIGHT_POSITION = (-0.7, -0.2, 0.7)
+FILL_LIGHT_INTENSITY = 0.15
+
+# Added (2026-10-01, explicit: "it's not actually brighter. maybe what i want is for the light
+# source to be more from the viewer's eyes" -- after bumping MATERIAL_DIFFUSE/MATERIAL_SPECULAR
+# didn't read as brighter). Root cause: KEY/FILL above sit at a deliberate side/grazing angle
+# (see their own comment) so the diffuse dot-product against a camera-FACING surface is small
+# regardless of the material's diffuse coefficient -- raising the coefficient alone can't fix a
+# weak incidence angle. HEADLIGHT sits essentially AT the camera ((0, 0, 1) in "camera light"
+# space is the camera's own position looking at the origin -- see KEY_LIGHT_POSITION's comment),
+# so camera-facing surfaces get real direct illumination. Kept separate from, not a replacement
+# for, KEY/FILL -- those still provide the off-axis directional gradient that makes individual
+# subdivisions read as differently-shaded; HEADLIGHT only adds overall brightness on top.
+# Bumped 0.6->0.9 (2026-10-01, explicit: "ok now bump up the key_light, fill_light, headlight"),
+# then dimmed back down 0.9->0.75 (2026-10-01, explicit: "ok looks now. now dim all the
+# key/fill/headlights a bit", alongside KEY_LIGHT_INTENSITY/FILL_LIGHT_INTENSITY above).
+HEADLIGHT_POSITION = (0.0, 0.0, 1.0)
+HEADLIGHT_INTENSITY = 0.75
 
 # Debug mode's "Show face normals"/"Show vertex normals"/"Show repulsive forces" toggles
 # (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a Diff
@@ -3816,6 +3894,9 @@ class InflaterPane:
         fill_light = pv.Light(light_type="camera light", intensity=FILL_LIGHT_INTENSITY)
         fill_light.position = FILL_LIGHT_POSITION
         self.plotter.add_light(fill_light)
+        headlight = pv.Light(light_type="camera light", intensity=HEADLIGHT_INTENSITY)
+        headlight.position = HEADLIGHT_POSITION
+        self.plotter.add_light(headlight)
 
     def _apply_camera(self):
         """Positions the plotter's orthographic camera from self._camera_controller.camera
@@ -5504,7 +5585,11 @@ class InflaterPane:
         self.faces, self.edge_length, self.face_of_fine = _build_level1_topology(self.base_faces)
         self.edges = _fan_level_edges(self.faces, self.base_edges)
         self.subdivision_level = 0
-        self.positions = random_initial_positions(self.faces, seed=0)
+        # No self.positions pre-assignment here (unlike before 2026-10-01) -- relax_initial_
+        # configuration_with_orientation_retry generates its own fresh starting cloud per
+        # attempt internally (see LEVEL0_SEED below), so there's nothing meaningful to show even
+        # as a placeholder, and _render() is deliberately never called before a real result
+        # anyway (next comment).
         # Deliberately no self._render() here -- these are raw, unrelaxed random positions, not
         # a converged state (2026-09-19, explicit: "never redraw anything" before real
         # convergence). The first real redraw is _on_relax_done's, once Level 0 has actually
@@ -5513,28 +5598,48 @@ class InflaterPane:
         self._set_running(True, active="full")
         self._set_status(f"{self._pipeline_label()} -- Level 0: Step 0.", "info")
         self._run_background(
-            lambda queue_progress: relax_initial_configuration(
-                self.positions, self.faces, self.edge_length,
-                max_nfev=SAFETY_STEP_CAP, gtol=self._get_tolerance(), rng=None,
-                # Adapts relax_once's own 6-arg on_progress (new_positions, steps_taken,
-                # max_stretch_pct, rms_stretch_pct, optimality, converged -- see its own
-                # docstring) down to (positions, steps_taken) -- queue_progress/on_progress
-                # below need positions too now, to capture a replay frame per checkpoint
-                # (2026-09-29, explicit user request -- see _capture_replay_frame), not just
-                # the step count status messages show.
-                on_progress=lambda new_positions, steps_taken, *_rest:
-                    queue_progress((new_positions, steps_taken)),
-                edges=self.edges, stop_event=self._stop_event,
-                # 2026-09-29, explicit bug report: goose.poly (an open/semi-closed net)
-                # converged in inflate_polyhedron_app but not here -- these two were simply
-                # never passed at all, so an open wedge's own unconstrained, naturally-higher
-                # stretch kept the RMS convergence check from ever settling below gtol, and its
-                # own jiggle kick kept nudging vertices that should feel no inflation force at
-                # all. See _rms_exclude_edges/_pressure_exclude_faces' own docstrings.
-                rms_exclude_edges=self._rms_exclude_edges(),
-                pressure_exclude_faces=self._pressure_exclude_faces()),
+            lambda queue_progress: self._run_level0_relax_with_seed_retry(queue_progress),
             self._on_relax_done,
             on_progress=self._on_level0_relax_progress)
+
+    # Starting seed for relax_initial_configuration_with_orientation_retry's own seed sweep
+    # (seed, seed+1, seed+2, ...) -- this app has no seed display/entry of its own (unlike
+    # inflate_polyhedron_app's Seed field), so a single fixed starting point is enough; the
+    # SeedSelecter it delegates to (see pre_inflation_relaxer.py) picks whichever of seed..
+    # seed+4 actually comes back orientation-consistent.
+    LEVEL0_SEED = 0
+
+    def _run_level0_relax_with_seed_retry(self, queue_progress):
+        """Level 0's own relax call for Full Inflate -- runs relax_initial_configuration up to
+        5 times from fresh seeds (LEVEL0_SEED, LEVEL0_SEED+1, ...), accepting the first
+        orientation-consistent result, same seed-retry policy inflate_polyhedron_app's own
+        Relax already uses (2026-10-01, explicit user request: "this logic should apply to
+        interactive_inflater as well when running full inflate") -- see pre_inflation_relaxer.
+        relax_initial_configuration_with_orientation_retry's own docstring for the exact
+        time/count budget (SeedSelecter) and why checking self.base_faces (not the fan-
+        triangulated self.faces) is what makes the orientation check reliable."""
+        result = relax_initial_configuration_with_orientation_retry(
+            self.faces, self.edge_length, seed=self.LEVEL0_SEED, base_faces=self.base_faces,
+            max_nfev=SAFETY_STEP_CAP, gtol=self._get_tolerance(), rng=None,
+            # Adapts relax_once's own 6-arg on_progress (new_positions, steps_taken,
+            # max_stretch_pct, rms_stretch_pct, optimality, converged -- see its own
+            # docstring) down to (positions, steps_taken) -- queue_progress/on_progress
+            # below need positions too now, to capture a replay frame per checkpoint
+            # (2026-09-29, explicit user request -- see _capture_replay_frame), not just
+            # the step count status messages show.
+            on_progress=lambda new_positions, steps_taken, *_rest:
+                queue_progress((new_positions, steps_taken)),
+            edges=self.edges, stop_event=self._stop_event,
+            # 2026-09-29, explicit bug report: goose.poly (an open/semi-closed net)
+            # converged in inflate_polyhedron_app but not here -- these two were simply
+            # never passed at all, so an open wedge's own unconstrained, naturally-higher
+            # stretch kept the RMS convergence check from ever settling below gtol, and its
+            # own jiggle kick kept nudging vertices that should feel no inflation force at
+            # all. See _rms_exclude_edges/_pressure_exclude_faces' own docstrings.
+            rms_exclude_edges=self._rms_exclude_edges(),
+            pressure_exclude_faces=self._pressure_exclude_faces())
+        *relax_result, _seed_used = result
+        return tuple(relax_result)
 
     def _on_level0_relax_progress(self, payload):
         """`on_progress` for on_full_inflate_clicked's own relax_initial_configuration call --

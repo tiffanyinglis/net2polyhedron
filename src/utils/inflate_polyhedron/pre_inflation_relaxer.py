@@ -20,6 +20,7 @@ from .stretchy_mesh import (
 )
 from .convergence_checker import CONVERGENCE_GTOL
 from .mesh_stretch_checker import positions_and_stretch
+from .seed_selecter import SeedSelecter, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_SEARCH_TIME
 
 # relax_initial_configuration's OWN step-size cap, separate from relax_once's
 # STEP_MAX_MULTIPLIER -- since _spring_only_force is a plain LINEAR spring, not the hardening
@@ -252,7 +253,10 @@ def relax_initial_configuration(positions, faces, edge_length,
 
 
 # relax_initial_configuration_with_orientation_retry's own retry budget -- see its docstring.
-LEVEL0_ORIENTATION_MAX_RETRIES = 5
+# Kept as aliases of seed_selecter.py's own defaults (2026-10-01) so existing callers/docs
+# naming this constant keep working; the actual budget now lives in SeedSelecter.
+LEVEL0_ORIENTATION_MAX_RETRIES = DEFAULT_MAX_ATTEMPTS
+LEVEL0_ORIENTATION_MAX_SEARCH_TIME = DEFAULT_MAX_SEARCH_TIME
 
 
 def _orientation_signs_of(positions, faces):
@@ -282,13 +286,22 @@ def _fraction_flipped(signs_list):
 
 def relax_initial_configuration_with_orientation_retry(
         faces, edge_length, seed, base_faces=None, max_retries=LEVEL0_ORIENTATION_MAX_RETRIES,
+        max_search_time=LEVEL0_ORIENTATION_MAX_SEARCH_TIME,
         max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None, on_progress=None,
         edges=None, rms_exclude_edges=None, pressure_exclude_faces=None):
-    """Runs relax_initial_configuration up to `max_retries` times, each
-    from a FRESH random start (random_initial_positions at seed,
-    seed + 1, seed + 2, ...), stopping at the first attempt that comes
-    back fully orientation-consistent (stretchy_mesh._orientation_signs
-    all +1).
+    """Runs relax_initial_configuration up to `max_retries` times (via a `SeedSelecter`, see its
+    own docstring for the exact time/count budget), each from a FRESH random start
+    (random_initial_positions at seed, seed + 1, seed + 2, ...), stopping at the first attempt
+    that comes back fully orientation-consistent (stretchy_mesh._orientation_signs all +1).
+
+    Time-bounded by `max_search_time` seconds (2026-10-01, explicit -- shared by BOTH apps' own
+    Full Inflate, see this module's own header note): the first attempt always runs in full
+    regardless of its own duration, but a SECOND (or later) attempt only starts if the
+    cumulative time spent so far is still under budget -- so a model big/slow enough for one
+    attempt to approach `max_search_time` gets exactly one attempt, never more. This is
+    deliberate, not just a safety valve: a bigger/more-braced mesh is empirically unlikely to hit
+    the all-faces-flipped failure mode this retry exists for in the first place, so spending
+    MORE search time on exactly the inputs that need it least would be wasted effort.
 
     A UNIFORMLY flipped attempt (all -1, no local disagreement) is
     treated as a normal retry candidate, NOT fixed for free via a
@@ -360,49 +373,53 @@ def relax_initial_configuration_with_orientation_retry(
     own values -- never a sum across every attempt tried, so a step
     counter never counts work that was silently discarded."""
     orientation_faces = base_faces if base_faces is not None else faces
-    best = None  # (fraction_flipped, seed_used, result, buffered_progress)
-    for attempt in range(max_retries):
-        attempt_seed = seed + attempt
+    selecter = SeedSelecter(max_attempts=max_retries, max_search_time=max_search_time)
+
+    def attempt_fn(attempt_seed):
         pos0 = random_initial_positions(faces, seed=attempt_seed)
         buffered_progress = [] if on_progress is not None else None
 
         def _buffer_progress(*progress_args):
             buffered_progress.append(progress_args)
 
-        result = relax_initial_configuration(
+        relax_result = relax_initial_configuration(
             pos0, faces, edge_length, max_nfev=max_nfev, stop_event=stop_event, gtol=gtol,
             rng=rng, on_progress=_buffer_progress if on_progress is not None else None,
             edges=edges, rms_exclude_edges=rms_exclude_edges,
             pressure_exclude_faces=pressure_exclude_faces)
-        positions, steps_taken, max_stretch, rms_stretch, optimality, converged = result
+        signs_list = _orientation_signs_of(relax_result[0], orientation_faces)
+        return relax_result, buffered_progress, signs_list
 
-        signs_list = _orientation_signs_of(positions, orientation_faces)
+    def score_fn(attempt_result):
+        _relax_result, _buffered_progress, signs_list = attempt_result
         signs = set(signs_list) - {0.0}
-        if signs <= {1.0} and signs:
-            print(f"Level 0 orientation: attempt {attempt + 1}/{max_retries}, "
-                  f"seed={attempt_seed} -> consistent, using this seed")
-            if on_progress is not None:
-                for progress_args in buffered_progress:
-                    on_progress(*progress_args)
-            return (positions, steps_taken, max_stretch, rms_stretch, optimality,
-                    converged, attempt_seed)
+        accepted = bool(signs) and signs <= {1.0}
+        return accepted, _fraction_flipped(signs_list)
 
-        fraction = _fraction_flipped(signs_list)
+    def on_attempt(attempt_index, attempt_seed, attempt_result, accepted, fraction):
+        _relax_result, _buffered_progress, signs_list = attempt_result
+        if accepted:
+            print(f"Level 0 orientation: attempt {attempt_index + 1}/{max_retries}, "
+                  f"seed={attempt_seed} -> consistent, using this seed")
+            return
+        signs = set(signs_list) - {0.0}
         description = "uniformly flipped" if signs == {-1.0} else "MIXED"
-        next_step = "retrying" if attempt + 1 < max_retries else "no attempts left"
-        print(f"Level 0 orientation: attempt {attempt + 1}/{max_retries}, "
+        next_step = "retrying" if attempt_index + 1 < max_retries else "no attempts left"
+        print(f"Level 0 orientation: attempt {attempt_index + 1}/{max_retries}, "
               f"seed={attempt_seed} -> {description} ({fraction:.0%} of faces flipped), "
               f"{next_step}")
-        if best is None or fraction < best[0]:
-            best = (fraction, attempt_seed,
-                    (positions, steps_taken, max_stretch, rms_stretch, optimality, converged),
-                    buffered_progress)
-        if stop_event is not None and stop_event.is_set():
-            break
-    fraction, seed_used, result, buffered_progress = best
-    print(f"Level 0 orientation: every attempt stayed mixed, using least-bad "
-          f"seed={seed_used} ({fraction:.0%} of faces flipped)")
+
+    def should_stop():
+        return stop_event is not None and stop_event.is_set()
+
+    (relax_result, buffered_progress, signs_list), seed_used, accepted, _attempts_tried = \
+        selecter.select(seed, attempt_fn, score_fn, on_attempt=on_attempt, should_stop=should_stop)
+
+    if not accepted:
+        fraction = _fraction_flipped(signs_list)
+        print(f"Level 0 orientation: every attempt stayed mixed, using least-bad "
+              f"seed={seed_used} ({fraction:.0%} of faces flipped)")
     if on_progress is not None:
         for progress_args in buffered_progress:
             on_progress(*progress_args)
-    return result + (seed_used,)
+    return relax_result + (seed_used,)
