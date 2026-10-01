@@ -7,9 +7,93 @@ holds the loader, mesh geometry helpers, shared low-level force primitives, and 
 `convergence_checker.py` holds the periodic stopping check. `mesh_stretch_checker.py` holds
 solved-positions -> max/RMS stretch %. `self_join_triangulator.py` splits a self-joined face at
 net-load time (currently wired into `inflate_polyhedron_app` only, not `interactive_inflater_app`
--- see apps.md). Each of the first five depends on `stretchy_mesh.py` for shared primitives, not
-the other way around, so `stretchy_mesh.py` never imports any of them. The rest of this doc
-refers to function names without repeating which file each now lives in.
+-- see apps.md). `inside_out_checker.py` holds `InsideOutChecker` (below). Each of these depends
+on `stretchy_mesh.py` for shared primitives, not the other way around, so `stretchy_mesh.py`
+never imports any of them. The rest of this doc refers to function names without repeating which
+file each now lives in.
+
+**Inside-out detection (`InsideOutChecker`, 2026-09-30, explicit).** Diagnosed on
+tetrahedron.poly: at Level 2+, some seeds have a genuine, converged but globally INVERTED
+equilibrium at LOW pressure (signed volume flips sign; stretch % roughly FLAT across a wide
+low-pressure range instead of scaling with pressure -- a spurious branch, not real physics) with
+a real, correctly-oriented equilibrium reachable only at meaningfully higher pressure. Before
+this fix, such a trial read as an ordinary sane-but-over-target trial, so the bracket search
+LOWERED pressure in response -- driving it deeper into the spurious branch and never finding the
+correct one. `estimate_pressure_for_target_stretch` now builds one `InsideOutChecker` per call
+(reference = the search's own starting `positions`) and checks every sane trial's result against
+it; an inside-out trial is excluded from best-candidacy and always forces pressure UP (bisecting
+against a confirmed hi_pressure if one exists, else `pressure *= _PRESSURE_RATIO_CLAMP[1]`)
+rather than trusting its own rms_stretch reading to pick a direction. A burst of real pressure at
+the very start of Level 0 (tried and rejected the same day) had no effect -- Level 0/1 were
+already orientation-consistent for every seed tested, and the flip reproduced fresh, inside
+Level 2's own relax_once call, regardless.
+
+Separately noted, NOT yet fixed: some already-correctly-oriented seeds still land far from a 5%
+target (e.g. ~30% stretch) because the geometric initial pressure guess overshoots and the
+halving-only pre-bracket search has no way to try pressure HIGHER than that first guess once it
+reads as over-target -- a different, pre-existing limitation of the bracket search, out of scope
+for the inside-out fix above.
+
+**Level 0 orientation retry (2026-09-30, explicit).** The InsideOutChecker fix above only
+catches a flip introduced AFTER Level 0 -- if Level 0 itself already converges to a bad
+orientation, every later level inherits it uncaught (`InsideOutChecker`'s own reference is
+whatever Level 0 produced). Confirmed real: Level 0's spring+repulsion relax can converge to a
+genuinely MIXED (both +1 and -1 present -- a real, locally self-folded shape) orientation for
+several shipped nets (tetrahedron seed 19, cube seed 8, octahedron seed 4, ravioli seeds
+1/2/4/10/15-19 -- ravioli especially prone, ~45% of seeds tried, since its own cancelling-
+pressure pathology gives springs+repulsion nothing to push it toward a consistent fold). Two
+pieces, in `pre_inflation_relaxer.py`:
+- **Burst phase** (`LEVEL0_BURST_PRESSURE=0.05`, `LEVEL0_BURST_STEPS=200`): a few steps of
+  plain-linear spring + a small amount of real PRESSURE (`_pressure_only_force`, NOT the
+  hardening spring -- that explodes combined with pressure on raw random noise), run before
+  repulsion ever starts inside `relax_initial_configuration` itself. Pressure's direction is tied
+  to each face's own winding, unlike repulsion (no outward notion at all), so this biases Level 0
+  toward a winding-consistent shape. Reduces the failure rate (fixed 2 of 5 worst-case seeds
+  tested alone) but doesn't eliminate it -- ravioli's pressure-cancellation pathology defeats it
+  structurally.
+- **Seed retry backstop** (`relax_initial_configuration_with_orientation_retry`,
+  `LEVEL0_ORIENTATION_MAX_RETRIES=5`): runs Level 0 up to 5 times from fresh seeds (seed,
+  seed+1, ...), accepting the first fully-consistent result. If every attempt stays bad, keeps
+  whichever had the fewest disagreeing faces. Returns a 7th value, `seed_used`, since the result
+  can come from a different seed than requested -- callers that display/store a seed
+  (`inflate_polyhedron_app`'s own Seed field) must update it to this value.
+
+  **Checks the BASE (macro) faces, not the fan-triangulated ones** (`base_faces` param, checked
+  instead of `faces` when given). Diagnosed 2026-09-30: checking the fan-triangulated mesh
+  directly is unreliable -- a macro face's own fan HUB vertex (added purely so a spring-only
+  relax has something rigid to work with) can bulge outward on its own, making every one of that
+  face's fine sub-triangles read "points away from centroid" even while the ACTUAL macro polygon
+  (the plane through its real, non-hub corners) is caved INWARD -- a small pointy bump poking out
+  of an otherwise inside-out shell, reported as a user-visible "caved-in tetrahedron" bug. Both
+  the per-face check AND `mesh_volume`'s own sign were fooled by this on the fan mesh; checking
+  `base_faces` (same vertex ids, no remapping needed) catches it correctly.
+
+  **A UNIFORMLY flipped result (all -1, no local disagreement) is NOT fixed via a mirror** --
+  tried, then reverted the same day: concavity is reflection-INVARIANT (mirroring a caved-in
+  shape gives another, equally caved-in shape, just chirality-flipped), so a uniform -1 reading
+  isn't reliable evidence the shape is otherwise a genuinely non-concave "just backwards"
+  embedding -- it can just as easily mean a real caved-in shape that happens to uniformly fail
+  this check. Uniform and mixed failures are both just retried.
+
+  Verified: the tetrahedron seed that originally surfaced the caved-in bug (1395581472) reads
+  "uniformly flipped" for 3 straight attempts before landing on a genuinely consistent one at
+  attempt 4. Separately, re-scanning the ORIGINAL 5 worst-case seeds (tetrahedron/cube/
+  octahedron/ravioli) with the CORRECTED macro-face check still resolves all 5 cleanly.
+
+  **Discarded attempts never reach the UI** (2026-09-30, explicit -- "you don't need to replay
+  the failed seeds"): `on_progress` is never forwarded live while an attempt is still just a
+  candidate -- each attempt's own progress calls are buffered in memory instead, and only
+  replayed through the real `on_progress` once that attempt is settled on (accepted outright, or
+  kept as the least-bad fallback). The returned `steps_taken` is that ONE attempt's own count,
+  never a sum across every attempt tried -- a caller's step counter (`inflate_polyhedron_app`'s
+  own "Steps" column) never counts work that was silently discarded.
+
+  **Not yet solved**: the real crochet-animal nets (giraffe, goose, hoodie, cannoli variants) fail
+  this check on EVERY one of 5 retries, consistently (30-67% of macro faces flipped each time,
+  same seed base) -- unlike the simple closed Platonic solids, 5 random reseeds isn't remotely
+  enough for these; the failure rate per seed looks close to universal for this seed range, not a
+  rare fluke. Needs a different approach (stronger/longer burst, per-face local repair, or
+  something else) -- flagged, not fixed.
 
 For nets that can't stay rigid+flat (faces sharing >1 edge — geometrically forces coplanarity,
 no dihedral fold possible). See `docs/algorithm.md` for full scientific writeup; this is the

@@ -16,7 +16,7 @@ import numpy as np
 
 from .stretchy_mesh import (
     _edge_setup, _face_index_groups, _safe_unit_vectors, _vertex_outward_normals,
-    _explicit_relax_loop, repulsion_force,
+    _explicit_relax_loop, repulsion_force, random_initial_positions, _orientation_signs,
 )
 from .convergence_checker import CONVERGENCE_GTOL
 from .mesh_stretch_checker import positions_and_stretch
@@ -68,6 +68,43 @@ LEVEL0_JIGGLE_INTERVAL_STEPS = 50
 # FORCE (jiggle_distance / dt) inside force_fn, since _explicit_relax_loop only accepts a force
 # to apply, not a direct position nudge.
 LEVEL0_JIGGLE_DISTANCE_FRACTION = 0.4
+
+
+# Burst phase: a few steps of the plain-linear spring above PLUS a small amount of real
+# per-face PRESSURE (_pressure_only_force), run BEFORE repulsion ever starts -- repulsion has
+# no notion of which way is "outward" at all, but pressure's direction is tied directly to
+# each face's own declared winding, so doing this FIRST biases the mesh toward a winding-
+# consistent (non-self-folded) starting shape while pressure is the only shaping force in
+# play. Diagnosed/tuned 2026-09-30 against several shipped nets' own worst seeds (see
+# physics.md's Level 0 orientation-retry section) -- reduces how often Level 0 lands in a
+# genuinely MIXED (locally self-folded) orientation, but doesn't eliminate it, which is why
+# relax_initial_configuration_with_orientation_retry (below) exists as the backstop. Small
+# enough, and the hardening term is NOT used here (see _pressure_only_force's own docstring),
+# to stay numerically safe even applied directly to raw, not-yet-relaxed random noise.
+LEVEL0_BURST_PRESSURE = 0.05
+LEVEL0_BURST_STEPS = 200
+
+
+def _pressure_only_force(pts, all_face_groups, pressure):
+    """The pure per-face pressure term of stretchy_mesh._relax_force --
+    `pressure * area * outward_normal`, split per vertex -- with NO spring
+    term at all. Used only by the burst phase above/below; kept separate
+    from _spring_only_force so the burst can combine plain-LINEAR spring
+    (matching the rest of Level 0) with real pressure, rather than using
+    _relax_force's own HARDENING spring, whose cubic term explodes when
+    combined with real pressure on raw, not-yet-relaxed random noise (see
+    git history, 2026-09-30)."""
+    n = pts.shape[0]
+    force = np.zeros((n, 3))
+    if not pressure:
+        return force
+    for n_sides, group_idx in all_face_groups.items():
+        face_pts = pts[group_idx]
+        next_pts = np.roll(face_pts, -1, axis=1)
+        area_vector = 0.5 * np.cross(face_pts, next_pts).sum(axis=1)
+        per_vertex_force = pressure * area_vector / n_sides
+        np.add.at(force, group_idx.ravel(), np.repeat(per_vertex_force, n_sides, axis=0))
+    return force
 
 
 def level0_jiggle_distance(faces, edge_length, edges=None):
@@ -154,6 +191,20 @@ def relax_initial_configuration(positions, faces, edge_length,
     inflating_face_groups = (all_face_groups if pressure_exclude_faces is None
                               else _face_index_groups(faces, idx, pressure_exclude_faces))
     pts0 = np.array([positions[v] for v in vertex_ids], dtype=float)
+
+    # Burst phase (see LEVEL0_BURST_PRESSURE's own comment) -- runs BEFORE repulsion, using the
+    # SAME step size as the rest of Level 0. Bounded by LEVEL0_BURST_STEPS regardless of
+    # `max_nfev`/`gtol` (it's a fixed head start, not itself a convergence target), but still
+    # honors `stop_event` so a Stop mid-burst aborts promptly rather than running it to
+    # completion first.
+    def burst_force_fn(pts):
+        return (_spring_only_force(pts, edge_ai, edge_bi, length_arr)
+                + _pressure_only_force(pts, all_face_groups, LEVEL0_BURST_PRESSURE))
+
+    pts0, _burst_steps, _burst_optimality, _burst_converged = _explicit_relax_loop(
+        pts0, scale, burst_force_fn, LEVEL0_BURST_STEPS, stop_event, gtol,
+        step_max_multiplier=LEVEL0_STEP_MAX_MULTIPLIER)
+
     jiggle_distance = LEVEL0_JIGGLE_DISTANCE_FRACTION * scale
     jiggle_dt = LEVEL0_STEP_MAX_MULTIPLIER * scale
     # Mutable (not a plain int) so force_fn -- called fresh each step by _explicit_relax_loop,
@@ -198,3 +249,160 @@ def relax_initial_configuration(positions, faces, edge_length,
     new_positions, max_stretch, rms_stretch = positions_and_stretch(
         pts, vertex_ids, edges, length_arr, rms_exclude_edges)
     return new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged
+
+
+# relax_initial_configuration_with_orientation_retry's own retry budget -- see its docstring.
+LEVEL0_ORIENTATION_MAX_RETRIES = 5
+
+
+def _orientation_signs_of(positions, faces):
+    """positions/faces: as elsewhere. Builds the idx/pts arrays
+    _orientation_signs itself needs and returns its per-face +1/-1/0
+    list, for relax_initial_configuration_with_orientation_retry's own
+    use below (see stretchy_mesh.is_orientation_consistent for the same
+    pattern's plain True/False wrapper)."""
+    vertex_ids = sorted(positions)
+    idx = {v: i for i, v in enumerate(vertex_ids)}
+    pts = np.array([positions[v] for v in vertex_ids])
+    return _orientation_signs(pts, faces, idx)
+
+
+def _fraction_flipped(signs_list):
+    """signs_list: _orientation_signs_of's own per-face +1/-1/0 list, for
+    a result already known to be MIXED (both signs present) -- ranks two
+    such results against each other, smaller is better (closer to a
+    single clean, fully-consistent shape). Degenerate (0) faces are
+    excluded from both the numerator and denominator, same as
+    stretchy_mesh._is_orientation_consistent's own treatment of them."""
+    nonzero = [s for s in signs_list if s != 0]
+    if not nonzero:
+        return 0.0
+    return sum(1 for s in nonzero if s < 0) / len(nonzero)
+
+
+def relax_initial_configuration_with_orientation_retry(
+        faces, edge_length, seed, base_faces=None, max_retries=LEVEL0_ORIENTATION_MAX_RETRIES,
+        max_nfev=None, stop_event=None, gtol=CONVERGENCE_GTOL, rng=None, on_progress=None,
+        edges=None, rms_exclude_edges=None, pressure_exclude_faces=None):
+    """Runs relax_initial_configuration up to `max_retries` times, each
+    from a FRESH random start (random_initial_positions at seed,
+    seed + 1, seed + 2, ...), stopping at the first attempt that comes
+    back fully orientation-consistent (stretchy_mesh._orientation_signs
+    all +1).
+
+    A UNIFORMLY flipped attempt (all -1, no local disagreement) is
+    treated as a normal retry candidate, NOT fixed for free via a
+    reflection -- tried, then reverted (2026-09-30): concavity/caving-in
+    is itself reflection-INVARIANT (mirroring a caved-in shape gives
+    another, equally caved-in shape -- chirality flipped, but the actual
+    dimple is still there), so a uniform -1 reading isn't reliable
+    evidence the shape is otherwise a genuinely non-concave "just
+    backwards" embedding -- it can just as easily mean a real caved-in
+    shape that happens to uniformly fail this centroid-relative check.
+    Only a genuinely non-concave embedding is worth accepting at all, and
+    the only way this module can tell the difference is by trying a
+    FRESH random start, not by reflecting a shape whose own concavity
+    reflecting can't fix.
+
+    `base_faces`, if given, is checked INSTEAD of `faces` for orientation
+    purposes only (the relax itself still runs on `faces`, the fan-
+    triangulated mesh) -- vertex ids in `base_faces` must be a subset of
+    `faces`' own (true for the ORIGINAL, pre-fan-triangulation polygon
+    ids, which every base_faces caller here has). Diagnosed 2026-09-30:
+    checking the fan-triangulated `faces` directly is NOT reliable -- a
+    single macro polygon's own fan HUB vertex (added purely so a
+    spring-only relax has something rigid to work with, see
+    mesh_levels.py's own docstring) can independently bulge outward from
+    its own 2 rim corners, making every one of that macro face's own fine
+    sub-triangles read "points away from centroid" even while the ACTUAL
+    macro polygon -- the plane through its real, non-hub corners -- is
+    caved INWARD relative to the rest of the shape (a small pointy bump
+    poking out of an otherwise inside-out shell). `base_faces` names the
+    ORIGINAL (pre-fan) polygons directly, immune to this: reusing the
+    exact ids `faces` was itself fanned from, so no extra remapping is
+    needed to read their positions out of the very same `positions` dict
+    the fan-triangulated relax already produces. `faces` itself is still
+    used as the fallback when `base_faces` is omitted (e.g. a caller with
+    no macro-polygon structure of its own to check against).
+
+    Diagnosed 2026-09-30: even with LEVEL0_BURST_PRESSURE's own burst
+    phase (which reduces how often this happens but doesn't eliminate
+    it), some seeds converge Level 0 to a genuine, fully-settled MIXED
+    orientation for some shipped nets (ravioli.poly's own cancelling-
+    pressure pathology is especially prone to it -- see physics.md's
+    Pressure calibration section) -- previously, this bad shape would
+    just carry forward silently into every later level (see this
+    function's own git history for the tetrahedron/cube/octahedron/
+    ravioli seeds that first surfaced it, and for the macro-vs-fine
+    discrepancy above).
+
+    If every attempt comes back genuinely mixed, keeps whichever had the
+    FEWEST disagreeing faces (_fraction_flipped) as the least-bad result,
+    rather than always just the last attempt tried.
+
+    Returns relax_initial_configuration's own 6-value result PLUS a 7th:
+    `seed_used` -- the actual seed (one of seed..seed + max_retries - 1)
+    the returned positions came from. A caller that displays/stores a
+    seed (e.g. inflate_polyhedron_app's own seed field) should update it
+    to THIS value, not whatever it originally requested, since a retry
+    means the result doesn't necessarily match a plain
+    relax_initial_configuration call at the ORIGINAL seed.
+
+    `on_progress`, if given, is NEVER forwarded live while an attempt is
+    still just a CANDIDATE (its own progress is buffered instead, in
+    memory) -- a caller watching Level 0 relax should never see a
+    discarded (mixed/uniformly-flipped) attempt's shape appear on
+    screen, even briefly, only to be thrown away a moment later. Once an
+    attempt is settled on (either accepted outright, or kept as the
+    least-bad fallback after every attempt in `max_retries` failed), its
+    own buffered progress calls are replayed through `on_progress` in
+    one go, and `steps_taken`/the final return are that ONE attempt's
+    own values -- never a sum across every attempt tried, so a step
+    counter never counts work that was silently discarded."""
+    orientation_faces = base_faces if base_faces is not None else faces
+    best = None  # (fraction_flipped, seed_used, result, buffered_progress)
+    for attempt in range(max_retries):
+        attempt_seed = seed + attempt
+        pos0 = random_initial_positions(faces, seed=attempt_seed)
+        buffered_progress = [] if on_progress is not None else None
+
+        def _buffer_progress(*progress_args):
+            buffered_progress.append(progress_args)
+
+        result = relax_initial_configuration(
+            pos0, faces, edge_length, max_nfev=max_nfev, stop_event=stop_event, gtol=gtol,
+            rng=rng, on_progress=_buffer_progress if on_progress is not None else None,
+            edges=edges, rms_exclude_edges=rms_exclude_edges,
+            pressure_exclude_faces=pressure_exclude_faces)
+        positions, steps_taken, max_stretch, rms_stretch, optimality, converged = result
+
+        signs_list = _orientation_signs_of(positions, orientation_faces)
+        signs = set(signs_list) - {0.0}
+        if signs <= {1.0} and signs:
+            print(f"Level 0 orientation: attempt {attempt + 1}/{max_retries}, "
+                  f"seed={attempt_seed} -> consistent, using this seed")
+            if on_progress is not None:
+                for progress_args in buffered_progress:
+                    on_progress(*progress_args)
+            return (positions, steps_taken, max_stretch, rms_stretch, optimality,
+                    converged, attempt_seed)
+
+        fraction = _fraction_flipped(signs_list)
+        description = "uniformly flipped" if signs == {-1.0} else "MIXED"
+        next_step = "retrying" if attempt + 1 < max_retries else "no attempts left"
+        print(f"Level 0 orientation: attempt {attempt + 1}/{max_retries}, "
+              f"seed={attempt_seed} -> {description} ({fraction:.0%} of faces flipped), "
+              f"{next_step}")
+        if best is None or fraction < best[0]:
+            best = (fraction, attempt_seed,
+                    (positions, steps_taken, max_stretch, rms_stretch, optimality, converged),
+                    buffered_progress)
+        if stop_event is not None and stop_event.is_set():
+            break
+    fraction, seed_used, result, buffered_progress = best
+    print(f"Level 0 orientation: every attempt stayed mixed, using least-bad "
+          f"seed={seed_used} ({fraction:.0%} of faces flipped)")
+    if on_progress is not None:
+        for progress_args in buffered_progress:
+            on_progress(*progress_args)
+    return result + (seed_used,)

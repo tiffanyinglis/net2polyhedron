@@ -39,6 +39,63 @@ Exceptions granted so far (don't re-ask for these, but don't extend past what's 
   `on_select_net` also gained a new self-join check/split on load (explicit, scoped to THIS app
   only — user said "do it for inflate_polyhedron_app for now" — not `interactive_inflater_app`,
   whose own import lines were updated only mechanically to keep working, no new behavior there).
+- `multi_trial_inflater.py` (post-split): new `InsideOutChecker` (2026-09-30, explicit — user
+  diagnosed the tetrahedron weird-inflation bug, a burst-of-inflation-at-Level-0 experiment to
+  test their own theory showed no effect, then user asked to pursue "the volume-sign-flip
+  detection idea" instead, explicitly naming the class `InsideOutChecker` — see physics.md).
+  `estimate_pressure_for_target_stretch`'s bracket loop now excludes an inside-out trial from
+  best-candidacy and always escalates pressure in response to one, regardless of its own
+  rms_stretch reading.
+- `inflate_polyhedron_app/app.py`: View > Inflater/Viewer (2026-09-30, explicit — "Create a
+  hippo viewer app... basically it reads all the hippo files in output/ and shows it in a sort
+  of photo viewer...", built first as its own standalone `hippo_viewer_app`, then explicitly
+  folded in: "instead of a whole separate app, make it just a view in the polyhedron_inflater
+  app. So add a View menu with two item: Inflater and Viewer"). Wrapped every existing
+  top-level widget in a new `self._inflater_frame` (packed/hidden by the View menu, no other
+  change to any of it); added `self._viewer_frame` and its own `_viewer_*`-prefixed
+  methods/state — see apps.md's own section for the full behavior. Also added this app's first
+  `WM_DELETE_WINDOW` handler (`_on_quit_request`), scoped to the Viewer pane's own dirty files
+  only — Inflater mode still has no save-prompt-on-close of its own, unchanged.
+  Follow-up, same session, explicit: square window for Viewer mode (`VIEWER_WINDOW_GEOMETRY`,
+  captures/restores Inflater's own geometry around the switch), a visible outline on the
+  drawing area, Prev/Next replaced by filled-triangle Canvas buttons (`_make_viewer_nav_
+  triangle`) flanking the panel, the Save button removed entirely, and the save-prompt
+  (`_viewer_confirm_discard_unsaved`) now also fires when switching back to View > Inflater,
+  not just on quit — cancelling that prompt reverts `view_mode_var` to "viewer".
+  Second follow-up, same session, explicit: Level buttons/single-level switching removed
+  entirely — all 4 levels now show at once in a 2x2 grid (4 plotters/image Labels,
+  `self._viewer_plotters`/`_image_labels`/`_centers`/`_halves`, one set per level) synced to
+  the SAME per-file camera; Prev/Next moved from toolbar buttons to anti-aliased (PIL+LANCZOS)
+  filled-triangle Labels overlaid via `place()` at the vertical middle of the drawing area's
+  edges (a plain `tk.Canvas` polygon version was tried first and had to be fixed — no
+  anti-aliasing, and `pack()`-ing it was clipping the right one off-screen entirely); the file-
+  position counter moved from the toolbar into a new margin strip below the grid.
+  Third follow-up, same session, explicit: on-screen Prev/Next triangles removed entirely
+  (`_make_viewer_nav_triangle` deleted, along with the now-unused `VIEWER_NAV_TRIANGLE_SIZE`/
+  `ImageDraw` import) and the status label removed entirely (its only uses were a redundant
+  file-name message and a "Saved" confirmation the title's own "*" already covers) — navigation
+  is keyboard-only now. Added "A"/"a"/"D" as Prev/Next (alongside the existing Left/Right);
+  lowercase "d" dispatches through a new `_on_key_d` by `view_mode_var` instead of binding
+  straight to `_on_toggle_debug_mode`, since "d" already meant "toggle debug mode" in Inflater
+  mode before any of this — only Viewer mode's own "d" means "next file".
+- `pre_inflation_relaxer.py`, `inflate_polyhedron_app/app.py` (post-split): Level-0 orientation
+  fix (2026-09-30, explicit — user confirmed the InsideOutChecker fix alone was insufficient
+  since "if level 0 starts out inverted then it still ends up inverted", proposed burst-at-
+  Level-0 and/or a Level-0 check, then explicitly said "do the 5 retries and use the best one.
+  change the seed in the UI to reflect the one actually used"). `relax_initial_configuration`
+  gained a mandatory burst phase (`LEVEL0_BURST_PRESSURE`/`LEVEL0_BURST_STEPS`, see physics.md)
+  before repulsion starts. New `relax_initial_configuration_with_orientation_retry`
+  (`LEVEL0_ORIENTATION_MAX_RETRIES=5`) is the seed-retry backstop; `app.py`'s `_run_relax_stream`
+  now calls it instead of `relax_initial_configuration` directly and writes the actual seed used
+  back into `self.seed_var` in `_finish_relax` — `interactive_inflater_app` untouched, still
+  calls plain `relax_initial_configuration` (its own signature/behavior unchanged by this).
+  Corrected the SAME session (still 2026-09-30, explicit, user reported the fix didn't work and
+  provided the exact failing seed): the orientation check was reading the fan-triangulated mesh,
+  not the macro polygons, and missed a real "caved-in" case entirely (see physics.md) — added a
+  `base_faces` param, checked instead when given; `app.py`'s call site passes
+  `base_faces=self.base_faces`. Also removed the uniform-flip-gets-a-free-mirror shortcut
+  (`_mirror_z`, deleted) after the user pointed out concavity is reflection-invariant — a
+  uniform flip is now just another retry candidate, same as a mixed one.
 - `stretchy_mesh.py` + its test: open-net support (boundary edges ok); `gtol` param on
   `estimate_pressure_for_target_stretch`; hardening spring + tuning; adaptive-step-term removal
   (now PERMANENT, re-declined 2026-09-16 — see physics.md), stall-check removal, chunking

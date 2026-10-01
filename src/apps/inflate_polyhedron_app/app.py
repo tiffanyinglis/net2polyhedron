@@ -80,6 +80,7 @@ from utils.inflate_polyhedron.stretchy_mesh import (
 )
 from utils.inflate_polyhedron.pre_inflation_relaxer import (
     relax_initial_configuration, level0_jiggle_distance,
+    relax_initial_configuration_with_orientation_retry,
 )
 from utils.inflate_polyhedron.multi_trial_inflater import estimate_pressure_for_target_stretch
 from utils.inflate_polyhedron.self_join_triangulator import has_self_join, split_self_joined_faces
@@ -222,6 +223,24 @@ LEVEL_DRAG_SENSITIVITY = 0.5
 LEVEL_ZOOM_STEP = 1.1
 LEVEL_ZOOM_MIN = 0.3
 LEVEL_ZOOM_MAX = 4.0
+
+# View > Viewer's own drawing area: a 2x2 grid showing all 4 levels AT ONCE (2026-09-30,
+# explicit -- "let's split the drawing area into 2x2 and show all 4 views, synced"), not one
+# level switched at a time -- all 4 share ONE camera (rotation/zoom/pan), each auto-fit to its
+# own current bounding box, exactly like Inflater's own "Level N" panels. Reuses
+# LEVEL_DRAG_SENSITIVITY/LEVEL_ZOOM_STEP/_MIN/_MAX/LEVEL_ZOOM_FILL_LEVELS_1_3 for identical
+# mouse feel. VIEWER_WINDOW_GEOMETRY is the whole window's size while Viewer mode is active --
+# SQUARE ("View mode should be a square window"), unlike Inflater's own wide layout; a little
+# taller than wide to leave room for the position-counter margin and status strip below the
+# grid.
+VIEWER_SUBPANEL_SIZE = (360, 360)
+VIEWER_WINDOW_GEOMETRY = "820x900"
+
+# A visible frame around each quadrant's own drawing area (2026-09-30, explicit) -- a plain
+# flat border, not a 3D bevel, so highlightthickness/highlightbackground on the image Label
+# itself rather than relief/bd.
+VIEWER_OUTLINE_COLOR = PLOT_THEME["fg"]
+VIEWER_OUTLINE_WIDTH = 2
 
 # Same idea for the Net panel's own mouse-wheel zoom (_on_net_scroll) -- separate state
 # (self.net_zoom) since the Net panel is matplotlib, not a PyVista camera: scales the
@@ -521,12 +540,20 @@ class InflatePolyhedronApp:
         # throwing off where mouse drags land on it.
         window_width = (NET_PANEL_SIZE[0] + LEVEL_PANEL_WIDTH_LEVEL_0
                         + LEVEL_PANEL_WIDTH_LEVELS_1_3 * MAX_LEVEL + 2 * 14)
-        root.geometry(f"{window_width}x880")
+        # Captured (not just computed fresh each time) so _on_view_mode_changed's return trip
+        # from Viewer mode's own square window restores whatever geometry Inflater mode
+        # actually had -- including a manual resize the user made before ever switching -- not
+        # this hardcoded default every time.
+        self._inflater_geometry = f"{window_width}x880"
+        root.geometry(self._inflater_geometry)
         root.minsize(820, 600)
 
         sv_ttk.set_theme("dark")
         self._scale_ui_fonts()
         self._init_ui_fonts()
+        # View > Inflater/Viewer -- created before _build_menu (which reads it to build the
+        # radiobuttons) so both frames it later toggles between exist under one shared switch.
+        self.view_mode_var = tk.StringVar(value="inflater")
         self._build_menu()
 
         # ---- Debug mode vs. release mode: the ONLY difference between
@@ -541,9 +568,12 @@ class InflatePolyhedronApp:
         # toggles between them at any time -- bind_all so it fires
         # regardless of which widget currently has focus (there's no
         # free-text entry in this app for a stray "d" keystroke to
-        # collide with).
+        # collide with). Dispatched through _on_key_d (not bound directly)
+        # since "d" ALSO means "next file" in Viewer mode (2026-09-30,
+        # explicit -- "let A and D work as arrow keys too") -- debug-mode
+        # toggling only fires in Inflater mode.
         self.debug_mode = False
-        self.root.bind_all("<KeyPress-d>", self._on_toggle_debug_mode)
+        self.root.bind_all("<KeyPress-d>", self._on_key_d)
 
         # The seed random_initial_positions uses on every net (re)load (see on_select_net/
         # _get_or_generate_seed) -- blank (the default) means "pick a fresh random one each
@@ -555,13 +585,20 @@ class InflatePolyhedronApp:
         # exactly the same, run after run.
         self.seed_var = tk.StringVar(value="")
 
+        # Every existing (Inflater-mode) widget below is parented to this ONE frame, not root
+        # directly, so _on_view_mode_changed can hide the whole thing with one pack_forget()
+        # when Viewer mode is selected, and restore it with one pack() -- nothing else about
+        # this section changes.
+        self._inflater_frame = ttk.Frame(root)
+        self._inflater_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
         # ---- Setup: net picker + target RMS stretch + tolerance, all
         # tiled HORIZONTALLY in one row to save vertical space (an
         # earlier version stacked net picker and target RMS stretch on
         # their own separate rows), shared by both modes, plus (debug
         # mode only) the steps-vs-convergence choice/Show normals row
         # below it. ----
-        setup_frame = ttk.LabelFrame(root, text="Setup", padding=12)
+        setup_frame = ttk.LabelFrame(self._inflater_frame, text="Setup", padding=12)
         setup_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(14, 8))
 
         setup_row = ttk.Frame(setup_frame)
@@ -714,7 +751,7 @@ class InflatePolyhedronApp:
         self.seed_spin.pack(side=tk.LEFT)
 
         # ---- Status (warning/error/progress message): debug-mode-only. ----
-        self.status_frame = ttk.Frame(root)
+        self.status_frame = ttk.Frame(self._inflater_frame)
         self.status_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(self.status_frame, textvariable=self.status_var)
@@ -726,7 +763,8 @@ class InflatePolyhedronApp:
         # against the current Target RMS spinner), and a combined "Convergence" cell
         # (`optimality` vs. gtol, check/cross). height=MAX_LEVEL+1 (0..MAX_LEVEL) is the most
         # rows this table will ever hold. ----
-        self.history_frame = ttk.LabelFrame(root, text="Convergence History", padding=12)
+        self.history_frame = ttk.LabelFrame(self._inflater_frame, text="Convergence History",
+                                             padding=12)
         self.history_frame.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 8))
         # "max_stretch" is debug-mode-only, "simulation_time"/"cumulative_time" show in both
         # modes -- all three stay DEFINED here regardless of mode (_apply_mode_visibility
@@ -776,7 +814,7 @@ class InflatePolyhedronApp:
         # Tkinter Inflate/Subdivide/Relax button can sit directly below it. Level N's panel is
         # LIVE only while self.subdivision_level == N; once the user moves past it, that
         # level's last state freezes into self.level_snapshots. ----
-        view_frame = ttk.Frame(root)
+        view_frame = ttk.Frame(self._inflater_frame)
         view_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(6, 14))
 
         # fill/expand=False here (unlike a plain pack default): each panel below is a
@@ -1055,6 +1093,463 @@ class InflatePolyhedronApp:
         # after on_select_net's draw() call, not right after _apply_mode_visibility above.
         self._refit_window_height()
 
+        self._build_hippo_viewer_pane()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_quit_request)
+
+    # ==== HIPPO Viewer pane (View > Viewer, 2026-09-30) ====
+    #
+    # A second, self-contained top-level pane toggled by the View menu (see
+    # _on_view_mode_changed) -- browses every .hippo file in SESSION_OUTPUT_DIR, letting a
+    # user step through them and adjust each one's own shared camera (level_rotation/
+    # level_zoom/level_pan -- the SAME fields Inflater mode itself reads/writes, via the same
+    # SessionStateModel), without re-solving anything. Entirely separate state from Inflater
+    # mode's own (every attribute/method here prefixed _viewer_) -- switching modes never
+    # disturbs whatever Inflater mode currently has loaded, and vice versa.
+    #
+    # Shows all 4 levels AT ONCE in a 2x2 grid, synced to ONE shared camera per file (each
+    # quadrant auto-fits its own current bounding box, same as Inflater's own "Level N"
+    # panels) -- mouse/camera math mirrors _on_level_motion/_on_level_pan_motion/
+    # _on_level_scroll/_capture_level_image exactly, reusing their shared LEVEL_* constants
+    # and _initial_level_rotation.
+
+    def _build_hippo_viewer_pane(self):
+        """Builds self._viewer_frame (constructed but NOT packed -- Inflater is the default
+        view; _on_view_mode_changed shows/hides it) and all its own widgets/state. Called once,
+        at the end of __init__."""
+        self._viewer_paths = []
+        self._viewer_index = 0
+        self._viewer_sessions = {}           # path -> SessionStateModel
+        self._viewer_cameras = {}            # path -> {"rotation", "zoom", "pan"}
+        self._viewer_saved_cameras = {}      # path -> same shape, the ON-DISK values (dirty-check)
+        self._viewer_dirty_paths = set()
+        self._viewer_dragging = False
+        self._viewer_panning = False
+        self._viewer_last_xy = None
+        # Per-QUADRANT (level) bounding-box auto-fit -- the camera itself (rotation/zoom/pan)
+        # is per-FILE, shared across all 4 (see self._viewer_cameras).
+        self._viewer_plotters = {}
+        self._viewer_image_labels = {}
+        self._viewer_photos = {}             # keeps PhotoImage refs alive -- Tk drops a GC'd one
+        self._viewer_centers = {}
+        self._viewer_halves = {}
+
+        self._viewer_frame = ttk.Frame(self.root)
+
+        # No Save button, no Level buttons/toolbar (2026-09-30, explicit) -- saving now only
+        # happens via a prompt covering every dirty file at once, when leaving Viewer mode or
+        # quitting (see _on_view_mode_changed/_on_quit_request); Ctrl+S (_on_control_s) still
+        # saves the current file on demand. All 4 levels show at once now, so there's nothing
+        # left to pick with a Level button either.
+        body = ttk.Frame(self._viewer_frame)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=14, pady=(14, 0))
+
+        grid_frame = ttk.Frame(body)
+        grid_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        grid_frame.grid_rowconfigure(0, weight=1)
+        grid_frame.grid_rowconfigure(1, weight=1)
+        grid_frame.grid_columnconfigure(0, weight=1)
+        grid_frame.grid_columnconfigure(1, weight=1)
+        for level in range(MAX_LEVEL + 1):
+            quad = ttk.Frame(grid_frame)
+            quad.grid(row=level // 2, column=level % 2, sticky="nsew", padx=3, pady=3)
+            ttk.Label(quad, text=f"Level {level}", anchor=tk.CENTER).pack(side=tk.TOP, fill=tk.X)
+            # A visible flat outline around the drawing area itself (2026-09-30, explicit) --
+            # highlightthickness/highlightbackground draws a plain border without the 3D-bevel
+            # look relief/bd would give.
+            image_label = tk.Label(
+                quad, bg=PLOT_THEME["bg"], bd=0, highlightthickness=VIEWER_OUTLINE_WIDTH,
+                highlightbackground=VIEWER_OUTLINE_COLOR, highlightcolor=VIEWER_OUTLINE_COLOR)
+            image_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            image_label.bind("<ButtonPress-1>", self._on_viewer_drag_start)
+            image_label.bind("<B1-Motion>", self._on_viewer_drag_motion)
+            image_label.bind("<ButtonRelease-1>", self._on_viewer_drag_end)
+            image_label.bind("<ButtonPress-3>", self._on_viewer_pan_start)
+            image_label.bind("<B3-Motion>", self._on_viewer_pan_motion)
+            image_label.bind("<ButtonRelease-3>", self._on_viewer_pan_end)
+            image_label.bind("<Button-2>", self._on_viewer_pan_reset)
+            image_label.bind("<MouseWheel>", self._on_viewer_scroll)
+            image_label.bind("<Button-4>", self._on_viewer_scroll)
+            image_label.bind("<Button-5>", self._on_viewer_scroll)
+            self._viewer_image_labels[level] = image_label
+            self._viewer_photos[level] = None
+            plotter = pv.Plotter(off_screen=True, window_size=list(VIEWER_SUBPANEL_SIZE))
+            plotter.set_background(PLOT_THEME["bg"])
+            self._viewer_plotters[level] = plotter
+            self._viewer_centers[level] = np.zeros(3)
+            self._viewer_halves[level] = 1.0
+
+        # A small margin strip directly below the drawing area (2026-09-30, explicit) holding
+        # just the "m / n" file-position counter -- no on-screen Prev/Next arrows anymore
+        # (2026-09-30, explicit -- removed) and no file-name message either (removed the same
+        # day -- the window title already shows the current file's own name); navigation is
+        # keyboard-only (Left/Right, A/D -- see _on_key_d and the bind_all calls below).
+        margin = ttk.Frame(self._viewer_frame)
+        margin.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(6, 14))
+        self._viewer_position_label = ttk.Label(margin, text="", anchor=tk.CENTER)
+        self._viewer_position_label.pack(side=tk.TOP, fill=tk.X)
+
+        # bind_all (fires regardless of which widget has focus, same rationale as "d"/Ctrl+S
+        # above) -- Inflater mode has no use for arrow/A/D keys, so this never collides with
+        # anything there. "d"/"D" dispatch through _on_key_d instead of binding directly here,
+        # since lowercase "d" is ALSO Inflater mode's own debug-mode toggle (see __init__).
+        self.root.bind_all("<Left>", lambda e: self._on_viewer_prev_clicked())
+        self.root.bind_all("<Right>", lambda e: self._on_viewer_next_clicked())
+        self.root.bind_all("<KeyPress-a>", lambda e: self._on_viewer_prev_clicked())
+        self.root.bind_all("<KeyPress-A>", lambda e: self._on_viewer_prev_clicked())
+        self.root.bind_all("<KeyPress-D>", lambda e: self._on_viewer_next_clicked())
+
+    def _on_view_mode_changed(self):
+        """View > Inflater/Viewer radiobutton command -- toggles which top-level frame is
+        packed, and the window's own size (VIEWER_WINDOW_GEOMETRY -- square -- for Viewer,
+        whatever Inflater's own geometry was right before the switch otherwise, including a
+        manual resize the user made). Viewer mode always rescans SESSION_OUTPUT_DIR fresh on
+        the way in (_viewer_rescan), so a .hippo file saved earlier in this same Inflater
+        session (File > Save, or Run All) is visible immediately, not just ones that existed
+        at app startup.
+
+        Leaving Viewer mode for Inflater prompts to save first if anything is dirty there
+        (2026-09-30, explicit -- "when the user tries to... go back to Inflater view, that's
+        when you prompt"), same as actually quitting (_on_quit_request) -- if the user cancels
+        that prompt, the radiobutton selection is reverted (view_mode_var set back to
+        "viewer") and nothing else about this call happens, leaving Viewer mode exactly as it
+        was."""
+        if self.view_mode_var.get() == "viewer":
+            self._inflater_geometry = self.root.geometry()
+            self._inflater_frame.pack_forget()
+            self._viewer_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.root.geometry(VIEWER_WINDOW_GEOMETRY)
+            self._viewer_rescan()
+        else:
+            if not self._viewer_confirm_discard_unsaved():
+                self.view_mode_var.set("viewer")
+                return
+            self._viewer_frame.pack_forget()
+            self._inflater_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.root.geometry(self._inflater_geometry)
+        self._update_window_title()
+
+    def _on_control_s(self):
+        """Ctrl+S dispatches by view_mode_var -- "save the current .hippo file" in Viewer
+        mode, "save an Inflater session" (on_save_session_clicked, unchanged) otherwise."""
+        if self.view_mode_var.get() == "viewer":
+            self._on_viewer_save_clicked()
+        else:
+            self.on_save_session_clicked()
+
+    # ---- file navigation ----
+
+    def _viewer_rescan(self):
+        """Re-globs SESSION_OUTPUT_DIR for *.hippo files -- called every time Viewer mode is
+        entered (_on_view_mode_changed), not just once. Keeps every already-cached session/
+        camera exactly as it was (only the path LIST is refreshed), so an in-progress, unsaved
+        edit made earlier in Viewer mode is never lost by a rescan. Tries to keep showing
+        whichever file was on screen before, by path; falls back to index 0 if that file is
+        gone (e.g. deleted from disk since)."""
+        current_path = self._viewer_current_path()
+        self._viewer_paths = sorted(SESSION_OUTPUT_DIR.glob(f"*{SESSION_FILE_EXTENSION}"))
+        self._viewer_index = (self._viewer_paths.index(current_path)
+                               if current_path in self._viewer_paths else 0)
+        if not self._viewer_paths:
+            self._viewer_position_label.config(text="")
+            for level in range(MAX_LEVEL + 1):
+                self._viewer_image_labels[level].config(image="")
+            self._update_window_title()
+            return
+        self._viewer_show_current()
+
+    def _on_viewer_prev_clicked(self):
+        if self.view_mode_var.get() != "viewer" or len(self._viewer_paths) < 2:
+            return
+        self._viewer_index = (self._viewer_index - 1) % len(self._viewer_paths)
+        self._viewer_show_current()
+
+    def _on_viewer_next_clicked(self):
+        if self.view_mode_var.get() != "viewer" or len(self._viewer_paths) < 2:
+            return
+        self._viewer_index = (self._viewer_index + 1) % len(self._viewer_paths)
+        self._viewer_show_current()
+
+    def _viewer_current_path(self):
+        return self._viewer_paths[self._viewer_index] if self._viewer_paths else None
+
+    def _viewer_get_session(self, path):
+        """Loads and caches `path`'s own SessionStateModel plus its starting camera state --
+        the ON-DISK camera (level_rotation/zoom/pan, or the default if the file predates them)
+        is kept separately (self._viewer_saved_cameras) so later edits can be compared against
+        it to know whether this file is actually dirty."""
+        if path not in self._viewer_sessions:
+            with open(path) as f:
+                session = SessionStateModel.model_validate_json(f.read())
+            self._viewer_sessions[path] = session
+            rotation = (Rotation.from_quat(session.level_rotation)
+                        if session.level_rotation is not None
+                        else self._initial_level_rotation())
+            camera = {"rotation": rotation, "zoom": session.level_zoom,
+                      "pan": np.array(session.level_pan, dtype=float)}
+            self._viewer_cameras[path] = camera
+            self._viewer_saved_cameras[path] = {"rotation": rotation, "zoom": camera["zoom"],
+                                                  "pan": camera["pan"].copy()}
+        return self._viewer_sessions[path]
+
+    def _viewer_show_current(self):
+        """Builds every quadrant's own scene (one per level, 0..MAX_LEVEL -- see
+        _viewer_draw_level_panel) and renders them all against the file's own shared camera.
+        A level this file never reached draws as a blank quadrant (faces=None), rather than
+        picking a fallback level the way the old single-panel viewer did -- showing all 4 at
+        once means there's no single "current level" to substitute."""
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        session = self._viewer_get_session(path)
+        self._update_window_title()
+        self._viewer_position_label.config(
+            text=f"{self._viewer_index + 1} / {len(self._viewer_paths)}")
+        for level in range(MAX_LEVEL + 1):
+            level_state = session.levels.get(level)
+            if level_state is not None:
+                faces, positions, face_of_fine, _edge_length = level_state.to_mesh()
+            else:
+                faces = positions = face_of_fine = None
+            self._viewer_draw_level_panel(level, faces, positions, face_of_fine)
+        self._viewer_render_all()
+
+    # ---- rendering ----
+
+    def _viewer_draw_level_panel(self, level, faces, positions, face_of_fine):
+        """Builds ONE quadrant's own PyVista scene -- mesh geometry only, called once per file
+        (on navigation), not per camera tick -- and recomputes that quadrant's own center/half
+        (bounding sphere), exactly like Inflater's own _draw_level_panel/_level_center/
+        _level_half. `faces`/`positions`/`face_of_fine` are None when this file never reached
+        `level` -- blanks the quadrant rather than erroring."""
+        plotter = self._viewer_plotters[level]
+        plotter.clear()
+        if faces is None:
+            self._viewer_centers[level] = np.zeros(3)
+            self._viewer_halves[level] = 1.0
+            self._viewer_image_labels[level].config(image="")
+            self._viewer_photos[level] = None
+            return
+        vertex_ids = sorted(positions)
+        idx = {v: i for i, v in enumerate(vertex_ids)}
+        points = np.array([positions[v] for v in vertex_ids])
+
+        # Colors by face_of_fine (the ORIGINAL base-face index) alone -- simpler than Inflater
+        # mode's own source_polygon_id-aware grouping (_face_colors_by_group), a deliberate
+        # simplification since a saved/finished mesh never needs to represent an in-progress
+        # Polygon Fold.
+        for base_face in sorted(set(face_of_fine)):
+            face_color = FACE_COLORS[base_face % len(FACE_COLORS)]
+            group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == base_face]
+            if not group_faces:
+                continue
+            face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
+            mesh = pv.PolyData(points, face_conn)
+            plotter.add_mesh(mesh, color=face_color, show_edges=True,
+                              edge_color=_midpoint_color("white", face_color),
+                              line_width=SUBDIVISION_EDGE_WIDTH,
+                              backface_params=dict(color=_darken_color(face_color)))
+
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        self._viewer_centers[level] = (lo + hi) / 2
+        self._viewer_halves[level] = float(
+            np.linalg.norm(points - self._viewer_centers[level], axis=1).max()) + 1e-6
+
+    def _viewer_render_all(self):
+        for level in range(MAX_LEVEL + 1):
+            self._viewer_render_level_camera(level)
+
+    def _viewer_render_level_camera(self, level):
+        """Positions quadrant `level`'s own orthographic camera from the file's own SHARED
+        camera state (rotation/zoom/pan) but THIS quadrant's own center/half, and blits the
+        result into its own image Label -- identical approach to
+        InflatePolyhedronApp._capture_level_image, just across 4 small plotters sharing one
+        camera instead of 4 independent ones. A quadrant with nothing drawn (blanked by
+        _viewer_draw_level_panel) is simply skipped -- its Label already shows no image."""
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        session = self._viewer_sessions.get(path)
+        if session is not None and level not in session.levels:
+            return
+        cam = self._viewer_cameras[path]
+        direction = cam["rotation"].apply([1.0, 0.0, 0.0])
+        up = cam["rotation"].apply([0.0, 0.0, 1.0])
+        center, half = self._viewer_centers[level], self._viewer_halves[level]
+        distance = half * 4
+        plotter = self._viewer_plotters[level]
+        camera = plotter.camera
+        camera.parallel_projection = True
+        camera.focal_point = tuple(center)
+        camera.position = tuple(center + direction * distance)
+        camera.up = tuple(up)
+        panel_width, panel_height = VIEWER_SUBPANEL_SIZE
+        camera.parallel_scale = (half * max(1.0, panel_height / panel_width)
+                                  / LEVEL_ZOOM_FILL_LEVELS_1_3 / cam["zoom"])
+        camera.SetWindowCenter(*cam["pan"])
+        plotter.reset_camera_clipping_range()
+        plotter.render()
+        image = Image.fromarray(plotter.screenshot(return_img=True))
+        photo = ImageTk.PhotoImage(image)
+        self._viewer_photos[level] = photo
+        self._viewer_image_labels[level].config(image=photo)
+
+    # ---- mouse: rotate / pan / zoom ----
+
+    def _viewer_mark_dirty(self):
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        cam = self._viewer_cameras[path]
+        saved = self._viewer_saved_cameras[path]
+        changed = (cam["zoom"] != saved["zoom"]
+                   or not np.allclose(cam["pan"], saved["pan"])
+                   or not np.allclose(cam["rotation"].as_quat(), saved["rotation"].as_quat()))
+        if changed:
+            self._viewer_dirty_paths.add(path)
+        else:
+            self._viewer_dirty_paths.discard(path)
+        self._update_window_title()
+
+    def _on_viewer_drag_start(self, event):
+        self._viewer_dragging = True
+        self._viewer_last_xy = (event.x, event.y)
+
+    def _on_viewer_drag_motion(self, event):
+        """Free trackball rotation -- identical math to _on_level_motion (see its own
+        docstring for why reading "up"/"right" off the current quaternion, rather than a fixed
+        world axis, avoids gimbal lock)."""
+        if not self._viewer_dragging or self._viewer_last_xy is None:
+            return
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        cam = self._viewer_cameras[path]
+        last_x, last_y = self._viewer_last_xy
+        dx, dy = event.x - last_x, event.y - last_y
+        up = cam["rotation"].apply([0.0, 0.0, 1.0])
+        right = cam["rotation"].apply([0.0, 1.0, 0.0])
+        sensitivity = np.radians(LEVEL_DRAG_SENSITIVITY)
+        yaw = Rotation.from_rotvec(-dx * sensitivity * up)
+        pitch = Rotation.from_rotvec(-dy * sensitivity * right)
+        cam["rotation"] = pitch * yaw * cam["rotation"]
+        self._viewer_last_xy = (event.x, event.y)
+        self._viewer_mark_dirty()
+        self._viewer_render_all()
+
+    def _on_viewer_drag_end(self, event):
+        self._viewer_dragging = False
+        self._viewer_last_xy = None
+
+    def _on_viewer_pan_start(self, event):
+        self._viewer_panning = True
+        self._viewer_last_xy = (event.x, event.y)
+
+    def _on_viewer_pan_motion(self, event):
+        if not self._viewer_panning or self._viewer_last_xy is None:
+            return
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        cam = self._viewer_cameras[path]
+        last_x, last_y = self._viewer_last_xy
+        dx, dy = event.x - last_x, event.y - last_y
+        panel_width, panel_height = VIEWER_SUBPANEL_SIZE
+        cam["pan"] = cam["pan"] + np.array(
+            [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
+        self._viewer_last_xy = (event.x, event.y)
+        self._viewer_mark_dirty()
+        self._viewer_render_all()
+
+    def _on_viewer_pan_end(self, event):
+        self._viewer_panning = False
+        self._viewer_last_xy = None
+
+    def _on_viewer_pan_reset(self, event=None):
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        cam = self._viewer_cameras[path]
+        cam["pan"] = np.zeros(2)
+        cam["zoom"] = 1.0
+        cam["rotation"] = self._initial_level_rotation()
+        self._viewer_mark_dirty()
+        self._viewer_render_all()
+
+    def _on_viewer_scroll(self, event):
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        cam = self._viewer_cameras[path]
+        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
+            factor = 1.0 / LEVEL_ZOOM_STEP
+        else:
+            factor = LEVEL_ZOOM_STEP
+        cam["zoom"] = max(LEVEL_ZOOM_MIN, min(LEVEL_ZOOM_MAX, cam["zoom"] * factor))
+        self._viewer_mark_dirty()
+        self._viewer_render_all()
+
+    # ---- save ----
+
+    def _on_viewer_save_clicked(self):
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        self._viewer_save_path(path)
+
+    def _viewer_save_path(self, path):
+        """Writes `path`'s own session back to disk with its camera fields (level_rotation/
+        level_zoom/level_pan) updated from the in-memory camera state -- everything else in
+        the file (the mesh, the Convergence History, every spinner) passes through unchanged."""
+        session = self._viewer_sessions[path]
+        cam = self._viewer_cameras[path]
+        session.level_rotation = tuple(float(x) for x in cam["rotation"].as_quat())
+        session.level_zoom = float(cam["zoom"])
+        session.level_pan = (float(cam["pan"][0]), float(cam["pan"][1]))
+        try:
+            path.write_text(session.model_dump_json(indent=2))
+        except OSError as e:
+            messagebox.showerror("Save", f"Could not save {path.name}: {e}")
+            return False
+        self._viewer_saved_cameras[path] = {"rotation": cam["rotation"], "zoom": cam["zoom"],
+                                              "pan": cam["pan"].copy()}
+        self._viewer_dirty_paths.discard(path)
+        # No separate "Saved" message (removed alongside the status label, 2026-09-30) -- the
+        # window title's own "*" disappearing is the confirmation.
+        self._update_window_title()
+        return True
+
+    def _update_viewer_title(self):
+        path = self._viewer_current_path()
+        if path is None:
+            self.root.title("HIPPO Viewer")
+            return
+        star = "*" if path in self._viewer_dirty_paths else ""
+        self.root.title(f"{path.name}{star} -- HIPPO Viewer")
+
+    # ---- close (Viewer's own unsaved-changes check; Inflater mode has none of its own to
+    # preserve here, so this is the app's first WM_DELETE_WINDOW handler) ----
+
+    def _on_quit_request(self):
+        if self._viewer_confirm_discard_unsaved():
+            self.root.destroy()
+
+    def _viewer_confirm_discard_unsaved(self):
+        """Returns True if it's safe to close: no Viewer file is dirty, the user said to
+        discard them anyway, or every dirty file actually saved successfully. Covers every
+        file touched this session, not just whichever is currently on screen."""
+        if not self._viewer_dirty_paths:
+            return True
+        names = ", ".join(sorted(p.name for p in self._viewer_dirty_paths))
+        answer = messagebox.askyesnocancel(
+            "Unsaved changes",
+            f"Save changes to {len(self._viewer_dirty_paths)} Viewer file(s) before exiting?\n"
+            f"({names})")
+        if answer is None:
+            return False
+        if not answer:
+            return True
+        return all(self._viewer_save_path(p) for p in list(self._viewer_dirty_paths))
+
     def _init_ui_fonts(self):
         """Computes self.LEVEL_TITLE_FONT/LEVEL_MESSAGE_FONT (and the File menu's own font,
         see _build_menu) from "Choose a net"'s own actual rendered font -- a plain ttk.Label
@@ -1116,13 +1611,33 @@ class InflatePolyhedronApp:
         run_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
         run_menu.add_command(label="Run All", command=self.on_run_all_clicked, font=menu_font)
         menubar.add_cascade(label="Run", menu=run_menu)
+        # Inflater (default) is this app's own existing UI; Viewer is the read-only .hippo
+        # browser (see _build_hippo_viewer_pane) -- a plain radiobutton pair, not separate
+        # windows, so switching is instant and keeps both panes' own state alive underneath.
+        view_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
+        view_menu.add_radiobutton(label="Inflater", variable=self.view_mode_var,
+                                   value="inflater", command=self._on_view_mode_changed,
+                                   font=menu_font)
+        view_menu.add_radiobutton(label="Viewer", variable=self.view_mode_var,
+                                   value="viewer", command=self._on_view_mode_changed,
+                                   font=menu_font)
+        menubar.add_cascade(label="View", menu=view_menu)
         self.root.config(menu=menubar)
         # Both cases bound since a held Shift/Caps Lock reports the keysym as uppercase "S" --
         # Control itself doesn't shift letter case the way it does on some platforms/layouts.
         # bind_all (not bound to one widget) so it works regardless of which widget has focus,
-        # same as the "d" debug-mode toggle below.
-        self.root.bind_all("<Control-s>", lambda event: self.on_save_session_clicked())
-        self.root.bind_all("<Control-S>", lambda event: self.on_save_session_clicked())
+        # same as the "d" debug-mode toggle below. Dispatches by view_mode_var since Ctrl+S
+        # means "save the current .hippo file" in Viewer mode, not "save an Inflater session".
+        self.root.bind_all("<Control-s>", lambda event: self._on_control_s())
+        self.root.bind_all("<Control-S>", lambda event: self._on_control_s())
+
+    def _on_key_d(self, event=None):
+        """"d" dispatches by view_mode_var -- "next file" in Viewer mode (2026-09-30,
+        explicit), debug-mode toggle (unchanged) otherwise."""
+        if self.view_mode_var.get() == "viewer":
+            self._on_viewer_next_clicked()
+        else:
+            self._on_toggle_debug_mode(event)
 
     def _on_toggle_debug_mode(self, _event=None):
         self.debug_mode = not self.debug_mode
@@ -1134,7 +1649,12 @@ class InflatePolyhedronApp:
         " (m/n)" while Run All is working through the net list (see on_run_all_clicked) --
         e.g. "...  (debug mode) (2/11)" if both apply at once. The single place either suffix
         gets composed, so toggling debug mode mid-Run-All (or vice versa) never drops the
-        other one."""
+        other one. Dispatches to _update_viewer_title instead while View > Viewer is active --
+        a completely different title scheme (the CURRENT .hippo file's own name, not this
+        app's), see that method's own docstring."""
+        if self.view_mode_var.get() == "viewer":
+            self._update_viewer_title()
+            return
         suffix = " (debug mode)" if self.debug_mode else ""
         if self._run_all_active:
             suffix += f" ({self._run_all_index + 1}/{len(self._run_all_paths)})"
@@ -3336,14 +3856,29 @@ class InflatePolyhedronApp:
         # Relax clicks at Level 0 too (reset only on promotion) -- so this call's own
         # contribution is `base_iteration_count + nfev`, not nfev alone.
         base_iteration_count = self.iteration_count
+        # Read on the MAIN thread (this method itself, never relax_fn -- that runs inside
+        # _run_chunked_relax_stream's own worker thread, where touching self.seed_var, a Tk
+        # StringVar, would be unsafe) -- relax_initial_configuration_with_orientation_retry
+        # below regenerates its own fresh starting cloud per attempt from this seed rather than
+        # consuming self.positions (the single-seed raw cloud on_select_net already set, kept
+        # only as the level's own pre-Relax preview/restart snapshot -- see
+        # _capture_level_start_state).
+        seed = self._get_or_generate_seed()
 
         def relax_fn(max_nfev, stop_event, on_progress):
-            return relax_initial_configuration(self.positions, faces, edge_length,
-                                                max_nfev=max_nfev, stop_event=stop_event,
-                                                gtol=gtol, rng=rng, on_progress=on_progress,
-                                                edges=self.edges,
-                                                rms_exclude_edges=self._rms_exclude_edges(),
-                                                pressure_exclude_faces=self._pressure_exclude_faces())
+            result = relax_initial_configuration_with_orientation_retry(
+                faces, edge_length, seed=seed, base_faces=self.base_faces,
+                max_nfev=max_nfev, stop_event=stop_event,
+                gtol=gtol, rng=rng, on_progress=on_progress, edges=self.edges,
+                rms_exclude_edges=self._rms_exclude_edges(),
+                pressure_exclude_faces=self._pressure_exclude_faces())
+            *relax_result, seed_used = result
+            # A plain attribute write (not a Tk widget touch) -- safe from the worker thread;
+            # _finish_relax (back on the main thread) applies it to self.seed_var itself. Only
+            # differs from `seed` above when a retry (or the free mirror fix) was needed -- see
+            # relax_initial_configuration_with_orientation_retry's own docstring.
+            self._pending_level0_seed_used = seed_used
+            return tuple(relax_result)
 
         self._run_chunked_relax_stream(relax_fn, None, stop_event,
                                         lambda result: self._apply_relax_progress(result, base_iteration_count),
@@ -3376,6 +3911,15 @@ class InflatePolyhedronApp:
         self._draw_level_panel(0, self.faces, self.positions, self.face_of_fine)
 
     def _finish_relax(self):
+        # Reveals whatever seed relax_initial_configuration_with_orientation_retry actually
+        # used (see _run_relax_stream) -- almost always the one already shown, but a retry (or
+        # the free mirror fix) can mean the RETURNED shape came from a different seed than what
+        # was requested; the displayed/stored seed should reflect the shape that's now actually
+        # on screen, not the one merely asked for.
+        seed_used = getattr(self, "_pending_level0_seed_used", None)
+        if seed_used is not None:
+            self.seed_var.set(str(seed_used))
+            self._pending_level0_seed_used = None
         was_stopped = self.stop_event is not None and self.stop_event.is_set()
         # Reveals the real optimality/converged now -- see _apply_relax_progress for why these
         # were stashed separately rather than kept live in self.last_stats. Applies regardless

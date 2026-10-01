@@ -10,6 +10,7 @@ import numpy as np
 
 from .stretchy_mesh import relax_once, _total_rest_area
 from .convergence_checker import CONVERGENCE_GTOL
+from .inside_out_checker import InsideOutChecker
 
 # Empirical starting point: required pressure scales with how much total rest AREA it's pushing
 # against, not vertex/face count -- see physics.md's Pressure calibration section for the
@@ -158,6 +159,10 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
         total_area = _total_rest_area(faces, edge_length)
         pressure = _PRESSURE_AREA_PRODUCT_ESTIMATE * (target_rms_pct / 100.0) / total_area
     insane_ceiling = max(_INSANE_STRETCH_FLOOR_PCT, target_rms_pct * _INSANE_STRETCH_TARGET_MULTIPLE)
+    # Catches a trial that settled into a genuinely converged, but globally INSIDE-OUT,
+    # equilibrium (see InsideOutChecker's own module docstring) -- built once against the
+    # search's own starting `positions`, reused for every trial.
+    inside_out_checker = InsideOutChecker(positions, faces)
     best_error, best_pressure, best_result, best_frames = None, None, None, None
     # Once both are set, every remaining trial bisects between them:
     # lo_pressure is the LARGEST pressure so far confirmed sane and AT OR
@@ -198,7 +203,7 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
                                      max_nfev=max_nfev_per_trial, stop_event=stop_event, gtol=gtol,
                                      on_progress=_relax_progress if need_progress else None,
                                      **relax_once_kwargs)
-            _, trial_steps, _, rms_stretch, _, _ = result
+            trial_positions, trial_steps, _, rms_stretch, _, _ = result
         except np.linalg.LinAlgError:
             # A pathological trial (e.g. a pressure far outside any sane range) can still blow
             # the explicit integrator up into NaN/Inf positions -- _remove_rigid_motion's Kabsch
@@ -208,20 +213,37 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
             # discarded rather than kept for replay.
             result = (positions, 0, _DIVERGED_SENTINEL_STRETCH_PCT,
                       _DIVERGED_SENTINEL_STRETCH_PCT, None, False)
+            trial_positions = positions
             rms_stretch = _DIVERGED_SENTINEL_STRETCH_PCT
             trial_frames = None
             trial_steps = 0
         cumulative_steps += trial_steps
         sane = rms_stretch < insane_ceiling
-        if sane:
+        # A sane-by-magnitude trial can still be WRONG: a globally inside-out equilibrium (see
+        # InsideOutChecker) reads as ordinary sane-but-over-target stretch, which would otherwise
+        # make the bracket search rescale pressure DOWNWARD -- deeper into the spurious branch,
+        # never discovering the real (higher-pressure) one. `usable` excludes it from both
+        # best-candidacy and the normal target-comparison bracket logic below.
+        inside_out = sane and inside_out_checker.is_inside_out(trial_positions)
+        usable = sane and not inside_out
+        if usable:
             error = abs(rms_stretch - target_rms_pct)
             if best_error is None or error < best_error:
                 best_error, best_pressure, best_result, best_frames = (
                     error, pressure, result, trial_frames)
         stopped = stop_event is not None and stop_event.is_set()
-        if stopped or (sane and error < tol_pct):
+        if stopped or (usable and error < tol_pct):
             break
-        if sane and rms_stretch <= target_rms_pct:
+        if inside_out:
+            # Always escalate, regardless of this trial's own (meaningless, in this spurious
+            # branch) rms_stretch reading -- the mesh needs MORE pressure to escape the inverted
+            # equilibrium, never less. Still recorded as a confirmed lower bound so a later
+            # genuine over-target/insane trial at higher pressure brackets correctly against it.
+            lo_pressure = pressure
+            pressure = ((lo_pressure + hi_pressure) / 2 if hi_pressure is not None
+                        else pressure * _PRESSURE_RATIO_CLAMP[1])
+            continue
+        if usable and rms_stretch <= target_rms_pct:
             lo_pressure = pressure
         else:
             hi_pressure = pressure

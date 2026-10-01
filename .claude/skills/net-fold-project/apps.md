@@ -1,6 +1,6 @@
 # Apps
 
-3 Tkinter entry points. `src/apps/common/` (paths, ui_theme, bounding_box) + `src/apps/ui/`
+4 Tkinter entry points. `src/apps/common/` (paths, ui_theme, bounding_box) + `src/apps/ui/`
 (tooltip, cullable_face) hold code shared across >1 app — not domain logic.
 
 `common/paths.py` is the only place computing cross-app locations (`STRETCHY_NETS_DIR`); an app
@@ -163,6 +163,67 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   `data/input/stretchy_nets/` (content, not extension, is all `load_stretchy_mesh` ever cared
   about). A `.json` and `.poly` sharing the same basename collide in the combo's own label→path
   map (second one wins).
+- **View > Inflater/Viewer** (2026-09-30, explicit — originally built as its own standalone app,
+  then explicitly folded in here instead: "instead of a whole separate app, make it just a view
+  in the polyhedron_inflater app"): a radiobutton pair (`self.view_mode_var`) toggling which of
+  two top-level frames is packed — `self._inflater_frame` (everything above, unchanged) or
+  `self._viewer_frame` (a read-only photo-viewer-style browser for `data/output/*.hippo`
+  sessions, every method/attribute prefixed `_viewer_` to keep its state completely separate
+  from Inflater mode's own).
+  - **Viewer mode's window is SQUARE** (`VIEWER_WINDOW_GEOMETRY`, 2026-09-30, explicit) --
+    `_on_view_mode_changed` captures Inflater's own current geometry (`self._inflater_geometry`,
+    whatever it actually was, including a manual resize) before switching away, resizes to
+    `VIEWER_WINDOW_GEOMETRY` for Viewer, and restores the captured one on the way back.
+  - Viewer mode **rescans `SESSION_OUTPUT_DIR` fresh every time it's entered** (`_viewer_rescan`,
+    called from `_on_view_mode_changed`), not just once at startup — a `.hippo` file saved
+    earlier in the SAME session (File > Save, or Run All) shows up immediately, without losing
+    any already-cached session/camera state for files already viewed.
+  - **Shows all 4 levels AT ONCE, in a 2x2 grid, synced to ONE shared camera** (2026-09-30,
+    explicit — "let's split the drawing area into 2x2 and show all 4 views, synced", no more
+    Level buttons/switching) — each quadrant is its own small PyVista plotter
+    (`self._viewer_plotters[level]`, `VIEWER_SUBPANEL_SIZE`) auto-fitting its OWN current
+    bounding box (`self._viewer_centers`/`_halves`, same per-level-auto-fit idea as Inflater's
+    own "Level N" panels), but every quadrant reads the SAME per-file camera
+    (`self._viewer_cameras[path]`) — `_viewer_draw_level_panel` builds one quadrant's mesh
+    scene (called once per file, on navigation), `_viewer_render_all`/
+    `_viewer_render_level_camera` reposition+blit all 4 (called on every drag/pan/zoom tick).
+    A level the file never reached draws as a blank quadrant.
+  - **No on-screen Prev/Next arrows, no status label at all** (2026-09-30, explicit — tried as
+    overlaid anti-aliased filled triangles first, then explicitly removed along with the
+    file-name status message: "get rid of the on-screen arrows. remove the file name
+    message"). Navigation is keyboard-only: Left/Right arrow, or A/D (`_on_key_d` dispatches
+    "d"/"D" by `view_mode_var` — lowercase "d" is ALSO Inflater mode's own debug-mode toggle,
+    so it only navigates in Viewer mode; "a"/"A"/"D" have no such collision and bind directly).
+    The window title already shows the current file's own name, so no separate message repeats
+    it; a save's own confirmation is just the title's "*" disappearing.
+  - **Each quadrant's own drawing area has a visible flat outline**
+    (`VIEWER_OUTLINE_COLOR`/`_WIDTH`, via the image Label's own
+    `highlightthickness`/`highlightbackground` — a plain border, not `relief`'s 3D bevel look).
+  - **A small margin strip directly below the 2x2 grid holds the "m / n" file-position
+    counter** (2026-09-30, explicit) — the only thing left in that strip now that the
+    status label is gone.
+  - Mouse on ANY quadrant (left-drag rotate / right-drag pan / scroll zoom / middle-click
+    reset) reuses the exact same math/constants as the "Level N" panels above
+    (`LEVEL_DRAG_SENSITIVITY`/`LEVEL_ZOOM_STEP`/`_MIN`/`_MAX`/`LEVEL_ZOOM_FILL_LEVELS_1_3`/
+    `_initial_level_rotation`), updating the one shared camera and re-rendering all 4 quadrants
+    together. Only edits each file's own shared camera (`level_rotation`/`level_zoom`/
+    `level_pan`, via the SAME `SessionStateModel` this app already uses) — never the mesh data.
+  - **No explicit Save button** (2026-09-30, explicit — removed): saving now only happens via
+    a single prompt covering every dirty file at once, triggered by EITHER quitting the whole
+    app OR switching back to View > Inflater (`_on_view_mode_changed`'s own "inflater" branch
+    calls `_viewer_confirm_discard_unsaved` BEFORE actually switching; cancelling reverts
+    `view_mode_var` back to "viewer" and leaves Viewer mode untouched) — same
+    `_viewer_confirm_discard_unsaved`/askyesnocancel helper `_on_quit_request` uses, covering
+    every file touched this session, not just whichever is on screen (pattern established by
+    `interactive_builder_app`'s own `_on_quit_request`). Ctrl+S (`_on_control_s`) still saves
+    the CURRENT file on demand, unaffected by the button's removal — only the explicit button
+    was asked to go.
+  - Window title while active is `"<filename>[* if dirty] -- HIPPO Viewer"`
+    (`_update_viewer_title`, dispatched from `_update_window_title`) — a completely different
+    scheme from Inflater mode's own `APP_TITLE`.
+  - Coloring is by `face_of_fine` (the ORIGINAL base-face index) alone, not
+    `source_polygon_id`-aware grouping (`_face_colors_by_group`) — a deliberate simplification,
+    since a saved/finished mesh never needs to represent an in-progress Polygon Fold.
 
 ## interactive_inflater_app (`src/apps/interactive_inflater_app/app.py`)
 Combines `interactive_builder_app`'s canvas (left) with a simplified one-panel solver viewer
