@@ -137,7 +137,6 @@ if str(_APPS_DIR) not in sys.path:
 
 import json
 import os
-import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import tkinter.font as tkfont
@@ -150,7 +149,6 @@ import pyvista as pv
 # package -- `import vtk` eagerly loads every VTK module and is dramatically slower (order of
 # a minute here) than pulling just the one class needed for picking.
 from vtkmodules.vtkRenderingCore import vtkCellPicker
-from scipy.spatial.transform import Rotation
 import sv_ttk
 
 import common.paths  # noqa: F401 -- side effect: puts src/ and src/apps/ on sys.path
@@ -162,7 +160,7 @@ from common.ui_theme import FACE_COLORS, PLOT_THEME, STATUS_COLORS
 # session format that app's own File > Save writes, rather than re-declaring an equivalent schema
 # here (2026-09-26, explicit: "you need to implement loading of .hippo files").
 from inflate_polyhedron_app.session_state import LevelStateModel, SessionStateModel
-from interactive_inflater_app.session_state import InflaterSessionStateModel
+from interactive_inflater_app.state.session_state import InflaterSessionStateModel
 
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
 from utils.inflate_polyhedron.stretchy_mesh import (
@@ -214,6 +212,19 @@ from interactive_inflater_app.logic import edge_modifier, face_modifier
 # The one pure decision inside the full-cold-reinflate pipeline (2026-09-30 modularization) --
 # see that module's own docstring for why the rest of the pipeline stays here.
 from interactive_inflater_app.logic import reinflater
+
+# The 3D panel's camera + its rotate/pan/zoom gesture state, isolated into its own small
+# stateful object (2026-09-30 modularization) -- see that module's own docstring for why this
+# one (unlike the logic/ modules) is a class, not a pure function.
+from interactive_inflater_app.state.camera_controller import CameraController
+
+# The generic Tkinter-safe background-worker helper behind every relax/calibration call
+# (2026-09-30 modularization) -- see that module's own docstring.
+from interactive_inflater_app.state.background_worker import run_in_background
+
+# The mesh-state take/restore pair behind Stop/revert, formalized into a small object
+# (2026-09-30 modularization) -- see that module's own docstring.
+from interactive_inflater_app.state.mesh_snapshot import MeshSnapshotManager
 
 # interactive_builder_app/app.py is NOT on the untouchable list, but per this app's own
 # instructions it's still read-only from here -- imported directly (a plain namespace-package
@@ -2309,6 +2320,7 @@ class InflaterPane:
         # whatever partial result the interrupted call returned. self._active_button records
         # which button ("full"/"diff") is currently showing "Stop", so _set_running(False) can
         # restore both buttons' normal text/command.
+        self._mesh_snapshots = MeshSnapshotManager(self)
         self._pre_click_snapshot = None
         self._stop_event = None
         self._stop_requested = False
@@ -2469,10 +2481,6 @@ class InflaterPane:
         # actors, same add/remove-just-these-on-change convention as _hover_actors.
         self._selected_shape_ids = set()
         self._selected_actors = []
-        # Set by _on_drag_start/_on_drag_motion/_on_drag_end below to tell a genuine
-        # rotate-drag apart from a plain click (a press+release with no meaningful motion
-        # between them) -- a rotate-drag must never ALSO select whatever's under the cursor.
-        self._drag_moved = False
 
         # Join-mode connection hover/select (2026-09-19, explicit: "in Join[J] mode, hovering
         # over a connection highlights it in yellow and the corresponding edge in 3d is also
@@ -2542,11 +2550,9 @@ class InflaterPane:
 
         self._center = np.zeros(3)
         self._half = 1.0
-        self._camera = {"rotation": self._initial_rotation(), "zoom": 1.0, "pan": np.zeros(2)}
-        self._dragging = False
-        self._last_xy = None
-        self._panning = False
-        self._pan_last_xy = None
+        self._camera_controller = CameraController(
+            PANEL_DEFAULT_AZIM, PANEL_DEFAULT_ELEV, PANEL_DRAG_SENSITIVITY,
+            CLICK_MOVE_TOLERANCE_PX, PANEL_ZOOM_STEP, PANEL_ZOOM_MIN, PANEL_ZOOM_MAX)
 
         self._build_ui()
         self._apply_target_rms_defaults()
@@ -3184,48 +3190,15 @@ class InflaterPane:
         self._set_status("Stopping...", "info")
 
     def _snapshot_mesh_state(self):
-        """Every mutable mesh-related field, as of right now -- taken at the top of
-        on_full_inflate_clicked/_diff_remove_face/_diff_reexport_and_relax, before any of them
-        touch self.faces/positions/etc., so a Stop click or a non-converged trial can revert
-        to exactly the state the user had when they clicked Inflate (2026-09-19, explicit).
-        A plain shallow copy is safe: every pipeline step REASSIGNS these fields wholesale
-        (subdivide_once/relax_once/estimate_pressure_for_target_stretch all return fresh
-        list/dict objects) rather than mutating one in place, so the objects this snapshot
-        still points at never change out from under it.
-
-        Also carries "builder_connections" -- the LIVE builder's own connections list, copied
-        here too (never restored by _restore_mesh_state, which only touches this pane's own
-        mesh fields) purely so _display_connections has something to serve while the run is in
-        flight: the ONE 2D edit that made a Diff Inflate run eligible has already been applied
-        to the live builder net by the time this snapshot is taken, so `builder.connections`
-        itself is already the NEW list -- same "computed but not yet shown" mismatch as
-        self._pending_source_polygon_id (see _display_pending_source_polygon_id's own
-        docstring), just on the BuilderPane side instead of this one's."""
-        return {
-            "base_faces": self.base_faces, "base_edges": self.base_edges,
-            "base_face_edge_ids": self.base_face_edge_ids, "faces": self.faces,
-            "edge_length": self.edge_length, "face_of_fine": self.face_of_fine,
-            "edges": self.edges, "positions": self.positions,
-            "subdivision_level": self.subdivision_level,
-            "pending_source_polygon_id": self._pending_source_polygon_id,
-            "pending_pendants": self._pending_pendants,
-            "is_fully_inflated": self.is_fully_inflated,
-            "builder_connections": list(self.builder_getter().connections),
-        }
+        """Taken at the top of on_full_inflate_clicked/_diff_remove_face/
+        _diff_reexport_and_relax, before any of them touch self.faces/positions/etc., so a Stop
+        click or a non-converged trial can revert to exactly the state the user had when they
+        clicked Inflate (2026-09-19, explicit) -- see mesh_snapshot.MeshSnapshotManager.take's
+        own docstring for the full field list/rationale."""
+        return self._mesh_snapshots.take()
 
     def _restore_mesh_state(self, snapshot):
-        self.base_faces = snapshot["base_faces"]
-        self.base_edges = snapshot["base_edges"]
-        self.base_face_edge_ids = snapshot["base_face_edge_ids"]
-        self.faces = snapshot["faces"]
-        self.edge_length = snapshot["edge_length"]
-        self.face_of_fine = snapshot["face_of_fine"]
-        self.edges = snapshot["edges"]
-        self.positions = snapshot["positions"]
-        self.subdivision_level = snapshot["subdivision_level"]
-        self._pending_source_polygon_id = snapshot["pending_source_polygon_id"]
-        self.is_fully_inflated = snapshot["is_fully_inflated"]
-        self._pending_pendants = snapshot["pending_pendants"]
+        self._mesh_snapshots.restore(snapshot)
 
     def _revert_run(self, status_text, popup_text=None):
         """Discards whatever the current run computed and restores self._pre_click_snapshot --
@@ -3719,6 +3692,25 @@ class InflaterPane:
             # is_fully_inflated flag is set to false" -- the club itself is gone (no member is
             # central anymore), so there's nothing left that could be "fully inflated".
             self.is_fully_inflated = False
+            # Also forgets any PREVIOUS completed inflate entirely (2026-09-30, explicit bug
+            # report: "if i choose File > New, then place a piece, nothing shows up in the 3d
+            # view") -- without this, self.last_shapes_snapshot (etc.) kept describing whatever
+            # was inflated before the canvas emptied, so the very next piece placed got diffed
+            # against that STALE snapshot instead of being treated as a brand new "never
+            # inflated yet" session. classify_change's own old_shapes/old_connections no longer
+            # had any vertex in common with the fresh net, so it fell through to its "complex"
+            # verdict -- not in DIFF_ELIGIBLE_KINDS, so Diff Inflate never auto-fired, and the
+            # "last_shapes_snapshot is None" branch above (which would have fired a fresh Full
+            # Inflate) never ran either, since last_shapes_snapshot was never actually None.
+            # Resetting these back to their __init__ defaults makes an emptied canvas behave
+            # exactly like a freshly started session again.
+            self.last_shapes_snapshot = None
+            self.last_connections_snapshot = None
+            self.last_anchor_snapshot = None
+            self.last_source_polygon_id = None
+            self.last_root_to_vertex_id = None
+            self.last_pressure = None
+            self.level_history = {}
             self._render()
         if self._running:
             self.diff_inflate_button.state(["disabled"])
@@ -3803,22 +3795,7 @@ class InflaterPane:
         self._setup_plotter_lighting()
         self._render()
 
-    # ---- camera (rotate/pan/zoom) ----
-
-    @staticmethod
-    def _initial_rotation():
-        """Same construction as inflate_polyhedron_app's own _initial_level_rotation -- an
-        explicit orthonormal (direction, right, up) frame read off as a rotation matrix, so the
-        starting view matches that app's default (non-axis-aligned) angle instead of a bare
-        identity quaternion."""
-        azim, elev = np.radians(PANEL_DEFAULT_AZIM), np.radians(PANEL_DEFAULT_ELEV)
-        direction = np.array([np.cos(elev) * np.cos(azim), np.cos(elev) * np.sin(azim),
-                               np.sin(elev)])
-        world_up = np.array([0.0, 0.0, 1.0])
-        right = np.cross(world_up, direction)
-        right /= np.linalg.norm(right)
-        up = np.cross(direction, right)
-        return Rotation.from_matrix(np.column_stack([direction, right, up]))
+    # ---- camera (rotate/pan/zoom) -- see state/camera_controller.py for the gesture state itself ----
 
     def _setup_plotter_lighting(self):
         """Replaces self.plotter's own default light kit with the explicit KEY/FILL
@@ -3841,10 +3818,11 @@ class InflaterPane:
         self.plotter.add_light(fill_light)
 
     def _apply_camera(self):
-        """Positions the plotter's orthographic camera from self._camera (rotation/zoom/pan)
-        and self._center/_half (this frame's own bounding-sphere, set by _render just before
-        this is called) -- same technique as inflate_polyhedron_app's own _render_level_pv."""
-        cam = self._camera
+        """Positions the plotter's orthographic camera from self._camera_controller.camera
+        (rotation/zoom/pan) and self._center/_half (this frame's own bounding-sphere, set by
+        _render just before this is called) -- same technique as inflate_polyhedron_app's own
+        _render_level_pv."""
+        cam = self._camera_controller.camera
         direction = cam["rotation"].apply([1.0, 0.0, 0.0])
         up = cam["rotation"].apply([0.0, 0.0, 1.0])
         distance = self._half * 4
@@ -3929,9 +3907,7 @@ class InflaterPane:
         self._grab_frame()
 
     def _on_drag_start(self, event):
-        self._dragging = True
-        self._last_xy = (event.x, event.y)
-        self._drag_moved = False
+        self._camera_controller.start_drag(event.x, event.y)
         # A ButtonPress-1 landing while an open edge is currently revealed (Edit mode's own
         # hover-reveal, see _set_hover_open_edge) starts a drag-to-connect instead of a camera
         # rotate-drag (2026-09-19, explicit: "hover over an open edge... drag to connect to
@@ -3950,70 +3926,41 @@ class InflaterPane:
         if self._connection_drag is not None:
             self._update_connection_drag(event)
             return
-        if not self._dragging or self._last_xy is None:
-            return
-        cam = self._camera
-        last_x, last_y = self._last_xy
-        dx, dy = event.x - last_x, event.y - last_y
-        # Anything past a couple pixels of actual movement means this is a rotate-drag, not a
-        # click -- _on_drag_end reads this to decide whether to select instead.
-        if abs(dx) > CLICK_MOVE_TOLERANCE_PX or abs(dy) > CLICK_MOVE_TOLERANCE_PX:
-            self._drag_moved = True
-        up = cam["rotation"].apply([0.0, 0.0, 1.0])
-        right = cam["rotation"].apply([0.0, 1.0, 0.0])
-        sensitivity = np.radians(PANEL_DRAG_SENSITIVITY)
-        yaw = Rotation.from_rotvec(-dx * sensitivity * up)
-        pitch = Rotation.from_rotvec(-dy * sensitivity * right)
-        cam["rotation"] = pitch * yaw * cam["rotation"]
-        self._last_xy = (event.x, event.y)
-        self._refresh_view()
+        if self._camera_controller.drag_motion(event.x, event.y):
+            self._refresh_view()
 
     def _on_drag_end(self, event):
-        """A press+release with no meaningful motion in between (self._drag_moved never set --
-        see CLICK_MOVE_TOLERANCE_PX above) is a plain CLICK, not a rotate-drag -- selects
-        whatever face/connection is under the cursor (2026-09-19, explicit: "clicking on a face
-        in 3d should select it in both views... clicking is distinct from press-drag-release,
-        which is used for rotation"). A connection-drag started at press time (above) is a
-        THIRD gesture, checked first -- it ends here regardless of how far the mouse moved
-        (dragging a bare few pixels onto an adjacent edge's own handle is a completely
-        reasonable connection, not a "click")."""
-        was_dragging, moved, was_connecting = self._dragging, self._drag_moved, self._connection_drag is not None
-        self._dragging = False
-        self._last_xy = None
+        """A press+release with no meaningful motion in between is a plain CLICK, not a rotate-
+        drag -- selects whatever face/connection is under the cursor (2026-09-19, explicit:
+        "clicking on a face in 3d should select it in both views... clicking is distinct from
+        press-drag-release, which is used for rotation"). A connection-drag started at press
+        time (above) is a THIRD gesture, checked first -- it ends here regardless of how far the
+        mouse moved (dragging a bare few pixels onto an adjacent edge's own handle is a
+        completely reasonable connection, not a "click")."""
+        was_connecting = self._connection_drag is not None
+        was_dragging, moved = self._camera_controller.end_drag()
         if was_connecting:
             self._finish_connection_drag(event)
         elif was_dragging and not moved:
             self._on_panel_click(event)
 
     def _on_pan_start(self, event):
-        self._panning = True
-        self._pan_last_xy = (event.x, event.y)
+        self._camera_controller.start_pan(event.x, event.y)
 
     def _on_pan_motion(self, event):
-        if not self._panning or self._pan_last_xy is None:
-            return
-        last_x, last_y = self._pan_last_xy
-        dx, dy = event.x - last_x, event.y - last_y
-        panel_width, panel_height = self.panel_size
-        self._camera["pan"] = self._camera["pan"] + np.array(
-            [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
-        self._pan_last_xy = (event.x, event.y)
-        self._refresh_view()
+        if self._camera_controller.pan_motion(event.x, event.y, *self.panel_size):
+            self._refresh_view()
 
     def _on_pan_end(self, _event):
-        self._panning = False
-        self._pan_last_xy = None
+        self._camera_controller.end_pan()
 
     def _on_camera_reset(self, _event=None):
-        self._camera = {"rotation": self._initial_rotation(), "zoom": 1.0, "pan": np.zeros(2)}
+        self._camera_controller.reset()
         self._render()
 
     def _on_scroll(self, event):
-        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
-            factor = 1.0 / PANEL_ZOOM_STEP
-        else:
-            factor = PANEL_ZOOM_STEP
-        self._camera["zoom"] = max(PANEL_ZOOM_MIN, min(PANEL_ZOOM_MAX, self._camera["zoom"] * factor))
+        zoom_in = not (getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0)
+        self._camera_controller.scroll(zoom_in)
         self._refresh_view()
 
     # ---- hover highlight ----
@@ -4396,8 +4343,9 @@ class InflaterPane:
         self._pending_made_connection_actors -- an already-successful connection's own
         persistent highlight is not what's being cancelled here.
 
-        Also resets self._dragging/_last_xy IFF a connection-drag was actually active -- left
-        alone otherwise, so this never disturbs an UNRELATED plain camera rotate-drag that
+        Also resets self._camera_controller's own rotate-drag state (cancel_drag()) IFF a
+        connection-drag was actually active -- left alone otherwise, so this never disturbs an
+        UNRELATED plain camera rotate-drag that
         happens to be in progress when a tool-mode switch or Esc fires. Without this, Esc
         pressed while the mouse button is still physically held down would cancel the
         connection but leave _dragging True with a now-STALE _last_xy, so the very next
@@ -4412,8 +4360,7 @@ class InflaterPane:
             self._set_edge_highlight_actors(role, None, "red")
         self._line_end_screen_override = None
         if was_dragging_connection:
-            self._dragging = False
-            self._last_xy = None
+            self._camera_controller.cancel_drag()
         self._grab_frame()
 
     def undo_illegal_connection_from_builder(self):
@@ -5261,7 +5208,7 @@ class InflaterPane:
         instance -- see interactive_builder_app's own _draw_shape/_build_palette_entry), so a
         square on the left inflates into a square-colored patch on the right (2026-09-19,
         explicit: "should use the same colours as the left side"). Camera framing/rotation/
-        pan/zoom come from self._camera (see _apply_camera/the drag/pan/scroll handlers below)
+        pan/zoom come from self._camera_controller.camera (see _apply_camera/state/camera_controller.py)
         instead of a fresh "iso" + reset_camera() every redraw, so a user's view survives
         across Inflate steps. Each face's own fill mesh is drawn as TWO separate, culled actors
         sharing the same PolyData -- an OUTSIDE one (culling="back", so only outward-facing
@@ -6447,47 +6394,19 @@ class InflaterPane:
     # _run_background) ----
 
     def _run_background(self, fn, on_done, on_progress=None):
-        q = queue.Queue()
+        run_in_background(self.root, fn, on_done, on_progress=on_progress,
+                           on_error=self._on_background_error)
 
-        def queue_progress(payload):
-            q.put(("progress", payload))
-
-        def worker():
-            try:
-                q.put(("done", fn(queue_progress)))
-            except Exception as e:  # surface a solver crash instead of hanging forever
-                q.put(("error", str(e)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-        def poll():
-            try:
-                while True:
-                    kind, payload = q.get_nowait()
-                    if kind == "progress":
-                        if on_progress is not None:
-                            on_progress(payload)
-                        continue
-                    if kind == "error":
-                        # A crash mid-computation (2026-09-19, explicit: "sometimes it
-                        # crashes") -- reverts the same way a non-convergence does, rather than
-                        # leaving whatever partial/possibly-invalid state was on screen when it
-                        # blew up.
-                        self._revert_run(
-                            f"Reverted to the state before Inflate (error: {payload}).",
-                            popup_text=(
-                                f"Inflate hit an error and was reverted: {payload}\n\nIf this "
-                                "keeps happening, the mesh may have a loosely-attached or "
-                                "floppy face -- try anchoring/reconnecting it and Inflate "
-                                "again."))
-                        return
-                    on_done(payload)
-                    return
-            except queue.Empty:
-                pass
-            self.root.after(100, poll)
-
-        self.root.after(100, poll)
+    def _on_background_error(self, message):
+        # A crash mid-computation (2026-09-19, explicit: "sometimes it crashes") -- reverts the
+        # same way a non-convergence does, rather than leaving whatever partial/possibly-invalid
+        # state was on screen when it blew up.
+        self._revert_run(
+            f"Reverted to the state before Inflate (error: {message}).",
+            popup_text=(
+                f"Inflate hit an error and was reverted: {message}\n\nIf this keeps happening, "
+                "the mesh may have a loosely-attached or floppy face -- try anchoring/"
+                "reconnecting it and Inflate again."))
 
 
 # ---- combined window ----

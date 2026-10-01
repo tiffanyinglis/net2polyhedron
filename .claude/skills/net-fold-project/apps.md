@@ -273,6 +273,34 @@ underscored method names so every call site stayed unchanged):
   an inherently stateful multi-callback background-threaded state machine, left in `app.py`.
 Unit tests: `tests/unit/interactive_inflater_app/`.
 
+**Second pass — stateful (not pure) UI helpers** (2026-09-30, explicit — "see how the front end
+can be refactored similar to the logic"): three small stateful classes, plus the pre-existing
+session schema, all collected under `src/apps/interactive_inflater_app/state/` (2026-09-30,
+explicit follow-up — "put all the non-app files in a folder" — distinct from `logic/`'s pure
+functions, named for what unifies all four: each manages some kind of mutable/transient state
+that isn't pure business logic):
+- `state/camera_controller.py` (`CameraController`) — the 3D panel's own camera (rotation/zoom/
+  pan) plus its rotate-drag/pan-drag/scroll-zoom gesture bookkeeping. `InflaterPane.
+  _camera_controller` replaces the old flat `self._camera`/`_dragging`/`_last_xy`/`_drag_moved`/
+  `_panning`/`_pan_last_xy` attributes; `_on_drag_*`/`_on_pan_*`/`_on_scroll`/`_on_camera_reset`
+  became thin event-translation wrappers.
+- `state/background_worker.py` (`run_in_background`) — the generic Tkinter-safe worker-thread/
+  queue/poll mechanism behind every relax/calibration call, generalized out of `_run_background`
+  (its only InflaterPane-specific bit, a hardcoded revert-on-error call, became an injected
+  `on_error` callback). Fully standalone — no InflaterPane state dependency.
+- `state/mesh_snapshot.py` (`MeshSnapshotManager`) — formalizes `_snapshot_mesh_state`/
+  `_restore_mesh_state` (the Stop/revert mesh-state capture) into one `take()`/`restore()`
+  object; `_revert_run` itself (the surrounding decision of when to revert and what else to
+  clean up) stays in `app.py`, too entangled with threading/undo-stack/status state to extract.
+- `state/session_state.py` (`InflaterSessionStateModel`) — the pre-existing .hippie session
+  schema (plain pydantic, no Tkinter dependency), moved here alongside the three classes above
+  rather than left loose beside `app.py`.
+
+Rendering (`_render`/`_render_replay_frame`/`_refresh_view`) and the 2D canvas's own Edit-mode
+gesture were reviewed and deliberately left alone: the former's fast-camera-only-vs-full-rebuild
+split is load-bearing for performance (not incidental spaghetti), and the latter's state overlaps
+too much with general hover/selection tracking to isolate cleanly without a larger rewrite.
+
 ## interactive_builder_app (`src/apps/interactive_builder_app/app.py`)
 Unrelated 2D shape-placement canvas, no relation to solving. Palette of regular polygons
 (triangle..8-gon) → click to drop instances → drag/select/delete/rotate(right-drag)/pan

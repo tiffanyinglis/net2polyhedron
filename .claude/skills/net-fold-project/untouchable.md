@@ -149,6 +149,38 @@ canonical copy. Verified via `tests/unit/interactive_inflater_app/` (new) plus a
 smoke test (place/connect/flat-attach/anchor-delete/diff-remove through `CombinedApp` without
 `mainloop()`) — not asked to re-verify every existing hand-tested behavior beyond that.
 
+`interactive_inflater_app/app.py`, second pass (2026-09-30, explicit — "see how the front end
+can be refactored similar to the logic"): three STATEFUL (not pure) helper classes pulled out as
+new files — `camera_controller.CameraController` (camera + rotate/pan/zoom gesture state),
+`background_worker.run_in_background` (generalized `_run_background`, error path now an injected
+callback), `mesh_snapshot.MeshSnapshotManager` (formalizes `_snapshot_mesh_state`/
+`_restore_mesh_state`). `app.py`'s own methods became thin wrappers; unused `queue`/
+`scipy.spatial.transform.Rotation` imports removed after the move. Rendering and the 2D canvas
+gesture were explicitly reviewed and left alone (see `apps.md`'s own note on why). Verified via
+new unit tests (`test_camera_controller.py`, `test_background_worker.py`,
+`test_mesh_snapshot.py`) plus in-process smoke tests through `CombinedApp` with a real
+`mainloop()` (interactive camera drag/pan/zoom/reset, and a full real relax/calibrate background
+run reaching `is_fully_inflated=True`).
+Third, same session, explicit follow-up ("put all the non-app files in a folder, appropriately
+categorized/named"): the three classes above plus the pre-existing `session_state.py` moved into
+a new `state/` subpackage (`git mv` for the tracked `session_state.py`, preserving history) —
+named for what unifies all four: each manages mutable/transient state, as opposed to `logic/`'s
+pure functions or `app.py`'s own orchestration. Every import updated (`app.py` + the three new
+test files); no behavior change. Re-verified: full test suite green, `CombinedApp` still builds
+and the `state.*` imports resolve.
+
+Bug fix (2026-09-30, explicit bug report: "if i choose File > New, then place a piece, nothing
+shows up in the 3d view") — PRE-EXISTING (confirmed present as far back as commit `93cdb25`,
+before any of today's refactoring), not a regression from the modularization. `refresh_diff_
+eligibility`'s "club emptied" branch cleared `self.faces`/etc. but never reset `self.
+last_shapes_snapshot`/`last_connections_snapshot`/`last_anchor_snapshot`/`last_source_polygon_id`/
+`last_root_to_vertex_id`/`last_pressure`/`level_history` — so after File > New (or deleting every
+shape), the next piece placed got `classify_change`d against the STALE pre-New snapshot, came
+back `"complex"`, and neither Full nor Diff Inflate ever auto-fired. Fix: that branch now also
+resets all seven fields to their `__init__` defaults, so an emptied canvas behaves exactly like a
+freshly started session. Verified via a scripted repro (inflate something, File > New, place one
+piece, confirm `self.faces` populates) before and after the fix.
+
 `bounding_box.py`, `cullable_face.py`: unused (written for now-deleted rigid pipeline). Stay on
 the list anyway — don't delete.
 
