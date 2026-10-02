@@ -13,7 +13,9 @@ in apps.md -- keep both in sync when changing behavior described here. Summary:
    see mesh_levels.subdivide_once) and given a fresh random start.
 2. "Relax" (Level 0 only) runs pure-spring relaxation to convergence, then promotes straight
    into Level 1's starting position -- a tangled result is possible and left for Inflate to
-   resolve.
+   resolve. EXPERIMENTAL: while BYPASS_LEVEL_1_INFLATE is True, this promotion continues
+   straight on through an extra subdivide into Level 2's own starting position instead, so
+   Level 1 is never itself inflated -- see that flag's own comment.
 3. "Subdivide" (up to MAX_LEVEL) quarters every triangle; new positions interpolate from the
    current mesh, new rest lengths derive from the original flat geometry so the target shape
    stays fixed across levels.
@@ -52,7 +54,7 @@ import json
 import math
 import os
 import queue
-import re
+import random
 import threading
 import time
 import tkinter as tk
@@ -63,7 +65,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import matplotlib
 matplotlib.use("TkAgg")
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -79,12 +80,23 @@ from utils.inflate_polyhedron.stretchy_mesh import (
     CONVERGENCE_GTOL, REPULSION_STRENGTH, repulsion_force,
 )
 from utils.inflate_polyhedron.pre_inflation_relaxer import (
-    relax_initial_configuration, level0_jiggle_distance,
+    relax_initial_configuration, level0_periodic_burst_distance,
     relax_initial_configuration_with_orientation_retry,
 )
 from utils.inflate_polyhedron.multi_trial_inflater import estimate_pressure_for_target_stretch
 from utils.inflate_polyhedron.mesh_levels import MAX_LEVEL, subdivide_once
+from utils.inflate_polyhedron.plotter_lighting import (
+    SMOOTH_SHADING, MATERIAL_AMBIENT, MATERIAL_DIFFUSE, MATERIAL_SPECULAR,
+    MATERIAL_SPECULAR_POWER, KEY_LIGHT_POSITION, KEY_LIGHT_INTENSITY, FILL_LIGHT_POSITION,
+    FILL_LIGHT_INTENSITY, HEADLIGHT_POSITION, HEADLIGHT_INTENSITY,
+    setup_plotter_lighting as _setup_plotter_lighting,
+)
 from utils.subdivisions.mesh_subdivide import load_fabric_spec
+from utils.numeric_entry_validation import is_valid_numeric_partial as _is_valid_numeric_partial
+from utils.camera_trackball import (
+    initial_rotation as _camera_initial_rotation, rotate as _camera_rotate,
+    pan as _camera_pan, zoom as _camera_zoom,
+)
 
 from inflate_polyhedron_app.state.session_state import (
     SessionStateModel, LevelStateModel, LevelHistoryRecordModel, LastStatsModel,
@@ -93,11 +105,21 @@ from inflate_polyhedron_app.state.session_state import (
 # Pure logic factored out of this module (2026-09-30 modularization, same spirit as the sibling
 # interactive_inflater_app's own `logic/` package) -- aliased to their old underscored names so
 # every existing call site below is unchanged.
-from inflate_polyhedron_app.logic import reinflater, net_loading
+from inflate_polyhedron_app.logic import net_loading
+# `reinflater` aliases utils.inflate_polyhedron.pressure_history_guess (2026-10-01, explicit:
+# "make sure they are using shared code whenever possible. shared code should be moved to utils")
+# -- was this app's own `logic/reinflater.py`, byte-identical to interactive_inflater_app's own
+# copy; moved to utils and imported under the SAME alias so every `reinflater.
+# guess_pressure_from_history(...)` call site below is unchanged.
+from utils.inflate_polyhedron import pressure_history_guess as reinflater
 from inflate_polyhedron_app.logic.coloring import (
     midpoint_color as _midpoint_color,
     darken_color as _darken_color,
+    polygon_n_of_group as _polygon_n_of_group,
     face_colors_by_group as _face_colors_by_group,
+    group_of_face as _group_of_face,
+    random_face_colors,
+    random_face_colors_by_group as _random_face_colors_by_group,
 )
 from inflate_polyhedron_app.logic.geometry import (
     vertex_normals as _vertex_normals,
@@ -128,128 +150,13 @@ SESSION_FILE_EXTENSION = ".hippo"
 SUBDIVISION_EDGE_WIDTH = 0.5
 
 
-# Lighting/shading for every "Level N"/viewer-quadrant face actor -- ported from
-# interactive_inflater_app (2026-09-29 there, explicit: "add some lighting and shading...
-# performant"), same constants/rationale. SMOOTH_SHADING makes VTK interpolate per-vertex
-# normals across each triangle instead of flat per-triangle shading, so a subdivided face reads
-# as a smoothly curved surface; the MATERIAL_* constants tone add_mesh's own flat defaults
-# (ambient=0, diffuse=1, specular=0) down slightly so the shadowed side never goes fully black
-# and a modest specular highlight sells the "glossy inflated surface" look. MATERIAL_AMBIENT
-# lowered 0.25->0.18 (2026-10-01, see KEY_LIGHT_POSITION's own comment below) -- a touch more
-# shadow depth, for more visible contrast once the light itself is actually off-axis.
-#
-# SMOOTH_SHADING temporarily OFF, MATERIAL_SPECULAR temporarily 0 (2026-10-01, explicit: "might
-# be because you didn't implement diffuse lighting. so try adding lighting that depends on face
-# normals. turn off phong for now" -- a follow-up to the light-repositioning fix above, trying a
-# different direction: FLAT per-face shading (each triangle lit by its OWN true face normal, no
-# per-vertex interpolation across neighbors) with the specular term (the actual "Phong" part of
-# the Blinn-Phong model -- ambient+diffuse alone is plain Lambertian) switched off, so only
-# face-normal-dependent ambient+diffuse brightness is visible. Verified: produces an obviously
-# faceted, triangle-by-triangle brightness step at this app's own native small panel size, not
-# just at a debug-render's larger resolution -- a stronger "every subdivision clearly shaded
-# differently" effect than smooth interpolation gives, at the cost of the smoothly-curved-
-# surface look SMOOTH_SHADING was originally added for. Revert both to True/0.35 to go back to
-# smooth Phong shading if this reads as too faceted/low-poly instead. MATERIAL_AMBIENT bumped
-# 0.18->0.26 (2026-10-01, explicit: "make things a tad brighter", alongside KEY_LIGHT_INTENSITY/
-# FILL_LIGHT_INTENSITY below) -- raises the floor brightness a bit without flattening the
-# per-facet contrast this whole change was for. MATERIAL_SPECULAR brought back 0.0->0.5
-# (2026-10-01, explicit: "make the phong lighting brighter" -- the specular term IS the "Phong"
-# part of Blinn-Phong, see this comment's own opening line) -- a brighter glossy highlight per
-# flat-shaded facet than the original (pre-"turn off phong") 0.35, still combined with FLAT
-# per-face normals (SMOOTH_SHADING still False), not a return to smooth interpolation.
-# MATERIAL_DIFFUSE 0.85->1.0 and MATERIAL_SPECULAR 0.5->0.75 (2026-10-01, explicit: "i still
-# want the diffuse and phong lighting to be brighter") -- diffuse at its max brightens the
-# per-facet directional gradient this whole flat-shading change was for; specular (the "Phong"
-# term) raised further for a stronger glossy highlight, still flat-shaded (SMOOTH_SHADING False).
-# Reverted back to 0.85/0.5 (2026-10-01, explicit: "lower diffuse and specular to before") --
-# once HEADLIGHT and the KEY/FILL retuning below actually fixed overall brightness, the material
-# bump was no longer needed/wanted on top of it. MATERIAL_AMBIENT reverted back to its own
-# pre-bump 0.18 (2026-10-01, explicit: "lower ambient"), same reasoning.
-SMOOTH_SHADING = False
-MATERIAL_AMBIENT = 0.18
-MATERIAL_DIFFUSE = 0.85
-MATERIAL_SPECULAR = 0.5
-MATERIAL_SPECULAR_POWER = 20
-
-# Explicit 2-light camera-relative rig, replacing the plotter's own default headlight kit (same
-# rationale as interactive_inflater_app's KEY_LIGHT_POSITION -- a headlight lights a convex
-# surface almost uniformly regardless of smooth_shading, so there's no real contrast to shade
-# with). `light_type="camera light"` tracks the camera automatically as the user rotates/pans.
-#
-# Repositioned further off-axis (2026-10-01, explicit bug report: "every face, regardless of
-# how it's subdivided and inflated, all get one phong lighting... shouldn't the individual
-# subdivisions get different lighting/shading"). Diagnosed, NOT a shading-computation bug: VTK's
-# per-vertex normals and Phong interpolation were already both correct (confirmed by direct
-# inspection -- real normal variation up to 50+ degrees within one subdivided macro face, and an
-# isolated high-res render of one face showing a clean gradient). The ORIGINAL position (0.55,
-# 0.7, 0.85) was simply still too close to the camera's own view axis ("camera light" space has
-# the camera at (0, 0, 1) looking at the origin) -- lighting a roughly dome-shaped inflated face
-# from nearly the same angle it's being VIEWED from produces a radially-symmetric "glow" (bright
-# center fading evenly toward the rim in every direction) rather than a left-to-right/top-to-
-# bottom directional gradient, which at a small panel size reads as "basically one flat shade
-# plus a highlight blob" even though the underlying per-vertex shading is genuinely varying.
-# Moving the light to a real side/grazing angle makes the SAME underlying curvature produce an
-# obviously directional, clearly-per-subdivision-varying gradient instead. Intensities bumped
-# 1.1->1.25 / 0.45->0.55 (2026-10-01, explicit: "make things a tad brighter"), then brought back
-# down 1.25->1.0 / 0.55->0.4 (2026-10-01, explicit: "now let's a bit too bright. make the other
-# headlights less intense" -- after HEADLIGHT below was added and pushed overall brightness past
-# where the user wanted it), then KEY_LIGHT_INTENSITY further down 1.0->0.4 (2026-10-01, explicit:
-# "drop key light to 0.4") and FILL_LIGHT_INTENSITY further down 0.4->0.2 (2026-10-01, explicit:
-# "change fill_light to 0.2"), then both bumped back up 0.4->0.6 / 0.2->0.3 (2026-10-01,
-# explicit: "ok now bump up the key_light, fill_light, headlight"), then that bump undone back to
-# 0.4/0.2 (2026-10-01, explicit: "undo the bumping for fill light and key light" -- HEADLIGHT's
-# own bump to 0.9 stays, only KEY/FILL's bump was reverted).
-#
-# Positions narrowed partway back toward the camera axis (2026-10-01, explicit: "can you move
-# the phong lights closer?", clarified via follow-up question -- "Narrow the angle a bit", since
-# position DISTANCE is a no-op for these: `light_type="camera light"` lights are directional
-# (VTK Positional=False by default), so only the direction to the position matters, never how
-# far away it is -- confirmed by rendering the same scene with the position scaled to 30% of its
-# length and diffing pixel output (identical). KEY_LIGHT_POSITION blended 30% of the way toward
-# (0, 0, 1) -- the camera's own position in this space, see the "camera light" note above --
-# taking its off-axis angle from ~103 degrees to ~84 degrees; FILL_LIGHT_POSITION blended the
-# same way, ~60 degrees to ~45 degrees. Still off-axis enough to preserve the directional
-# per-subdivision gradient the original repositioning (above) was for, just less extreme.
-# Dimmed a bit (2026-10-01, explicit: "ok looks now. now dim all the key/fill/headlights a bit",
-# alongside HEADLIGHT_INTENSITY below): 0.4->0.3 / 0.2->0.15.
-KEY_LIGHT_POSITION = (0.9, 0.15, 0.1)
-KEY_LIGHT_INTENSITY = 0.3
-FILL_LIGHT_POSITION = (-0.7, -0.2, 0.7)
-FILL_LIGHT_INTENSITY = 0.15
-
-# Added (2026-10-01, explicit: "it's not actually brighter. maybe what i want is for the light
-# source to be more from the viewer's eyes" -- after bumping MATERIAL_DIFFUSE/MATERIAL_SPECULAR
-# didn't read as brighter). Root cause: KEY/FILL above sit at a deliberate side/grazing angle
-# (see their own comment) so the diffuse dot-product against a camera-FACING surface is small
-# regardless of the material's diffuse coefficient -- raising the coefficient alone can't fix a
-# weak incidence angle. HEADLIGHT sits essentially AT the camera ((0, 0, 1) in "camera light"
-# space is the camera's own position looking at the origin -- see KEY_LIGHT_POSITION's comment),
-# so camera-facing surfaces get real direct illumination. Kept separate from, not a replacement
-# for, KEY/FILL -- those still provide the off-axis directional gradient that makes individual
-# subdivisions read as differently-shaded; HEADLIGHT only adds overall brightness on top.
-# Bumped 0.6->0.9 (2026-10-01, explicit: "ok now bump up the key_light, fill_light, headlight"),
-# then dimmed back down 0.9->0.75 (2026-10-01, explicit: "ok looks now. now dim all the
-# key/fill/headlights a bit", alongside KEY_LIGHT_INTENSITY/FILL_LIGHT_INTENSITY above).
-HEADLIGHT_POSITION = (0.0, 0.0, 1.0)
-HEADLIGHT_INTENSITY = 0.75
-
-
-def _setup_plotter_lighting(plotter):
-    """Replaces `plotter`'s own default light kit with the explicit KEY/FILL camera-relative
-    rig. Must be called after every `pv.Plotter(...)` construction AND after every
-    `plotter.clear()` -- clear() calls remove_all_lights() internally, so a one-time setup
-    right after construction is silently undone by the first real draw."""
-    plotter.remove_all_lights()
-    key_light = pv.Light(light_type="camera light", intensity=KEY_LIGHT_INTENSITY)
-    key_light.position = KEY_LIGHT_POSITION
-    plotter.add_light(key_light)
-    fill_light = pv.Light(light_type="camera light", intensity=FILL_LIGHT_INTENSITY)
-    fill_light.position = FILL_LIGHT_POSITION
-    plotter.add_light(fill_light)
-    headlight = pv.Light(light_type="camera light", intensity=HEADLIGHT_INTENSITY)
-    headlight.position = HEADLIGHT_POSITION
-    plotter.add_light(headlight)
-
+# Lighting/shading for every "Level N"/viewer-quadrant face actor -- moved to
+# utils.inflate_polyhedron.plotter_lighting (2026-10-01, explicit: "make sure they are using
+# shared code whenever possible. shared code should be moved to utils") since it was identical,
+# including the entire tuning-history comment, to interactive_inflater_app's own copy; see that
+# module's own docstring for the full tuning history (light-repositioning fix, flat-shading
+# change, every brightness retune). Imported at the top of this file under the same names this
+# file's own call sites already use, so nothing below needed to change.
 
 # Net panel's own bezier connection curves (interactive_builder_app's gluing between two
 # faces' edges), shown read-only for context -- solid white for contrast against every
@@ -408,25 +315,29 @@ REPULSION_FORCE_COLOR = "magenta"
 # call's own max_nfev in "iterate until convergence" mode (no app-side chunking anymore).
 INFLATE_SAFETY_STEP_CAP = 50000
 
+# EXPERIMENTAL (2026-10-01, explicit: "let's see if level 1 is even necessary... bypass level 1
+# entirely, pass the result of level 0 directly to level 2") -- when True, _finish_relax_report's
+# own promotion from a converged Level 0 immediately subdivides again (Level 1 -> 2) before the
+# user, or Auto, ever gets a chance to Inflate at Level 1: Level 1's own mesh still exists for one
+# instant (frozen into self.level_snapshots, same as any other level Subdivide leaves behind) but
+# is never itself pressure-relaxed. Level 2 becomes the first level a real (pressure-calibrated)
+# Inflate ever runs at, its starting positions interpolated directly from Level 0's own relaxed
+# result via TWO interpolation-only subdivide_once calls (fan-triangulate, then quarter) rather
+# than one. False restores the normal Level 0 -> 1 -> 2 -> 3 pipeline (2026-10-01, explicit:
+# "add back level 1" -- tried, reverted the same day).
+BYPASS_LEVEL_1_INFLATE = False
+
 
 def _initial_level_rotation():
     """Builds the starting camera quaternion reproducing LEVEL_DEFAULT_AZIM/ELEV -- the only
     place spherical angles are converted into a rotation; every update after this
     (_on_level_motion) works with the quaternion directly and never decomposes it back into
-    angles, which is what avoids gimbal lock. Constructs an explicit orthonormal (direction,
-    right, up) frame and reads the rotation off it as a 3x3 matrix (a rotation matrix IS exactly
-    [x|y|z-axis-image] as columns). Shared by both Inflater's own Level-N camera and Viewer's
-    own per-file camera (same default angle for both)."""
-    azim, elev = np.radians(LEVEL_DEFAULT_AZIM), np.radians(LEVEL_DEFAULT_ELEV)
-    direction = np.array([np.cos(elev) * np.cos(azim), np.cos(elev) * np.sin(azim),
-                           np.sin(elev)])
-    world_up = np.array([0.0, 0.0, 1.0])
-    # This cross-product order makes [direction | right | up] a right-handed (det +1) frame --
-    # the other order is left-handed and scipy's Rotation.from_matrix rejects it.
-    right = np.cross(world_up, direction)
-    right /= np.linalg.norm(right)
-    up = np.cross(direction, right)
-    return Rotation.from_matrix(np.column_stack([direction, right, up]))
+    angles, which is what avoids gimbal lock. Shared by both Inflater's own Level-N camera and
+    Viewer's own per-file camera (same default angle for both). Delegates to utils.
+    camera_trackball.initial_rotation (2026-10-01, explicit: "make sure they are using shared
+    code whenever possible. shared code should be moved to utils") -- that same pure math was
+    duplicated a THIRD time in interactive_inflater_app's own CameraController."""
+    return _camera_initial_rotation(LEVEL_DEFAULT_AZIM, LEVEL_DEFAULT_ELEV)
 
 
 class ViewerPane:
@@ -448,21 +359,33 @@ class ViewerPane:
     names as before, unchanged -- see apps.md's own inflate_polyhedron_app section.
     """
 
-    def __init__(self, root, view_mode_var):
+    def __init__(self, root, view_mode_var, app):
         """Builds self._viewer_frame (constructed but NOT packed -- Inflater is the default
         view; InflatePolyhedronApp._on_view_mode_changed shows/hides it) and all its own
         widgets/state. `view_mode_var` is the SAME tk.StringVar InflatePolyhedronApp's own View
         menu radiobuttons drive -- needed here too since the Left/Right/A/D keyboard bindings
         below are global (root.bind_all), so _on_viewer_prev_clicked/_on_viewer_next_clicked
         must be able to check it's actually Viewer mode that's showing before acting, even
-        though Inflater mode itself never binds these keys."""
+        though Inflater mode itself never binds these keys. `app` is the owning
+        InflatePolyhedronApp instance (2026-10-01, explicit: "colour changes should apply in
+        Viewer mode as well, and they should factor into the undo/redo stack") -- the Colour
+        menu itself (self.color_mode_var/_colour_menu/_update_colour_menu_state) lives on `app`,
+        not here, since it's ONE menu shared by both views; ViewerPane needs to read/drive it
+        while Viewer mode is active (see _viewer_show_current's own resync, and
+        _on_viewer_color_mode_changed/_on_viewer_randomize_colors_clicked, called from `app`'s
+        own Colour-menu command handlers whenever view_mode_var is "viewer")."""
         self.root = root
         self.view_mode_var = view_mode_var
+        self.app = app
         self._viewer_paths = []
         self._viewer_index = 0
         self._viewer_sessions = {}           # path -> SessionStateModel
         self._viewer_cameras = {}            # path -> {"rotation", "zoom", "pan"}
         self._viewer_saved_cameras = {}      # path -> same shape, the ON-DISK values (dirty-check)
+        # path -> {"color_mode", "face_colors"}, the ON-DISK values (dirty-check) -- same
+        # lifecycle/purpose as _viewer_saved_cameras, just for Colour-menu state (2026-10-01,
+        # explicit, see __init__'s own docstring).
+        self._viewer_saved_colors = {}
         self._viewer_dirty_paths = set()
         self._viewer_dragging = False
         self._viewer_panning = False
@@ -479,7 +402,7 @@ class ViewerPane:
         # own single step, since those are already one discrete action.
         self._viewer_undo_stack = []
         self._viewer_redo_stack = []
-        self._viewer_gesture_start_camera = None
+        self._viewer_gesture_start_state = None
         # Per-QUADRANT (level) bounding-box auto-fit -- the camera itself (rotation/zoom/pan)
         # is per-FILE, shared across all 4 (see self._viewer_cameras).
         self._viewer_plotters = {}
@@ -545,20 +468,35 @@ class ViewerPane:
         self._viewer_position_label.pack(side=tk.TOP, fill=tk.X)
 
         # bind_all (fires regardless of which widget has focus, same rationale as "d"/Ctrl+S
-        # above) -- Inflater mode has no use for arrow/A/D keys, so this never collides with
-        # anything there. "d"/"D" dispatch through _on_key_d instead of binding directly here,
-        # since lowercase "d" is ALSO Inflater mode's own debug-mode toggle (see __init__).
-        self.root.bind_all("<Left>", lambda e: self._on_viewer_prev_clicked())
-        self.root.bind_all("<Right>", lambda e: self._on_viewer_next_clicked())
+        # above) -- Inflater mode itself has no OTHER use for arrow/A/D keys, so this never
+        # collides with anything there except Run > Debug All's own Left/Right-arrow "go back"/
+        # "skip ahead or continue" behavior (2026-10-01, explicit -- _on_debug_all_left_key/
+        # _on_debug_all_right_key), tried FIRST on every "<Left>"/"<Right>" press: both are a
+        # no-op whenever Debug All isn't actually running right now (including the whole time
+        # Viewer mode is showing), so falling through to _on_viewer_prev_clicked/_on_viewer_
+        # next_clicked afterward is always safe. "d"/"D" dispatch through _on_key_d instead of
+        # binding directly here, since lowercase "d" is ALSO Inflater mode's own debug-mode
+        # toggle (see __init__).
+        def _on_left_key(_event):
+            self.app._on_debug_all_left_key()
+            self._on_viewer_prev_clicked()
+
+        def _on_right_key(_event):
+            self.app._on_debug_all_right_key()
+            self._on_viewer_next_clicked()
+
+        self.root.bind_all("<Left>", _on_left_key)
+        self.root.bind_all("<Right>", _on_right_key)
         self.root.bind_all("<KeyPress-a>", lambda e: self._on_viewer_prev_clicked())
         self.root.bind_all("<KeyPress-A>", lambda e: self._on_viewer_prev_clicked())
         self.root.bind_all("<KeyPress-D>", lambda e: self._on_viewer_next_clicked())
-        # Camera undo/redo (see self._viewer_undo_stack's own comment) -- same bind_all
-        # rationale as Left/Right/A/D above, same view_mode_var guard inside the handlers.
-        self.root.bind_all("<Control-z>", self._on_viewer_undo)
-        self.root.bind_all("<Control-Z>", self._on_viewer_undo)
-        self.root.bind_all("<Control-y>", self._on_viewer_redo)
-        self.root.bind_all("<Control-Y>", self._on_viewer_redo)
+        # Ctrl+Z/Ctrl+Y themselves are now bound centrally by InflatePolyhedronApp (2026-10-01,
+        # explicit: "put Undo/Redo in an Edit menu [for polyhedron_inflater, in both views]")
+        # -- dispatching to _on_viewer_undo/_on_viewer_redo here or to this app's OWN Inflater-
+        # view undo/redo, by view_mode_var, from ONE place (_on_edit_undo/_on_edit_redo) rather
+        # than two separate bind_all calls racing for the same key (Tk's bind_all only keeps the
+        # LAST binding registered for a given sequence+tag, so two independent bind_all calls
+        # for "<Control-z>" would silently fight over who actually fires).
 
     def _viewer_rescan(self):
         """Re-globs SESSION_OUTPUT_DIR for *.hippo files -- called every time Viewer mode is
@@ -596,12 +534,12 @@ class ViewerPane:
         self._viewer_show_current()
 
     def _viewer_reset_undo_stack(self):
-        """Clears camera undo/redo history -- called whenever the file ON SCREEN changes, so
-        undo never reaches back into a DIFFERENT model's adjustments (2026-10-01, explicit:
-        "if you switch to a new model, then the undo stack resets")."""
+        """Clears camera/Colour undo/redo history -- called whenever the file ON SCREEN
+        changes, so undo never reaches back into a DIFFERENT model's adjustments (2026-10-01,
+        explicit: "if you switch to a new model, then the undo stack resets")."""
         self._viewer_undo_stack = []
         self._viewer_redo_stack = []
-        self._viewer_gesture_start_camera = None
+        self._viewer_gesture_start_state = None
 
     def _viewer_current_path(self):
         return self._viewer_paths[self._viewer_index] if self._viewer_paths else None
@@ -623,6 +561,13 @@ class ViewerPane:
             self._viewer_cameras[path] = camera
             self._viewer_saved_cameras[path] = {"rotation": rotation, "zoom": camera["zoom"],
                                                   "pan": camera["pan"].copy()}
+            # ON-DISK Colour-menu state (2026-10-01, explicit) -- same dirty-check lifecycle as
+            # _viewer_saved_cameras above.
+            self._viewer_saved_colors[path] = {
+                "color_mode": session.color_mode,
+                "face_colors": (list(session.face_colors)
+                                 if session.face_colors is not None else None),
+            }
         return self._viewer_sessions[path]
 
     def _viewer_show_current(self):
@@ -638,23 +583,65 @@ class ViewerPane:
         self._update_viewer_title()
         self._viewer_position_label.config(
             text=f"{self._viewer_index + 1} / {len(self._viewer_paths)}")
+        # Resyncs the (shared) Colour menu's own display to THIS file's mode (2026-10-01,
+        # explicit: "colour changes should apply in Viewer mode as well, and they should factor
+        # into the undo/redo stack") -- the menu's radiobuttons are bound to self.app.
+        # color_mode_var, Inflater mode's own live state; while Viewer mode is active that same
+        # variable instead DISPLAYS/controls whichever file is on screen (see
+        # _on_viewer_color_mode_changed), so it needs resyncing on every navigation. self.app.
+        # _last_color_mode is reused the same way (undo's own "before" tracking, see
+        # _on_viewer_color_mode_changed's own docstring) -- never read by both views at once,
+        # since only one is ever showing. _on_view_mode_changed is what saves/restores Inflater
+        # mode's own values across a trip into Viewer mode.
+        self.app.color_mode_var.set(session.color_mode)
+        self.app._last_color_mode = session.color_mode
+        self.app._update_colour_menu_state()
+        # Polygon-specific mode's own per-base-face color, by ORIGINAL polygon side count
+        # (2026-10-01, explicit bug report: "Polygon-specific colouring is wrong. It should use
+        # the colour scheme in interactive_inflater..." -- same fix, and the SAME pure
+        # _face_colors_by_group Inflater mode's own _apply_color_mode uses, just computed once
+        # per file here instead of once per Colour-menu change) -- reused by every level's own
+        # _viewer_draw_level_panel call below (only Multi-colour's saved face_colors differ
+        # per-level, since that's keyed straight by base_face already).
+        net_file = session.net_file or {}
+        source_polygon_id = net_file.get("source_polygon_id")
+        n_by_group = _polygon_n_of_group(source_polygon_id, net_file.get("net_layout") or [])
+        # The flat per-base-face `colors` list (face_colors_by_group's FIRST return value), NOT
+        # `color_by_group` (2026-10-01, bug fix: "Polygon-specific colours are not working in
+        # Viewer view") -- `color_by_group` is keyed by GROUP id, which is `source_polygon_id[i]`
+        # (an arbitrary 2D-builder shape id) whenever that's given, not the plain positional
+        # base-face index `_viewer_draw_level_panel`'s own `base_face` (from `face_of_fine`)
+        # actually is -- looking it up directly as `color_by_group[base_face]` silently missed
+        # for most faces (shape ids essentially never equal their own positional index) and fell
+        # through to the arbitrary FACE_COLORS-modulo fallback instead. `colors[i]` is already
+        # the right color for base face `i` directly, no group-id translation needed.
+        polygon_colors, _color_by_group, _group_of_face = _face_colors_by_group(
+            session.base_faces, source_polygon_id, n_by_group)
         for level in range(MAX_LEVEL + 1):
             level_state = session.levels.get(level)
             if level_state is not None:
                 faces, positions, face_of_fine, _edge_length = level_state.to_mesh()
             else:
                 faces = positions = face_of_fine = None
-            self._viewer_draw_level_panel(level, faces, positions, face_of_fine)
+            self._viewer_draw_level_panel(level, faces, positions, face_of_fine,
+                                           session.color_mode, session.face_colors,
+                                           polygon_colors)
         self._viewer_render_all()
 
     # ---- rendering ----
 
-    def _viewer_draw_level_panel(self, level, faces, positions, face_of_fine):
+    def _viewer_draw_level_panel(self, level, faces, positions, face_of_fine,
+                                  color_mode="polygon", face_colors=None,
+                                  polygon_colors=None):
         """Builds ONE quadrant's own PyVista scene -- mesh geometry only, called once per file
         (on navigation), not per camera tick -- and recomputes that quadrant's own center/half
         (bounding sphere), exactly like Inflater's own _draw_level_panel/_level_center/
         _level_half. `faces`/`positions`/`face_of_fine` are None when this file never reached
-        `level` -- blanks the quadrant rather than erroring."""
+        `level` -- blanks the quadrant rather than erroring. `polygon_colors` (a flat list,
+        `polygon_colors[base_face]`, from _viewer_show_current's own one-per-file
+        _face_colors_by_group call) is Polygon-specific mode's own color -- computed once per
+        file, not per level, since it only depends on the file's base_faces/source_polygon_id,
+        never on which level is being drawn."""
         plotter = self._viewer_plotters[level]
         plotter.clear()
         _setup_plotter_lighting(plotter)
@@ -668,12 +655,23 @@ class ViewerPane:
         idx = {v: i for i, v in enumerate(vertex_ids)}
         points = np.array([positions[v] for v in vertex_ids])
 
-        # Colors by face_of_fine (the ORIGINAL base-face index) alone -- simpler than Inflater
-        # mode's own source_polygon_id-aware grouping (_face_colors_by_group), a deliberate
-        # simplification since a saved/finished mesh never needs to represent an in-progress
-        # Polygon Fold.
+        # Multi-colour shows the saved session's own EXACT per-base-face face_colors (2026-10-01,
+        # explicit: "these colours persist via Save/Load, even into different app, if the target
+        # app supports it") -- those colors are random and only meaningful as whatever was
+        # actually saved, so there's nothing to re-derive. Polygon-specific uses `polygon_colors`
+        # (a flat list, POLYGON_COLORS by original side count -- same scheme Inflater mode's own
+        # _apply_color_mode uses), indexed directly by `base_face` (a plain positional index into
+        # base_faces/face_of_fine) -- falling back to a plain base_face-modulo FACE_COLORS cycle
+        # only if that list is somehow too short (shouldn't normally happen -- defensive, same as
+        # every other fallback here).
+        use_saved_colors = (color_mode == "multi" and face_colors is not None)
         for base_face in sorted(set(face_of_fine)):
-            face_color = FACE_COLORS[base_face % len(FACE_COLORS)]
+            if use_saved_colors and base_face < len(face_colors):
+                face_color = face_colors[base_face]
+            elif polygon_colors is not None and base_face < len(polygon_colors):
+                face_color = polygon_colors[base_face]
+            else:
+                face_color = FACE_COLORS[base_face % len(FACE_COLORS)]
             group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == base_face]
             if not group_faces:
                 continue
@@ -735,11 +733,20 @@ class ViewerPane:
         if path is None:
             return
         cam = self._viewer_cameras[path]
-        saved = self._viewer_saved_cameras[path]
-        changed = (cam["zoom"] != saved["zoom"]
-                   or not np.allclose(cam["pan"], saved["pan"])
-                   or not np.allclose(cam["rotation"].as_quat(), saved["rotation"].as_quat()))
-        if changed:
+        saved_cam = self._viewer_saved_cameras[path]
+        camera_changed = (cam["zoom"] != saved_cam["zoom"]
+                           or not np.allclose(cam["pan"], saved_cam["pan"])
+                           or not np.allclose(cam["rotation"].as_quat(),
+                                               saved_cam["rotation"].as_quat()))
+        # Colour-menu state dirty-check (2026-10-01, explicit: "colour changes should apply in
+        # Viewer mode as well, and they should factor into the undo/redo stack") -- same
+        # saved-vs-live comparison idea as the camera check above, just against
+        # _viewer_saved_colors instead of _viewer_saved_cameras.
+        session = self._viewer_sessions[path]
+        saved_colors = self._viewer_saved_colors[path]
+        colors_changed = (session.color_mode != saved_colors["color_mode"]
+                           or session.face_colors != saved_colors["face_colors"])
+        if camera_changed or colors_changed:
             self._viewer_dirty_paths.add(path)
         else:
             self._viewer_dirty_paths.discard(path)
@@ -758,6 +765,38 @@ class ViewerPane:
         cam["zoom"] = snapshot["zoom"]
         cam["pan"] = snapshot["pan"].copy()
 
+    def _viewer_state_snapshot(self, path):
+        """One Viewer undo/redo entry for `path`: its camera (_viewer_camera_snapshot) PLUS its
+        Colour-menu state (color_mode/face_colors) -- extended from camera-only (2026-10-01,
+        explicit: "colour changes should apply in Viewer mode as well, and they should factor
+        into the undo/redo stack") the same way InflatePolyhedronApp's own _inflater_snapshot
+        bundles Colour state alongside its camera. face_colors is a plain shallow list copy --
+        every entry's a hex-string color, nothing nested."""
+        session = self._viewer_sessions[path]
+        return {
+            "camera": self._viewer_camera_snapshot(self._viewer_cameras[path]),
+            "color_mode": session.color_mode,
+            "face_colors": (list(session.face_colors)
+                             if session.face_colors is not None else None),
+        }
+
+    def _viewer_apply_state_snapshot(self, snapshot):
+        """Inverse of _viewer_state_snapshot -- restores the CURRENT file's camera AND Colour-
+        menu state, and keeps self.app's own color_mode_var/_last_color_mode (the Colour menu's
+        live display while Viewer mode is active -- see _viewer_show_current's own resync)
+        showing the result."""
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        self._viewer_apply_camera_snapshot(snapshot["camera"])
+        session = self._viewer_sessions[path]
+        session.color_mode = snapshot["color_mode"]
+        session.face_colors = (list(snapshot["face_colors"])
+                                if snapshot["face_colors"] is not None else None)
+        self.app.color_mode_var.set(snapshot["color_mode"])
+        self.app._last_color_mode = snapshot["color_mode"]
+        self.app._update_colour_menu_state()
+
     def _viewer_push_undo(self, snapshot):
         self._viewer_undo_stack.append(snapshot)
         self._viewer_redo_stack.clear()
@@ -765,17 +804,18 @@ class ViewerPane:
     def _viewer_commit_gesture_undo(self):
         """Pushes ONE undo step for the just-finished drag/pan gesture, captured at its START
         (_on_viewer_drag_start/_on_viewer_pan_start) rather than per motion tick -- and only if
-        the camera actually ended up different, so a click-without-moving leaves no undo
-        entry."""
+        the camera actually ended up different (a drag/pan gesture never touches Colour state),
+        so a click-without-moving leaves no undo entry."""
         path = self._viewer_current_path()
-        start = self._viewer_gesture_start_camera
-        self._viewer_gesture_start_camera = None
+        start = self._viewer_gesture_start_state
+        self._viewer_gesture_start_state = None
         if start is None or path is None:
             return
         cam = self._viewer_cameras[path]
-        changed = (cam["zoom"] != start["zoom"]
-                   or not np.allclose(cam["pan"], start["pan"])
-                   or not np.allclose(cam["rotation"].as_quat(), start["rotation"].as_quat()))
+        start_cam = start["camera"]
+        changed = (cam["zoom"] != start_cam["zoom"]
+                   or not np.allclose(cam["pan"], start_cam["pan"])
+                   or not np.allclose(cam["rotation"].as_quat(), start_cam["rotation"].as_quat()))
         if changed:
             self._viewer_push_undo(start)
 
@@ -785,12 +825,12 @@ class ViewerPane:
         path = self._viewer_current_path()
         if path is None:
             return
-        current = self._viewer_camera_snapshot(self._viewer_cameras[path])
+        current = self._viewer_state_snapshot(path)
         previous = self._viewer_undo_stack.pop()
         self._viewer_redo_stack.append(current)
-        self._viewer_apply_camera_snapshot(previous)
+        self._viewer_apply_state_snapshot(previous)
         self._viewer_mark_dirty()
-        self._viewer_render_all()
+        self._viewer_show_current()
 
     def _on_viewer_redo(self, event=None):
         if self.view_mode_var.get() != "viewer" or not self._viewer_redo_stack:
@@ -798,25 +838,23 @@ class ViewerPane:
         path = self._viewer_current_path()
         if path is None:
             return
-        current = self._viewer_camera_snapshot(self._viewer_cameras[path])
+        current = self._viewer_state_snapshot(path)
         following = self._viewer_redo_stack.pop()
         self._viewer_undo_stack.append(current)
-        self._viewer_apply_camera_snapshot(following)
+        self._viewer_apply_state_snapshot(following)
         self._viewer_mark_dirty()
-        self._viewer_render_all()
+        self._viewer_show_current()
 
     def _on_viewer_drag_start(self, event):
         self._viewer_dragging = True
         self._viewer_last_xy = (event.x, event.y)
         path = self._viewer_current_path()
-        self._viewer_gesture_start_camera = (
-            self._viewer_camera_snapshot(self._viewer_cameras[path]) if path is not None
-            else None)
+        self._viewer_gesture_start_state = (
+            self._viewer_state_snapshot(path) if path is not None else None)
 
     def _on_viewer_drag_motion(self, event):
         """Free trackball rotation -- identical math to _on_level_motion (see its own
-        docstring for why reading "up"/"right" off the current quaternion, rather than a fixed
-        world axis, avoids gimbal lock)."""
+        docstring), via the shared utils.camera_trackball.rotate."""
         if not self._viewer_dragging or self._viewer_last_xy is None:
             return
         path = self._viewer_current_path()
@@ -825,12 +863,7 @@ class ViewerPane:
         cam = self._viewer_cameras[path]
         last_x, last_y = self._viewer_last_xy
         dx, dy = event.x - last_x, event.y - last_y
-        up = cam["rotation"].apply([0.0, 0.0, 1.0])
-        right = cam["rotation"].apply([0.0, 1.0, 0.0])
-        sensitivity = np.radians(LEVEL_DRAG_SENSITIVITY)
-        yaw = Rotation.from_rotvec(-dx * sensitivity * up)
-        pitch = Rotation.from_rotvec(-dy * sensitivity * right)
-        cam["rotation"] = pitch * yaw * cam["rotation"]
+        cam["rotation"] = _camera_rotate(cam["rotation"], dx, dy, LEVEL_DRAG_SENSITIVITY)
         self._viewer_last_xy = (event.x, event.y)
         self._viewer_mark_dirty()
         self._viewer_render_all()
@@ -844,9 +877,8 @@ class ViewerPane:
         self._viewer_panning = True
         self._viewer_last_xy = (event.x, event.y)
         path = self._viewer_current_path()
-        self._viewer_gesture_start_camera = (
-            self._viewer_camera_snapshot(self._viewer_cameras[path]) if path is not None
-            else None)
+        self._viewer_gesture_start_state = (
+            self._viewer_state_snapshot(path) if path is not None else None)
 
     def _on_viewer_pan_motion(self, event):
         if not self._viewer_panning or self._viewer_last_xy is None:
@@ -858,8 +890,7 @@ class ViewerPane:
         last_x, last_y = self._viewer_last_xy
         dx, dy = event.x - last_x, event.y - last_y
         panel_width, panel_height = VIEWER_SUBPANEL_SIZE
-        cam["pan"] = cam["pan"] + np.array(
-            [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
+        cam["pan"] = _camera_pan(cam["pan"], dx, dy, panel_width, panel_height)
         self._viewer_last_xy = (event.x, event.y)
         self._viewer_mark_dirty()
         self._viewer_render_all()
@@ -874,7 +905,7 @@ class ViewerPane:
         if path is None:
             return
         cam = self._viewer_cameras[path]
-        self._viewer_push_undo(self._viewer_camera_snapshot(cam))
+        self._viewer_push_undo(self._viewer_state_snapshot(path))
         cam["pan"] = np.zeros(2)
         cam["zoom"] = 1.0
         cam["rotation"] = _initial_level_rotation()
@@ -886,14 +917,86 @@ class ViewerPane:
         if path is None:
             return
         cam = self._viewer_cameras[path]
-        self._viewer_push_undo(self._viewer_camera_snapshot(cam))
-        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
-            factor = 1.0 / LEVEL_ZOOM_STEP
-        else:
-            factor = LEVEL_ZOOM_STEP
-        cam["zoom"] = max(LEVEL_ZOOM_MIN, min(LEVEL_ZOOM_MAX, cam["zoom"] * factor))
+        self._viewer_push_undo(self._viewer_state_snapshot(path))
+        zoom_in = not (getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0)
+        cam["zoom"] = _camera_zoom(cam["zoom"], zoom_in, LEVEL_ZOOM_STEP, LEVEL_ZOOM_MIN,
+                                    LEVEL_ZOOM_MAX)
         self._viewer_mark_dirty()
         self._viewer_render_all()
+
+    # ---- Colour menu (2026-10-01, explicit: "colour changes should apply in Viewer mode as
+    # well, and they should factor into the undo/redo stack") ----
+
+    def _viewer_color_face_edge_ids(self, session):
+        """Best-effort face_edge_ids for `session.base_faces`, from `session.net_file` -- used
+        to avoid a neighbor-color clash when generating fresh Multi-colour colors (same
+        disambiguation InflatePolyhedronApp's own on_select_net uses). None (random_face_colors'
+        own base_face_neighbors then falls back to a plain shared-vertex-pair match) whenever
+        `net_file` is missing or its own "faces" doesn't line up with `base_faces` (a mismatched
+        or legacy net)."""
+        net_file = session.net_file or {}
+        faces = net_file.get("faces")
+        if faces is not None and len(faces) == len(session.base_faces):
+            return net_file.get("face_edge_ids")
+        return None
+
+    def _viewer_ensure_multi_colors(self, session):
+        """Lazily (re)generates `session.face_colors` the FIRST time Multi-colour actually needs
+        them for this file (none yet, or a stale list left over from a mismatched base_faces
+        length) -- NOT every time Multi-colour is re-selected, same "toggling without Randomize
+        never changes colors" rule Inflater mode's own _apply_color_mode follows."""
+        if session.face_colors is None or len(session.face_colors) != len(session.base_faces):
+            session.face_colors = random_face_colors(
+                session.base_faces, self._viewer_color_face_edge_ids(session), random.Random())
+
+    def _on_viewer_color_mode_changed(self, new_mode):
+        """Colour > Polygon-specific/Multi-colour radiobutton command, while Viewer mode is
+        active (InflatePolyhedronApp._on_color_mode_changed dispatches here) -- operates on the
+        CURRENTLY VIEWED file's own session.color_mode/face_colors (2026-10-01, explicit:
+        "colour changes should apply in Viewer mode as well, and they should factor into the
+        undo/redo stack") rather than Inflater mode's own color_mode_var/multi_colors. Same
+        undo-snapshot-with-overridden-"before"-mode trick as Inflater's own
+        _on_color_mode_changed/interactive_inflater_app's identical feature, for the same
+        Tk-Radiobutton-variable-already-flipped reason -- self.app._last_color_mode holds the
+        PREVIOUS mode (kept in sync by _viewer_show_current's own resync on every navigation).
+        Snapshotted BEFORE _viewer_ensure_multi_colors runs, not after (same bug/fix as
+        InflatePolyhedronApp's own _on_color_mode_changed -- that method's own lazily-GENERATED
+        colors would otherwise get captured as if they were already "the before state")."""
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        session = self._viewer_sessions[path]
+        old_mode = self.app._last_color_mode
+        if new_mode != old_mode:
+            snap = self._viewer_state_snapshot(path)
+            snap["color_mode"] = old_mode
+        else:
+            snap = None
+        if new_mode == "multi":
+            self._viewer_ensure_multi_colors(session)
+        if snap is not None:
+            self._viewer_push_undo(snap)
+        session.color_mode = new_mode
+        self.app._last_color_mode = new_mode
+        self.app._update_colour_menu_state()
+        self._viewer_mark_dirty()
+        self._viewer_show_current()
+
+    def _on_viewer_randomize_colors_clicked(self):
+        """Colour > Randomize, while Viewer mode is active -- re-rolls the CURRENTLY VIEWED
+        file's own Multi-colour colors from scratch. A no-op outside Multi-colour mode or with
+        nothing on screen, same guards Inflater mode's own _on_randomize_colors_clicked uses."""
+        path = self._viewer_current_path()
+        if path is None:
+            return
+        session = self._viewer_sessions[path]
+        if session.color_mode != "multi":
+            return
+        self._viewer_push_undo(self._viewer_state_snapshot(path))
+        session.face_colors = random_face_colors(
+            session.base_faces, self._viewer_color_face_edge_ids(session), random.Random())
+        self._viewer_mark_dirty()
+        self._viewer_show_current()
 
     # ---- save ----
 
@@ -906,7 +1009,12 @@ class ViewerPane:
     def _viewer_save_path(self, path):
         """Writes `path`'s own session back to disk with its camera fields (level_rotation/
         level_zoom/level_pan) updated from the in-memory camera state -- everything else in
-        the file (the mesh, the Convergence History, every spinner) passes through unchanged."""
+        the file (the mesh, the Convergence History, every spinner) passes through unchanged.
+        `session.color_mode`/`face_colors` need no such copy-over step before saving -- unlike
+        the camera (kept in a separate `self._viewer_cameras[path]` dict, mutated live), Colour-
+        menu edits (_on_viewer_color_mode_changed/_on_viewer_randomize_colors_clicked) already
+        mutate `session` itself directly, so whatever's currently on it is already what gets
+        written."""
         session = self._viewer_sessions[path]
         cam = self._viewer_cameras[path]
         session.level_rotation = tuple(float(x) for x in cam["rotation"].as_quat())
@@ -919,6 +1027,11 @@ class ViewerPane:
             return False
         self._viewer_saved_cameras[path] = {"rotation": cam["rotation"], "zoom": cam["zoom"],
                                               "pan": cam["pan"].copy()}
+        self._viewer_saved_colors[path] = {
+            "color_mode": session.color_mode,
+            "face_colors": (list(session.face_colors)
+                             if session.face_colors is not None else None),
+        }
         self._viewer_dirty_paths.discard(path)
         # No separate "Saved" message (removed alongside the status label, 2026-09-30) -- the
         # window title's own "*" disappearing is the confirmation.
@@ -982,6 +1095,39 @@ class InflatePolyhedronApp:
         # View > Inflater/Viewer -- created before _build_menu (which reads it to build the
         # radiobuttons) so both frames it later toggles between exist under one shared switch.
         self.view_mode_var = tk.StringVar(value="inflater")
+        # Colour > Polygon-specific/Multi-colour -- same "created before _build_menu" reasoning
+        # (2026-10-01, explicit: "add a Colour menu"). self.multi_colors (the actual persisted
+        # per-base-face color list for Multi-colour mode, None until first needed) and
+        # self._source_polygon_id (Polygon-specific mode's own grouping, set by on_select_net/
+        # on_load_session_clicked) are read by _apply_color_mode, not referenced by any widget,
+        # so they don't need to exist this early -- only the StringVar does. Default is
+        # "multi" (2026-10-01, explicit: "use multi-colour as default") -- only this live
+        # starting value changed; a LOADED session still restores whatever mode it was actually
+        # saved with (on_load_session_clicked sets color_mode_var from the file), and
+        # SessionStateModel.color_mode's own default stays "polygon" for backward compatibility
+        # with a session saved before this field existed (such a file never saved any
+        # face_colors either, so defaulting ITS read-back to "multi" would show freshly
+        # randomized colors instead of reproducing what was actually on screen when it was
+        # saved).
+        self.color_mode_var = tk.StringVar(value="multi")
+        self.multi_colors = None
+        self._source_polygon_id = None
+        # Undo/redo for the Inflater view (2026-10-01, explicit: "put Undo/Redo in an Edit
+        # menu... it should apply to polyhedron_inflater too (in both views). There, the
+        # undo/redo stack applies to colours, rotations/scale/zoom") -- same single-stack-of-
+        # snapshots idea as ViewerPane's own pre-existing camera undo (_viewer_undo_stack), just
+        # covering this view's own Colour-menu state (color_mode/multi_colors) ALONGSIDE its
+        # shared Level camera (rotation/zoom/pan), since both are "the only things Inflater mode
+        # lets the user change" that aren't already Ctrl+Z-able net edits (there are none of
+        # those here -- this view has no 2D canvas). See _inflater_snapshot's own docstring for
+        # exactly what one entry holds. _last_color_mode tracks color_mode_var's own PREVIOUS
+        # value -- needed because a Tk Radiobutton's variable is already set to the NEW value by
+        # the time its own `command` fires, so _on_color_mode_changed can't just read
+        # color_mode_var itself to find the "before" state.
+        self._last_color_mode = "multi"
+        self._inflater_undo_stack = []
+        self._inflater_redo_stack = []
+        self._inflater_gesture_start_snapshot = None
         self._build_menu()
 
         # ---- Debug mode vs. release mode: the ONLY difference between
@@ -1371,14 +1517,15 @@ class InflatePolyhedronApp:
         # subdivide to). Only the current frontier level's button is
         # ever enabled.
         self.level_action_buttons = {}
-        # Debug-mode-only replay scrubber, one per level with an Inflate/Subdivide button
-        # (levels 1..MAX_LEVEL -- Level 0's own Relax doesn't support capture_frames). Lets a
-        # user inspect any point in a level's last-captured Inflate trajectory, not just the
-        # live end state or the auto-played animation. self._level_frames[level] is that
-        # level's own captured (positions, steps_taken) list, kept even after Subdividing past
-        # it; self._level_scrub_index[level], when set, OVERRIDES what draw() shows for that
-        # panel -- self.positions/level_snapshots are never touched by scrubbing, so the next
-        # real action always continues from the true state regardless of the slider.
+        # Debug-mode-only replay scrubber, one per level (including Level 0 -- its own Relax
+        # replays/captures frames the same way Levels 1-3's Inflate does, see _finish_relax;
+        # 2026-10-01, explicit: "debug mode should have the replay slider"). Lets a user inspect
+        # any point in a level's last-captured trajectory, not just the live end state or the
+        # auto-played animation. self._level_frames[level] is that level's own captured
+        # (positions, steps_taken) list, kept even after Subdividing/promoting past it;
+        # self._level_scrub_index[level], when set, OVERRIDES what draw() shows for that panel
+        # -- self.positions/level_snapshots are never touched by scrubbing, so the next real
+        # action always continues from the true state regardless of the slider.
         self._level_frames = {}
         self._level_scrub_index = {}
         self.level_replay_sliders = {}
@@ -1389,15 +1536,14 @@ class InflatePolyhedronApp:
             self.level_frames[level] = level_frame
             button = ttk.Button(level_frame, text="Relax" if level == 0 else "Inflate")
             self.level_action_buttons[level] = button
-            if level > 0:
-                # Packed FIRST among this frame's bottom-side widgets (Tk stacks additional
-                # bottom-packed siblings upward from the bottom edge), so it lands below the
-                # button once that's packed next.
-                slider = ttk.Scale(level_frame, from_=0, to=0, orient=tk.HORIZONTAL,
-                                    command=lambda v, lvl=level: self._on_replay_slider_moved(lvl, v))
-                slider.state(["disabled"])
-                self.level_replay_sliders[level] = slider
-                slider.pack(side=tk.BOTTOM, in_=level_frame)
+            # Packed FIRST among this frame's bottom-side widgets (Tk stacks additional
+            # bottom-packed siblings upward from the bottom edge), so it lands below the
+            # button once that's packed next.
+            slider = ttk.Scale(level_frame, from_=0, to=0, orient=tk.HORIZONTAL,
+                                command=lambda v, lvl=level: self._on_replay_slider_moved(lvl, v))
+            slider.state(["disabled"])
+            self.level_replay_sliders[level] = slider
+            slider.pack(side=tk.BOTTOM, in_=level_frame)
             # Button packed BEFORE the panel widget, at BOTTOM -- packing it after an
             # expand=True widget would starve it of space, since that widget would already
             # have claimed the whole remaining cavity. No fill=tk.X -- left at its own
@@ -1426,6 +1572,9 @@ class InflatePolyhedronApp:
         # interactive_builder_app's own saved "builder_connections" (bezier control points
         # included), or None -- see on_select_net for when this is populated.
         self.target_connections = None
+        # target_layout's own key space (see net_loading.target_layout_and_connections) --
+        # parallel to self.base_faces, populated alongside target_layout.
+        self.target_group_of_face = None
         self.positions = None
         self.iteration_count = 0
         self.last_stats = {}
@@ -1489,14 +1638,25 @@ class InflatePolyhedronApp:
         # "stopped" reads "Continue Simulation" and resumes from the START of whatever level
         # was interrupted (on_auto_continue_clicked), not from its own mid-run progress.
         self._auto_end_state = None
-        # Run > Run All's own state (see on_run_all_clicked): whether it's currently
-        # working through self._run_all_paths (a
+        # Run > Run All/Debug All's own state (see on_run_all_clicked/on_debug_all_clicked):
+        # whether a run is currently working through self._run_all_paths (a
         # fixed [(label, path), ...] snapshot of self.label_to_path taken at kickoff, so a net
         # added/removed mid-run doesn't change the list underway) and which index it's on --
-        # read by _update_window_title for the "(m/n)" suffix.
+        # read by _update_window_title for the "(m/n)" suffix. _run_all_wait_for_advance/
+        # _run_all_awaiting_key are Debug All's own pause-between-nets state (see
+        # _poll_run_all_net/_on_debug_all_right_key) -- always False for a plain Run All run.
+        # _run_all_poll_token guards against TWO _poll_run_all_net chains ever running at once
+        # (see _debug_all_jump's own comment) -- bumped every time a net is (re)started, and
+        # checked by every _poll_run_all_net call against the CURRENT value, so a poll chain
+        # left over from a net the user jumped away from early (Left/Right arrow mid-run)
+        # recognizes itself as stale and quietly stops, instead of racing the new chain.
         self._run_all_active = False
         self._run_all_paths = []
         self._run_all_index = 0
+        self._run_all_save_results = True
+        self._run_all_wait_for_advance = False
+        self._run_all_awaiting_key = False
+        self._run_all_poll_token = 0
         # The CURRENT level's own starting faces/positions/face_of_fine/edge_length/edges,
         # captured fresh every time a level is first entered (on_select_net for Level 0,
         # _finish_relax's own promotion to Level 1, _subdivide_step for Level 2+) -- exactly
@@ -1521,7 +1681,7 @@ class InflatePolyhedronApp:
         # after on_select_net's draw() call, not right after _apply_mode_visibility above.
         self._refit_window_height()
 
-        self.viewer = ViewerPane(self.root, self.view_mode_var)
+        self.viewer = ViewerPane(self.root, self.view_mode_var, self)
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit_request)
 
     def _on_view_mode_changed(self):
@@ -1547,11 +1707,20 @@ class InflatePolyhedronApp:
             # at Viewer's square size because the captured geometry was stale).
             self._inflater_was_zoomed = self.root.state() == "zoomed"
             self._inflater_geometry = self.root.geometry()
+            # Same capture-before-overwrite idea as the geometry above, for the Colour menu's
+            # own state (2026-10-01, explicit: "colour changes should apply in Viewer mode as
+            # well...") -- self.viewer._viewer_rescan() below (via _viewer_show_current) is
+            # about to repoint color_mode_var/_last_color_mode at whatever file Viewer mode
+            # shows, so Inflater's own current values need saving first to be restored on the
+            # way back out.
+            self._inflater_color_mode_snapshot = self.color_mode_var.get()
+            self._inflater_last_color_mode_snapshot = self._last_color_mode
             self._inflater_frame.pack_forget()
             self.viewer._viewer_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
             self.root.state("normal")
             self.root.geometry(VIEWER_WINDOW_GEOMETRY)
             self.viewer._viewer_rescan()
+            self._update_run_menu_state()
         else:
             if not self.viewer._viewer_confirm_discard_unsaved():
                 self.view_mode_var.set("viewer")
@@ -1562,6 +1731,14 @@ class InflatePolyhedronApp:
                 self.root.state("zoomed")
             else:
                 self.root.geometry(self._inflater_geometry)
+            # Restores Inflater mode's own Colour-menu state, captured above on the way in --
+            # color_mode_var currently holds whatever Viewer file was last on screen.
+            self.color_mode_var.set(
+                getattr(self, "_inflater_color_mode_snapshot", self.color_mode_var.get()))
+            self._last_color_mode = getattr(
+                self, "_inflater_last_color_mode_snapshot", self._last_color_mode)
+            self._update_colour_menu_state()
+            self._update_run_menu_state()
         self._update_window_title()
 
     def _on_control_s(self):
@@ -1571,6 +1748,26 @@ class InflatePolyhedronApp:
             self.viewer._on_viewer_save_clicked()
         else:
             self.on_save_session_clicked()
+
+    # ---- Edit menu (2026-10-01, explicit: "Put Undo/Redo in an Edit menu... it should apply
+    # to polyhedron_inflater too (in both views)") ----
+
+    def _on_edit_undo(self):
+        """Edit > Undo / Ctrl+Z -- dispatches by view_mode_var, same pattern as _on_control_s.
+        Viewer mode's own undo (_viewer_undo_stack, pre-existing) already covers that view's
+        camera; _on_inflater_undo is this view's own new equivalent, covering Colour-menu state
+        plus the shared Level camera (see _inflater_snapshot's own docstring)."""
+        if self.view_mode_var.get() == "viewer":
+            self.viewer._on_viewer_undo()
+        else:
+            self._on_inflater_undo()
+
+    def _on_edit_redo(self):
+        """Edit > Redo / Ctrl+Y -- see _on_edit_undo's own docstring."""
+        if self.view_mode_var.get() == "viewer":
+            self.viewer._on_viewer_redo()
+        else:
+            self._on_inflater_redo()
 
     # ---- close (Viewer's own unsaved-changes check; Inflater mode has none of its own to
     # preserve here, so this is the app's first WM_DELETE_WINDOW handler) ----
@@ -1618,8 +1815,8 @@ class InflatePolyhedronApp:
     def _build_menu(self):
         """This app's only menu bar -- File > Load.../Save..., Load above Save as the more
         common entry point (opening a previously-saved session before continuing it); Run >
-        Run All (see on_run_all_clicked). See on_save_clicked/on_load_clicked for what the
-        File items actually do.
+        Run All/Debug All (see on_run_all_clicked/on_debug_all_clicked). See on_save_clicked/
+        on_load_clicked for what the File items actually do.
 
         Explicit `font=` on every Menu/add_command call here: Windows renders the native menu
         bar via its own chrome, which ignores "TkMenuFont"'s configured size regardless of
@@ -1633,13 +1830,68 @@ class InflatePolyhedronApp:
         file_menu.add_command(label="Load...", command=self.on_load_session_clicked, font=menu_font)
         # "accelerator" is display-only (the menu label's own right-aligned hint text) -- Tk
         # never wires it up as an actual key binding, so bind_all below is what makes Ctrl+S
-        # really work.
-        file_menu.add_command(label="Save...", command=self.on_save_session_clicked,
+        # really work. command=self._on_control_s, not self.on_save_session_clicked directly
+        # (2026-10-01, explicit bug report: "in Viewer view, choose File > Save As should try
+        # to save the currently loaded file, not the one in Inflater mode") -- _on_control_s
+        # already dispatches by view_mode_var exactly this way (Viewer's own
+        # _on_viewer_save_clicked vs. Inflater's on_save_session_clicked), the menu item had
+        # just never been routed through it.
+        file_menu.add_command(label="Save...", command=self._on_control_s,
                                accelerator="Ctrl+S", font=menu_font)
         menubar.add_cascade(label="File", menu=file_menu)
         run_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
         run_menu.add_command(label="Run All", command=self.on_run_all_clicked, font=menu_font)
+        # Debug All (2026-10-01, explicit): same unattended run through every net as Run All,
+        # except it never saves results and pauses after each net for the Right arrow key
+        # (see on_debug_all_clicked) -- only meaningful, and only enabled, in debug mode.
+        run_menu.add_command(label="Debug All", command=self.on_debug_all_clicked, font=menu_font)
         menubar.add_cascade(label="Run", menu=run_menu)
+        # Run All is disabled while Viewer mode is active (2026-10-01, explicit: "Run All
+        # should be disabled in this view") -- it iterates every shipped net through the
+        # Inflater pipeline, which has nothing to do with whatever Viewer mode is showing.
+        # Debug All is additionally disabled outside debug mode (see _update_run_menu_state).
+        self._run_menu = run_menu
+        self._run_all_menu_index = run_menu.index("Run All")
+        self._debug_all_menu_index = run_menu.index("Debug All")
+        self._update_run_menu_state()
+        # Edit > Undo/Redo (2026-10-01, explicit: "Put Undo/Redo in an Edit menu... it should
+        # apply to polyhedron_inflater too (in both views)") -- _on_edit_undo/_on_edit_redo
+        # dispatch to whichever view is actually showing (self.view_mode_var), same pattern
+        # _on_control_s already uses for Ctrl+S. self.viewer doesn't exist yet at this point in
+        # __init__ (built further down) -- fine, since these are only ever CALLED later, same
+        # "lazy self.viewer reference" already used by _on_key_d below.
+        edit_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
+        edit_menu.add_command(label="Undo", command=self._on_edit_undo,
+                               accelerator="Ctrl+Z", font=menu_font)
+        edit_menu.add_command(label="Redo", command=self._on_edit_redo,
+                               accelerator="Ctrl+Y", font=menu_font)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+        # Colour > Polygon-specific/Multi-colour (radio, mutually exclusive)/Randomize
+        # (2026-10-01, explicit: "add a Colour menu"). Polygon-specific is this app's existing
+        # per-Polygon-Fold-group coloring (_face_colors_by_group); Multi-colour is a NEW mode --
+        # one random color per individual base face, from the same FACE_COLORS palette, chosen
+        # to avoid matching an adjacent face's color where possible (_apply_color_mode/
+        # logic.coloring.random_face_colors). Randomize re-rolls Multi-colour's own colors; kept
+        # enabled only while Multi-colour is selected (_update_colour_menu_state) -- it has
+        # nothing to do in Polygon-specific mode, which has no random element to reroll.
+        # P/M/R keyboard shortcuts (2026-10-01, explicit: "let P, M, R be the keyboard
+        # shortcuts for Polygon-specific, Multi-colour, and Randomize") -- accelerator= is
+        # display-only, same convention as every other accelerator label here; the bind_all
+        # calls near the end of this method are what actually make the keys work.
+        colour_menu = tk.Menu(menubar, tearoff=False, font=menu_font)
+        colour_menu.add_radiobutton(label="Polygon-specific", variable=self.color_mode_var,
+                                     value="polygon", command=self._on_color_mode_changed,
+                                     accelerator="P", font=menu_font)
+        colour_menu.add_radiobutton(label="Multi-colour", variable=self.color_mode_var,
+                                     value="multi", command=self._on_color_mode_changed,
+                                     accelerator="M", font=menu_font)
+        colour_menu.add_separator()
+        colour_menu.add_command(label="Randomize", command=self._on_randomize_colors_clicked,
+                                 accelerator="R", font=menu_font)
+        menubar.add_cascade(label="Colour", menu=colour_menu)
+        self._colour_menu = colour_menu
+        self._randomize_menu_index = colour_menu.index("Randomize")
+        self._update_colour_menu_state()
         # Inflater (default) is this app's own existing UI; Viewer is the read-only .hippo
         # browser (see _build_hippo_viewer_pane) -- a plain radiobutton pair, not separate
         # windows, so switching is instant and keeps both panes' own state alive underneath.
@@ -1659,6 +1911,35 @@ class InflatePolyhedronApp:
         # means "save the current .hippo file" in Viewer mode, not "save an Inflater session".
         self.root.bind_all("<Control-s>", lambda event: self._on_control_s())
         self.root.bind_all("<Control-S>", lambda event: self._on_control_s())
+        # Edit > Undo/Redo (2026-10-01, explicit) -- same dispatch-by-view_mode_var/bind_all
+        # pattern as Ctrl+S above. Bound here (ONE place) rather than separately inside
+        # ViewerPane's own __init__ too -- Tk's bind_all only keeps the LAST binding registered
+        # for a given sequence+tag, so two independent bind_all calls for "<Control-z>" would
+        # silently fight over which one actually fires; see ViewerPane.__init__'s own comment
+        # where its half of this used to live.
+        self.root.bind_all("<Control-z>", lambda event: self._on_edit_undo())
+        self.root.bind_all("<Control-Z>", lambda event: self._on_edit_undo())
+        self.root.bind_all("<Control-y>", lambda event: self._on_edit_redo())
+        self.root.bind_all("<Control-Y>", lambda event: self._on_edit_redo())
+        # Colour > Polygon-specific/Multi-colour/Randomize (2026-10-01, explicit: "let P, M, R
+        # be the keyboard shortcuts..."). Both cases bound (no Ctrl involved here, so Shift
+        # alone produces the uppercase keysym) -- same reasoning as every other plain-letter
+        # shortcut in this app/interactive_builder_app (d/f/h/v/j/m there). _on_color_mode_key
+        # dispatches through _on_color_mode_changed exactly as the menu's own radiobutton click
+        # would (including its own Viewer-vs-Inflater dispatch).
+        self.root.bind_all("<KeyPress-p>", lambda event: self._on_color_mode_key("polygon"))
+        self.root.bind_all("<KeyPress-P>", lambda event: self._on_color_mode_key("polygon"))
+        self.root.bind_all("<KeyPress-m>", lambda event: self._on_color_mode_key("multi"))
+        self.root.bind_all("<KeyPress-M>", lambda event: self._on_color_mode_key("multi"))
+        self.root.bind_all("<KeyPress-r>", lambda event: self._on_randomize_colors_clicked())
+        self.root.bind_all("<KeyPress-R>", lambda event: self._on_randomize_colors_clicked())
+
+    def _on_color_mode_key(self, mode):
+        """P/M keyboard shortcuts -- sets color_mode_var then reuses _on_color_mode_changed
+        exactly as the Colour menu's own radiobutton click would (same undo-push/Viewer-vs-
+        Inflater dispatch, no separate logic needed here)."""
+        self.color_mode_var.set(mode)
+        self._on_color_mode_changed()
 
     def _on_key_d(self, event=None):
         """"d" dispatches by view_mode_var -- "next file" in Viewer mode (2026-09-30,
@@ -1672,6 +1953,198 @@ class InflatePolyhedronApp:
         self.debug_mode = not self.debug_mode
         self._apply_mode_visibility()
         self._refit_window_height()
+        self._update_run_menu_state()
+
+    # ---- Colour menu (2026-10-01, explicit: "add a Colour menu") ----
+
+    def _on_color_mode_changed(self):
+        """Colour > Polygon-specific/Multi-colour radiobutton command -- dispatches by
+        view_mode_var (2026-10-01, explicit: "colour changes should apply in Viewer mode as
+        well, and they should factor into the undo/redo stack"), same pattern _on_control_s/
+        _on_edit_undo already use: Viewer mode's own _on_viewer_color_mode_changed operates on
+        the CURRENTLY VIEWED file instead of this view's live net. _apply_color_mode (Inflater's
+        own path, below) lazily generates Multi-colour's own colors the FIRST time they're
+        needed for this net (none yet, or a stale list left over from a net with a different
+        face count) -- NOT every time Multi-colour is RE-selected, so toggling back and forth
+        without ever hitting Randomize keeps showing the SAME colors each time (explicit: "if
+        the user is toggling... but they haven't selected Randomize, then the colours used in
+        Multi-colour shouldn't change every time we toggle back").
+
+        Undoable (2026-10-01, explicit: "the undo/redo stack applies to colours...") -- pushes
+        an undo snapshot whose own "color_mode" field is OVERRIDDEN to self._last_color_mode
+        (the value from right before this click), since by the time a Tk Radiobutton's own
+        `command` fires, its `variable` has ALREADY been set to the new value --
+        self._inflater_snapshot() alone would otherwise capture the new mode as if it were the
+        "before" state. Snapshotted BEFORE _apply_color_mode runs, not after (2026-10-01, fix
+        for a bug caught while building Viewer mode's own identical feature): _apply_color_mode
+        lazily GENERATES self.multi_colors the first time Multi-colour is ever selected for this
+        net, so snapshotting afterward would capture those freshly-generated colors as if they
+        were already "the before state" -- undoing back out of Multi-colour would then leave
+        multi_colors non-None (and the net spuriously flagged dirty on a subsequent save) even
+        though it was genuinely None before this click. Only pushes when the mode actually
+        changed."""
+        new_mode = self.color_mode_var.get()
+        if self.view_mode_var.get() == "viewer":
+            self.viewer._on_viewer_color_mode_changed(new_mode)
+            return
+        old_mode = self._last_color_mode
+        if new_mode != old_mode:
+            snap = self._inflater_snapshot()
+            snap["color_mode"] = old_mode
+        else:
+            snap = None
+        self._apply_color_mode()
+        self._update_colour_menu_state()
+        if snap is not None:
+            self._inflater_push_undo(snap)
+        self._last_color_mode = new_mode
+        if self.base_faces is not None:
+            self.draw()
+
+    def _on_randomize_colors_clicked(self):
+        """Colour > Randomize -- dispatches by view_mode_var, same pattern as
+        _on_color_mode_changed above. Inflater mode's own path (below) re-rolls Multi-colour's
+        own per-base-face colors from scratch; a no-op outside Multi-colour mode (the menu item
+        is disabled then -- see _update_colour_menu_state) or before any net is loaded. Undoable
+        (2026-10-01, explicit) -- an ordinary push right before the actual color change
+        (nothing's mutated self.multi_colors yet at this point, unlike _on_color_mode_changed's
+        trickier case, so the plain automatic "before" snapshot is already correct)."""
+        if self.view_mode_var.get() == "viewer":
+            self.viewer._on_viewer_randomize_colors_clicked()
+            return
+        if self.color_mode_var.get() != "multi" or self.base_faces is None:
+            return
+        self._inflater_push_undo(self._inflater_snapshot())
+        self._regenerate_multi_colors()
+        self._apply_color_mode()
+        self.draw()
+
+    def _regenerate_multi_colors(self):
+        self.multi_colors, _, _ = _random_face_colors_by_group(
+            self.base_faces, self.base_face_edge_ids, self._source_polygon_id, random.Random())
+
+    def _apply_color_mode(self):
+        """Recomputes self.colors/self.color_by_group/self.group_of_base_face for
+        self.color_mode_var's current value -- the one place on_select_net/
+        on_load_session_clicked and the Colour menu's own handlers all go through, so every
+        caller sees the same mode-dependent coloring applied consistently. "multi" lazily
+        (re)generates self.multi_colors first if it's missing or stale (wrong length for the
+        current net -- e.g. right after a fresh on_select_net, or a session loaded with no
+        saved face_colors), then assigns it directly -- one color per Polygon-Fold GROUP
+        (2026-10-01, bug fix: was one color per individual base face, see
+        random_face_colors_by_group's own docstring for why that changed), same group_of_base_face
+        _draw_level_panel's existing per-group add_mesh grouping already uses for Polygon-specific
+        mode. A no-op if no net is loaded yet."""
+        if self.base_faces is None:
+            return
+        if self.color_mode_var.get() == "multi":
+            if self.multi_colors is None or len(self.multi_colors) != len(self.base_faces):
+                self._regenerate_multi_colors()
+            self.colors = list(self.multi_colors)
+            self.group_of_base_face = _group_of_face(self.base_faces, self._source_polygon_id)
+            self.color_by_group = {}
+            for i, g in enumerate(self.group_of_base_face):
+                self.color_by_group.setdefault(g, self.colors[i])
+        else:
+            net_layout = (self._net_file_json or {}).get("net_layout") or []
+            n_by_group = _polygon_n_of_group(self._source_polygon_id, net_layout)
+            self.colors, self.color_by_group, self.group_of_base_face = _face_colors_by_group(
+                self.base_faces, self._source_polygon_id, n_by_group)
+
+    def _update_colour_menu_state(self):
+        """Randomize only does something in Multi-colour mode (Polygon-specific has no random
+        element to reroll) -- disabled otherwise."""
+        state = "normal" if self.color_mode_var.get() == "multi" else "disabled"
+        self._colour_menu.entryconfig(self._randomize_menu_index, state=state)
+
+    def _update_run_menu_state(self):
+        """Run > Run All only makes sense in Inflater mode -- disabled in Viewer mode
+        (2026-10-01, explicit: "Run All should be disabled in this view"), same as Randomize's
+        own mode-gated enabled state above. Run > Debug All is additionally gated on debug mode
+        itself -- it's a debugging aid (pauses after each net for the Right arrow key), not
+        something a release-mode user should see enabled at all. Called from both
+        _on_view_mode_changed and _on_toggle_debug_mode, so either toggle alone keeps both
+        items' state correct."""
+        viewer_active = self.view_mode_var.get() == "viewer"
+        self._run_menu.entryconfig(
+            self._run_all_menu_index, state="disabled" if viewer_active else "normal")
+        # getattr: _build_menu's own initial call runs before self.debug_mode is set (defaults
+        # to False there, same as the real default moments later).
+        debug_mode = getattr(self, "debug_mode", False)
+        self._run_menu.entryconfig(
+            self._debug_all_menu_index,
+            state="normal" if (debug_mode and not viewer_active) else "disabled")
+
+    # ---- Inflater-view undo/redo (2026-10-01, explicit -- see _on_edit_undo's own docstring) --
+
+    def _inflater_snapshot(self):
+        """One Inflater-view undo/redo entry: color_mode/multi_colors (Colour menu) plus the
+        shared Level camera's own rotation/zoom/pan -- mirrors ViewerPane's own per-file camera
+        snapshot (_viewer_camera_snapshot), just for this view's single live net instead of
+        per-file, and with Colour state folded in alongside (this view has no 2D canvas/net
+        edits of its own to cover, unlike interactive_inflater_app's equivalent feature -- Colour
+        + camera really is everything Inflater mode lets the user change). multi_colors is a
+        plain shallow list copy -- every entry's a hex-string color, nothing nested."""
+        cam = self._level_camera_state
+        return {
+            "color_mode": self.color_mode_var.get(),
+            "multi_colors": list(self.multi_colors) if self.multi_colors is not None else None,
+            "camera": {"rotation": cam["rotation"], "zoom": cam["zoom"], "pan": cam["pan"].copy()},
+        }
+
+    def _inflater_apply_snapshot(self, snap):
+        """Inverse of _inflater_snapshot -- restores color_mode/multi_colors/camera, then
+        recomputes self.colors/color_by_group/group_of_base_face (_apply_color_mode) and
+        redraws (draw()) so the restored state is actually visible, same as every other Colour-
+        menu/camera-changing call site here already does."""
+        self.color_mode_var.set(snap["color_mode"])
+        self.multi_colors = list(snap["multi_colors"]) if snap["multi_colors"] is not None else None
+        self._last_color_mode = snap["color_mode"]
+        cam = self._level_camera_state
+        cam["rotation"] = snap["camera"]["rotation"]
+        cam["zoom"] = snap["camera"]["zoom"]
+        cam["pan"] = snap["camera"]["pan"].copy()
+        self._update_colour_menu_state()
+        self._apply_color_mode()
+        if self.base_faces is not None:
+            self.draw()
+
+    def _inflater_push_undo(self, snapshot):
+        self._inflater_undo_stack.append(snapshot)
+        self._inflater_redo_stack.clear()
+
+    def _inflater_commit_gesture_undo(self):
+        """Pushes ONE undo step for a just-finished camera drag/pan gesture, captured at its
+        START (_on_level_drag_start/_on_level_pan_start) rather than per motion tick -- and only
+        if the camera actually ended up different, so a click-without-moving leaves no undo
+        entry. Mirrors ViewerPane._viewer_commit_gesture_undo exactly."""
+        start = self._inflater_gesture_start_snapshot
+        self._inflater_gesture_start_snapshot = None
+        if start is None:
+            return
+        cam = self._level_camera_state
+        start_cam = start["camera"]
+        changed = (cam["zoom"] != start_cam["zoom"]
+                   or not np.allclose(cam["pan"], start_cam["pan"])
+                   or not np.allclose(cam["rotation"].as_quat(), start_cam["rotation"].as_quat()))
+        if changed:
+            self._inflater_push_undo(start)
+
+    def _on_inflater_undo(self):
+        if not self._inflater_undo_stack:
+            return
+        current = self._inflater_snapshot()
+        previous = self._inflater_undo_stack.pop()
+        self._inflater_redo_stack.append(current)
+        self._inflater_apply_snapshot(previous)
+
+    def _on_inflater_redo(self):
+        if not self._inflater_redo_stack:
+            return
+        current = self._inflater_snapshot()
+        following = self._inflater_redo_stack.pop()
+        self._inflater_undo_stack.append(current)
+        self._inflater_apply_snapshot(following)
 
     def _update_window_title(self):
         """The window's own title: APP_TITLE, plus " (debug mode)" while debug mode is on, plus
@@ -1860,6 +2333,10 @@ class InflatePolyhedronApp:
         self._level_dragging = True
         self._level_last_xy = (event.x, event.y)
         self._level_drag_group_level = self._level_of_label.get(event.widget, 1)
+        # Undo/redo (2026-10-01, explicit) -- captured at gesture START, pushed at gesture END
+        # (_on_level_drag_end) only if the camera actually ended up different; see
+        # _inflater_commit_gesture_undo's own docstring.
+        self._inflater_gesture_start_snapshot = self._inflater_snapshot()
 
     def _on_level_motion(self, event):
         """Left-click-drag on a level panel rotates that panel's own camera group's
@@ -1869,22 +2346,15 @@ class InflatePolyhedronApp:
         interactive widgets. Re-rendering the whole group costs ~30ms, well within real-time
         feel.
 
-        Composes two small rotations -- about the current up axis for a horizontal drag, the
-        current right axis for a vertical one -- onto the existing quaternion, rather than
-        accumulating into a stored azimuth/elevation pair. This is a free trackball rotation:
-        "up" is whatever the group's rotation currently says it is (not re-pinned to world +z
-        every frame), so there's no pole for elevation to lock up near, and no clamp needed."""
+        This is a free trackball rotation (utils.camera_trackball.rotate -- "up"/"right" read
+        off the group's rotation as it currently is, not re-pinned to world +z every frame, so
+        there's no pole for elevation to lock up near, and no clamp needed)."""
         if not self._level_dragging or self._level_last_xy is None:
             return
         cam = self._level_camera(self._level_drag_group_level)
         last_x, last_y = self._level_last_xy
         dx, dy = event.x - last_x, event.y - last_y
-        up = cam["rotation"].apply([0.0, 0.0, 1.0])
-        right = cam["rotation"].apply([0.0, 1.0, 0.0])
-        sensitivity = np.radians(LEVEL_DRAG_SENSITIVITY)
-        yaw = Rotation.from_rotvec(-dx * sensitivity * up)
-        pitch = Rotation.from_rotvec(-dy * sensitivity * right)
-        cam["rotation"] = pitch * yaw * cam["rotation"]
+        cam["rotation"] = _camera_rotate(cam["rotation"], dx, dy, LEVEL_DRAG_SENSITIVITY)
         self._level_last_xy = (event.x, event.y)
         self._render_camera_group(self._level_drag_group_level)
 
@@ -1897,11 +2367,15 @@ class InflatePolyhedronApp:
         if self._level_drag_group_level is not None:
             self._render_camera_group(self._level_drag_group_level)
         self._level_drag_group_level = None
+        self._inflater_commit_gesture_undo()
 
     def _on_level_pan_start(self, event):
         self._level_panning = True
         self._level_pan_last_xy = (event.x, event.y)
         self._level_pan_group_level = self._level_of_label.get(event.widget, 1)
+        # Undo/redo (2026-10-01, explicit) -- same gesture-start/commit pattern as
+        # _on_level_drag_start/_on_level_drag_end above.
+        self._inflater_gesture_start_snapshot = self._inflater_snapshot()
 
     def _on_level_pan_motion(self, event):
         """Right-click-drag on a level panel translates that panel's own camera group's pan
@@ -1922,8 +2396,7 @@ class InflatePolyhedronApp:
         last_x, last_y = self._level_pan_last_xy
         dx, dy = event.x - last_x, event.y - last_y
         panel_width, panel_height = _level_panel_size(self._level_pan_group_level)
-        cam["pan"] = cam["pan"] + np.array(
-            [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
+        cam["pan"] = _camera_pan(cam["pan"], dx, dy, panel_width, panel_height)
         self._level_pan_last_xy = (event.x, event.y)
         self._render_camera_group(self._level_pan_group_level)
 
@@ -1934,15 +2407,18 @@ class InflatePolyhedronApp:
         if self._level_pan_group_level is not None:
             self._render_camera_group(self._level_pan_group_level)
         self._level_pan_group_level = None
+        self._inflater_commit_gesture_undo()
 
     def _on_level_pan_reset(self, event=None):
         """Middle-click on a level panel resets the shared camera's pan/zoom/rotation
         together, back to defaults -- every level panel, since they all now share one camera.
         Rotation resets through _initial_level_rotation() (the same starting quaternion
         __init__ builds), not plain identity, since the default view is deliberately
-        non-axis-aligned."""
+        non-axis-aligned. Undoable (2026-10-01, explicit) -- pushed directly, same "already one
+        discrete action" reasoning _on_level_scroll's own push uses."""
         level = self._level_of_label.get(event.widget, 1) if event is not None else 1
         cam = self._level_camera(level)
+        self._inflater_push_undo(self._inflater_snapshot())
         cam["pan"] = np.zeros(2)
         cam["zoom"] = 1.0
         cam["rotation"] = _initial_level_rotation()
@@ -1952,16 +2428,16 @@ class InflatePolyhedronApp:
         """Mouse-wheel-scroll on a level panel zooms the shared camera and re-renders every
         level panel (they all zoom together now). event.num is Button-4/5 on X11 (no
         event.delta there); event.delta is Windows/macOS's signed notch count (positive delta
-        zooms in)."""
+        zooms in). Undoable (2026-10-01, explicit) -- pushed directly, one undo step per wheel
+        tick (already a single discrete action, unlike a drag gesture's many motion ticks)."""
         level = self._level_of_label.get(event.widget)
         if level is None:
             return
         cam = self._level_camera(level)
-        if getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
-            factor = 1.0 / LEVEL_ZOOM_STEP
-        else:
-            factor = LEVEL_ZOOM_STEP
-        cam["zoom"] = max(LEVEL_ZOOM_MIN, min(LEVEL_ZOOM_MAX, cam["zoom"] * factor))
+        self._inflater_push_undo(self._inflater_snapshot())
+        zoom_in = not (getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0)
+        cam["zoom"] = _camera_zoom(cam["zoom"], zoom_in, LEVEL_ZOOM_STEP, LEVEL_ZOOM_MIN,
+                                    LEVEL_ZOOM_MAX)
         self._render_camera_group(level)
 
     def _render_all_level_panels(self):
@@ -2114,9 +2590,7 @@ class InflatePolyhedronApp:
         self._render_level_pv(level)
 
     def _capture_level_image(self, level):
-        """The actual pixels _render_level_pv blits into self.level_labels[level] -- factored
-        out as its own PIL Image return so on_save_session_clicked can save Level 3's own view
-        as a .jpg alongside a .hippo without duplicating this camera-setup logic. Positions an
+        """The actual pixels _render_level_pv blits into self.level_labels[level]. Positions an
         orthographic (parallel-projection) camera from `level`'s own
         camera group's rotation at a distance derived from this level's own current bounding
         box (self._level_center/_level_half, set by _draw_level_panel -- necessary since
@@ -2207,12 +2681,13 @@ class InflatePolyhedronApp:
 
     def _start_computing_animation(self, level):
         """Blanks `level`'s panel image (plain background, no mesh) and shows an animated
-        "Computing..." in its bottom message area for as long as pressure calibration is
-        searching -- most of calibration's several relax_once trials are thrown away, so
-        there's no single meaningful shape to show frame-by-frame, unlike Level 0's own Relax
-        (which stays live -- only ever one run there). _render_level_pv skips `level` entirely
-        while self._computing_level is set to it, so nothing else can paint over the blank
-        image.
+        "Computing..." in its bottom message area while a run is in progress -- Levels 1-3
+        (pressure calibration) since most of calibration's several relax_once trials are thrown
+        away, so there's no single meaningful shape to show frame-by-frame; Level 0's own Relax
+        the same way since 2026-10-01 (explicit: "when it's computing, it should say
+        Computing... like the other levels" -- previously stayed live instead, only ever one
+        run there, see on_relax_clicked). _render_level_pv skips `level` entirely while
+        self._computing_level is set to it, so nothing else can paint over the blank image.
 
         The blank image is rendered ONCE here, not regenerated every dot-cycle tick -- a flat
         background never changes frame to frame, so only the separate message Label's text
@@ -2358,13 +2833,21 @@ class InflatePolyhedronApp:
         # that first call still gets its defaults applied.
         if getattr(self, "current_path", None) != path:
             self._reset_target_rms_defaults()
-        self.colors, self.color_by_group, self.group_of_base_face = _face_colors_by_group(
-            len(self.base_faces), source_polygon_id)
+        # A freshly-loaded net has no Multi-colour colors of its own yet -- _apply_color_mode
+        # (below, after self.base_faces is final) regenerates them on demand if Multi-colour is
+        # the active mode; a net with the SAME face count as whatever was loaded before is still
+        # treated as fresh here (not worth trying to detect "genuinely the same net" to preserve
+        # colors across a reselect -- on_select_net already re-runs for the same net in a few
+        # places, e.g. on_auto_clicked's restart, and those should look freshly-colored too).
+        self.multi_colors = None
+        self._source_polygon_id = source_polygon_id
+        self._apply_color_mode()
 
         # Precomputed once per net selection: this panel's flat net layout doesn't change with
         # subdivision level, only its overlay does -- see net_loading.target_layout_and_
         # connections's own docstring for the net_layout/BFS-fallback decision.
-        self.target_layout, self.target_connections = net_loading.target_layout_and_connections(
+        (self.target_layout, self.target_connections,
+         self.target_group_of_face) = net_loading.target_layout_and_connections(
             self.base_faces, self._net_file_json, self_join_split)
 
         # Level 0 and Level 1 share this exact fan-triangulated topology -- computed once here,
@@ -2443,15 +2926,7 @@ class InflatePolyhedronApp:
         level's own live faces/positions/face_of_fine/edge_length aren't in there yet, so this
         adds them under self.subdivision_level before writing. Camera rotation (a scipy
         Rotation) is stored as .as_quat() -- JSON has no quaternion type, and a plain tuple
-        round-trips through Rotation.from_quat() losslessly.
-
-        Also saves a .jpg of Level 3's own current view alongside the .hippo, same basename,
-        same folder -- e.g. butterfly.hippo -> butterfly.jpg. Skipped (silently -- the .hippo
-        save itself already succeeded regardless) unless Level 3 actually has real content:
-        draw()'s own condition for "this level has been reached" (either the live frontier
-        right now, or already left behind as a snapshot) -- _capture_level_image(3) alone isn't
-        enough to tell, since it happily renders an EMPTY scene (plotter.clear() with nothing
-        added, see _draw_level_panel) for a level that was never reached at all."""
+        round-trips through Rotation.from_quat() losslessly."""
         levels = {level: LevelStateModel.from_mesh(snap["faces"], snap["positions"],
                                                      snap["face_of_fine"])
                   for level, snap in self.level_snapshots.items()}
@@ -2488,6 +2963,10 @@ class InflatePolyhedronApp:
             level0_rotation=tuple(float(v) for v in self._level_camera_state["rotation"].as_quat()),
             net_zoom=self.net_zoom,
             net_pan=(float(self.net_pan[0]), float(self.net_pan[1])),
+            color_mode=self.color_mode_var.get(),
+            face_colors=(list(self.multi_colors)
+                         if self.color_mode_var.get() == "multi" and self.multi_colors is not None
+                         else None),
         )
         try:
             with open(path, "w") as f:
@@ -2495,18 +2974,7 @@ class InflatePolyhedronApp:
         except OSError as e:
             messagebox.showerror("Save", f"Could not save session: {e}")
             return False
-        jpg_saved = False
-        level3_reached = 3 == self.subdivision_level or 3 in self.level_snapshots
-        level3_image = self._capture_level_image(3) if level3_reached else None
-        if level3_image is not None:
-            jpg_path = os.path.splitext(path)[0] + ".jpg"
-            try:
-                level3_image.convert("RGB").save(jpg_path, "JPEG")
-                jpg_saved = True
-            except OSError as e:
-                messagebox.showerror("Save", f"Session saved, but could not save Level 3 image: {e}")
-        suffix = " (+ Level 3 .jpg)" if jpg_saved else ""
-        self._set_status(f"Session saved to {os.path.basename(path)}{suffix}.", "info")
+        self._set_status(f"Session saved to {os.path.basename(path)}.", "info")
         return True
 
     def on_load_session_clicked(self):
@@ -2555,11 +3023,30 @@ class InflatePolyhedronApp:
             self.base_edges = None
             self.base_face_edge_ids = None
             source_polygon_id = None
-        self.colors, self.color_by_group, self.group_of_base_face = _face_colors_by_group(
-            len(self.base_faces), source_polygon_id)
+        self._source_polygon_id = source_polygon_id
+        # Colour mode + Multi-colour's own persisted colors (2026-10-01, explicit: "these
+        # colours persist via Save/Load, even into different app, if the target app supports
+        # it") -- state.face_colors is None for a session saved before this existed, or one
+        # saved in Polygon-specific mode (nothing to persist there, it's re-derived fresh every
+        # time from source_polygon_id); _apply_color_mode's own lazy-regenerate path covers a
+        # length mismatch (e.g. face_colors from a DIFFERENT net than base_faces, shouldn't
+        # normally happen but isn't trusted blindly either) the same way a fresh net's own None
+        # is covered.
+        self.color_mode_var.set(state.color_mode)
+        # Keeps _last_color_mode in sync with the just-loaded mode (2026-10-01, explicit:
+        # "make sure the specific colours and the colour mode are saved/loaded appropriately")
+        # -- _on_color_mode_changed's own undo-snapshot logic reads this to find the mode from
+        # "before" a later Colour-menu click; left stale (at whatever it was pre-load), the
+        # FIRST mode toggle after a load would record the wrong "before" state in its own undo
+        # entry.
+        self._last_color_mode = state.color_mode
+        self.multi_colors = list(state.face_colors) if state.face_colors is not None else None
+        self._apply_color_mode()
+        self._update_colour_menu_state()
         # Same layout decision as on_select_net -- see net_loading.target_layout_and_
         # connections's own docstring.
-        self.target_layout, self.target_connections = net_loading.target_layout_and_connections(
+        (self.target_layout, self.target_connections,
+         self.target_group_of_face) = net_loading.target_layout_and_connections(
             self.base_faces, self._net_file_json)
 
         self.subdivision_level = state.subdivision_level
@@ -2718,15 +3205,15 @@ class InflatePolyhedronApp:
 
     def _record_level_history(self):
         """Records/updates the current level's row: pressure last calibrated for it at Level
-        1+, or the jiggle/burst strength actually used at Level 0 (level0_jiggle_distance --
-        see that function's own docstring for why a displacement, not a literal pressure, ends
-        up in that column), steps so far this
+        1+, or the periodic-burst strength actually used at Level 0 (level0_periodic_burst_
+        distance -- see that function's own docstring for why a displacement, not a literal
+        pressure, ends up in that column), steps so far this
         level, stretch stats, and the stopping-condition `optimality` -- all from
         self.last_stats, plus the "Simulation Time"/"Cumulative Time" columns' own backing
         state. Called on every subdivide/promotion, every live progress update, and when a run
         finishes, so the row always reflects the level's latest state rather than only its
         final converged one."""
-        level0_burst = (level0_jiggle_distance(self.faces, self.edge_length, self.edges)
+        level0_burst = (level0_periodic_burst_distance(self.faces, self.edge_length, self.edges)
                          if self.subdivision_level == 0 and self.faces is not None else None)
         self.level_history[self.subdivision_level] = {
             "pressure": level0_burst if self.subdivision_level == 0 else self.pressure_value,
@@ -2830,9 +3317,9 @@ class InflatePolyhedronApp:
                                 f"{self._format_sci(gtol, precision=0)} {mark}")
                 tags = ("converged",) if converged else ("not_converged",)
             # "--" only when this level's own row hasn't recorded anything yet -- Level 0's own
-            # "pressure" is level0_jiggle_distance (the burst strength actually used there, see
-            # _record_level_history's own comment), not a literal calibrated pressure, but
-            # still a real number once Level 0 has run at all.
+            # "pressure" is level0_periodic_burst_distance (the burst strength actually used
+            # there, see _record_level_history's own comment), not a literal calibrated
+            # pressure, but still a real number once Level 0 has run at all.
             pressure_str = "--" if rec["pressure"] is None else f"{rec['pressure']:.2f}"
             # This row's own target_rms_pct (recorded at the time it was calibrated, not read
             # live from the spinner), so a level's row keeps showing what it was actually
@@ -2909,19 +3396,9 @@ class InflatePolyhedronApp:
         the user's cursor position the way a post-hoc correction would. `allow_exponent`
         permits an "e"/"E" exponent, for tolerance's scientific-notation text (e.g. "1e-03").
         `allow_decimal` permits a "." -- target RMS entries pass False (whole numbers only)."""
-        vcmd = self.root.register(lambda proposed: self._is_valid_numeric_partial(
+        vcmd = self.root.register(lambda proposed: _is_valid_numeric_partial(
             proposed, allow_exponent, allow_decimal))
         entry.configure(validate="key", validatecommand=(vcmd, "%P"))
-
-    @staticmethod
-    def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
-        """True if `proposed` is a full number or a prefix a user could still be typing toward
-        one (e.g. "", "-", ".", "1.", "1e", "1e-" when `allow_exponent`) -- accepting these
-        in-progress states, not just a complete `float()`-parseable string, lets a user type a
-        negative number or decimal point without the first keystroke being rejected."""
-        digits = r"\d*\.?\d*" if allow_decimal else r"\d*"
-        pattern = f"-?{digits}(?:[eE][-+]?\\d*)?" if allow_exponent else f"-?{digits}"
-        return re.fullmatch(pattern, proposed) is not None
 
     def _begin_edit_target_rms(self, level):
         """<FocusIn> on a target-RMS entry: swaps its displayed "N%" for the bare number alone
@@ -3176,7 +3653,8 @@ class InflatePolyhedronApp:
         While calibration is searching, this level's panel shows an animated "Computing..."
         placeholder instead of a live redraw -- most calibration trials are thrown away, so
         there's no single meaningful shape to show frame-by-frame until it finishes. Level 0's
-        Relax has no such phase and keeps redrawing live throughout.
+        own Relax has no calibration phase to discard trials from, but shows the same
+        "Computing..." placeholder throughout its one real run (see on_relax_clicked).
 
         Recalibrates fresh from wherever self.positions currently is on every click, since the
         user can't set pressure directly. Calibrates against the current Tolerance spinner
@@ -3303,14 +3781,17 @@ class InflatePolyhedronApp:
                             "target_rms_pct": self._current_target_rms_pct,
                             "pressure_found": pressure_found}
         self._record_level_history()
-        final_result = (new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged)
         # Made available for manual scrubbing right away, defaulted to the true final frame --
         # not gated on the auto-played animation finishing, so the slider is usable the instant
         # a result exists, even while that animation is still playing.
         self._level_frames[self.subdivision_level] = frames
         self._level_scrub_index[self.subdivision_level] = len(frames) - 1
         self._update_replay_slider(self.subdivision_level)
-        self._start_frame_replay(frames, final_result, base_iteration_count)
+        # iteration_count/last_stats are already set to their true final values above, before
+        # replay even starts -- only self.positions needs applying once replay finishes (every
+        # frame in between is display-only, see _start_frame_replay's own docstring).
+        self._start_frame_replay(
+            frames, lambda: setattr(self, "positions", new_positions), self._finish_inflate)
 
     # Target frames per second during a replay -- purely a display rate for an already-
     # finished trial's own positions, fast enough to read as "watching it happen" without
@@ -3327,22 +3808,27 @@ class InflatePolyhedronApp:
     # make each individual render (the real bottleneck) more likely to fall behind.
     REPLAY_FRAME_STRIDE = 4
 
-    def _start_frame_replay(self, frames, final_result, base_iteration_count):
-        """Plays back estimate_pressure_for_target_stretch's own captured `frames` (the
-        winning trial's `(positions, steps_taken)` pairs every CONVERGENCE_CHECK_INTERVAL
-        steps, including its own convergence top-up) at REPLAY_FPS -- a purely visual recap of
-        an already-finished run; no physics runs here, and neither a timer nor
-        `iteration_count` moves during it ("Steps" already advanced during the actual
-        simulation via _on_calibration_progress, snapped to its true final value by
-        _on_pressure_calibrated before this is even called). The bottom-of-panel message shows
-        "Replaying" + a 0-3-dot cycle through _replay_step, clearing once done.
-        `final_result` is only actually applied once the replay reaches its last frame
-        (_finish_frame_replay) -- every frame in between is display-only, self.positions
-        temporarily set to it just so draw() shows it."""
+    def _start_frame_replay(self, frames, apply_final, on_finished):
+        """Plays back `frames` (`(positions, steps_taken)` pairs, captured every
+        CONVERGENCE_CHECK_INTERVAL steps) at REPLAY_FPS -- a purely visual recap of an
+        already-finished run; no physics runs here. Shared by Inflate's own winning-
+        calibration-trial replay (_on_pressure_calibrated) and Level 0's own Relax replay
+        (_finish_relax, 2026-10-01, explicit: "when it's done, it should replay like the other
+        levels" -- previously Inflate-only, Level 0 kept redrawing live throughout instead).
+        The bottom-of-panel message shows "Replaying" + a 0-3-dot cycle through _replay_step,
+        clearing once done.
+
+        `apply_final` (no args) is called once the replay reaches its last frame
+        (_finish_frame_replay), to apply whatever the caller's own true final state actually is
+        (self.positions/iteration_count/last_stats -- every frame in between is DISPLAY-ONLY,
+        self.positions temporarily pointed at it just so draw() shows it); `on_finished` (no
+        args), called right after, does whatever level-specific reporting/promotion/Auto
+        follow-up comes next (_finish_inflate for Levels 1-3, _finish_relax_report for Level
+        0)."""
         self._replay_frames = frames
         self._replay_index = 0
-        self._replay_final_result = final_result
-        self._replay_base_iteration_count = base_iteration_count
+        self._replay_apply_final = apply_final
+        self._replay_on_finished = on_finished
         self._replay_step()
 
     def _replay_step(self):
@@ -3382,32 +3868,16 @@ class InflatePolyhedronApp:
     def _finish_frame_replay(self):
         # A Stop click can only ever reach here meaning "skip the replay animation" -- a Stop
         # that actually interrupted the real computation is caught earlier, in
-        # _on_pressure_calibrated's own stop_event branch, which returns before a replay
-        # starts. By the time this runs, the winning trial's result is already final
-        # regardless of whether the animation played in full -- clearing stop_event here
-        # keeps the "Stopped"/"Converged" status message honest.
+        # _on_pressure_calibrated's own stop_event branch (or _finish_relax's own was_stopped
+        # branch), which returns before a replay starts. By the time this runs, the run's
+        # result is already final regardless of whether the animation played in full --
+        # clearing stop_event here keeps the "Stopped"/"Converged" status message honest.
         self.stop_event = None
-        new_positions, steps_taken, max_stretch, rms_stretch, optimality, converged = (
-            self._replay_final_result)
-        self.positions = new_positions
-        # iteration_count/last_stats are already set to these exact values by
-        # _on_pressure_calibrated, before replay even started
-        # (see _start_frame_replay's own docstring) -- reassigned here
-        # anyway for robustness/symmetry with the rest of this method's
-        # own final-state bookkeeping, not because replay itself changed
-        # them.
-        self.iteration_count = self._replay_base_iteration_count + steps_taken
-        self.last_stats = {"max_stretch_pct": max_stretch, "rms_stretch_pct": rms_stretch,
-                            "optimality": optimality, "converged": converged,
-                            "gtol": self._current_gtol,
-                            "target_rms_pct": self._current_target_rms_pct,
-                            # Already set by _on_pressure_calibrated, before replay even
-                            # started -- carried over rather than dropped by this reassignment.
-                            "pressure_found": self.last_stats.get("pressure_found", True)}
+        self._replay_apply_final()
         self._record_level_history()
         self._set_level_message(self.subdivision_level, "")  # clears once replay is done
         self.draw()
-        self._finish_inflate()
+        self._replay_on_finished()
 
     def _update_replay_slider(self, level):
         """Configures level `level`'s own replay scrubber to match self._level_frames[level] --
@@ -3622,19 +4092,46 @@ class InflatePolyhedronApp:
         else:
             self.on_inflate_clicked()
 
-    # ---- Run > Run All ----
+    # ---- Run > Run All / Debug All ----
 
     def on_run_all_clicked(self):
         """Run > Run All: runs the exact same unattended
         pipeline "Run Simulation" (on_auto_clicked) drives for ONE net, for EVERY net currently
         listed in "Choose a net", one after another, through the real UI (each one actually
         selected, relaxed/inflated/subdivided on screen, not some separate headless
-        computation) -- saving each net's own .hippo + Level 3 .jpg (_write_session) the
-        instant its own sequence reaches a natural end, before moving to the next. The window
-        title shows "(m/n)" progress throughout (_update_window_title). No-op if Run All or an
-        Auto sequence is already active, or there's nothing to run."""
-        if self._run_all_active or self._auto_active or not self.label_to_path:
+        computation) -- saving each net's own .hippo (_write_session) the instant its own
+        sequence reaches a natural end, before moving straight on to the next (no save-results
+        prompt, no pause between nets -- see on_debug_all_clicked for the debug-only variant
+        that skips saving and pauses on the Right arrow key instead). The window title shows
+        "(m/n)" progress throughout (_update_window_title). No-op if Run All/Debug All or an
+        Auto sequence is already active, there's nothing to run, or Viewer mode is showing
+        (2026-10-01, explicit: "Run All should be disabled in this view" -- the menu item itself
+        is disabled there too, via _update_run_menu_state; this guard is defense in depth)."""
+        self._start_run_all(save_results=True, wait_for_advance=False)
+
+    def on_debug_all_clicked(self):
+        """Run > Debug All (2026-10-01, explicit -- debug-mode only, see _update_run_menu_state):
+        the same unattended run through every net as Run All, except it never saves any net's
+        own .hippo (a dry/test run), and PAUSES after each net finishes until the user presses
+        the Right arrow key, rather than moving straight on to the next -- see
+        _on_debug_all_right_key. Lets a developer actually look at each net's own Level 3
+        result before the next one overwrites the panels. The Right/Left arrow keys ALSO work
+        while a net is still mid-run (not just once paused): Right abandons it and skips straight
+        to the next net, Left abandons it and goes back to re-run the previous one (see
+        _on_debug_all_right_key/_on_debug_all_left_key, and _debug_all_jump for the shared
+        abandon-and-jump logic both use). Same no-op guards as on_run_all_clicked (Debug All or
+        an Auto sequence already active, nothing to run, Viewer mode)."""
+        self._start_run_all(save_results=False, wait_for_advance=True)
+
+    def _start_run_all(self, save_results, wait_for_advance):
+        """Shared kickoff for on_run_all_clicked/on_debug_all_clicked -- see their own
+        docstrings for what `save_results`/`wait_for_advance` mean."""
+        if (self._run_all_active or self._auto_active or not self.label_to_path
+                or self.view_mode_var.get() == "viewer"):
             return
+        self._run_all_save_results = save_results
+        self._run_all_wait_for_advance = wait_for_advance
+        self._run_all_awaiting_key = False
         # A fixed snapshot taken now, not read live from self.label_to_path later -- so a net
         # file added/removed/renamed while Run All is already working through the list doesn't
         # change what's left to do partway through.
@@ -3647,40 +4144,135 @@ class InflatePolyhedronApp:
         """Loads self._run_all_paths[self._run_all_index] (on_select_net, exactly as if picked
         from the dropdown by hand) and kicks off its own Auto sequence (on_auto_clicked) --
         on_select_net's own defensive reset already clears self._auto_end_state back to None,
-        so on_auto_clicked doesn't redundantly reload the net it was just given. Then starts
-        _poll_run_all_net watching for that sequence's own natural end."""
+        so on_auto_clicked doesn't redundantly reload the net it was just given. Bumps
+        self._run_all_poll_token and starts _poll_run_all_net watching for that sequence's own
+        natural end, tagged with the NEW token -- see _run_all_poll_token's own comment (in
+        __init__) for why every call here gets a fresh one."""
         label, _path = self._run_all_paths[self._run_all_index]
         self.net_var.set(label)
         self.on_select_net()
         self._update_window_title()
+        run_label = "Debug All" if self._run_all_wait_for_advance else "Run All"
         self._set_status(
-            f"Run All ({self._run_all_index + 1}/{len(self._run_all_paths)}): "
+            f"{run_label} ({self._run_all_index + 1}/{len(self._run_all_paths)}): "
             f"running {label}...", "info")
         self.on_auto_clicked()
-        self._poll_run_all_net()
+        self._run_all_poll_token += 1
+        self._poll_run_all_net(self._run_all_poll_token)
 
-    def _poll_run_all_net(self):
+    def _poll_run_all_net(self, token):
         """Watches the CURRENT net's own Auto sequence (self._auto_active) until it reaches a
         natural end, polling every 200ms rather than threading a callback through on_auto_
         clicked/_auto_step's own machinery (which has plenty of its own exit points already,
         e.g. Stop, a worker error, or genuinely finishing -- self._auto_active going False is
-        the one signal all of them already funnel through, via _update_auto_button). Once it
-        does: saves this net's own .hippo + Level 3 .jpg (_write_session, no dialog -- straight
-        to SESSION_OUTPUT_DIR under self.mesh_name), then either starts the next net or, if
-        this was the last one, ends Run All and restores the plain window title."""
-        if self._auto_active:
-            self.root.after(200, self._poll_run_all_net)
+        the one signal all of them already funnel through, via _update_auto_button). `token`:
+        this call's own poll chain's identity (self._run_all_poll_token at the moment
+        _start_next_run_all_net started it) -- if it no longer matches the CURRENT value, a
+        Left/Right-arrow jump (_debug_all_jump) abandoned this net for a different one while
+        this chain was still watching it, so this call quietly does nothing instead of
+        double-processing a net the jump already moved on from.
+
+        Once the watched net genuinely finishes: saves this net's own .hippo (_write_session,
+        no dialog -- straight to SESSION_OUTPUT_DIR under self.mesh_name), unless this run
+        started via on_debug_all_clicked (self._run_all_save_results False). If
+        self._run_all_wait_for_advance and there's a next net still to run, stops HERE and waits
+        for the Right arrow key (_on_debug_all_right_key) rather than continuing immediately.
+        Otherwise either starts the next net right away or, if this was the last one, ends the
+        run via _finish_run_all."""
+        if token != self._run_all_poll_token:
             return
-        SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        output_path = str(SESSION_OUTPUT_DIR / f"{self.mesh_name}{SESSION_FILE_EXTENSION}")
-        self._write_session(output_path)
+        if self._auto_active:
+            self.root.after(200, self._poll_run_all_net, token)
+            return
+        if self._run_all_save_results:
+            SESSION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            output_path = str(SESSION_OUTPUT_DIR / f"{self.mesh_name}{SESSION_FILE_EXTENSION}")
+            self._write_session(output_path)
         self._run_all_index += 1
         if self._run_all_index < len(self._run_all_paths):
+            if self._run_all_wait_for_advance:
+                self._run_all_awaiting_key = True
+                self._set_status(
+                    f"Debug All ({self._run_all_index}/{len(self._run_all_paths)} done): "
+                    f"press -> to continue to the next net, <- to go back.", "info")
+                return
             self._start_next_run_all_net()
             return
+        self._finish_run_all()
+
+    def _finish_run_all(self):
+        """Ends a Run All/Debug All run (reached the natural end of self._run_all_paths, or
+        Left/Right jumped past either end of it -- see _debug_all_jump) and restores the plain
+        window title. `self._run_all_save_results` is read BEFORE being reset, so the final
+        status message still correctly says whether this was a real save or a dry run."""
+        run_label = "Debug All" if not self._run_all_save_results else "Run All"
+        saved_note = "" if self._run_all_save_results else " (results not saved)"
+        total = len(self._run_all_paths)
         self._run_all_active = False
+        self._run_all_wait_for_advance = False
+        self._run_all_awaiting_key = False
         self._update_window_title()
-        self._set_status(f"Run All: finished all {len(self._run_all_paths)} nets.", "success")
+        self._set_status(f"{run_label}: finished all {total} nets.{saved_note}", "success")
+
+    def _on_debug_all_right_key(self):
+        """The Right arrow key's own Debug-All-specific behavior (see the "<Right>" bind_all in
+        ViewerPane.__init__) -- a no-op whenever Debug All isn't actually the thing running
+        right now (self._run_all_active and self._run_all_wait_for_advance both True; a plain
+        Run All run never sets the latter), so this key does nothing unexpected the rest of the
+        time. Two cases: if a net just finished and Debug All is PAUSED waiting for this key
+        (self._run_all_awaiting_key), resumes by starting the already-advanced next net --
+        normal "continue" case. Otherwise a net is still mid-run: abandons it and jumps straight
+        to the next one (_debug_all_jump), skipping whatever it hadn't gotten to yet."""
+        if not (self._run_all_active and self._run_all_wait_for_advance):
+            return
+        if self._run_all_awaiting_key:
+            self._run_all_awaiting_key = False
+            self._start_next_run_all_net()
+            return
+        self._debug_all_jump(self._run_all_index + 1)
+
+    def _on_debug_all_left_key(self):
+        """The Left arrow key's own Debug-All-specific behavior -- same gating as
+        _on_debug_all_right_key. Always means "go back and re-run the PREVIOUS net", whether
+        the current one is still mid-run (abandoned) or already finished and Debug All is just
+        paused on it (self._run_all_awaiting_key -- self._run_all_index already points PAST the
+        just-finished net in that case, see _poll_run_all_net, so the net actually on screen
+        right now is self._run_all_index - 1, and "previous" means one before THAT)."""
+        if not (self._run_all_active and self._run_all_wait_for_advance):
+            return
+        shown_index = self._run_all_index - 1 if self._run_all_awaiting_key else self._run_all_index
+        self._debug_all_jump(shown_index - 1)
+
+    def _debug_all_jump(self, target_index):
+        """Shared Left/Right-arrow-while-Debug-All-is-running logic: below 0 is a no-op --
+        already at the first net, Left has nothing earlier to go back to, so this returns
+        WITHOUT disturbing anything (whatever net is currently running, if any, keeps running
+        exactly as if the key had never been pressed; a paused Debug All stays paused). Otherwise
+        abandons whatever net is CURRENTLY mid-run, if any (same stop_event-based interrupt
+        on_auto_stop_clicked uses -- _abort_auto marks the sequence stopped, on_stop_clicked
+        actually signals the worker thread to unwind), then jumps straight to `target_index` --
+        at or past the end of self._run_all_paths ends the run via _finish_run_all, same as
+        reaching it normally would.
+
+        Calling _start_next_run_all_net directly here (rather than letting the abandoned net's
+        own _poll_run_all_net chain notice and continue on its own) is exactly why
+        self._run_all_poll_token exists: that OLD chain is still scheduled to fire again in up
+        to 200ms, and once self._auto_active does go False (moments after the abort below) it
+        would otherwise run its OWN completion logic for the abandoned net too -- a second,
+        stale _start_next_run_all_net/_finish_run_all racing the one this method just triggered.
+        Bumping the token (inside _start_next_run_all_net, or directly here on the past-the-end
+        path) makes that old chain recognize itself as stale and quietly stop instead."""
+        if target_index < 0:
+            return
+        if self._auto_active:
+            self.on_stop_clicked()  # signals stop_event (if any) AND calls _abort_auto
+        self._run_all_awaiting_key = False
+        if target_index >= len(self._run_all_paths):
+            self._run_all_poll_token += 1
+            self._finish_run_all()
+            return
+        self._run_all_index = target_index
+        self._start_next_run_all_net()
 
     def _run_chunked_relax_stream(self, relax_fn, target_steps, stop_event, on_progress, on_finished):
         """Driver behind _run_relax_stream (Level 0's own Relax, its only remaining caller --
@@ -3796,7 +4388,13 @@ class InflatePolyhedronApp:
         springs), so this goes straight to the streamed run. Always runs to convergence
         (ignores the debug-mode steps-vs-convergence choice, which only applies to Inflate) --
         Relax's whole point is to finish the initial-configuration algorithm, not to be
-        steppable."""
+        steppable.
+
+        Shows the same "Computing..." placeholder Levels 1-3 show during pressure calibration,
+        and replays its own captured frames once done, exactly like Levels 1-3's own Inflate
+        (2026-10-01, explicit: "when it's computing, it should say Computing... like the other
+        levels. then when it's done, it should replay like the other levels" -- previously kept
+        redrawing live throughout instead of either)."""
         if self.positions is None or self.subdivision_level != 0 or self.last_stats.get("converged"):
             return
         # Same capture-once rationale as _on_pressure_calibrated -- see self._current_gtol.
@@ -3804,6 +4402,11 @@ class InflatePolyhedronApp:
         self.stop_event = threading.Event()
         self._set_controls_enabled(False)
         self._set_level_action_button_running(True)
+        # Starting frame for this click's own replay (see _apply_relax_progress for the rest) --
+        # fresh every click, same as Levels 1-3's own self._level_frames[level]: only the MOST
+        # RECENT Relax click's run is ever replayed/scrubbable, not a history across clicks.
+        self._level0_relax_frames = [(self.positions, self.iteration_count)]
+        self._start_computing_animation(0)
         self._set_status("Relaxing random start into a well-separated shape...", "info")
         # Level 0 has no pressure-calibration phase -- "Precomp time" stays "--"; only "Sim
         # time" applies here, starting now.
@@ -3854,6 +4457,11 @@ class InflatePolyhedronApp:
         positions, nfev, max_stretch, rms_stretch, optimality, converged = result
         self.positions = positions
         self.iteration_count = base_iteration_count + nfev
+        # Captured for _finish_relax's own replay once the run is done (2026-10-01, explicit:
+        # "when it's done, it should replay like the other levels") -- the panel itself shows
+        # the "Computing..." placeholder meanwhile (_start_computing_animation, called from
+        # on_relax_clicked), not a live redraw of this tick's positions.
+        self._level0_relax_frames.append((positions, self.iteration_count))
         # optimality/converged are stashed here, NOT written into self.last_stats -- Level 0's
         # own Convergence column shows "--" for the whole time Relax is running, same
         # "--"-while-unknown sentinel Level 1-3's Computing phase uses, via
@@ -3867,14 +4475,6 @@ class InflatePolyhedronApp:
         self._record_level_history()
         self._set_status(f"Relaxing... {self.iteration_count} steps so far "
                           f"(edges stretched up to {max_stretch:.2f}%).", "info")
-        # Only Level 0's own panel actually changes here -- a full draw() (Net panel plus
-        # every "Level N" panel) is slower than _run_chunked_relax_stream's own 80ms poll
-        # interval, which would make "Simulation Time" appear to stall then jump (each
-        # already-due `after()` callback gets queued up behind an overlong draw() and
-        # processed in one burst once it returns, instead of promptly). Same root cause fixed
-        # for Inflate's own replay (_replay_step) -- a targeted _draw_level_panel call keeps
-        # each progress tick cheap enough to reach the screen promptly.
-        self._draw_level_panel(0, self.faces, self.positions, self.face_of_fine)
 
     def _finish_relax(self):
         # Reveals whatever seed relax_initial_configuration_with_orientation_retry actually
@@ -3893,16 +4493,53 @@ class InflatePolyhedronApp:
         pending = getattr(self, "_pending_relax_stats", {})
         self.last_stats["optimality"] = pending.get("optimality")
         self.last_stats["converged"] = pending.get("converged")
-        converged = self.last_stats.get("converged")
-        max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
-        rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
         self._current_sim_time_s = time.perf_counter() - self._sim_start_time
         self._record_level_history()
+        self._stop_computing_animation()
         if was_stopped:
+            # Nothing finished to replay -- same as _on_pressure_calibrated's own stopped
+            # branch, which also skips straight to reporting rather than starting a replay.
+            max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
+            rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
             self._set_status(
                 f"Stopped ({self.iteration_count} relax steps): edges stretched up to "
                 f"{max_stretch:.2f}% from rest length (RMS {rms_stretch:.1f}%).", "warn")
-        elif converged:
+            self._set_controls_enabled(True)
+            self._set_level_action_button_running(False)
+            self.draw()
+            self._auto_step()  # no-op unless Auto is what actually drove this run
+            return
+        # Replays this click's own run (2026-10-01, explicit: "when it's done, it should
+        # replay like the other levels"). self.positions is ALREADY the true final value here
+        # (set live, tick by tick, by _apply_relax_progress) -- unlike Inflate's own calibration
+        # replay, there's no separate "apply the real result" step needed, just carrying it
+        # through apply_final so replay's own intermediate frames don't leave it pointed at an
+        # earlier one.
+        final_positions = self.positions
+        frames = self._level0_relax_frames
+        if frames[-1][0] is not final_positions:
+            frames.append((final_positions, self.iteration_count))
+        self._level_frames[0] = frames
+        self._level_scrub_index[0] = len(frames) - 1
+        self._update_replay_slider(0)
+        self._set_controls_enabled(False)
+        self._set_level_action_button_running(True)
+        self._set_status("Replaying the relax...", "info")
+        self._start_frame_replay(
+            frames, lambda: setattr(self, "positions", final_positions),
+            self._finish_relax_report)
+
+    def _finish_relax_report(self):
+        """Tail end of a Relax click, called once _finish_frame_replay has already replayed
+        this run's captured frames and restored self.positions to its true final value --
+        reports status and, on convergence, promotes to Level 1 (or, if BYPASS_LEVEL_1_INFLATE,
+        straight on through to Level 2 -- see that flag's own comment). Split out of
+        _finish_relax so replay can sit between "the run itself just finished" and "report it",
+        same shape as Inflate's own on_inflate_clicked/_on_pressure_calibrated/_finish_inflate."""
+        converged = self.last_stats.get("converged")
+        max_stretch = self.last_stats.get("max_stretch_pct", 0.0)
+        rms_stretch = self.last_stats.get("rms_stretch_pct", 0.0)
+        if converged:
             # Level 0 and Level 1 share the exact fan-triangulated topology -- promoting the
             # just-relaxed result into Level 1's starting position is a pure relabeling, not a
             # new subdivide_once call.
@@ -3920,9 +4557,23 @@ class InflatePolyhedronApp:
             self._current_target_rms_pct = self.target_rms_vars[1].get()
             self.last_stats = self._compute_stretch_stats()
             self._record_level_history()
-            self._set_status(
-                f"Relaxed (edges stretched up to {max_stretch:.2f}% from rest length, RMS "
-                f"{rms_stretch:.1f}%). Promoted to Level 1 -- press Inflate to continue.", "info")
+            if BYPASS_LEVEL_1_INFLATE:
+                # _subdivide_step snapshots Level 1's own (never-inflated) mesh exactly as left
+                # above, then quarters it straight into Level 2 -- its own bookkeeping (another
+                # _capture_level_start_state/_compute_stretch_stats/_record_level_history, this
+                # time for Level 2) supersedes the Level-1-specific calls just above, same as an
+                # ordinary Subdivide click immediately following a Relax would.
+                self._subdivide_step()
+                self._set_status(
+                    f"Relaxed (edges stretched up to {max_stretch:.2f}% from rest length, RMS "
+                    f"{rms_stretch:.1f}%). Bypassed Level 1 -- subdivided straight to Level 2 "
+                    f"({len(self.faces)} faces, {len(self.positions)} vertices). Press Inflate "
+                    "to continue.", "info")
+            else:
+                self._set_status(
+                    f"Relaxed (edges stretched up to {max_stretch:.2f}% from rest length, RMS "
+                    f"{rms_stretch:.1f}%). Promoted to Level 1 -- press Inflate to continue.",
+                    "info")
         else:
             self._set_status(
                 f"Relaxed ({self.iteration_count} steps, step cap reached): edges stretched up "
@@ -3930,6 +4581,11 @@ class InflatePolyhedronApp:
                 "again to continue.", "info")
         self._set_controls_enabled(True)
         self._set_level_action_button_running(False)
+        # draw() again here (on top of _finish_frame_replay's own) only actually redraws
+        # anything new in the converged branch above -- subdivision_level/level_snapshots just
+        # changed, so the Net panel's current-level highlight and the now-current frontier
+        # panel (Level 1, or Level 2 if BYPASS_LEVEL_1_INFLATE) need a fresh draw() that
+        # _finish_frame_replay's own (taken while still at Level 0) couldn't have shown.
         self.draw()
         self._auto_step()  # no-op unless Auto is what actually drove this run
 
@@ -4034,12 +4690,17 @@ class InflatePolyhedronApp:
         bezier curve is drawn too -- never its handles, since this panel is read-only."""
         self.ax2d.cla()
         self._style_2d_axis(self.ax2d, theme)
+        # self.target_layout's keys live in self.target_group_of_face's id space (see
+        # net_loading.target_layout_and_connections's own docstring) -- NOT necessarily
+        # self.color_by_group's key space (Multi-colour mode keys that by base-face position,
+        # which only coincidentally matches). Rebuilt fresh each draw from the flat,
+        # mode-agnostic self.colors list instead of indexing self.color_by_group directly.
+        target_color_by_group = {}
+        for i, g in enumerate(self.target_group_of_face):
+            target_color_by_group.setdefault(g, self.colors[i])
         all_pts = []
         for face_idx in sorted(self.target_layout):
-            # self.target_layout's keys are already GROUP ids, so this looks up color the
-            # same way _draw_level_panel's per-group add_mesh calls do, not the flat
-            # self.colors list.
-            color = self.color_by_group[face_idx]
+            color = target_color_by_group[face_idx]
             placed = self.target_layout[face_idx]
             self.ax2d.add_patch(Polygon(placed, closed=True, facecolor=color,
                                          edgecolor="k", alpha=0.9))
@@ -4150,6 +4811,16 @@ class InflatePolyhedronApp:
         past, or -- for Level 0 -- promoted away from) draws its frozen state; any other level
         hasn't been reached yet and draws empty.
 
+        Level 0 specifically draws empty too, even though it's self.subdivision_level and
+        self.positions already holds a real (random-initial, or in-progress-relaxed) cloud,
+        UNLESS self._level_frames[0] is already populated -- i.e. at least one Relax run has
+        actually finished and been replayed (2026-10-01, explicit: "for level 0, don't show the
+        initial random state at the start... stuff is only shown after simulation done and it's
+        showing the replay"). Doesn't affect replay ITSELF (_replay_step draws Level 0's panel
+        directly, bypassing this method entirely) or the "Computing..." placeholder (already
+        blanks the panel on its own, via _start_computing_animation) -- only this general redraw
+        path, which otherwise ran right after on_select_net and would show raw noise.
+
         A level with an active replay-slider scrub (self._level_frames/_level_scrub_index both
         set for it) shows that captured frame's positions instead of its live/frozen ones --
         faces/face_of_fine are unaffected (a captured trajectory never changes topology, only
@@ -4159,7 +4830,10 @@ class InflatePolyhedronApp:
         self._draw_target_faces(theme)
         for level in self.level_plotters:
             if level == self.subdivision_level:
-                faces, positions, face_of_fine = self.faces, self.positions, self.face_of_fine
+                if level == 0 and not self._level_frames.get(0):
+                    faces = positions = face_of_fine = None
+                else:
+                    faces, positions, face_of_fine = self.faces, self.positions, self.face_of_fine
             elif level in self.level_snapshots:
                 snap = self.level_snapshots[level]
                 faces, positions, face_of_fine = (snap["faces"], snap["positions"],

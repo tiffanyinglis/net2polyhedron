@@ -5,7 +5,7 @@ Every function here is pure (no Tkinter/`self`) -- callers pass their own shapes
 snapshots directly.
 """
 from interactive_builder_app.app import _expand_folded_shapes, _shape_face_corner_order, _vertex_roots
-from interactive_inflater_app.logic.club_member_classifier import central_shape_ids
+from interactive_inflater_app.logic.node_classifier import central_shape_ids
 
 __all__ = ["is_orphan_to_orphan_join", "current_root_to_vertex_id", "old_atomic_slot_to_id"]
 
@@ -29,10 +29,10 @@ def current_root_to_vertex_id(central_ids, shapes, connections, base_faces,
     `base_faces` actually uses RIGHT NOW, not a fresh export's own deterministic sequential
     numbering. A fresh export's numbering has NO knowledge of a pendant's own arbitrary
     flat-attach id remapping -- using it directly as a positions lookup key silently matched some
-    UNRELATED vertex that happened to share the same small integer id whenever a pendant/guest
-    was involved (2026-09-29, explicit bug report, confirmed via the debug replay slider: a guest
-    promoted from pendant to insider mid-Diff-Inflate got seeded from a random vertex on the
-    opposite side of the mesh).
+    UNRELATED vertex that happened to share the same small integer id whenever a pendant/
+    terminal node was involved (2026-09-29, explicit bug report, confirmed via the debug replay
+    slider: a terminal node promoted from pendant to junction node mid-Diff-Inflate got seeded
+    from a random vertex on the opposite side of the mesh).
 
     Walks `pending_source_polygon_id`/`base_faces` (the CURRENT, already correct ids -- pendant-
     remapped or not, doesn't matter) group by group, matching each group's shape id back to its

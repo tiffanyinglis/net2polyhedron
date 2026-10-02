@@ -49,6 +49,19 @@ class InflaterSessionStateModel(BaseModel):
     # than a dedicated model since it's never anything but this one app's own internal cache, fed
     # straight back into self.level_history on load with no translation needed either way.
     level_history: Dict[int, Dict[str, Any]] = {}
+    # Colour menu (2026-10-01, explicit -- see inflate_polyhedron_app's own SessionStateModel
+    # for the original version of this pair, and interactive_inflater_app/logic/coloring.py's
+    # module docstring for why THIS app tracks colors per shape rather than per base face).
+    # SAME field names as that sibling app's own two fields, and the SAME meaning of
+    # `face_colors` -- a flat list parallel to `base_faces`, one color per base face/group (NOT
+    # per shape_id -- InflaterPane derives this from its own shape_colors at save time via
+    # _multi_color_for_group, and rebuilds shape_colors from it at load time via
+    # source_polygon_id) -- so a `.hippie`'s central-object colors round-trip through the exact
+    # same shape a `.hippo`'s own do, and either file format can in principle be read by
+    # whichever app understands this convention. "polygon" (default) needs nothing persisted,
+    # same reasoning as the sibling app's own field.
+    color_mode: str = "polygon"
+    face_colors: Optional[List[str]] = None
     # Whether `mesh` reflects a real relax/inflate result (True) or was only ever geometrically
     # placed, never really solved (False) -- InflaterPane.is_fully_inflated at save time
     # (2026-09-28, explicit user request: "when i save a session, it should contain information

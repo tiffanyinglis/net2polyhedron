@@ -2164,5 +2164,10 @@
   "net_pan": [
     0.0,
     0.0
+  ],
+  "color_mode": "multi",
+  "face_colors": [
+    "#d83034",
+    "#ffcd8e"
   ]
 }

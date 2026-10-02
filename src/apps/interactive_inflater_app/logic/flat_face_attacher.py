@@ -1,5 +1,6 @@
-"""Pendant/guest flat-attach pipeline, moved verbatim out of interactive_inflater_app/app.py
-(2026-09-30 modularization -- see that module's own docstring for the "club"/guest terminology).
+"""Pendant/terminal-node flat-attach pipeline, moved verbatim out of
+interactive_inflater_app/app.py (2026-09-30 modularization -- see that module's own docstring
+for the "active group"/terminal-node terminology).
 
 "when a face is attached to the central group by only one edge, it is going to flop around
 because it's too unconstrained. that face should be excluded from the relaxation/inflation
@@ -322,8 +323,9 @@ def reattach_pendant_faces(pendants, faces, positions, face_of_fine, edge_length
     id at all), and the boundary edge shared between them canceled out INSIDE that one merged
     group instead of surviving as a rim (group_boundary_edge_set counts an edge shared by TWO
     triangles of the SAME group as interior, not a rim -- see its own docstring), so no seam
-    ever showed between a guest and its neighbor either. Giving the pendant its own group fixes
-    both: it's now its own independently pickable/hoverable actor, with a real rim of its own,
+    ever showed between a terminal node and its neighbor either. Giving the pendant its own group
+    fixes both: it's now its own independently pickable/hoverable actor, with a real rim of its
+    own,
     without changing place_pendant_flat's own geometry at all (`neighbor_face_idx`, read from
     `pendant["neighbor_idx"]` below, is still what its PLACEMENT is computed against -- only the
     OUTPUT tag changes). No-op (returns the inputs unchanged) if `pendants` is empty.

@@ -2,7 +2,7 @@
 different pressures to find one whose result lands within tolerance of
 a target RMS stretch %, keeping whichever SANE trial got closest. See
 physics.md's Pressure calibration section for the full bracket-then-
-bisect search strategy and stall-detection rationale.
+bisect search strategy.
 
 Depends on stretchy_mesh (relax_once, _total_rest_area) -- not the other
 way around, so stretchy_mesh never needs to import this module."""
@@ -40,19 +40,6 @@ _INSANE_STRETCH_TARGET_MULTIPLE = 5.0
 # _INSANE_STRETCH_FLOOR_PCT so it's treated exactly like any other insane/blown-up trial by the
 # bracket search. Never surfaced to a user in practice.
 _DIVERGED_SENTINEL_STRETCH_PCT = 1e6
-
-# How many consecutive trials, still in the pure-rescale phase (no lo/hi bracket established
-# yet), with essentially NO change in achieved stretch despite pressure being rescaled (up to the
-# 5x ceiling each time), before giving up on finding a real pressure at this level rather than
-# escalating pressure without bound -- see physics.md's Pressure calibration section (a
-# ravioli-paired mesh whose two identical, opposite-wound faces cancel pressure exactly is the
-# concrete case this guards against).
-_STALL_TRIAL_LIMIT = 2
-# "Essentially no change" between consecutive rescale-phase trials -- deliberately tiny and NOT
-# tied to tol_pct (which is about being close to the TARGET, a different question): this only
-# needs to catch a trial that moved by a genuinely negligible amount, not one that's merely still
-# far from target but actually responding to pressure.
-_STALL_DELTA_PCT = 1e-6
 
 
 def estimate_pressure_for_target_stretch(positions, faces, edge_length,
@@ -110,12 +97,8 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     this settled on (if every single trial was insane, the LAST one anyway, so this never raises
     for an irrecoverably bad target).
 
-    `pressure_found` is True unless this gave up WITHOUT ever finding a usable pressure: either
-    every trial was insane, or the mesh turned out completely UNRESPONSIVE to pressure at this
-    level (see _STALL_TRIAL_LIMIT / physics.md's Pressure calibration section) -- e.g. a
-    ravioli-paired mesh whose pressure forces cancel EXACTLY at every pressure, so `converged` can
-    still come back True (a real equilibrium was found) while `pressure_found` is False (no
-    pressure could ever reach the target there).
+    `pressure_found` is True unless this gave up WITHOUT ever finding a usable pressure: every
+    trial was insane within `max_iterations`.
 
     The WINNING trial, if it hasn't actually converged yet (it only ran `max_nfev_per_trial`
     steps, a search-time budget, not a real convergence criterion), is topped up with one further
@@ -173,8 +156,6 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
     trial_frames = None
     cumulative_steps = 0
     pressure_found = True
-    stalled_trials = 0
-    prev_rescale_rms = None
     for _ in range(max_iterations):
         # `(positions, 0)` -- this trial's own starting point at step 0
         # (the same starting `positions` for every trial) -- is the very
@@ -255,28 +236,13 @@ def estimate_pressure_for_target_stretch(positions, faces, edge_length,
             # one shows up (then the branch above takes over).
             pressure = hi_pressure / 2
         elif rms_stretch > 0:
-            # Stall check FIRST, before rescaling further: if this trial's own achieved stretch
-            # is essentially identical to the previous rescale-phase trial's (see
-            # _STALL_DELTA_PCT's own comment), rescaling pressure again is very unlikely to help.
-            # Two such trials in a row (_STALL_TRIAL_LIMIT) means the mesh is unresponsive to
-            # pressure at this level entirely (not just slow), so give up rather than keep
-            # escalating pressure without bound.
-            if prev_rescale_rms is not None and abs(rms_stretch - prev_rescale_rms) < _STALL_DELTA_PCT:
-                stalled_trials += 1
-            else:
-                stalled_trials = 0
-            prev_rescale_rms = rms_stretch
-            if stalled_trials >= _STALL_TRIAL_LIMIT:
-                pressure_found = False
-                break
             ratio = target_rms_pct / rms_stretch
             ratio = min(max(ratio, _PRESSURE_RATIO_CLAMP[0]), _PRESSURE_RATIO_CLAMP[1])
             pressure *= ratio
         else:
-            # Degenerate reading (zero stretch) with nothing to bracket against yet -- a single
-            # sane-at-zero trial isn't itself proof of unresponsiveness (the very first guess
-            # could just be too low), but there's no ratio to rescale by either; _STALL_TRIAL_
-            # LIMIT only ever triggers above once a SECOND such (near-)zero trial confirms it.
+            # Degenerate reading (zero stretch) with nothing to bracket against yet and no ratio
+            # to rescale by -- give up on this trial path rather than looping forever on the same
+            # zero reading.
             break
     stopped = stop_event is not None and stop_event.is_set()
     if best_result is None:

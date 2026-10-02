@@ -47,25 +47,29 @@ deletes it immediately after -- the mesh itself is never written to (or
 read from) any file under data/, only this one transient temp file that
 never outlives a single Inflate click.
 
-Club terminology (2026-09-28, explicit user request -- "let's make it clear by using the same
-language (both in docs and in code)"): the anchor's own connected component (BuilderPane.
-central_shape_ids) is the CLUB. Every shape in it is a MEMBER. A member with 0 or 1 connections
-is a GUEST (2026-09-28, explicit correction: "Guests are members with 0 or 1 connections" -- 0
-covers the very first piece ever placed, with nothing to connect to yet) -- placed flatly
-against its one neighbor if it has one, or just placed with no relax/inflate involved at all if
-it has none, never touching relax/inflate either way (this is what the surrounding code still
-mostly calls a "pendant" -- same concept, not yet renamed everywhere). A member with two or more
-connections is an INSIDER -- inflation only ever involves insiders (Rule 1). A shape not in the
-club at all (not connected to the anchor) is an OUTSIDER/non-member. self.is_fully_inflated tracks whether the club's own insiders currently
-reflect a real relax/inflate result (Rule 2: reset to False whenever the club empties out
-entirely; set True whenever a real pressure-calibration pass completes) -- on_diff_inflate_
-clicked reads it to decide Diff Inflate (True) vs. a Full Inflate redirect (False) whenever a
-builder edit actually changes the insiders -- their own membership (a guest promoted to insider,
-or vice versa) or a connection between two of them (Rule 3). A guest-only add/remove never
+Node terminology (2026-09-28, explicit user request -- "let's make it clear by using the same
+language (both in docs and in code)"; renamed 2026-10-01, explicit user request, to active
+group/reachable node/unreachable node/junction node/terminal node -- see that request's own
+central node/reachable node/unreachable node/junction node/terminal node mapping): the anchor's
+own connected component (BuilderPane.central_shape_ids) is the ACTIVE GROUP. Every shape in it is
+a REACHABLE NODE. A reachable node with 0 or 1 connections is a TERMINAL NODE (2026-09-28,
+explicit correction: "Guests are members with 0 or 1 connections" -- 0 covers the very first
+piece ever placed, with nothing to connect to yet) -- placed flatly against its one neighbor if
+it has one, or just placed with no relax/inflate involved at all if it has none, never touching
+relax/inflate either way (this is what the surrounding code still mostly calls a "pendant" --
+same concept, not yet renamed everywhere). A reachable node with two or more connections is a
+JUNCTION NODE -- inflation only ever involves junction nodes (Rule 1). A shape not in the active
+group at all (not connected to the anchor) is an UNREACHABLE NODE. self.is_fully_inflated tracks
+whether the active group's own junction nodes currently reflect a real relax/inflate result
+(Rule 2: reset to False whenever the active group empties out entirely; set True whenever a real
+pressure-calibration pass completes) -- on_diff_inflate_clicked reads it to decide Diff Inflate
+(True) vs. a Full Inflate redirect (False) whenever a builder edit actually changes the junction
+nodes -- their own reachable-node status (a terminal node promoted to junction node, or vice
+versa) or a connection between two of them (Rule 3). A terminal-node-only add/remove never
 reaches that decision at all (_is_pendant_add/_diff_attach_pendant_only's own fast path) since
-it never changes what the insiders are. Undo/redo funnel through the SAME BuilderPane.on_change
-hook (refresh_diff_eligibility) every other edit does, so Rule 4 falls out of the existing
-architecture for free -- no separate undo/redo-specific handling needed.
+it never changes what the junction nodes are. Undo/redo funnel through the SAME
+BuilderPane.on_change hook (refresh_diff_eligibility) every other edit does, so Rule 4 falls out
+of the existing architecture for free -- no separate undo/redo-specific handling needed.
 
 Simplifications vs. inflate_polyhedron_app (all explicitly allowed by this
 app's own spec):
@@ -137,6 +141,7 @@ if str(_APPS_DIR) not in sys.path:
 
 import json
 import os
+import random
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import tkinter.font as tkfont
@@ -172,10 +177,25 @@ from utils.inflate_polyhedron.pre_inflation_relaxer import (
     relax_initial_configuration_with_orientation_retry,
 )
 from utils.inflate_polyhedron.multi_trial_inflater import estimate_pressure_for_target_stretch
+from utils.inflate_polyhedron.plotter_lighting import (
+    SMOOTH_SHADING, MATERIAL_AMBIENT, MATERIAL_DIFFUSE, MATERIAL_SPECULAR,
+    MATERIAL_SPECULAR_POWER, KEY_LIGHT_POSITION, KEY_LIGHT_INTENSITY, FILL_LIGHT_POSITION,
+    FILL_LIGHT_INTENSITY, HEADLIGHT_POSITION, HEADLIGHT_INTENSITY, setup_plotter_lighting,
+)
+# `_vertex_normals`/`_is_valid_numeric_partial`/`_open_base_edges`/`_build_level1_topology`
+# moved to utils (2026-10-01, explicit: "make sure they are using shared code whenever
+# possible. shared code should be moved to utils") -- were duplicated, byte-identical, in
+# inflate_polyhedron_app's own app.py/logic package. Imported under the same underscored names
+# this file's own call sites already use.
+from utils.inflate_polyhedron.mesh_normals import vertex_normals as _vertex_normals
+from utils.inflate_polyhedron.mesh_topology import (
+    build_level1_topology as _build_level1_topology, open_base_edges as _open_base_edges,
+)
+from utils.numeric_entry_validation import is_valid_numeric_partial as _is_valid_numeric_partial
 
-# Pendant/guest flat-attach pipeline (2026-09-30 modularization -- moved out verbatim, see that
-# module's own docstring) -- aliased to their old underscored names so every existing call site
-# below is unchanged.
+# Pendant/terminal-node flat-attach pipeline (2026-09-30 modularization -- moved out verbatim,
+# see that module's own docstring) -- aliased to their old underscored names so every existing
+# call site below is unchanged.
 from interactive_inflater_app.logic.flat_face_attacher import (
     pendant_face_attachments as _pendant_face_attachments,
     prepare_mesh_for_inflate as _prepare_mesh_for_inflate,
@@ -184,11 +204,12 @@ from interactive_inflater_app.logic.flat_face_attacher import (
     place_all_flat as _place_all_flat,
 )
 
-# Club/member/guest/insider/outsider classification + the inflate-pipeline dispatch decision
-# (2026-09-30 modularization -- moved out, see each module's own docstring) -- aliased to their
-# old underscored names so every existing call site below is unchanged.
-from interactive_inflater_app.logic import club_member_classifier, inflation_type_chooser
-from interactive_inflater_app.logic.club_member_classifier import (
+# Active-group/reachable-node/terminal-node/junction-node/unreachable-node classification +
+# the inflate-pipeline dispatch decision (2026-09-30 modularization -- moved out, see each
+# module's own docstring) -- aliased to their old underscored names so every existing call site
+# below is unchanged.
+from interactive_inflater_app.logic import node_classifier, inflation_type_chooser
+from interactive_inflater_app.logic.node_classifier import (
     shape_connected_components as _shape_connected_components,
     central_shape_ids as _central_shape_ids,
     connection_key as _connection_key,
@@ -197,6 +218,12 @@ from interactive_inflater_app.logic.club_member_classifier import (
 # Group<->shape_id and base-edge<->fine-mesh identity mapping (2026-09-30 modularization) -- what
 # keeps the 2D canvas and the 3D panel "matching", see each module's own docstring.
 from interactive_inflater_app.logic import face_indexer, edge_indexer
+
+# Colour > Multi-colour per-shape color picking (2026-10-01, explicit: "add a Colour menu...
+# once that's done, add the same thing for interactive_inflater") -- see its own module
+# docstring for why colors are tracked per 2D shape_id here, unlike inflate_polyhedron_app's own
+# per-3D-group version.
+from interactive_inflater_app.logic import coloring
 
 # Pure hover/selection set arithmetic (2026-09-30 modularization) -- the VTK actor-building
 # stays here; _point_segment_distance_3d (used to hit-test the 3D panel's own Join-mode cursor
@@ -211,9 +238,13 @@ from interactive_inflater_app.logic.edge_selecter import (
 # arithmetic (2026-09-30 modularization) -- see each module's own docstring.
 from interactive_inflater_app.logic import edge_modifier, face_modifier
 
-# The one pure decision inside the full-cold-reinflate pipeline (2026-09-30 modularization) --
-# see that module's own docstring for why the rest of the pipeline stays here.
-from interactive_inflater_app.logic import reinflater
+# The one pure decision inside the full-cold-reinflate pipeline -- `reinflater` aliases
+# utils.inflate_polyhedron.pressure_history_guess (2026-10-01, explicit: "make sure they are
+# using shared code whenever possible. shared code should be moved to utils"); was this app's
+# own `logic/reinflater.py`, byte-identical to inflate_polyhedron_app's own copy, moved to utils
+# and imported under the SAME alias so every `reinflater.guess_pressure_from_history(...)` call
+# site below is unchanged.
+from utils.inflate_polyhedron import pressure_history_guess as reinflater
 
 # The 3D panel's camera + its rotate/pan/zoom gesture state, isolated into its own small
 # stateful object (2026-09-30 modularization) -- see that module's own docstring for why this
@@ -552,225 +583,22 @@ FRONT_EDGE_WEIGHT = 0.85
 BACK_EDGE_WEIGHT = 0.9
 SUBDIVISION_EDGE_LINE_WIDTH = 0.75
 
-# Lighting/shading for the two per-group face actors (2026-09-29, explicit user request: "add
-# some lighting and shading... performant") -- SMOOTH_SHADING is the actual visual win: VTK
-# interpolates PER-VERTEX normals (averaged from each vertex's own incident fine triangles)
-# across every triangle instead of using one flat per-triangle normal, so a subdivided face
-# reads as a smoothly curved/inflated surface instead of a faceted polyhedron made of visible
-# flat triangles -- exactly what an "inflated" mesh should look like, and cheap: VTK computes
-# these normals once per add_mesh call (a `vtkPolyDataNormals` pass over however many triangles
-# that one group's own PolyData has, not the whole scene, not per-frame), not a rendering-time
-# cost repeated every redraw. No new library needed -- this is PyVista/VTK's own existing Phong
-# lighting pipeline (already active with a default 3-light kit; add_mesh's default
-# smooth_shading=False was simply never overridden), not a swap to some heavier PBR/raytracing
-# path. The material constants below tone the default lighting down slightly from add_mesh's
-# own defaults (ambient=0.0, diffuse=1.0, specular=0.0) -- a touch of ambient keeps the shadowed
-# side of a face from ever going fully black/flat, and a modest specular highlight is what
-# actually SELLS the "smooth, slightly glossy inflated surface" look once combined with smooth
-# shading; SPECULAR_POWER keeps that highlight small/tight rather than a big soft blob.
-#
-# SMOOTH_SHADING temporarily OFF, MATERIAL_SPECULAR temporarily 0 (2026-10-01, explicit: "might
-# be because you didn't implement diffuse lighting. so try adding lighting that depends on face
-# normals. turn off phong for now" -- see inflate_polyhedron_app's own identical change for the
-# full rationale/verification). FLAT per-face shading (each triangle lit by its OWN true face
-# normal) with specular (the actual "Phong" part of Blinn-Phong) off, so only face-normal-
-# dependent ambient+diffuse brightness is visible -- an obviously faceted, triangle-by-triangle
-# look rather than a smoothly curved one. Revert both to True/0.35 to go back to smooth Phong
-# shading if this reads as too faceted/low-poly instead. MATERIAL_AMBIENT bumped 0.18->0.26
-# (2026-10-01, explicit: "make things a tad brighter", alongside KEY_LIGHT_INTENSITY/
-# FILL_LIGHT_INTENSITY below) -- raises the floor brightness a bit without flattening the
-# per-facet contrast this whole change was for. MATERIAL_SPECULAR brought back 0.0->0.5
-# (2026-10-01, explicit: "make the phong lighting brighter" -- the specular term IS the "Phong"
-# part of Blinn-Phong, see this comment's own opening line) -- a brighter glossy highlight per
-# flat-shaded facet than the original (pre-"turn off phong") 0.35, still combined with FLAT
-# per-face normals (SMOOTH_SHADING still False), not a return to smooth interpolation.
-# MATERIAL_DIFFUSE 0.85->1.0 and MATERIAL_SPECULAR 0.5->0.75 (2026-10-01, explicit: "i still
-# want the diffuse and phong lighting to be brighter") -- diffuse at its max brightens the
-# per-facet directional gradient this whole flat-shading change was for; specular (the "Phong"
-# term) raised further for a stronger glossy highlight, still flat-shaded (SMOOTH_SHADING False).
-# Reverted back to 0.85/0.5 (2026-10-01, explicit: "lower diffuse and specular to before") --
-# once HEADLIGHT and the KEY/FILL retuning below actually fixed overall brightness, the material
-# bump was no longer needed/wanted on top of it. MATERIAL_AMBIENT reverted back to its own
-# pre-bump 0.18 (2026-10-01, explicit: "lower ambient"), same reasoning.
-SMOOTH_SHADING = False
-MATERIAL_AMBIENT = 0.18
-MATERIAL_DIFFUSE = 0.85
-MATERIAL_SPECULAR = 0.5
-MATERIAL_SPECULAR_POWER = 20
-
-# Explicit 2-light camera-relative rig, REPLACING the plotter's own default light kit
-# (2026-09-29, explicit bug report: "I don't see any shading" on a mesh that converges fine --
-# smooth_shading/material tuning alone weren't enough). A plain default VTK Plotter lights the
-# scene with a HEADLIGHT -- a light collocated with the camera, pointed straight down the view
-# axis -- which is exactly the lighting setup that looks flattest: every point on a convex
-# surface facing the camera receives close to the SAME light angle relative to its own normal,
-# so there's minimal brightness falloff across the visible surface regardless of how good
-# smooth_shading's own normal interpolation is (a shading MODEL can't manufacture contrast a
-# light rig never provides). `light_type='camera light'` positions a light in a coordinate
-# space where the camera itself sits at (0, 0, 1) looking at (0, 0, 0) with up=(0, 1, 0) --
-# OFFSETTING position away from (0, 0, 1) (unlike a headlight) puts the light off the view axis,
-# so there's always real angular falloff across a curved surface, and VTK automatically keeps
-# the light following the camera as the user rotates/pans -- no per-render recomputation needed,
-# unlike a world-space light that could leave one whole side permanently unlit. KEY (bright,
-# upper-right) does the actual shape-defining work; FILL (dim, opposite side) keeps the unlit
-# side from going flat black without washing out the key's own contrast -- classic 2-point
-# rig, cheaper than the default kit's 5 lights and deliberately more off-axis than any of them.
-#
-# Pushed FURTHER off-axis, and MATERIAL_AMBIENT lowered 0.25->0.18 (2026-10-01, explicit bug
-# report: "every face, regardless of how it's subdivided and inflated, all get one phong
-# lighting... shouldn't the individual subdivisions get different lighting/shading"). Diagnosed,
-# NOT a shading-computation bug: per-vertex normals and Phong interpolation were already both
-# correct (direct inspection confirmed real normal variation up to 50+ degrees within one
-# subdivided macro face). The PREVIOUS position (0.55, 0.7, 0.85), despite the "off the view
-# axis" reasoning above, was still close enough to the camera's own (0, 0, 1) that lighting a
-# roughly dome-shaped inflated face from nearly the angle it's VIEWED from produces a radially-
-# symmetric "glow" (bright center fading evenly toward the rim in every direction) rather than a
-# left-to-right/top-to-bottom directional gradient -- which at a small panel size reads as
-# "basically one flat shade plus a highlight blob" even though the underlying per-vertex shading
-# genuinely varies. A real side/grazing angle makes the SAME underlying curvature produce an
-# obviously directional, clearly-per-subdivision-varying gradient instead. Intensities bumped
-# 1.1->1.25 / 0.45->0.55 (2026-10-01, explicit: "make things a tad brighter"), then brought back
-# down 1.25->1.0 / 0.55->0.4 (2026-10-01, explicit: "now let's a bit too bright. make the other
-# headlights less intense" -- after HEADLIGHT below was added and pushed overall brightness past
-# where the user wanted it), then KEY_LIGHT_INTENSITY further down 1.0->0.4 (2026-10-01, explicit:
-# "drop key light to 0.4") and FILL_LIGHT_INTENSITY further down 0.4->0.2 (2026-10-01, explicit:
-# "change fill_light to 0.2"), then both bumped back up 0.4->0.6 / 0.2->0.3 (2026-10-01,
-# explicit: "ok now bump up the key_light, fill_light, headlight"), then that bump undone back to
-# 0.4/0.2 (2026-10-01, explicit: "undo the bumping for fill light and key light" -- HEADLIGHT's
-# own bump to 0.9 stays, only KEY/FILL's bump was reverted).
-#
-# Positions narrowed partway back toward the camera axis (2026-10-01, explicit: "can you move
-# the phong lights closer?", clarified via follow-up question -- "Narrow the angle a bit", since
-# position DISTANCE is a no-op for these: `light_type="camera light"` lights are directional
-# (VTK Positional=False by default), so only the direction to the position matters, never how
-# far away it is -- confirmed by rendering the same scene with the position scaled to 30% of its
-# length and diffing pixel output (identical). KEY_LIGHT_POSITION blended 30% of the way toward
-# (0, 0, 1) -- the camera's own position in this space, see the "camera light" note above --
-# taking its off-axis angle from ~103 degrees to ~84 degrees; FILL_LIGHT_POSITION blended the
-# same way, ~60 degrees to ~45 degrees. Still off-axis enough to preserve the directional
-# per-subdivision gradient the original repositioning (above) was for, just less extreme.
-# Dimmed a bit (2026-10-01, explicit: "ok looks now. now dim all the key/fill/headlights a bit",
-# alongside HEADLIGHT_INTENSITY below): 0.4->0.3 / 0.2->0.15.
-KEY_LIGHT_POSITION = (0.9, 0.15, 0.1)
-KEY_LIGHT_INTENSITY = 0.3
-FILL_LIGHT_POSITION = (-0.7, -0.2, 0.7)
-FILL_LIGHT_INTENSITY = 0.15
-
-# Added (2026-10-01, explicit: "it's not actually brighter. maybe what i want is for the light
-# source to be more from the viewer's eyes" -- after bumping MATERIAL_DIFFUSE/MATERIAL_SPECULAR
-# didn't read as brighter). Root cause: KEY/FILL above sit at a deliberate side/grazing angle
-# (see their own comment) so the diffuse dot-product against a camera-FACING surface is small
-# regardless of the material's diffuse coefficient -- raising the coefficient alone can't fix a
-# weak incidence angle. HEADLIGHT sits essentially AT the camera ((0, 0, 1) in "camera light"
-# space is the camera's own position looking at the origin -- see KEY_LIGHT_POSITION's comment),
-# so camera-facing surfaces get real direct illumination. Kept separate from, not a replacement
-# for, KEY/FILL -- those still provide the off-axis directional gradient that makes individual
-# subdivisions read as differently-shaded; HEADLIGHT only adds overall brightness on top.
-# Bumped 0.6->0.9 (2026-10-01, explicit: "ok now bump up the key_light, fill_light, headlight"),
-# then dimmed back down 0.9->0.75 (2026-10-01, explicit: "ok looks now. now dim all the
-# key/fill/headlights a bit", alongside KEY_LIGHT_INTENSITY/FILL_LIGHT_INTENSITY above).
-HEADLIGHT_POSITION = (0.0, 0.0, 1.0)
-HEADLIGHT_INTENSITY = 0.75
+# Lighting/shading for the two per-group face actors -- moved to
+# utils.inflate_polyhedron.plotter_lighting (2026-10-01, explicit: "make sure they are using
+# shared code whenever possible. shared code should be moved to utils") since it was identical,
+# including the entire tuning-history comment, to inflate_polyhedron_app's own copy; see that
+# module's own docstring for the full tuning history (why smooth_shading/material tuning alone
+# weren't enough, the light-repositioning fix, flat-shading change, every brightness retune).
+# Imported at the top of this file under the same names this file's own call sites already use.
 
 # Debug mode's "Show face normals"/"Show vertex normals"/"Show repulsive forces" toggles
-# (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a Diff
+# (2026-09-29, explicit user request -- diagnosing a crumpled terminal-node boundary after a Diff
 # Inflate join) -- same colors/length convention as inflate_polyhedron_app's own identically-
 # named toggles (_draw_level_panel), so a user familiar with that app reads these the same way.
 NORMAL_COLOR = "yellow"
 VERTEX_NORMAL_COLOR = "cyan"
 REPULSION_FORCE_COLOR = "magenta"
 NORMAL_LENGTH_FRACTION = 0.5
-
-
-def _vertex_normals(faces, positions):
-    """Same as inflate_polyhedron_app's own _vertex_normals (duplicated, not imported -- that
-    app's own app.py only resolves its `from session_state import ...` when run as __main__
-    with its own directory on sys.path, so it isn't safely importable as a library module from
-    here). faces: triangle vertex-id loops; positions: {vertex_id: pos}. Returns
-    {vertex_id: (unit_normal, mean_incident_edge_length)} for "Show vertex normals" below --
-    every vertex touched by at least one non-degenerate face, `unit_normal` the normalized SUM
-    of every incident face's own unit normal (equally weighted, not by area)."""
-    normal_sums = {}
-    edge_len_sums = {}
-    edge_len_counts = {}
-    for a, b, c in faces:
-        pa, pb, pc = positions[a], positions[b], positions[c]
-        normal = np.cross(pb - pa, pc - pa)
-        normal_len = np.linalg.norm(normal)
-        if normal_len < 1e-12:
-            continue
-        unit_normal = normal / normal_len
-        for v in (a, b, c):
-            normal_sums[v] = normal_sums.get(v, np.zeros(3)) + unit_normal
-        for u, w in ((a, b), (b, c), (c, a)):
-            length = np.linalg.norm(positions[w] - positions[u])
-            for v in (u, w):
-                edge_len_sums[v] = edge_len_sums.get(v, 0.0) + length
-                edge_len_counts[v] = edge_len_counts.get(v, 0) + 1
-    result = {}
-    for v, total in normal_sums.items():
-        total_len = np.linalg.norm(total)
-        if total_len < 1e-12:
-            continue
-        result[v] = (total / total_len, edge_len_sums[v] / edge_len_counts[v])
-    return result
-
-
-def _is_valid_numeric_partial(proposed, allow_exponent, allow_decimal=True):
-    """True if `proposed` is a full number or a prefix a user could still be typing toward one
-    -- same validation idea as inflate_polyhedron_app's own _is_valid_numeric_partial
-    (duplicated, not imported -- a tiny, self-contained regex check, not worth pulling in that
-    whole module for)."""
-    digits = r"\d*\.?\d*" if allow_decimal else r"\d*"
-    pattern = f"-?{digits}(?:[eE][-+]?\\d*)?" if allow_exponent else f"-?{digits}"
-    return re.fullmatch(pattern, proposed) is not None
-
-
-def _open_base_edges(base_faces, face_edge_ids):
-    """Returns {base_face_idx: {frozenset(rim-edge vertex pair), ...}} -- for each of
-    `base_faces`' own polygons, which of ITS OWN edges have no partner elsewhere in the mesh (a
-    genuine free/boundary edge) rather than being glued to some other piece. Same logic as
-    inflate_polyhedron_app's own _open_base_edges (duplicated, not imported -- see module
-    docstring), used here only to answer "is the central object closed" (InflaterPane's own
-    _is_central_object_closed) -- an empty return means every edge is glued, i.e. closed.
-
-    Adjacency is found via `face_edge_ids` when given (an edge id used by exactly ONE
-    base_faces entry across the whole mesh is that entry's own free edge) -- same
-    disambiguation rationale as mesh_levels.polygon_centroid_springs' own docstring, since two
-    DIFFERENT genuine edges can coincidentally share a plain vertex-id pair. Falls back to a
-    plain shared-vertex-pair match when `face_edge_ids` is None."""
-    owners = {}
-    if face_edge_ids is not None:
-        for i, ids in enumerate(face_edge_ids):
-            face = base_faces[i]
-            n = len(face)
-            for k, eid in enumerate(ids):
-                pair = frozenset((face[k], face[(k + 1) % n]))
-                owners.setdefault(eid, []).append((i, pair))
-    else:
-        for i, face in enumerate(base_faces):
-            n = len(face)
-            for k in range(n):
-                pair = frozenset((face[k], face[(k + 1) % n]))
-                owners.setdefault(pair, []).append((i, pair))
-    open_edges = {}
-    for group in owners.values():
-        if len(group) == 1:
-            i, pair = group[0]
-            open_edges.setdefault(i, set()).add(pair)
-    return open_edges
-
-
-def _build_level1_topology(base_faces):
-    """Level 0 and Level 1 share this exact fan-triangulated topology -- same construction as
-    inflate_polyhedron_app's own _build_level1_topology (duplicated, not imported -- see module
-    docstring). Calls subdivide_once with placeholder positions purely to get the resulting
-    faces/edge_length/face_of_fine; the interpolated positions it also returns are meaningless
-    and discarded."""
-    dummy_positions = {v: np.zeros(3) for face in base_faces for v in face}
-    faces, _, edge_length, face_of_fine = subdivide_once(
-        base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
-    return faces, edge_length, face_of_fine
 
 
 def _subdivide_combined_to_level3(base_faces, face_edge_ids, seed_positions):
@@ -1848,33 +1676,35 @@ class BuilderPane(InteractiveBuilderApp):
         CURRENT anchor -- decides whether that's allowed and, if so, who the new anchor should
         be. Simulates the deletion against the CURRENT self.shapes/self.connections (both still
         intact at call time, since this runs BEFORE anything is actually removed): every
-        component the OLD central object's own SURVIVING members fall into, post-deletion, gets
-        checked -- more than one means deleting the anchor would split the club into two or more
-        separate pieces, which is never allowed (2026-09-29, explicit: "if the user tries to
-        delete the anchor and it splits the club into two, then it's not allowed. show a dialog
-        explaining why").
+        component the OLD central object's own SURVIVING reachable nodes fall into, post-deletion,
+        gets checked -- more than one means deleting the anchor would split the active group into
+        two or more separate pieces, which is never allowed (2026-09-29, explicit: "if the user
+        tries to delete the anchor and it splits the club into two, then it's not allowed. show a
+        dialog explaining why").
 
         Returns (allowed, new_anchor_id):
         - (False, None): blocked -- a split. Caller shows the explanatory dialog and leaves the
           anchor out of the deletion.
         - (True, None): allowed, and nothing of the old central object survives at all (the
-          whole club is being deleted along with the anchor) -- no replacement anchor is needed;
-          _refresh_vme_state's own fallback (or the next shape placed, if the canvas ends up
-          fully empty) takes it from here.
+          whole active group is being deleted along with the anchor) -- no replacement anchor is
+          needed; _refresh_vme_state's own fallback (or the next shape placed, if the canvas ends
+          up fully empty) takes it from here.
         - (True, some_id): allowed, with `some_id` the shape that should become the new anchor
           -- "assign another insider piece as the anchor... the insider with the most
-          connections" (2026-09-29, explicit), i.e. the surviving member of the (still intact)
-          club with >= 2 remaining connections and the highest connection count among those;
-          falling back to the best-connected survivor overall if no insider survives (e.g. the
-          club shrinks to a single piece, or to two guests only connected to each other)."""
-        return club_member_classifier.plan_anchor_deletion(
+          connections" (2026-09-29, explicit), i.e. the surviving reachable node of the (still
+          intact) active group with >= 2 remaining connections and the highest connection count
+          among those; falling back to the best-connected survivor overall if no junction node
+          survives (e.g. the active group shrinks to a single piece, or to two terminal nodes
+          only connected to each other)."""
+        return node_classifier.plan_anchor_deletion(
             self.shapes, self.connections, self.central_shape_ids(), deleted_ids)
 
     def _on_delete_key(self, _event):
         """Runs InteractiveBuilderApp's own multi-shape/connection delete unchanged, except when
         the current anchor is among the shapes about to be deleted: _plan_anchor_deletion decides
-        whether that's allowed (deleting it mustn't split the club into two or more pieces,
-        2026-09-29 explicit) and, if so, who the new anchor should be. When blocked, the anchor
+        whether that's allowed (deleting it mustn't split the active group into two or more
+        pieces, 2026-09-29 explicit) and, if so, who the new anchor should be. When blocked, the
+        anchor
         is dropped from this deletion (an explanatory popup says why, 2026-09-26 explicit) but
         whatever ELSE was selected is still deleted normally. When allowed, self._anchor_shape_id
         is updated to the chosen replacement BEFORE the actual deletion runs (so
@@ -1931,24 +1761,24 @@ class BuilderPane(InteractiveBuilderApp):
         -- InteractiveBuilderApp.on_copy_key's own docstring says it captures every connection
         with BOTH endpoints among the selected shapes, so copying 2+ CONNECTED shapes and
         pasting would drop in two brand-new shapes already connected to EACH OTHER, neither one
-        yet connected to the club -- exactly the outsider-to-outsider connection this app
-        never otherwise allows (an outsider can only ever gain its first connection by joining
-        the club directly). Blocked here, at Ctrl+C itself, rather than at Ctrl+V -- this is
-        the only place self._clipboard ever gets populated, so refusing it here means the
-        clipboard can never hold more than one shape to begin with, no separate paste-time
-        guard needed. A single-shape copy is unaffected (its own clipboard entry can never
-        carry a connection either way -- classify_change's underlying set is what would still
-        show as an outsider, isolated, after paste). See _call_super_in_move_mode's own
-        docstring for why the actual super() call goes through that helper rather than a plain
-        super().on_copy_key(_event)."""
+        yet connected to the active group -- exactly the unreachable-node-to-unreachable-node
+        connection this app never otherwise allows (an unreachable node can only ever gain its
+        first connection by joining the active group directly). Blocked here, at Ctrl+C itself,
+        rather than at Ctrl+V -- this is the only place self._clipboard ever gets populated, so
+        refusing it here means the clipboard can never hold more than one shape to begin with,
+        no separate paste-time guard needed. A single-shape copy is unaffected (its own
+        clipboard entry can never carry a connection either way -- classify_change's underlying
+        set is what would still show as an unreachable node, isolated, after paste). See
+        _call_super_in_move_mode's own docstring for why the actual super() call goes through
+        that helper rather than a plain super().on_copy_key(_event)."""
         if self._locked:
             return
         if len(self.selected_ids) > 1:
             messagebox.showerror(
                 "Cannot copy multiple pieces",
                 "Copy/paste only works one piece at a time here -- pieces not yet connected to "
-                "the club (outsiders) must stay isolated from each other, and pasting more than "
-                "one at once would paste them still connected to each other.")
+                "the active group (unreachable nodes) must stay isolated from each other, and "
+                "pasting more than one at once would paste them still connected to each other.")
             return
         self._call_super_in_move_mode(super().on_copy_key, _event)
 
@@ -1966,6 +1796,45 @@ class BuilderPane(InteractiveBuilderApp):
         if self._locked:
             return
         super().on_redo_key(_event)
+
+    def _snapshot_state(self):
+        """Extends InteractiveBuilderApp's own undo/redo snapshot (shapes/connections/etc.)
+        with InflaterPane's own Colour menu state (2026-10-01, explicit: "it should be able to
+        undo/redo colour changes") -- `color_mode`/`shape_colors` (a plain shallow copy; every
+        value is a hex-string color, nothing nested that needs deepcopy) ride along in the SAME
+        snapshot dict every existing undo/redo call site (_push_undo, _begin_/
+        _commit_undoable_change, on_undo_key/on_redo_key) already captures/restores, so a shape
+        placement/delete/edit that happens to also touch shape_colors (e.g. a newly-placed piece
+        picking up its own first color) undoes/redoes its color right along with the shape, with
+        no separate tracking needed. A no-op addition when inflater_getter isn't wired up yet
+        (before CombinedApp.__init__ finishes)."""
+        snap = super()._snapshot_state()
+        if self.inflater_getter is not None:
+            inflater = self.inflater_getter()
+            snap["color_mode"] = inflater.color_mode_var.get()
+            snap["shape_colors"] = dict(inflater.shape_colors)
+        return snap
+
+    def _restore_snapshot(self, snap):
+        """Inverse of _snapshot_state's own addition -- restores color_mode/shape_colors from
+        the snapshot right after the base class restores shapes/connections/etc. Tolerates a
+        snapshot that predates this field (plain `.get`, defaulting to "leave it alone") -- the
+        undo/redo stacks are purely in-memory for the life of one running app, so this only
+        matters for whatever was already on the stack the instant this feature first runs, never
+        for a saved/reloaded file."""
+        super()._restore_snapshot(snap)
+        if self.inflater_getter is not None and "color_mode" in snap:
+            inflater = self.inflater_getter()
+            inflater.color_mode_var.set(snap["color_mode"])
+            inflater.shape_colors = dict(snap["shape_colors"])
+            inflater._last_color_mode = snap["color_mode"]
+            # A color-only undo/redo (mode toggle, Randomize) changes nothing classify_change
+            # would notice (shapes/connections are untouched), so nothing else here would ever
+            # redraw the 3D panel with the just-restored colors otherwise -- harmless/cheap to
+            # call even when shapes DID also change, since whatever else is about to run (Full/
+            # Diff Inflate, another _render()) just redraws over this one.
+            if inflater.base_faces is not None:
+                inflater._render()
 
     # Same before-__init__-finishes reasoning as on_change/_hover_shape_id/_locked above --
     # wired to InflaterPane.on_load_success once both panes exist (CombinedApp.__init__).
@@ -1987,8 +1856,8 @@ class BuilderPane(InteractiveBuilderApp):
             # InteractiveBuilderApp.on_load_clicked's subsequent self._refresh_vme_state()
             # call corrects self._anchor_shape_id (the overridden _refresh_vme_state's own
             # "shapes exist but the current anchor id doesn't name any of them" fallback,
-            # above) -- so that first redraw always draws every shape dimmed as an outsider
-            # (self.central_shape_ids() sees the OLD, no-longer-valid anchor id, or None),
+            # above) -- so that first redraw always draws every shape dimmed as an unreachable
+            # node (self.central_shape_ids() sees the OLD, no-longer-valid anchor id, or None),
             # regardless of the newly-loaded net's real connectivity. Nothing else redraws
             # the canvas again afterward, so that wrong frame was what stayed on screen
             # until some unrelated interaction (hover, drag, ...) happened to trigger a real
@@ -2062,7 +1931,7 @@ class BuilderPane(InteractiveBuilderApp):
         else below runs, so placing (or removing) a shape that never joins the central object at
         all classifies as "none": it doesn't change what actually gets exported/inflated, so it
         shouldn't disable Diff Inflate or fire an unnecessary Auto Inflate re-run either."""
-        return club_member_classifier.classify_change(
+        return node_classifier.classify_change(
             old_shapes, old_connections, old_anchor_shape_id,
             self.shapes, self.connections, self._anchor_shape_id)
 
@@ -2359,6 +2228,28 @@ class InflaterPane:
         self.base_faces = None
         self.base_edges = None
         self.base_face_edge_ids = None
+        # Colour menu (2026-10-01, explicit -- see logic/coloring.py's own module docstring).
+        # color_mode_var: "polygon" (this app's PRE-EXISTING per-shape-type POLYGON_COLORS
+        # coloring, unchanged) or "multi" (one random color per shape, avoiding a neighbor's
+        # where possible). shape_colors ({shape_id: color}) is the actual persisted Multi-colour
+        # state -- assigned the moment a shape is first placed (CombinedApp's own new-shape
+        # detection calls _ensure_shape_color), so it's already there by the time Multi-colour
+        # mode is ever selected; _apply_color_mode's own lazy-fill covers anything that still
+        # slipped through (a loaded net with no saved colors, etc.).
+        # Default is "multi" (2026-10-01, explicit: "use multi-colour as default") -- only this
+        # live starting value changed; a LOADED session still restores whatever mode it was
+        # actually saved with, and InflaterSessionStateModel.color_mode's own default stays
+        # "polygon" for backward compatibility with a session saved before this field existed
+        # (see inflate_polyhedron_app's own identical reasoning).
+        self.color_mode_var = tk.StringVar(value="multi")
+        self.shape_colors = {}
+        # Tracks color_mode_var's own PREVIOUS value, read by on_color_mode_changed to build an
+        # undo snapshot with the right "before" mode (2026-10-01, explicit: "undo/redo colour
+        # changes") -- can't just read color_mode_var itself at that point, since a Tk
+        # Radiobutton's variable is already set to the NEW value by the time its own `command`
+        # fires. Kept in sync by BuilderPane._restore_snapshot too, so undoing/redoing past a
+        # mode change doesn't leave this stale.
+        self._last_color_mode = "multi"
         self.faces = None
         self.edge_length = None
         self.face_of_fine = None
@@ -2427,6 +2318,10 @@ class InflaterPane:
         self.on_inflate_success = None
         self.on_session_saved = None
         self.on_session_loaded = None
+        # Fired from _refresh_undo_redo_buttons with (can_undo, can_redo) -- CombinedApp wires
+        # this to keep its own Edit > Undo/Redo menu items' enabled state in sync with the icon
+        # buttons' (2026-10-01, explicit: "put Undo/Redo in an Edit menu").
+        self.on_undo_redo_state_changed = None
         # True for the duration of a Full Inflate run that on_diff_inflate_clicked itself
         # redirected into (self.is_fully_inflated False -- see that method's own docstring) --
         # lets _revert_run's own "undo the triggering edit
@@ -2441,10 +2336,11 @@ class InflaterPane:
         # unrelated edit) -- cleared in both _revert_run and _record_inflate_success so it never
         # leaks into a later, unrelated run.
         self._diff_redirect_pending = False
-        # A short label ("Anchor piece"/"Insider added"/"Insiders deleted"/"Insider modified")
-        # prefixed onto every status message for the run this change triggered (2026-09-28,
-        # explicit user request: status messages should say what kind of club change is
-        # driving the run, not just which pipeline/level -- see _describe_change's own
+        # A short label ("Anchor piece"/"Junction node added"/"Junction nodes deleted"/
+        # "Junction node modified") prefixed onto every status message for the run this change
+        # triggered (2026-09-28, explicit user request: status messages should say what kind of
+        # active-group change is driving the run, not just which pipeline/level -- see
+        # _describe_change's own
         # docstring for how this is derived and _pipeline_label for where it's applied). None
         # for a run started by a plain manual Full Inflate/Reinflate/on_load_success click,
         # which has no single "triggering change" to describe. Deliberately NOT cleared in
@@ -2456,14 +2352,14 @@ class InflaterPane:
         # each new run's own start always overwrites whatever a PRIOR run left behind, so
         # staleness is never possible without a separate clearing step.
         self._change_label = None
-        # {shape_id, ...} of every OUTSIDER (a placed shape not connected to the club at all --
-        # see the module's own "Club terminology" section) as of the last refresh_diff_
-        # eligibility call -- BuilderPane.classify_change deliberately reports "none" for an
-        # outsider-only add/remove (see its own docstring: it never changes what's actually
-        # exported/inflated), so this is the ONLY way outsider changes get their own status
-        # message ("Outsider added"/"Outsider deleted") at all (2026-09-28, explicit user
-        # request).
-        self._last_outsider_ids = frozenset()
+        # {shape_id, ...} of every UNREACHABLE NODE (a placed shape not connected to the active
+        # group at all -- see the module's own "Node terminology" section) as of the last
+        # refresh_diff_eligibility call -- BuilderPane.classify_change deliberately reports
+        # "none" for an unreachable-node-only add/remove (see its own docstring: it never changes
+        # what's actually exported/inflated), so this is the ONLY way unreachable-node changes
+        # get their own status message ("Unreachable node added"/"Unreachable node deleted") at
+        # all (2026-09-28, explicit user request).
+        self._last_unreachable_node_ids = frozenset()
 
         # The BUILDER's own shapes/connections at the moment of the last successfully-COMPLETED
         # inflate (Full or Diff) -- None until the first one finishes -- plus source_polygon_id
@@ -2506,23 +2402,23 @@ class InflaterPane:
         # they don't run pendant exclusion themselves); _on_inflate_step_done's own Level-3
         # "Done" branch consumes it via _reattach_pendant_faces.
         self._pending_pendants = []
-        # Whether the CLUB's own insiders (every member except guests, i.e. single-connection
-        # members -- see the module docstring's "Club terminology" section) currently reflect a
-        # real relax/inflate result, or were only ever geometrically placed
-        # (on_full_inflate_clicked's own "place" mode -- see _prepare_mesh_for_inflate's own
-        # docstring) -- 2026-09-28, explicit user request, now this app's Rule 2/3: "every time
-        # the canvas empties, the is_fully_inflated flag is set to false. every time a full
-        # inflate is performed, the flag is set to true... when there is a change to insiders...
-        # if is_fully_inflated = true, then do diff inflate. else do full inflate." Diff
-        # Inflate's own incremental paths all assume they're seeding from an ALREADY relaxed/
-        # calibrated result -- reusing a flat placement's own positions that way would feed
-        # real physics a starting point it was never designed for. Checked by
+        # Whether the ACTIVE GROUP's own junction nodes (every reachable node except terminal
+        # nodes, i.e. single-connection reachable nodes -- see the module docstring's "Node
+        # terminology" section) currently reflect a real relax/inflate result, or were only ever
+        # geometrically placed (on_full_inflate_clicked's own "place" mode -- see
+        # _prepare_mesh_for_inflate's own docstring) -- 2026-09-28, explicit user request, now
+        # this app's Rule 2/3: "every time the canvas empties, the is_fully_inflated flag is set
+        # to false. every time a full inflate is performed, the flag is set to true... when there
+        # is a change to insiders... if is_fully_inflated = true, then do diff inflate. else do
+        # full inflate." Diff Inflate's own incremental paths all assume they're seeding from an
+        # ALREADY relaxed/calibrated result -- reusing a flat placement's own positions that way
+        # would feed real physics a starting point it was never designed for. Checked by
         # on_diff_inflate_clicked, set True whenever _on_inflate_step_done's own Level-3 "Done"
         # branch is reached (a real pressure-calibration pass just ran, whichever pipeline path
         # got it there), set False by on_full_inflate_clicked's own "place" branch AND by
-        # refresh_diff_eligibility whenever the club empties out entirely (Rule 2). Left
-        # UNCHANGED by _diff_attach_pendant_only -- attaching a guest never touches the
-        # insiders either way, so it doesn't change whether they were ever really solved.
+        # refresh_diff_eligibility whenever the active group empties out entirely (Rule 2). Left
+        # UNCHANGED by _diff_attach_pendant_only -- attaching a terminal node never touches the
+        # junction nodes either way, so it doesn't change whether they were ever really solved.
         self.is_fully_inflated = False
 
         # Hover-highlight state (2026-09-19, explicit: "when i mouse over a face in the 3d
@@ -2736,7 +2632,7 @@ class InflaterPane:
         self._replay_slider.state(["disabled"])
 
         # Debug-mode-only diagnostics (2026-09-29, explicit user request -- diagnosing a
-        # crumpled guest boundary after a Diff Inflate join): same idea as
+        # crumpled terminal-node boundary after a Diff Inflate join): same idea as
         # inflate_polyhedron_app's own identically-named toggles, see _render's own overlay
         # block for what each actually draws. command=self._render (not a separate redraw path)
         # since this pane has exactly one panel/one _render, unlike that app's per-level draw().
@@ -3104,32 +3000,35 @@ class InflaterPane:
         return f"{self._change_label}: {base}" if self._change_label else base
 
     def _describe_change(self, kind, extra):
-        """Returns a short label ("Anchor piece"/"Insider(s) added"/"Insider(s) deleted"/
-        "Insider modified"/"Guest(s) added"/"Guest(s) deleted") for `kind`/`extra` (as returned
-        by BuilderPane.classify_change) -- see the module's own "Club terminology" section for
-        what these mean, and _pipeline_label for where this gets used. None for a kind this
-        doesn't describe (only ever called with a DIFF_ELIGIBLE_KINDS value or "add_face" for a
-        guest attach, never "none"/"complex").
+        """Returns a short label ("Anchor piece"/"Junction node(s) added"/"Junction node(s)
+        deleted"/"Junction node modified"/"Terminal node(s) added"/"Terminal node(s) deleted")
+        for `kind`/`extra` (as returned by BuilderPane.classify_change) -- see the module's own
+        "Node terminology" section for what these mean, and _pipeline_label for where this gets
+        used. None for a kind this doesn't describe (only ever called with a DIFF_ELIGIBLE_KINDS
+        value or "add_face" for a terminal-node attach, never "none"/"complex").
 
         "add_face": a brand new shape, so ITS OWN connection count IS its own glued-edge count
         (see _is_pendant_add's own reasoning). 0 connections means this is the very first piece
         ever placed (nothing else exists yet to connect to) -- "Anchor piece". Exactly 1
-        connection is ordinarily a guest add, UNLESS that one neighbor itself only had exactly
-        1 OTHER connection before this -- then the neighbor is PROMOTED from guest to insider
-        by this same edit (see _is_pendant_add's own docstring), so it's really an insider
-        change, not a guest one. 2+ connections (rare, but possible) is a genuine insider add.
+        connection is ordinarily a terminal-node add, UNLESS that one neighbor itself only had
+        exactly 1 OTHER connection before this -- then the neighbor is PROMOTED from terminal
+        node to junction node by this same edit (see _is_pendant_add's own docstring), so it's
+        really a junction-node change, not a terminal-node one. 2+ connections (rare, but
+        possible) is a genuine junction-node add.
 
         "remove_face": `extra` is the SET of removed shape ids -- gone now, so their own former
         connection counts are read from self.last_connections_snapshot (the net as of the last
         successful inflate, the correct "before" reference point for a single diff-eligible
-        edit). Counts as an insider change if any removed member itself had >= 2 connections
-        THEN, or if removing it drops some SURVIVING neighbor that had exactly 2 down to 1
-        (demoting that neighbor from insider to guest) -- otherwise every removed member (and
-        anything it touched) was already guest-level, so it's a guest removal.
+        edit). Counts as a junction-node change if any removed reachable node itself had >= 2
+        connections THEN, or if removing it drops some SURVIVING neighbor that had exactly 2
+        down to 1 (demoting that neighbor from junction node to terminal node) -- otherwise every
+        removed reachable node (and anything it touched) was already terminal-node-level, so
+        it's a terminal-node removal.
 
-        "add_connection"/"remove_connection": always an insider change -- these only ever run
-        between two members ALREADY in the club (see classify_change's own docstring), and
-        changing a connection between them is exactly Rule 3's "their internal connections"."""
+        "add_connection"/"remove_connection": always a junction-node change -- these only ever
+        run between two reachable nodes ALREADY in the active group (see classify_change's own
+        docstring), and changing a connection between them is exactly Rule 3's "their internal
+        connections"."""
         builder = self.builder_getter()
         if kind == "add_face":
             new_shape_id = extra
@@ -3145,16 +3044,16 @@ class InflaterPane:
                 neighbor_other = sum(
                     1 for c in connections if c["id"] != conn["id"]
                     and (c["a_shape"] == neighbor_id or c["b_shape"] == neighbor_id))
-                # A guest is 0 OR 1 connections -- the neighbor stays a guest itself (0 -> 1,
-                # a mutual guest pair) iff it had ZERO other connections before this one; it's
-                # promoted to insider (1 -> 2) iff it had EXACTLY one. 2+ already meant it was
-                # already an insider, unaffected either way.
+                # A terminal node is 0 OR 1 connections -- the neighbor stays a terminal node
+                # itself (0 -> 1, a mutual terminal-node pair) iff it had ZERO other connections
+                # before this one; it's promoted to junction node (1 -> 2) iff it had EXACTLY
+                # one. 2+ already meant it was already a junction node, unaffected either way.
                 if neighbor_other != 1:
-                    return "Guest added"
-            return "Insider added"
+                    return "Terminal node added"
+            return "Junction node added"
         if kind == "remove_face":
             removed_ids = set(extra)
-            word = "Insider" if len(removed_ids) == 1 else "Insiders"
+            word = "Junction node" if len(removed_ids) == 1 else "Junction nodes"
             old_conns = self.last_connections_snapshot or []
 
             def count_of(shape_id):
@@ -3171,10 +3070,10 @@ class InflaterPane:
                     other = c["a_shape"]
                 if other is not None and count_of(other) == 2:
                     return f"{word} deleted"
-            guest_word = "Guest" if len(removed_ids) == 1 else "Guests"
-            return f"{guest_word} deleted"
+            terminal_node_word = "Terminal node" if len(removed_ids) == 1 else "Terminal nodes"
+            return f"{terminal_node_word} deleted"
         if kind in ("add_connection", "remove_connection"):
-            return "Insider modified"
+            return "Junction node modified"
         return None
 
     def _set_running(self, running, active=None):
@@ -3412,7 +3311,7 @@ class InflaterPane:
             # _load_faces' own _redraw() call (its very last line, above) draws with whatever
             # self._anchor_shape_id was BEFORE this load -- _refresh_vme_state's own fallback
             # (self.shapes[0]["id"], see its docstring) only corrects it just now, one line
-            # above, so that first redraw always shows every shape dimmed as an outsider
+            # above, so that first redraw always shows every shape dimmed as an unreachable node
             # regardless of the newly-loaded net's real connectivity (2026-09-29, explicit bug
             # report: "the polygons are rendered as outsiders initially and later became
             # members"). Nothing else redraws the canvas again afterward.
@@ -3452,10 +3351,16 @@ class InflaterPane:
             face_of_fine=face_of_fine, edge_length=edge_length,
             target_rms_pct=state.target_rms_pct, tolerance=state.tolerance,
             last_pressure=last_pressure, level_history=level_history, session_label=state.net_name,
-            # A .hippo comes from inflate_polyhedron_app, which has no guest/insider concept at
-            # all -- every mesh it ever saves is a real relax/inflate result, never a flat
+            # A .hippo comes from inflate_polyhedron_app, which has no terminal-node/junction-
+            # node concept at all -- every mesh it ever saves is a real relax/inflate result,
+            # never a flat
             # "place" (see this app's own is_fully_inflated docstring), so this is always True.
-            is_fully_inflated=True)
+            is_fully_inflated=True,
+            # Colour menu (2026-10-01, explicit: "these colours persist via Save/Load, even
+            # into different app, if the target app supports it") -- a .hippo's own
+            # color_mode/face_colors fields use the exact same per-base-face convention this
+            # app's own InflaterSessionStateModel fields do (see that model's own docstring).
+            color_mode=state.color_mode, face_colors=state.face_colors)
 
     def _load_hippie_session(self, raw_text, path=None):
         """Restores this app's OWN `.hippie` session (InflaterSessionStateModel) -- see
@@ -3471,14 +3376,15 @@ class InflaterPane:
         field for either), but NOT `base_faces` itself: `state.base_faces` is used for that
         directly instead of `central_mesh["faces"]` (2026-09-29 fix, explicit bug report --
         "i'm not able to select the guest piece"/"highlighted a non-edge that connects a vertex
-        to the centre of an opposite face"). A guest/pendant shape's own corners get FRESH
-        runtime-counter vertex ids when first placed flat (_place_pendant_flat, so they never
-        collide with the core's independently-numbered fine mesh -- see its own docstring), ids
-        that are only reproducible by saving them, never by re-deriving them: a fresh
-        export_mesh_dict() call assigns a guest's corners whatever ids _faces_from_shapes'
-        deterministic numbering happens to land on, which is generally DIFFERENT from the
-        arbitrary-but-consistent ids `state.mesh`'s own saved positions/faces actually use for
-        that same guest. self.base_faces is read by every pick/hover/rim-walk path that matters
+        to the centre of an opposite face"). A terminal-node/pendant shape's own corners get
+        FRESH runtime-counter vertex ids when first placed flat (_place_pendant_flat, so they
+        never collide with the core's independently-numbered fine mesh -- see its own
+        docstring), ids that are only reproducible by saving them, never by re-deriving them: a
+        fresh export_mesh_dict() call assigns a terminal node's corners whatever ids
+        _faces_from_shapes' deterministic numbering happens to land on, which is generally
+        DIFFERENT from the arbitrary-but-consistent ids `state.mesh`'s own saved positions/faces
+        actually use for that same terminal node. self.base_faces is read by every
+        pick/hover/rim-walk path that matters
         here (_rebuild_open_edges, _base_edge_vertex_chain, _group_boundary_edge_set -- none of
         them ever touch self.base_edges/self.base_face_edge_ids), so using the SAVED value there
         is both correct and sufficient; base_edges/base_face_edge_ids are only consulted by the
@@ -3514,7 +3420,7 @@ class InflaterPane:
         # _load_faces' own _redraw() call (its very last line, above) draws with whatever
         # self._anchor_shape_id was BEFORE this load -- the real one is only assigned just
         # now, a few lines above -- so that first redraw always shows every shape dimmed as
-        # an outsider regardless of the newly-loaded net's real connectivity (2026-09-29,
+        # an unreachable node regardless of the newly-loaded net's real connectivity (2026-09-29,
         # explicit bug report: "the polygons are rendered as outsiders initially and later
         # became members"). Nothing else redraws the canvas again afterward.
         builder._redraw()
@@ -3537,12 +3443,13 @@ class InflaterPane:
             target_rms_pct=state.target_rms_pct, tolerance=state.tolerance,
             last_pressure=state.last_pressure, level_history=state.level_history,
             session_label=state.net_name, is_fully_inflated=state.is_fully_inflated,
-            session_path=path)
+            session_path=path, color_mode=state.color_mode, face_colors=state.face_colors)
 
     def _apply_loaded_session(self, builder, net_file, base_faces, base_edges, base_face_edge_ids,
                                subdivision_level, faces, positions, face_of_fine, edge_length,
                                target_rms_pct, tolerance, last_pressure, level_history,
-                               session_label, is_fully_inflated, session_path=None):
+                               session_label, is_fully_inflated, session_path=None,
+                               color_mode="polygon", face_colors=None):
         """Shared tail of _load_hippo_session/_load_hippie_session -- everything past "the
         builder's own 2D net is already restored, and we have the central object's own base
         mesh/current mesh": populates every remaining InflaterPane field (see
@@ -3617,6 +3524,29 @@ class InflaterPane:
             source_polygon_id = [old_to_live_id.get(spid, spid) for spid in source_polygon_id]
         self._pending_source_polygon_id = source_polygon_id
         self.last_source_polygon_id = source_polygon_id
+        # Colour menu (2026-10-01, explicit) -- face_colors is a flat per-base-face list (see
+        # InflaterSessionStateModel's own docstring); rebuilt here into self.shape_colors (keyed
+        # by shape_id, this app's own persistent form -- see logic/coloring.py's module
+        # docstring) via the SAME remapped source_polygon_id just computed above, so a
+        # `.hippie` whose shapes got reassigned fresh live ids on this load still lines colors
+        # up with the right shape. A full RESET (not a merge) -- this load's own net is a fresh
+        # session, replacing whatever shape_colors a previous session left behind.
+        self.color_mode_var.set(color_mode)
+        # Keeps _last_color_mode in sync with the just-loaded mode (2026-10-01, explicit:
+        # "make sure the specific colours and the colour mode are saved/loaded appropriately")
+        # -- on_color_mode_changed's own undo-snapshot logic reads this to find the mode from
+        # "before" a later Colour-menu click; left stale (at whatever it was pre-load), the
+        # FIRST mode toggle after a load would record the wrong "before" state in its own undo
+        # entry.
+        self._last_color_mode = color_mode
+        if face_colors is not None:
+            self.shape_colors = {source_polygon_id[g]: face_colors[g]
+                                  for g in range(min(len(face_colors), len(source_polygon_id)))}
+        else:
+            self.shape_colors = {}
+        for shape in builder.shapes:
+            self.ensure_shape_color(shape["id"])
+        self._apply_color_mode()
         # 2026-09-28, explicit user request: a save now records is_fully_inflated (True if the
         # saved mesh is a real relax/inflate result, False if it was only ever geometrically
         # placed -- see InflaterSessionStateModel's own docstring) -- restored here rather than
@@ -3624,16 +3554,17 @@ class InflaterPane:
         # edit to a real Full Inflate (Rule 3) instead of trying to Diff Inflate from geometry
         # that was never actually solved.
         self.is_fully_inflated = is_fully_inflated
-        # Nothing pendant/guest-excluded staged here regardless -- a future Full/Diff Inflate
-        # re-derives its own guest exclusion fresh from the builder's current net either way.
+        # Nothing pendant/terminal-node-excluded staged here regardless -- a future Full/Diff
+        # Inflate re-derives its own terminal-node exclusion fresh from the builder's current
+        # net either way.
         self._pending_pendants = []
         (self.last_shapes_snapshot, self.last_connections_snapshot,
          self.last_anchor_snapshot) = builder.snapshot_state()
         # _current_root_to_vertex_id (NOT builder.root_to_vertex_id() directly -- see that
         # method's own docstring) -- self.base_faces/self._pending_source_polygon_id are
         # already set above, correctly (state.base_faces, per _load_hippie_session's own fix),
-        # so this correctly reads a loaded guest's own arbitrary remapped id straight off them
-        # instead of re-deriving a fresh id that wouldn't match self.positions.
+        # so this correctly reads a loaded terminal node's own arbitrary remapped id straight
+        # off them instead of re-deriving a fresh id that wouldn't match self.positions.
         self.last_root_to_vertex_id = self._current_root_to_vertex_id()
 
         self._render()
@@ -3678,6 +3609,12 @@ class InflaterPane:
             return False
         mesh_state = LevelStateModel.from_mesh(self.faces, self.positions, self.face_of_fine,
                                                 self.edge_length)
+        self._apply_color_mode()
+        # Colour menu (2026-10-01, explicit) -- face_colors is a flat per-base-face list (see
+        # InflaterSessionStateModel's own docstring), None for "polygon" mode same as
+        # inflate_polyhedron_app's own save path.
+        face_colors = ([self._multi_color_for_group(g) for g in range(len(self.base_faces))]
+                       if self.color_mode_var.get() == "multi" else None)
         state = InflaterSessionStateModel(
             net_name=net_file.get("name", "live_net"), net_file=net_file,
             anchor_shape_id=builder._anchor_shape_id,
@@ -3686,6 +3623,7 @@ class InflaterPane:
             target_rms_pct={lvl: var.get() for lvl, var in self.target_rms_vars.items()},
             last_pressure=self.last_pressure, level_history=self.level_history,
             is_fully_inflated=self.is_fully_inflated,
+            color_mode=self.color_mode_var.get(), face_colors=face_colors,
         )
         try:
             with open(path, "w") as f:
@@ -3715,6 +3653,8 @@ class InflaterPane:
         can_redo = bool(builder._redo_stack) and not builder._locked
         self.undo_button.config(state=tk.NORMAL if can_undo else tk.DISABLED)
         self.redo_button.config(state=tk.NORMAL if can_redo else tk.DISABLED)
+        if self.on_undo_redo_state_changed is not None:
+            self.on_undo_redo_state_changed(can_undo, can_redo)
 
     def refresh_diff_eligibility(self):
         """Enables Diff Inflate iff an inflate has completed at least once AND the builder's
@@ -3767,8 +3707,9 @@ class InflaterPane:
             self.positions = None
             self.subdivision_level = 0
             # Rule 2 (2026-09-28, explicit): "every time the canvas empties, the
-            # is_fully_inflated flag is set to false" -- the club itself is gone (no member is
-            # central anymore), so there's nothing left that could be "fully inflated".
+            # is_fully_inflated flag is set to false" -- the active group itself is gone (no
+            # reachable node is central anymore), so there's nothing left that could be "fully
+            # inflated".
             self.is_fully_inflated = False
             # Also forgets any PREVIOUS completed inflate entirely (2026-09-30, explicit bug
             # report: "if i choose File > New, then place a piece, nothing shows up in the 3d
@@ -3793,38 +3734,40 @@ class InflaterPane:
         if self._running:
             self.diff_inflate_button.state(["disabled"])
             return
-        # Outsider add/delete gets its OWN status message (2026-09-28, explicit user request:
-        # "if outsiders changed, it can say 'Outsider added/deleted/modified'") -- BuilderPane.
-        # classify_change deliberately reports "none" for an outsider-only change (see its own
-        # docstring: it never affects what's actually exported/inflated), so it's the only way
-        # this ever gets noticed at all. Tracked here (every edit), not just around a
-        # successful inflate, since an outsider change never touches self.last_shapes_snapshot
-        # either.
+        # Unreachable-node add/delete gets its OWN status message (2026-09-28, explicit user
+        # request: "if outsiders changed, it can say 'Outsider added/deleted/modified'") --
+        # BuilderPane.classify_change deliberately reports "none" for an unreachable-node-only
+        # change (see its own docstring: it never affects what's actually exported/inflated),
+        # so it's the only way this ever gets noticed at all. Tracked here (every edit), not
+        # just around a successful inflate, since an unreachable-node change never touches
+        # self.last_shapes_snapshot either.
         builder = self.builder_getter()
         current_central_ids = builder.central_shape_ids()
-        current_outsider_ids = frozenset(
+        current_unreachable_node_ids = frozenset(
             s["id"] for s in builder.shapes if s["id"] not in current_central_ids)
-        if current_outsider_ids != self._last_outsider_ids:
-            added = current_outsider_ids - self._last_outsider_ids
-            removed = self._last_outsider_ids - current_outsider_ids
+        if current_unreachable_node_ids != self._last_unreachable_node_ids:
+            added = current_unreachable_node_ids - self._last_unreachable_node_ids
+            removed = self._last_unreachable_node_ids - current_unreachable_node_ids
             if added and not removed:
                 self._set_status(
-                    f"{'Outsider' if len(added) == 1 else 'Outsiders'} added.", "info")
+                    f"{'Unreachable node' if len(added) == 1 else 'Unreachable nodes'} added.",
+                    "info")
             elif removed and not added:
                 self._set_status(
-                    f"{'Outsider' if len(removed) == 1 else 'Outsiders'} deleted.", "info")
+                    f"{'Unreachable node' if len(removed) == 1 else 'Unreachable nodes'} "
+                    f"deleted.", "info")
             else:
-                self._set_status("Outsiders modified.", "info")
-            self._last_outsider_ids = current_outsider_ids
+                self._set_status("Unreachable nodes modified.", "info")
+            self._last_unreachable_node_ids = current_unreachable_node_ids
         if not current_central_ids:
             # Nothing central at all (e.g. the anchor -- and everything else -- was just
-            # deleted, see the empty-club clearing block above) -- there's no net left to Full
-            # or Diff Inflate against, so stop here rather than falling into classify_change's
-            # own "remove_face" verdict below, which would otherwise redirect straight into
-            # on_full_inflate_clicked -- export_mesh_dict's own "Nothing to inflate yet" error
-            # for an empty club, surfaced as a "Cannot inflate" popup for what's really just an
-            # ordinary delete (2026-09-28, explicit bug report: "when i place the anchor and
-            # delete it, it shouldn't have a 'Cannot Inflate' popup").
+            # deleted, see the empty-active-group clearing block above) -- there's no net left
+            # to Full or Diff Inflate against, so stop here rather than falling into
+            # classify_change's own "remove_face" verdict below, which would otherwise redirect
+            # straight into on_full_inflate_clicked -- export_mesh_dict's own "Nothing to
+            # inflate yet" error for an empty active group, surfaced as a "Cannot inflate" popup
+            # for what's really just an ordinary delete (2026-09-28, explicit bug report: "when
+            # i place the anchor and delete it, it shouldn't have a 'Cannot Inflate' popup").
             self.diff_inflate_button.state(["disabled"])
             return
         if self.last_shapes_snapshot is None:
@@ -3876,27 +3819,18 @@ class InflaterPane:
     # ---- camera (rotate/pan/zoom) -- see state/camera_controller.py for the gesture state itself ----
 
     def _setup_plotter_lighting(self):
-        """Replaces self.plotter's own default light kit with the explicit KEY/FILL
-        camera-relative rig (see KEY_LIGHT_POSITION's own comment for why). Called right after
-        every `self.plotter = pv.Plotter(...)` (both _build_ui's initial one and
-        _apply_panel_resize's rebuild-on-resize one) AND at the top of every _render/
-        _render_replay_frame, right after plotter.clear() -- that call wipes every light, not
-        just actors (pyvista's own Renderer.clear() calls remove_all_lights() internally), so a
-        one-time setup right after construction was silently undone the moment the very first
-        real frame drew (2026-09-29, explicit bug report: "I don't see any shading" -- this was
-        the actual cause, not the lighting model itself). Cheap either way: two lightweight VTK
-        Light objects, no mesh work -- `light_type='camera light'` lights track the camera
-        automatically from here on, no re-positioning needed as the user rotates/pans/zooms."""
-        self.plotter.remove_all_lights()
-        key_light = pv.Light(light_type="camera light", intensity=KEY_LIGHT_INTENSITY)
-        key_light.position = KEY_LIGHT_POSITION
-        self.plotter.add_light(key_light)
-        fill_light = pv.Light(light_type="camera light", intensity=FILL_LIGHT_INTENSITY)
-        fill_light.position = FILL_LIGHT_POSITION
-        self.plotter.add_light(fill_light)
-        headlight = pv.Light(light_type="camera light", intensity=HEADLIGHT_INTENSITY)
-        headlight.position = HEADLIGHT_POSITION
-        self.plotter.add_light(headlight)
+        """Replaces self.plotter's own default light kit with the shared KEY/FILL/HEADLIGHT
+        camera-relative rig (utils.inflate_polyhedron.plotter_lighting -- see its own docstring
+        for the full tuning history, and KEY_LIGHT_POSITION's own import comment above for why
+        this moved out of being inlined here). Called right after every `self.plotter =
+        pv.Plotter(...)` (both _build_ui's initial one and _apply_panel_resize's rebuild-on-
+        resize one) AND at the top of every _render/_render_replay_frame, right after
+        plotter.clear() -- that call wipes every light, not just actors (pyvista's own
+        Renderer.clear() calls remove_all_lights() internally), so a one-time setup right after
+        construction was silently undone the moment the very first real frame drew (2026-09-29,
+        explicit bug report: "I don't see any shading" -- this was the actual cause, not the
+        lighting model itself)."""
+        setup_plotter_lighting(self.plotter)
 
     def _apply_camera(self):
         """Positions the plotter's orthographic camera from self._camera_controller.camera
@@ -4138,8 +4072,9 @@ class InflaterPane:
         nearly-closed net folds enough that a totally unrelated shape's own seam can sit
         CLOSER in 3D to a given surface point than that surface's own nearby seam, even
         directly on top of it, topologically distant faces having folded close together in
-        space -- caught by direct testing: a pick position confirmed to be on the guest's own
-        rendered surface still matched a DIFFERENT shape's connection more often than its own).
+        space -- caught by direct testing: a pick position confirmed to be on the terminal
+        node's own rendered surface still matched a DIFFERENT shape's connection more often than
+        its own).
         The caller passes the shape actually under the cursor (`_actor_to_group`'s own hit),
         so a hover only ever finds an edge genuinely belonging to what's actually being
         pointed at."""
@@ -4561,6 +4496,105 @@ class InflaterPane:
         return face_indexer.group_polygon_n(
             group, self._display_pending_source_polygon_id(), self.builder_getter().shapes,
             self.base_faces)
+
+    # ---- Colour menu (2026-10-01, explicit -- see logic/coloring.py's own module docstring) ----
+
+    def ensure_shape_color(self, shape_id):
+        """Assigns shape_id a Multi-colour color if it doesn't have one yet -- a no-op
+        otherwise, so calling this repeatedly (every builder edit, via CombinedApp's own
+        new-shape detection) never changes an already-assigned shape's color. Picks avoiding
+        every currently-OPEN shape's own color (coloring.shapes_with_open_edges/
+        pick_color_for_new_shape) -- the best available guess for "a piece this shape could
+        end up connected to" before any connection naming it even exists yet."""
+        if shape_id in self.shape_colors:
+            return
+        builder = self.builder_getter()
+        open_ids = coloring.shapes_with_open_edges(builder.shapes, builder.connections)
+        self.shape_colors[shape_id] = coloring.pick_color_for_new_shape(self.shape_colors, open_ids)
+
+    def _apply_color_mode(self):
+        """The one place that keeps self.shape_colors consistent with whatever's currently
+        inflated, for self.color_mode_var's current value -- called at the top of every _render.
+        "polygon" mode needs nothing precomputed (_render/_render_replay_frame's own
+        POLYGON_COLORS.get(n, ...) lookup already IS that mode, unchanged); "multi" mode lazily
+        fills in any shape_id the CURRENT mesh's groups reference but don't have a color for yet
+        (a loaded net with no saved colors, or a shape that somehow slipped past
+        ensure_shape_color) -- never touches an already-assigned shape's color (2026-10-01,
+        explicit: "if the user is toggling... but they haven't selected Randomize, then the
+        colours used in Multi-colour shouldn't change every time we toggle back")."""
+        if self.base_faces is None or self.color_mode_var.get() != "multi":
+            return
+        source_polygon_id = self._display_pending_source_polygon_id()
+        shape_ids = {source_polygon_id[g] if source_polygon_id else g
+                     for g in range(len(self.base_faces))}
+        for sid in shape_ids - set(self.shape_colors):
+            self.ensure_shape_color(sid)
+
+    def _multi_color_for_group(self, group):
+        """Multi-colour mode's own color for base-face `group` -- its shape's self.shape_colors
+        entry (broadcast across every one of that shape's own fan-triangle groups, if any),
+        falling back to the plain per-group FACE_COLORS cycling whenever `group` is out of range
+        for self.base_faces/source_polygon_id (a transient state, not an error -- same guard
+        _render_replay_frame's own `_group_polygon_n` call already uses) or has somehow never
+        been assigned a color at all."""
+        if self.base_faces is not None and group < len(self.base_faces):
+            sid = self._shape_id_of_group(group)
+            if sid is not None and sid in self.shape_colors:
+                return self.shape_colors[sid]
+        return FACE_COLORS[group % len(FACE_COLORS)]
+
+    def on_color_mode_changed(self):
+        """Colour > Polygon-specific/Multi-colour radiobutton command. Undoable (2026-10-01,
+        explicit: "it should be able to undo/redo colour changes") -- pushes an undo snapshot
+        whose own "color_mode" field is OVERRIDDEN to self._last_color_mode (the value from
+        right before this click), since by the time a Tk Radiobutton's own `command` fires, its
+        `variable` has ALREADY been set to the new value -- builder._snapshot_state() alone
+        would otherwise capture the new mode as if it were the "before" state. Snapshotted
+        BEFORE _apply_color_mode runs, not after (2026-10-01, fix for a bug caught while
+        building the same feature's Viewer-mode equivalent in inflate_polyhedron_app):
+        _apply_color_mode lazily FILLS a missing shape's own color, so snapshotting afterward
+        could capture a freshly-filled color as if it were already "the before state" for any
+        shape that somehow reached this point with none (ordinarily already covered by
+        CombinedApp's own per-placement ensure_shape_color, but not guaranteed). Only pushes
+        when the mode actually changed and the builder isn't locked (same guard _push_undo's
+        own call sites implicitly get via BuilderPane._locked)."""
+        old_mode = self._last_color_mode
+        new_mode = self.color_mode_var.get()
+        builder = self.builder_getter()
+        if new_mode != old_mode and not builder._locked:
+            snap = builder._snapshot_state()
+            snap["color_mode"] = old_mode
+        else:
+            snap = None
+        self._apply_color_mode()
+        if snap is not None:
+            builder._record_undo_snapshot(snap)
+        self._last_color_mode = new_mode
+        if self.base_faces is not None:
+            self._render()
+
+    def on_randomize_colors_clicked(self):
+        """Colour > Randomize -- re-rolls EVERY currently-inflated shape's own Multi-colour
+        color from scratch, using the real mesh adjacency now available (coloring.
+        shape_group_neighbors/random_shape_colors) rather than the weaker "avoid an open
+        shape's color" guess ensure_shape_color makes at placement time. A no-op outside
+        Multi-colour mode or before anything's inflated. Undoable (2026-10-01, explicit) -- an
+        ordinary _push_undo right before the actual color change, unlike on_color_mode_changed's
+        own trickier case: nothing here has already mutated self.shape_colors yet at this
+        point, so the plain automatic "before" snapshot is already correct."""
+        if self.color_mode_var.get() != "multi" or self.base_faces is None:
+            return
+        source_polygon_id = self._display_pending_source_polygon_id()
+        neighbors = coloring.shape_group_neighbors(self.base_faces, self.base_face_edge_ids,
+                                                     source_polygon_id)
+        shape_ids = {source_polygon_id[g] if source_polygon_id else g
+                     for g in range(len(self.base_faces))}
+        builder = self.builder_getter()
+        if not builder._locked:
+            builder._push_undo()
+        self.shape_colors.update(
+            coloring.random_shape_colors(shape_ids, neighbors, rng=random.Random()))
+        self._render()
 
     def _groups_for_shape_ids(self, shape_ids):
         """Every 3D group whose own source_polygon_id is one of `shape_ids`. Reads via
@@ -5159,8 +5193,11 @@ class InflaterPane:
             group_faces = [f for f, bf in zip(faces, face_of_fine) if bf == group]
             if not group_faces:
                 continue
-            n = self._group_polygon_n(group) if group < len(self.base_faces) else 3
-            color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
+            if self.color_mode_var.get() == "multi":
+                color = self._multi_color_for_group(group)
+            else:
+                n = self._group_polygon_n(group) if group < len(self.base_faces) else 3
+                color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
             inside_color = _darken_color(color)
             face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
             mesh = pv.PolyData(points, face_conn)
@@ -5337,6 +5374,7 @@ class InflaterPane:
             for conn in self.builder_getter().connections
         }
         self._rebuild_open_edges()
+        self._apply_color_mode()
         if self.faces and self.positions and self.base_faces:
             vertex_ids = sorted(self.positions)
             idx = {v: i for i, v in enumerate(vertex_ids)}
@@ -5347,8 +5385,11 @@ class InflaterPane:
                 group_faces = [f for f, bf in zip(self.faces, face_of_fine) if bf == group]
                 if not group_faces:
                     continue
-                n = self._group_polygon_n(group)
-                color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
+                if self.color_mode_var.get() == "multi":
+                    color = self._multi_color_for_group(group)
+                else:
+                    n = self._group_polygon_n(group)
+                    color = POLYGON_COLORS.get(n, FACE_COLORS[group % len(FACE_COLORS)])
                 inside_color = _darken_color(color)
                 face_conn = np.hstack([[3, idx[a], idx[b], idx[c]] for a, b, c in group_faces])
                 mesh = pv.PolyData(points, face_conn)
@@ -5402,7 +5443,7 @@ class InflaterPane:
                     self._add_rounded_lines(back_rim, RIM_COLOR, POLYGON_EDGE_LINE_WIDTH)
 
             # Debug mode's "Show face/vertex normals"/"Show repulsive forces" toggles
-            # (2026-09-29, explicit user request -- diagnosing a crumpled guest boundary after a
+            # (2026-09-29, explicit user request -- diagnosing a crumpled terminal-node boundary after a
             # Diff Inflate join) -- same drawing convention as inflate_polyhedron_app's own
             # identically-named toggles (_draw_level_panel): a line segment per vertex/face,
             # NORMAL_LENGTH_FRACTION of the local mean edge length long, direction only (not
@@ -5568,16 +5609,17 @@ class InflaterPane:
             self._pre_click_snapshot = None
             self._stop_event = None
             # self._change_label ("Anchor piece" for the very first placement, or whatever
-            # club change triggered a LATER degenerate collapse -- e.g. deleting enough
-            # insiders to leave only guests) prefixes this exactly like _pipeline_label does
-            # for a real relax/inflate run (2026-09-28, explicit user request: "Anchor piece:
-            # placed flat"). None only for a genuine manual Full Inflate/Reinflate click on an
-            # already-degenerate net, with no single change to describe.
+            # active-group change triggered a LATER degenerate collapse -- e.g. deleting enough
+            # junction nodes to leave only terminal nodes) prefixes this exactly like
+            # _pipeline_label does for a real relax/inflate run (2026-09-28, explicit user
+            # request: "Anchor piece: placed flat"). None only for a genuine manual Full
+            # Inflate/Reinflate click on an already-degenerate net, with no single change to
+            # describe.
             self._set_status(
                 f"{self._change_label}: placed flat."
                 if self._change_label else
-                "Placed directly: no insiders yet (every member is a guest -- Rule 1), so "
-                "there's nothing to inflate here, only to place.", "success")
+                "Placed directly: no junction nodes yet (every reachable node is a terminal "
+                "node -- Rule 1), so there's nothing to inflate here, only to place.", "success")
             return
         (_mode, self.base_faces, self.base_edges, self.base_face_edge_ids, source_polygon_id,
          self._pending_pendants) = prepared
@@ -5673,8 +5715,10 @@ class InflaterPane:
         self._run_inflate_step()
 
     def _guess_pressure_from_history(self, target_rms_pct):
-        """Same algorithm as inflate_polyhedron_app's own _guess_pressure_from_history
-        (duplicated, not imported -- see module docstring): looks at every level ALREADY
+        """Same algorithm as inflate_polyhedron_app's own _guess_pressure_from_history --
+        both now call the SAME shared utils.inflate_polyhedron.pressure_history_guess.
+        guess_pressure_from_history (2026-10-01, moved out of being duplicated per-app; see
+        this file's own `reinflater` import comment): looks at every level ALREADY
         completed this Full Inflate run (self.level_history) and picks whichever one's own
         ACHIEVED RMS stretch landed closest to `target_rms_pct`, scaling that record's pressure
         by 2 per level of resolution difference (each Subdivide roughly doubles resolution,
@@ -5810,8 +5854,8 @@ class InflaterPane:
             # Each pendant gets its OWN trailing self.base_faces/self._pending_source_polygon_id
             # index (2026-09-29, explicit bug report -- see _reattach_pendant_faces' own
             # docstring) -- same convention _diff_attach_pendant_only already used for its own
-            # single-pendant fast path, applied here too so a guest is independently pickable
-            # regardless of which pipeline path reattached it.
+            # single-pendant fast path, applied here too so a terminal node is independently
+            # pickable regardless of which pipeline path reattached it.
             core_base_faces = self.base_faces
             own_groups = list(range(len(core_base_faces),
                                      len(core_base_faces) + len(self._pending_pendants)))
@@ -5888,9 +5932,10 @@ class InflaterPane:
         own arbitrary _place_pendant_flat id_map remapping -- using its raw output directly as
         a self.positions lookup key (as self.last_root_to_vertex_id used to, before this fix)
         silently matched some UNRELATED vertex that happened to share the same small integer id
-        whenever a pendant/guest was involved (2026-09-29, explicit bug report, confirmed via
-        the debug replay slider: a guest promoted from pendant to insider mid-Diff-Inflate got
-        seeded from a random vertex on the opposite side of the mesh, "connected to the centre
+        whenever a pendant/terminal node was involved (2026-09-29, explicit bug report,
+        confirmed via the debug replay slider: a terminal node promoted from pendant to junction
+        node mid-Diff-Inflate got seeded from a random vertex on the opposite side of the mesh,
+        "connected to the centre
         of an opposite pentagon" -- the exact same class of stale-id mismatch as the earlier
         _load_hippie_session fix, here in _diff_reexport_and_relax's own root-matched seeding
         instead of the file-load path).
@@ -6019,7 +6064,7 @@ class InflaterPane:
         between the button's last refresh and this click), and tells the user to use Full
         Inflate instead if that's no longer true. A no-op while already running.
 
-        If the CLUB's own insiders were only ever geometrically placed, never really solved
+        If the ACTIVE GROUP's own junction nodes were only ever geometrically placed, never really solved
         (self.is_fully_inflated False -- e.g. a chain of pieces joined one single edge at a
         time, each one just flat-attached, no real physics run yet), and this particular change
         genuinely needs real physics (anything except another pendant-only add, which stays
@@ -6082,26 +6127,27 @@ class InflaterPane:
     def _is_pendant_add(self, new_shape_id):
         """True iff `new_shape_id` (classify_change's own "add_face" `extra`, always a BRAND
         NEW shape with no prior connections at all) currently has EXACTLY ONE connection in the
-        live builder net -- i.e. it would be a guest (0-or-1-connection member) were this
-        exported and inflated right now (see this module's own "Club terminology" section) --
-        AND that connection's OTHER end (the neighbor it's hinging onto) does NOT get PROMOTED
-        from guest to insider by gaining this one extra connection. Plain connection counting
-        for new_shape_id's own count is enough (no need for _pendant_face_attachments' own
-        face_edge_ids disambiguation): being brand new, EVERY connection touching it is
-        necessarily its own, so the count IS its own glued-edge count.
+        live builder net -- i.e. it would be a terminal node (0-or-1-connection reachable node)
+        were this exported and inflated right now (see this module's own "Node terminology"
+        section) -- AND that connection's OTHER end (the neighbor it's hinging onto) does NOT
+        get PROMOTED from terminal node to junction node by gaining this one extra connection.
+        Plain connection counting for new_shape_id's own count is enough (no need for
+        _pendant_face_attachments' own face_edge_ids disambiguation): being brand new, EVERY
+        connection touching it is necessarily its own, so the count IS its own glued-edge count.
 
-        A guest is 0 OR 1 connections (2026-09-28, explicit correction: "Guests are members
-        with 0 or 1 connections") -- the neighbor's OWN prior connection count (excluding this
-        new one) decides what this edit does to IT: 0 -> stays a guest (0 -> 1, a mutual guest
-        pair, both flatly placed -- see _place_pendant_flat's own "chained onto another guest"
-        handling); exactly 1 -> PROMOTED to insider (1 -> 2), a real change to the club's
-        insiders needing a genuine reinflate (diff or full, per Rule 3), not the fast flat-
-        attach-only path _diff_attach_pendant_only takes when nothing about the insiders
-        actually changed; 2+ -> already an insider, unaffected either way."""
-        return club_member_classifier.is_pendant_add(
+        A terminal node is 0 OR 1 connections (2026-09-28, explicit correction: "Guests are
+        members with 0 or 1 connections") -- the neighbor's OWN prior connection count
+        (excluding this new one) decides what this edit does to IT: 0 -> stays a terminal node
+        (0 -> 1, a mutual terminal-node pair, both flatly placed -- see _place_pendant_flat's
+        own "chained onto another terminal node" handling); exactly 1 -> PROMOTED to junction
+        node (1 -> 2), a real change to the active group's junction nodes needing a genuine
+        reinflate (diff or full, per Rule 3), not the fast flat-attach-only path
+        _diff_attach_pendant_only takes when nothing about the junction nodes actually changed;
+        2+ -> already a junction node, unaffected either way."""
+        return node_classifier.is_pendant_add(
             self.builder_getter().connections, new_shape_id)
 
-    def _diff_attach_pendant_only(self, new_shape_id, label="Guest added"):
+    def _diff_attach_pendant_only(self, new_shape_id, label="Terminal node added"):
         """Skips the whole Diff Inflate relax/calibrate pipeline entirely when the just-added
         shape is a pendant (2026-09-28, explicit user request: "since the new piece is not used
         in the inflation algorithm... there hasn't actually been any change to the inflatable
@@ -6555,6 +6601,9 @@ class CombinedApp:
         # _update_title/_mark_dirty/_mark_clean.
         self.current_session_path = None
         self._mesh_dirty = False
+        # Colour menu (2026-10-01, explicit) -- every shape_id already seen by
+        # _assign_colors_for_new_shapes, so a later call only touches ones placed since then.
+        self._known_shape_ids = set()
 
         sv_ttk.set_theme("dark")
         _scale_ui_fonts_once(root)
@@ -6563,6 +6612,17 @@ class CombinedApp:
         # program, also prompt them to save if there are any unsaved changes") -- same
         # unsaved-work check File > New uses, see _confirm_discard_unsaved/_on_quit_request.
         root.protocol("WM_DELETE_WINDOW", self._on_quit_request)
+        # Ctrl+S (2026-10-01, explicit: "look for inconsistencies between the related apps" --
+        # inflate_polyhedron_app's own _on_control_s already did this for the exact same
+        # conceptual action; this app had the File > Save Session... menu item but no keyboard
+        # shortcut at all). Both cases bound since a held Shift/Caps Lock reports the keysym as
+        # uppercase "S" -- Control itself doesn't shift letter case the way it does on some
+        # platforms/layouts. Plain bind_all, not the guarded _bind_all_guarded BuilderPane's own
+        # Ctrl+C/V/Z/Y use -- those are real text-editing shortcuts that must stand down inside
+        # a text-entry widget; Ctrl+S isn't one, same reasoning inflate_polyhedron_app's own
+        # unguarded Ctrl+S binding already relies on.
+        self.root.bind_all("<Control-s>", lambda event: self.inflater.on_save_session_clicked())
+        self.root.bind_all("<Control-S>", lambda event: self.inflater.on_save_session_clicked())
 
         # A plain 2-column grid with equal, UNIFORM weight (not tk.PanedWindow, which only
         # obeys its stretch="always" flags for LEFTOVER space beyond each pane's own requested
@@ -6584,6 +6644,24 @@ class CombinedApp:
 
         self.builder = BuilderPane(left_root)
         self.inflater = InflaterPane(right_frame, lambda: self.builder)
+        # Edit/Colour menus (2026-10-01, explicit) -- both need a pane to exist (Edit needs
+        # self.builder for on_undo_key/on_redo_key; Colour needs self.inflater.color_mode_var),
+        # so built here rather than inside _build_menu (called above, before either pane exists).
+        self._build_edit_menu()
+        self._build_colour_menu()
+        # Colour > Polygon-specific/Multi-colour/Randomize keyboard shortcuts (2026-10-01,
+        # explicit: "let P, M, R be the keyboard shortcuts..."). BuilderPane's own _build_ui
+        # override (unlike the base InteractiveBuilderApp) never binds plain "m"/"j" at all --
+        # this app has no separate Move/Join tool modes, just Edit (bound to "e") -- so "m" is
+        # free here, same as every other plain-letter shortcut in this project.
+        self.root.bind_all("<KeyPress-p>", lambda event: self._on_color_mode_key("polygon"))
+        self.root.bind_all("<KeyPress-P>", lambda event: self._on_color_mode_key("polygon"))
+        self.root.bind_all("<KeyPress-m>", lambda event: self._on_color_mode_key("multi"))
+        self.root.bind_all("<KeyPress-M>", lambda event: self._on_color_mode_key("multi"))
+        self.root.bind_all("<KeyPress-r>",
+                            lambda event: self.inflater.on_randomize_colors_clicked())
+        self.root.bind_all("<KeyPress-R>",
+                            lambda event: self.inflater.on_randomize_colors_clicked())
         # Wired AFTER both panes exist -- keeps Diff Inflate's enabled state live across every
         # builder edit (BuilderPane._refresh_vme_state's own hook), not just re-checked when
         # Inflate is clicked. Also keeps the window title's own "*" current (2026-09-29,
@@ -6615,16 +6693,34 @@ class CombinedApp:
         self.inflater.on_inflate_success = self._mark_dirty
         self.inflater.on_session_saved = self._mark_clean
         self.inflater.on_session_loaded = self._mark_clean
+        # Edit menu (2026-10-01, explicit) -- keeps Edit > Undo/Redo's own enabled state in sync
+        # with the icon buttons', same single chokepoint (_refresh_undo_redo_buttons) both read.
+        self.inflater.on_undo_redo_state_changed = self._update_edit_menu_state
 
         self._update_title()
 
     def _on_builder_change(self):
+        self._assign_colors_for_new_shapes()
         self.inflater.refresh_diff_eligibility()
         self._update_title()
 
     def _on_builder_load_success(self):
         self._mark_clean(path=None)
+        self._known_shape_ids = set()
+        self._assign_colors_for_new_shapes()
         self.inflater.on_load_success()
+
+    def _assign_colors_for_new_shapes(self):
+        """Colour > Multi-colour (2026-10-01, explicit: "when a user picks up a piece, we don't
+        know where they're going to place it yet... give the new piece a colour...") -- every
+        builder edit/load can introduce brand-new shape ids; this gives each one a color guess
+        the MOMENT it appears (InflaterPane.ensure_shape_color, a no-op for an id that already
+        has one), well before Multi-colour mode might ever be selected, so the mode's own colors
+        are always ready rather than generated in one big batch the first time it's picked."""
+        current_ids = {s["id"] for s in self.builder.shapes}
+        for shape_id in current_ids - self._known_shape_ids:
+            self.inflater.ensure_shape_color(shape_id)
+        self._known_shape_ids = current_ids
 
     def _update_title(self):
         """Single source of truth for the window title (2026-09-29, explicit user request):
@@ -6737,10 +6833,87 @@ class CombinedApp:
                                command=lambda: self.inflater.on_load_session_clicked())
         # 2026-09-26, explicit -- writes a .hippie (this app's own session format, the only one
         # allowed >1 connected piece); see InflaterPane.on_save_session_clicked's own docstring.
+        # "accelerator" is display-only (the menu label's own right-aligned hint text) -- Tk
+        # never wires it up as an actual key binding, so the bind_all calls in __init__ are what
+        # make Ctrl+S really work (2026-10-01, explicit: "look for inconsistencies between the
+        # related apps" -- inflate_polyhedron_app already had a Ctrl+S shortcut for the exact
+        # same conceptual action, this app never had one; same accelerator-label convention
+        # reused here).
         file_menu.add_command(label="Save Session...",
-                               command=lambda: self.inflater.on_save_session_clicked())
+                               command=lambda: self.inflater.on_save_session_clicked(),
+                               accelerator="Ctrl+S")
         menubar.add_cascade(label="File", menu=file_menu)
         root.config(menu=menubar)
+        # Edit/Colour menus themselves are added later, by _build_edit_menu/_build_colour_menu
+        # -- Edit needs self.builder (for on_undo_key/on_redo_key) and Colour needs
+        # self.inflater.color_mode_var, neither of which exists yet at this point in __init__.
+        self._menubar = menubar
+        self._menu_kwargs = menu_kwargs
+
+    def _build_edit_menu(self):
+        """Edit > Undo/Redo (2026-10-01, explicit: "put Undo/Redo in an Edit menu" -- previously
+        only reachable via the icon buttons/Ctrl+Z/Ctrl+Y). Same commands those already call
+        (BuilderPane.on_undo_key/on_redo_key, which already include color_mode/shape_colors in
+        every snapshot -- see BuilderPane._snapshot_state/_restore_snapshot's own docstrings),
+        so a menu click undoes/redoes exactly what Ctrl+Z/Ctrl+Y or the icon buttons would.
+        Accelerator labels are display-only in Tk (the existing bind_all calls are what actually
+        make the keys work) -- same convention as File > Save Session...'s own "Ctrl+S" label."""
+        edit_menu = tk.Menu(self._menubar, tearoff=False, **self._menu_kwargs)
+        edit_menu.add_command(label="Undo", command=lambda: self.builder.on_undo_key(),
+                               accelerator="Ctrl+Z")
+        edit_menu.add_command(label="Redo", command=lambda: self.builder.on_redo_key(),
+                               accelerator="Ctrl+Y")
+        self._menubar.add_cascade(label="Edit", menu=edit_menu)
+        self._edit_menu = edit_menu
+        self._undo_menu_index = edit_menu.index("Undo")
+        self._redo_menu_index = edit_menu.index("Redo")
+        self._update_edit_menu_state(can_undo=False, can_redo=False)
+
+    def _update_edit_menu_state(self, can_undo, can_redo):
+        self._edit_menu.entryconfig(self._undo_menu_index,
+                                     state="normal" if can_undo else "disabled")
+        self._edit_menu.entryconfig(self._redo_menu_index,
+                                     state="normal" if can_redo else "disabled")
+
+    def _build_colour_menu(self):
+        """Colour > Polygon-specific/Multi-colour (radio, mutually exclusive)/Randomize
+        (2026-10-01, explicit -- the same menu built for inflate_polyhedron_app, see that app's
+        own _build_menu for the original). Polygon-specific is this app's PRE-EXISTING
+        POLYGON_COLORS-by-side-count coloring, unchanged; Multi-colour is new -- one random
+        color per shape (InflaterPane.shape_colors), avoiding a neighbor's where possible.
+        Randomize only does something in Multi-colour mode -- disabled otherwise, same as the
+        sibling app's own Colour menu."""
+        # P/M/R keyboard shortcuts (2026-10-01, explicit: "let P, M, R be the keyboard
+        # shortcuts...") -- see the bind_all calls in __init__ for why plain "m" is safe to use
+        # here (no Move-tool-mode conflict, unlike the base InteractiveBuilderApp).
+        colour_menu = tk.Menu(self._menubar, tearoff=False, **self._menu_kwargs)
+        colour_menu.add_radiobutton(label="Polygon-specific", variable=self.inflater.color_mode_var,
+                                     value="polygon", command=self._on_color_mode_changed,
+                                     accelerator="P")
+        colour_menu.add_radiobutton(label="Multi-colour", variable=self.inflater.color_mode_var,
+                                     value="multi", command=self._on_color_mode_changed,
+                                     accelerator="M")
+        colour_menu.add_separator()
+        colour_menu.add_command(label="Randomize", command=self.inflater.on_randomize_colors_clicked,
+                                 accelerator="R")
+        self._menubar.add_cascade(label="Colour", menu=colour_menu)
+        self._colour_menu = colour_menu
+        self._randomize_menu_index = colour_menu.index("Randomize")
+        self._update_colour_menu_state()
+
+    def _on_color_mode_changed(self):
+        self.inflater.on_color_mode_changed()
+        self._update_colour_menu_state()
+
+    def _on_color_mode_key(self, mode):
+        """P/M keyboard shortcuts -- sets color_mode_var then reuses _on_color_mode_changed
+        exactly as the Colour menu's own radiobutton click would."""
+        self.inflater.color_mode_var.set(mode)
+        self._on_color_mode_changed()
+
+    def _update_colour_menu_state(self):
+        state = "normal" if self.inflater.color_mode_var.get() == "multi" else "disabled"
+        self._colour_menu.entryconfig(self._randomize_menu_index, state=state)
 
 
 def main():

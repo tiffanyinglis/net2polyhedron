@@ -11,14 +11,15 @@ import time
 
 __all__ = ["SeedSelecter"]
 
-# Defaults (2026-10-01, explicit): up to 5 attempts, but never spend more than 10s total
-# searching for one. A model big/complex enough for a single attempt to approach this budget is
-# also, empirically, unlikely to land in the all-faces-flipped failure mode this search exists
-# for in the first place (more bracing faces leaves less room for the whole shape to silently
-# settle backwards) -- so it's not worth chasing a problem that mostly affects SMALL, fast-to-
-# relax nets by spending proportionally MORE time on exactly the inputs that need it least.
+# Defaults (2026-10-01, explicit; search time lowered to 5s same day): up to 5 attempts, but
+# never spend more than 5s total searching for one. A model big/complex enough for a single
+# attempt to approach this budget is also, empirically, unlikely to land in the all-faces-flipped
+# failure mode this search exists for in the first place (more bracing faces leaves less room for
+# the whole shape to silently settle backwards) -- so it's not worth chasing a problem that mostly
+# affects SMALL, fast-to-relax nets by spending proportionally MORE time on exactly the inputs
+# that need it least.
 DEFAULT_MAX_ATTEMPTS = 5
-DEFAULT_MAX_SEARCH_TIME = 10.0
+DEFAULT_MAX_SEARCH_TIME = 5.0
 
 
 class SeedSelecter:

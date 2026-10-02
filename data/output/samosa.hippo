@@ -4014,5 +4014,11 @@
   "net_pan": [
     0.0,
     0.0
+  ],
+  "color_mode": "multi",
+  "face_colors": [
+    "#003a7d",
+    "#d83034",
+    "#f9e858"
   ]
 }

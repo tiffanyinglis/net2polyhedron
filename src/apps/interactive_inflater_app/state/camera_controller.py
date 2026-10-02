@@ -12,21 +12,16 @@ re-render (`_refresh_view`/`_render`) -- this class only computes what the camer
 become in response to an event.
 """
 import numpy as np
-from scipy.spatial.transform import Rotation
 
-
-def initial_rotation(azim_deg, elev_deg):
-    """An explicit orthonormal (direction, right, up) frame read off as a rotation matrix, so
-    the starting view matches a deliberately non-axis-aligned angle instead of a bare identity
-    quaternion."""
-    azim, elev = np.radians(azim_deg), np.radians(elev_deg)
-    direction = np.array([np.cos(elev) * np.cos(azim), np.cos(elev) * np.sin(azim),
-                           np.sin(elev)])
-    world_up = np.array([0.0, 0.0, 1.0])
-    right = np.cross(world_up, direction)
-    right /= np.linalg.norm(right)
-    up = np.cross(direction, right)
-    return Rotation.from_matrix(np.column_stack([direction, right, up]))
+# `initial_rotation` moved to utils.camera_trackball (2026-10-01, explicit: "make sure they are
+# using shared code whenever possible. shared code should be moved to utils") -- was duplicated,
+# byte-identical, in inflate_polyhedron_app's own app.py (where the SAME math was further
+# duplicated a second time, between its InflaterPane level-panel camera and its ViewerPane
+# quadrant camera). Re-exported under the same name so this module's own `initial_rotation(...)`
+# call sites are unchanged.
+from utils.camera_trackball import (
+    initial_rotation, rotate as _camera_rotate, pan as _camera_pan, zoom as _camera_zoom,
+)
 
 
 class CameraController:
@@ -64,28 +59,19 @@ class CameraController:
         self.drag_moved = False
 
     def drag_motion(self, x, y):
-        """Updates `self.camera["rotation"]` from a rotate-drag tick. Returns True iff a drag
-        was actually active (the caller should re-render only then) -- composes two small
-        rotations (about the current up axis for a horizontal drag, the current right axis for
-        a vertical one) onto the existing quaternion, rather than accumulating into a stored
-        azimuth/elevation pair: "up" is whatever the rotation currently says it is (not re-pinned
-        to world +z every frame), so there's no pole for elevation to lock up near, and no clamp
-        needed. Also sets `self.drag_moved` once movement exceeds `click_move_tolerance_px` --
-        the caller's own `end_drag()` uses this to tell a genuine rotate-drag apart from a plain
-        click."""
+        """Updates `self.camera["rotation"]` from a rotate-drag tick (utils.camera_trackball.
+        rotate -- a free trackball rotation, see its own docstring). Returns True iff a drag was
+        actually active (the caller should re-render only then). Also sets `self.drag_moved`
+        once movement exceeds `click_move_tolerance_px` -- the caller's own `end_drag()` uses
+        this to tell a genuine rotate-drag apart from a plain click."""
         if not self.dragging or self.last_xy is None:
             return False
         last_x, last_y = self.last_xy
         dx, dy = x - last_x, y - last_y
         if abs(dx) > self.click_move_tolerance_px or abs(dy) > self.click_move_tolerance_px:
             self.drag_moved = True
-        cam = self.camera
-        up = cam["rotation"].apply([0.0, 0.0, 1.0])
-        right = cam["rotation"].apply([0.0, 1.0, 0.0])
-        sensitivity = np.radians(self.drag_sensitivity)
-        yaw = Rotation.from_rotvec(-dx * sensitivity * up)
-        pitch = Rotation.from_rotvec(-dy * sensitivity * right)
-        cam["rotation"] = pitch * yaw * cam["rotation"]
+        self.camera["rotation"] = _camera_rotate(self.camera["rotation"], dx, dy,
+                                                   self.drag_sensitivity)
         self.last_xy = (x, y)
         return True
 
@@ -111,15 +97,13 @@ class CameraController:
         self.pan_last_xy = (x, y)
 
     def pan_motion(self, x, y, panel_width, panel_height):
-        """Updates `self.camera["pan"]` (a 2D NDC offset) from a pan-drag tick. Returns True iff
-        a pan was actually active. Needs no per-panel scale beyond `panel_width`/`panel_height`
-        since NDC is resolution/scale-independent."""
+        """Updates `self.camera["pan"]` (a 2D NDC offset) from a pan-drag tick (utils.
+        camera_trackball.pan). Returns True iff a pan was actually active."""
         if not self.panning or self.pan_last_xy is None:
             return False
         last_x, last_y = self.pan_last_xy
         dx, dy = x - last_x, y - last_y
-        self.camera["pan"] = self.camera["pan"] + np.array(
-            [-dx / (panel_width / 2.0), dy / (panel_height / 2.0)])
+        self.camera["pan"] = _camera_pan(self.camera["pan"], dx, dy, panel_width, panel_height)
         self.pan_last_xy = (x, y)
         return True
 
@@ -128,5 +112,5 @@ class CameraController:
         self.pan_last_xy = None
 
     def scroll(self, zoom_in):
-        factor = self.zoom_step if zoom_in else 1.0 / self.zoom_step
-        self.camera["zoom"] = max(self.zoom_min, min(self.zoom_max, self.camera["zoom"] * factor))
+        self.camera["zoom"] = _camera_zoom(self.camera["zoom"], zoom_in, self.zoom_step,
+                                            self.zoom_min, self.zoom_max)

@@ -3,9 +3,16 @@
 """
 import numpy as np
 
-from utils.inflate_polyhedron.stretchy_mesh import EDGE_LENGTH, mesh_edges
-from utils.inflate_polyhedron.mesh_levels import subdivide_once
+from utils.inflate_polyhedron.stretchy_mesh import mesh_edges
 from utils.geometry.polygon_geom import regular_polygon_vertices, apply_rigid
+# `build_level1_topology`/`open_base_edges` moved to utils.inflate_polyhedron.mesh_topology
+# (2026-10-01, explicit: "make sure they are using shared code whenever possible. shared code
+# should be moved to utils") -- were duplicated, byte-identical, in interactive_inflater_app's
+# own app.py. `fan_level_edges`/`layout_from_net_layout`/`net_layout_is_new_format`/
+# `INTERACTIVE_BUILDER_EDGE_LENGTH` below stay here -- no counterpart in that app (it never
+# loads a saved net file). Re-exported under the same names so every existing
+# `from inflate_polyhedron_app.logic.mesh_topology import ...` call site is unchanged.
+from utils.inflate_polyhedron.mesh_topology import build_level1_topology, open_base_edges
 
 __all__ = [
     "INTERACTIVE_BUILDER_EDGE_LENGTH", "build_level1_topology", "open_base_edges",
@@ -17,55 +24,6 @@ __all__ = [
 # app's own EDGE_LENGTH=1.0 convention). Duplicated rather than imported -- a whole separate,
 # unrelated Tkinter app (see docs/README.md).
 INTERACTIVE_BUILDER_EDGE_LENGTH = 70.0
-
-
-def build_level1_topology(base_faces):
-    """Level 0 and Level 1 share this exact fan-triangulated topology (see mesh_levels' own
-    docstring for why triangulating first matters for a spring-only relax) -- cheap enough (pure
-    index math, no numerical solve) to compute synchronously on every net selection. Calls
-    subdivide_once with placeholder positions purely to get the resulting faces/edge_length/
-    face_of_fine; the interpolated positions it also returns are meaningless (every input point
-    is the same placeholder) and discarded -- random_initial_positions supplies Level 0's real
-    starting positions instead."""
-    dummy_positions = {v: np.zeros(3) for face in base_faces for v in face}
-    faces, _, edge_length, face_of_fine = subdivide_once(
-        base_faces, dummy_positions, EDGE_LENGTH, list(range(len(base_faces))), 0)
-    return faces, edge_length, face_of_fine
-
-
-def open_base_edges(base_faces, face_edge_ids):
-    """Returns {base_face_idx: {frozenset(rim-edge vertex pair), ...}} -- for each original
-    polygon, which of ITS OWN edges have no partner elsewhere in the net (a genuine
-    free/boundary edge) rather than being glued to some other piece. Per-EDGE, not per-whole-
-    polygon: an n-gon connected at 2 of its own edges triangulates into 2 "closed" wedges and
-    n-2 "open" ones.
-
-    Adjacency is found via `face_edge_ids` when given (an edge id used by exactly ONE
-    base_faces entry across the whole net is that entry's own free edge) -- same
-    disambiguation rationale as mesh_levels.polygon_centroid_springs' own docstring, since two
-    DIFFERENT genuine edges can coincidentally share a plain vertex-id pair. Falls back to a
-    plain shared-vertex-pair match when `face_edge_ids` is None (a net with no such field has
-    no such collision risk either)."""
-    owners = {}
-    if face_edge_ids is not None:
-        for i, ids in enumerate(face_edge_ids):
-            face = base_faces[i]
-            n = len(face)
-            for k, eid in enumerate(ids):
-                pair = frozenset((face[k], face[(k + 1) % n]))
-                owners.setdefault(eid, []).append((i, pair))
-    else:
-        for i, face in enumerate(base_faces):
-            n = len(face)
-            for k in range(n):
-                pair = frozenset((face[k], face[(k + 1) % n]))
-                owners.setdefault(pair, []).append((i, pair))
-    open_edges = {}
-    for group in owners.values():
-        if len(group) == 1:
-            i, pair = group[0]
-            open_edges.setdefault(i, set()).add(pair)
-    return open_edges
 
 
 def fan_level_edges(faces, base_edges):

@@ -7,6 +7,17 @@
 one level under `src/apps/` bootstraps `sys.path` via `import common.paths` before importing
 `utils.*`.
 
+**Shared code goes in `utils/`, not duplicated between apps** (2026-10-01, explicit: "make sure
+they are using shared code whenever possible. shared code should be moved to utils" --
+REVERSES an earlier convention of deliberately duplicating logic between `inflate_polyhedron_
+app` and `interactive_inflater_app` rather than cross-importing). Genuinely shared pure logic
+(camera trackball math, lighting setup, mesh-normal/topology helpers, numeric-entry validation,
+the pressure-history guess) now lives under `src/utils/` and both apps import it. Still
+genuinely separate per-app, NOT moved: each app's own pydantic session-state schema (different
+fields for a very different state shape), anything tied to one app's own UI structure (e.g. a
+method reading `self.<app-specific-state>` even if conceptually similar to the other app's own),
+and anything with no actual counterpart in the sibling app at all.
+
 ## inflate_polyhedron_app (`src/apps/inflate_polyhedron_app/app.py`)
 The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
 
@@ -36,8 +47,8 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
   during replay — only `self.positions` (the 3D panel) keeps moving frame by frame.
   "RMS Stretch %" and "Pressure" both show "--" for the whole Computing phase, only revealed the
   instant the real result is known. Level 0's own row shows its actual RMS Stretch % same as every
-  other level, and its own "Pressure" column shows `level0_jiggle_distance` — the fixed
-  burst/jiggle displacement Level 0 actually uses (see physics.md), not a literal calibrated
+  other level, and its own "Pressure" column shows `level0_periodic_burst_distance` — the fixed
+  periodic-burst displacement Level 0 actually uses (see physics.md), not a literal calibrated
   pressure, but the closest analogue that column has for "how strong was the burst" at Level 0.
   **Every level (0-3) shares ONE camera state** (rotation/zoom/pan): `self._level_camera_state` (a
   `{"rotation", "zoom", "pan"}` dict). `_level_camera(level)` returns it regardless of `level`
@@ -235,19 +246,23 @@ The solver viewer. See `physics.md` for the actual algorithm; this is UI wiring.
 Combines `interactive_builder_app`'s canvas (left) with a simplified one-panel solver viewer
 (right) — build a net by hand and inflate it immediately, no save/load round trip.
 
-**Club terminology**: the anchor's own connected component is the **club**; every shape in it is
-a **member**; a member with 0 or 1 connections is a **guest** (0 = the first piece ever placed,
-nothing to connect to yet; flat-attached or just placed, never touches relax/inflate); a member
-with ≥2 connections is an **insider** (inflation only ever involves insiders); a shape not
-connected to the anchor at all is an **outsider**. `self.is_fully_inflated` tracks whether the
-insiders currently reflect a real relax/inflate result.
-Rules: (1) inflation only involves insiders, guests are attached flatly; (2) `is_fully_inflated`
-resets to False whenever the club empties, set True after a real Full Inflate; (3) a change to
-insiders (membership or their internal connections) triggers Diff Inflate if `is_fully_inflated`
-else Full Inflate; (4) undo/redo fall under the same rules for free, via the same `on_change` hook
-every edit funnels through. Status messages always say which pipeline (Full/Diff Inflate) and
-level is running (`_pipeline_label`), including when Diff Inflate redirects into a real Full
-Inflate because the insiders were never really solved yet.
+**Node terminology** (renamed 2026-10-01, explicit — active group/reachable node/unreachable
+node/junction node/terminal node, replacing the earlier club/member/outsider/insider/guest
+naming): the anchor's own connected component is the **active group**; every shape in it is a
+**reachable node**; a reachable node with 0 or 1 connections is a **terminal node** (0 = the
+first piece ever placed, nothing to connect to yet; flat-attached or just placed, never touches
+relax/inflate); a reachable node with ≥2 connections is a **junction node** (inflation only ever
+involves junction nodes); a shape not connected to the anchor at all is an **unreachable node**.
+`self.is_fully_inflated` tracks whether the junction nodes currently reflect a real relax/inflate
+result.
+Rules: (1) inflation only involves junction nodes, terminal nodes are attached flatly; (2)
+`is_fully_inflated` resets to False whenever the active group empties, set True after a real Full
+Inflate; (3) a change to junction nodes (reachable-node status or their internal connections)
+triggers Diff Inflate if `is_fully_inflated` else Full Inflate; (4) undo/redo fall under the same
+rules for free, via the same `on_change` hook every edit funnels through. Status messages always
+say which pipeline (Full/Diff Inflate) and level is running (`_pipeline_label`), including when
+Diff Inflate redirects into a real Full Inflate because the junction nodes were never really
+solved yet.
 
 **Modularization** (2026-09-30, explicit — "apply [the stretchy_mesh.py-style] refactoring... to
 interactive_inflater_app"): `src/apps/interactive_inflater_app/logic/` holds 10 pure (no Tkinter/
@@ -258,10 +273,11 @@ underscored method names so every call site stayed unchanged):
   mapping, what keeps the 2D canvas and 3D panel "matching".
 - `face_selecter.py` / `edge_selecter.py` — pure hover/selection set arithmetic (ctrl-toggle,
   nearest-point search); the VTK highlight actors stay in `app.py`.
-- `flat_face_attacher.py` — the pendant/guest flat-attach pipeline (mechanical move, already
-  pure); also owns `prepare_mesh_for_inflate`, the solve-vs-place dispatcher.
-- `club_member_classifier.py` — club/member/guest/insider/outsider classification,
-  `classify_change`'s diff core, anchor-deletion planning.
+- `flat_face_attacher.py` — the pendant/terminal-node flat-attach pipeline (mechanical move,
+  already pure); also owns `prepare_mesh_for_inflate`, the solve-vs-place dispatcher.
+- `node_classifier.py` (renamed 2026-10-01 from `club_member_classifier.py`) — active-group/
+  reachable-node/terminal-node/junction-node/unreachable-node classification, `classify_change`'s
+  diff core, anchor-deletion planning.
 - `inflation_type_chooser.py` — the decision tree choosing pendant-attach/full-inflate-redirect/
   diff-add/diff-remove/diff-connection-change/unsupported after an edit.
 - `edge_modifier.py` — connection-join validity + vertex-identity continuity across edits

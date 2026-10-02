@@ -1,8 +1,9 @@
 """Decides which inflate pipeline a builder edit should trigger -- moved out of
 interactive_inflater_app/app.py's `on_diff_inflate_clicked` (2026-09-30 modularization). Pure
-decision tree: given a `club_member_classifier.classify_change` verdict plus whether the just-
-added shape (if any) is a pendant/guest and whether the club's insiders are already fully
-inflated, picks ONE action. `InflaterPane.on_diff_inflate_clicked` calls `choose_action` then
+decision tree: given a `node_classifier.classify_change` verdict plus whether the just-
+added shape (if any) is a pendant/terminal node and whether the active group's junction nodes
+are already fully inflated, picks ONE action. `InflaterPane.on_diff_inflate_clicked` calls
+`choose_action` then
 dispatches to the one matching existing method -- all side effects (status labels, selection
 staging, the actual solve) stay in app.py.
 """
@@ -23,14 +24,16 @@ __all__ = [
 
 
 def choose_action(kind, extra, is_fully_inflated, is_pendant_add):
-    """`kind`/`extra`: a `club_member_classifier.classify_change` result. `is_fully_inflated`:
-    whether the club's insiders currently reflect a real relax/inflate result (vs. only ever
-    having been flat-attached). `is_pendant_add`: only meaningful when `kind == "add_face"`,
-    whether `extra` (the newly added shape) would be a guest were this inflated right now.
+    """`kind`/`extra`: a `node_classifier.classify_change` result. `is_fully_inflated`:
+    whether the active group's junction nodes currently reflect a real relax/inflate result
+    (vs. only ever having been flat-attached). `is_pendant_add`: only meaningful when
+    `kind == "add_face"`, whether `extra` (the newly added shape) would be a terminal node were
+    this inflated right now.
 
-    A guest-only add never changes the insiders at all, so it always takes the flat-attach fast
-    path regardless of `is_fully_inflated` (PENDANT_ATTACH). Otherwise, if the insiders were only
-    ever geometrically placed, never really solved, and this edit genuinely needs real physics,
+    A terminal-node-only add never changes the junction nodes at all, so it always takes the
+    flat-attach fast path regardless of `is_fully_inflated` (PENDANT_ATTACH). Otherwise, if the
+    junction nodes were only ever geometrically placed, never really solved, and this edit
+    genuinely needs real physics,
     this redirects to a full re-solve from scratch (FULL_INFLATE_REDIRECT) -- every incremental
     path below assumes it's seeding a real relax/calibration pass from an ALREADY relaxed/
     calibrated result, which a flat placement never was. Otherwise dispatches by `kind`; a

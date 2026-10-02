@@ -1,12 +1,12 @@
 from interactive_inflater_app.logic import edge_modifier as em
 
 
-def test_is_orphan_to_orphan_join_blocks_two_outsiders():
+def test_is_orphan_to_orphan_join_blocks_two_unreachable_nodes():
     central_ids = frozenset({1})
     assert em.is_orphan_to_orphan_join(2, 3, central_ids) is True
 
 
-def test_is_orphan_to_orphan_join_allows_joining_the_club():
+def test_is_orphan_to_orphan_join_allows_joining_the_active_group():
     central_ids = frozenset({1})
     assert em.is_orphan_to_orphan_join(1, 2, central_ids) is False
 

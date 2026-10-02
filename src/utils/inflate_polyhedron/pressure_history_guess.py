@@ -1,8 +1,8 @@
-"""Pressure-guess pure logic, moved out of inflate_polyhedron_app/app.py (2026-09-30
-modularization). Algorithmically identical to the sibling interactive_inflater_app's own
-`logic/reinflater.py` -- duplicated rather than cross-imported, matching this project's own
-stated convention of not importing between the two sibling apps.
-"""
+"""Pressure-guess pure logic shared by inflate_polyhedron_app and interactive_inflater_app
+(2026-10-01, explicit: "make sure they are using shared code whenever possible. shared code
+should be moved to utils" -- previously duplicated, byte-identical, as each app's own
+`logic/reinflater.py`, per this project's prior "duplicate rather than cross-import between the
+two sibling apps" convention)."""
 
 __all__ = ["guess_pressure_from_history"]
 

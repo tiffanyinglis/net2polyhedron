@@ -43,14 +43,27 @@ several shipped nets (tetrahedron seed 19, cube seed 8, octahedron seed 4, ravio
 1/2/4/10/15-19 -- ravioli especially prone, ~45% of seeds tried, since its own cancelling-
 pressure pathology gives springs+repulsion nothing to push it toward a consistent fold). Two
 pieces, in `pre_inflation_relaxer.py`:
-- **Burst phase** (`LEVEL0_BURST_PRESSURE=0.05`, `LEVEL0_BURST_STEPS=200`): a few steps of
-  plain-linear spring + a small amount of real PRESSURE (`_pressure_only_force`, NOT the
-  hardening spring -- that explodes combined with pressure on raw random noise), run before
-  repulsion ever starts inside `relax_initial_configuration` itself. Pressure's direction is tied
-  to each face's own winding, unlike repulsion (no outward notion at all), so this biases Level 0
-  toward a winding-consistent shape. Reduces the failure rate (fixed 2 of 5 worst-case seeds
-  tested alone) but doesn't eliminate it -- ravioli's pressure-cancellation pathology defeats it
-  structurally.
+- **Burst** (2026-10-01, standardized name -- see below for both uses): a shot of outward-biased
+  force/displacement meant to nudge the mesh toward a winding-consistent, non-self-folded shape.
+  Two flavors, both in `pre_inflation_relaxer.py`:
+  - **Initial burst** (`LEVEL0_INITIAL_BURST_PRESSURE=0.1`, raised from 0.05 2026-10-01 explicit
+    "make the Level 0 bursts stronger"; `LEVEL0_INITIAL_BURST_STEPS=200`): a
+    few steps of plain-linear spring + a small amount of real PRESSURE (`_pressure_only_force`,
+    NOT the hardening spring -- that explodes combined with pressure on raw random noise), run
+    ONCE, before repulsion ever starts inside `relax_initial_configuration` itself. Pressure's
+    direction is tied to each face's own winding, unlike repulsion (no outward notion at all), so
+    this biases Level 0 toward a winding-consistent shape. Reduces the failure rate (fixed 2 of 5
+    worst-case seeds tested alone) but doesn't eliminate it -- ravioli's pressure-cancellation
+    pathology defeats it structurally.
+  - **Periodic burst** (`LEVEL0_PERIODIC_BURST_INTERVAL_STEPS=50`,
+    `LEVEL0_PERIODIC_BURST_DISTANCE_FRACTION=0.6`, raised from 0.4 2026-10-01 explicit "make the
+    Level 0 bursts stronger"): after the initial burst, Level 0 runs
+    spring + gated repulsion only, but every 50 steps every vertex gets a one-step DISPLACEMENT
+    kick along its own outward normal -- gated so it only fires while the mesh hasn't yet been
+    reported converged by the most recent check, i.e. convergence is always tested BEFORE a
+    periodic burst can fire, never after (this gating was previously called a "jiggle";
+    standardized to "burst" to match the initial one, same underlying idea, just repeated instead
+    of one-time).
 - **Seed retry backstop** (`relax_initial_configuration_with_orientation_retry`,
   `LEVEL0_ORIENTATION_MAX_RETRIES=5`): runs Level 0 up to 5 times from fresh seeds (seed,
   seed+1, ...), accepting the first fully-consistent result. If every attempt stays bad, keeps
@@ -66,10 +79,10 @@ pieces, in `pre_inflation_relaxer.py`:
   stop early on a good-enough score or a time/count budget" policy; `relax_initial_configuration_
   with_orientation_retry` supplies the orientation-specific `attempt_fn`/`score_fn`/print
   diagnostics and is otherwise unchanged. New `max_search_time` param
-  (`LEVEL0_ORIENTATION_MAX_SEARCH_TIME=10.0`s, aliasing `SeedSelecter`'s own default): the FIRST
-  attempt always runs in full regardless of duration, but attempt 2+ only starts if cumulative
-  time so far is still under budget — a model slow enough for one attempt to approach 10s gets
-  exactly one attempt. Deliberate, not just a safety valve: a bigger/more-braced mesh is
+  (`LEVEL0_ORIENTATION_MAX_SEARCH_TIME=5.0`s, aliasing `SeedSelecter`'s own default, lowered from
+  10.0s on 2026-10-01): the FIRST attempt always runs in full regardless of duration, but attempt
+  2+ only starts if cumulative time so far is still under budget — a model slow enough for one
+  attempt to approach 5s gets exactly one attempt. Deliberate, not just a safety valve: a bigger/more-braced mesh is
   empirically unlikely to hit the all-faces-flipped failure mode this retry targets, so spending
   MORE search time on the inputs that need it least would be wasted. `interactive_inflater_app`'s
   own `on_full_inflate_clicked` now calls this same function (`LEVEL0_SEED=0` as the fixed
@@ -125,14 +138,15 @@ edge with no reverse partner is a valid open boundary (mesh need not be closed 2
 ## Pipeline
 1. `random_initial_positions` — iid uniform noise, no meaning.
 2. `relax_initial_configuration` (Level 0, "Relax" button) — PLAIN LINEAR spring only, no
-   pressure. Needs mesh pre-triangulated (fan about centroid) or it's a floppy mechanism.
-   Repulsion is gated per vertex per step: a vertex's own repulsion force is zeroed whenever it
-   dots negative against that vertex's own outward normal (`_vertex_outward_normals` —
-   face-winding-based, same convention `_relax_force`'s pressure term uses). No global
-   orientation fix-up — orientation is left exactly as the physics settles it.
-   A periodic "jiggle" (`LEVEL0_JIGGLE_INTERVAL_STEPS`/`LEVEL0_JIGGLE_DISTANCE_FRACTION`) nudges
-   every vertex along its own outward normal to jog a locally-stuck region loose; gated so it
-   never fires on the same step as a convergence check.
+   calibrated pressure. Needs mesh pre-triangulated (fan about centroid) or it's a floppy
+   mechanism. Runs an INITIAL burst (200 steps of spring + small fixed pressure) once, before
+   repulsion ever starts; after that, spring + gated all-pairs repulsion only, with a PERIODIC
+   burst (a one-step outward-normal displacement kick) every 50 steps, gated so it only fires
+   while the mesh hasn't yet been reported converged by the most recent check. Repulsion is
+   gated per vertex per step: a vertex's own repulsion force is zeroed whenever it dots negative
+   against that vertex's own outward normal (`_vertex_outward_normals` — face-winding-based,
+   same convention `_relax_force`'s pressure term uses). No global orientation fix-up —
+   orientation is left exactly as the physics settles it.
 3. Promote to Level 1 (same topology, no re-subdivide needed).
 4. `relax_once` ("Inflate") — pressure-driven, HARDENING spring (see below). One call = fixed
    pressure; app recalibrates pressure fresh every Inflate click.
@@ -143,8 +157,8 @@ edge with no reverse partner is a valid open boundary (mesh need not be closed 2
 
 ## Force model
 - **Level 0** (`_spring_only_force`): plain Hooke, `f = stretch`. Deliberately NOT hardening —
-  no pressure to resist there, and plain linear settles faster. Own step constant
-  `LEVEL0_STEP_MAX_MULTIPLIER = 0.1`.
+  plain linear settles faster, and the hardening term's cubic can explode combined with
+  `_pressure_only_force` on raw random noise. Own step constant `LEVEL0_STEP_MAX_MULTIPLIER = 0.1`.
 - **Level 1+** (`_relax_force`): HARDENING spring, `f = stretch + c*stretch^3`,
   `c = HARDENING_CUBIC_COEFFICIENT = 0.5`. Needed because plain linear can't hold pressure past a
   critical value (pressure push ~area~length^2, linear spring pull only ~length) — real rubber
@@ -165,7 +179,8 @@ edge with no reverse partner is a valid open boundary (mesh need not be closed 2
   growing with subdivision); `repulsion_vertex_multipliers` can weaken it per-vertex.
 - **`pressure_exclude_faces`** (`_face_index_groups`): an "open" wedge triangle (outer edge not
   glued to another polygon) gets no pressure force at all — still fully present for
-  edges/repulsion/convergence. Also excludes those faces from the Level-0 jiggle's own normal.
+  edges/repulsion/convergence. Also excludes those faces from the Level-0 periodic burst's own
+  normal.
 
 ## Integration
 `dt = step_max_multiplier * scale` (`scale` = mesh's own rest edge length) — the whole step size,
@@ -221,13 +236,14 @@ new target, scaled by `2^(level difference)` (each Subdivide roughly doubles the
 for the same target RMS). Not a `new_target / prior_achieved` rescale — that ratio explodes when
 a prior level's own achieved stretch is ~0.
 
-**Unresponsive-mesh stall detection.** If `_STALL_TRIAL_LIMIT` (2) consecutive rescale-phase
-trials land within `_STALL_DELTA_PCT` (1e-6) of each other despite pressure being rescaled by up
-to 5x, the mesh is judged unresponsive to pressure at this level (e.g. a ravioli-paired mesh
-whose two identical, opposite-wound faces cancel pressure exactly) and the search gives up
-rather than escalating pressure without bound. Return value gains `pressure_found` (False in
-this case, though `converged` can still be True) so `_guess_pressure_from_history` can exclude
-this level's pressure from later levels' starting guess.
+**Stall detection removed (2026-10-01, explicit -- "stall detection confirmed not needed. you can
+delete it now").** Previously, 2 consecutive rescale-phase trials landing within 1e-6 pct of each
+other (e.g. a ravioli-paired mesh whose two identical, opposite-wound faces cancel pressure
+exactly) would make the search give up early with `pressure_found=False`. Now the rescale phase
+just keeps rescaling by `target/achieved` (clamped to `[0.2x, 5x]`) for the full `max_iterations`
+budget regardless -- an unresponsive mesh just burns through its iteration budget rather than
+bailing out early. `pressure_found` is now False only when every trial within `max_iterations`
+was insane.
 
 ## Defaults (current)
 - `LEVEL_DEFAULT_TARGET_RMS_PCT = {1: 5.0, 2: 5.0, 3: 5.0}` (app, per-level spinner default);

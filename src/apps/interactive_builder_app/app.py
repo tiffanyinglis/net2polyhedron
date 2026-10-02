@@ -417,7 +417,6 @@ dragging/rotating logic never has to look at what's drawn -- it works
 entirely in world coordinates against each shape's own stored geometry,
 exactly as it did before this module used Pillow at all.
 """
-import colorsys
 import copy
 import json
 import math
@@ -441,6 +440,7 @@ from common.paths import STRETCHY_NETS_DIR
 from common.ui_theme import PLOT_THEME, STATUS_COLORS
 from ui.tooltip import Tooltip
 from utils.geometry.polygon_geom import attach_polygon, regular_polygon_vertices
+from utils.polygon_colors import POLYGON_NS, POLYGON_COLORS
 
 # This app's own File > Save/Save As extension, not ".json" -- still plain JSON content (see module
 # docstring's "net JSON import/export" section), just a distinct
@@ -451,32 +451,11 @@ from utils.geometry.polygon_geom import attach_polygon, regular_polygon_vertices
 # existing hand-authored/previously-saved net still opens.
 NET_FILE_EXTENSION = ".poly"
 
-# Palette entries, in display order.
-POLYGON_NS = [3, 4, 5, 6, 7, 8]
-
-# One FIXED color per polygon type (never per-instance), as an explicit
-# (hue_deg, lightness, saturation) table rather than a formula swept
-# evenly across all 6 -- per-color tweaks over time left hues unevenly
-# spaced, so an explicit table reads more clearly than exceptions
-# bolted onto a formula. Order matches POLYGON_NS (triangle..8-gon);
-# base lightness/saturation is 0.50/0.65 except where a color's own
-# tweak departs from it.
-_POLYGON_HLS = [
-    (136, 0.38, 0.50),  # triangle: green (darker/less saturated)
-    (172, 0.40, 0.65),  # square: turquoise, darkened a bit
-    (208, 0.50, 0.65),  # pentagon: blue
-    (244, 0.58, 0.65),  # hexagon: darker blue, lightened a bit
-    (262, 0.50, 0.65),  # 7-gon: violet
-    (280, 0.50, 0.65),  # 8-gon: purple
-]
-
-
-def _hls_hex(hue_deg, lightness, saturation):
-    r, g, b = colorsys.hls_to_rgb(hue_deg / 360.0, lightness, saturation)
-    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
-
-
-POLYGON_COLORS = {n: _hls_hex(*hls) for n, hls in zip(POLYGON_NS, _POLYGON_HLS)}
+# Palette entries, in display order, and their one FIXED color per polygon type (never per-
+# instance) -- POLYGON_NS/POLYGON_COLORS moved to utils.polygon_colors (2026-10-01, explicit:
+# "shared code should be moved to utils" -- inflate_polyhedron_app's own "Polygon-specific"
+# Colour mode needs this exact same palette too, see that module's own docstring), imported
+# above under the same names so every existing call site in this file is unchanged.
 
 # Regular-polygon local vertices (centered on origin), precomputed once
 # per n rather than on every redraw -- a placed shape's world vertices

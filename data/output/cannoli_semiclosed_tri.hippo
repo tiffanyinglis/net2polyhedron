@@ -6040,5 +6040,14 @@
   "net_pan": [
     0.0,
     0.0
+  ],
+  "color_mode": "multi",
+  "face_colors": [
+    "#f45f74",
+    "#003a7d",
+    "#f9e858",
+    "#ffcd8e",
+    "#98c127",
+    "#4ecb8d"
   ]
 }

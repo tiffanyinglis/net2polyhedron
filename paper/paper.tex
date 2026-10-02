@@ -71,22 +71,61 @@ Our algorithm covers the basic models. But there are more complex features found
 \begin{itemize}
 	\item duplicate edges
 	\item self joins
+	\item open models
 \end{itemize}
 
 When creating small appendages, it's common to have two pieces joined end-to-end. When two squares are joined by opposite edges, we end up with two distinct edges with the same endpoints. To handle them properly, we need to keep the deduping of vertices and edges separate. Two edges are only considered the same if they are directly joined together. It's not sufficient for their vertices to be the same.
 
 Appendages can also feature self joins, in which edges from the same polygon are joined to one another. This results in the polygon folding, though not creased since we're still dealing with fabric, not paper. To handle self joins, we simply subdivide the polygon into triangles (basically the Level 0 triangulation). And then any self joins are just regular inter-polygon joins.
 
+Open models are meshes that are not closed. When inflated naively, because there are many valid solutions, the algorithm doesn't converge. To fix this, we need to bring in electrostatic repulsion to make vertices repel each other so that open faces can hold stiff and not flip flop in the wind.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection*{Improved inflation algorithm}
+
+The improved algorithm can handle incremental inflation, open models (as opposed to closed), small features like legs/head, self-joined polygons, etc.
+
+Level 0:
+- start with a random set of points. the edges are basic springs with $F=ks$ where $s$ is relative stretch
+- if an n-gon face has self-joins, then it's split from the centroid into n triangles
+- Initial burst: an initial burst (200 steps) helps open things up to avoid too many self intersections and inversions
+- Repulsive phase: add repulsive forces to the vertices
+- Periodic burst: Every 200 steps, we check for convergence. If not converged yet, then add a 1-step burst to inflate a bit more.
+- Inversion check: For really small nets, it's possible for the random start to result in an inverted models. We check this by seeing if the outward vectors on the face are mostly pointing away from the model's centroid (not foolproof but works well enough in practice). Since Level 0 is fast, we allow 5 seconds for the Level 0 to retries multiple times (up to 5 times) and pick the best start.
+
+Level 1:
+- start from the converged result of Level 0
+- run up to 8 trials (each one up to 5000 steps) with bracket-and-bisect to determine the best pressure to reach the target stretch \%
+- each trial inflates the model (composite cubic + linear springs), and every 200 steps, apply Kabsch alignment to remove rotation/translation drift, and check for convergence.
+- run the chosen trial to completion
+
+Level 2:
+- use results from Level 1 to determine the best pressure (each level requires roughly double the pressure to maintain the same level of stretch)
+- run additional trials if needed
+- use the best pressure to run the simulation to completion
+
+Level 3:
+- use results from Level 2 to determine the best pressure
+- run additional trials if needed
+- use the best pressure to run the simulation to completion
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section*{Real-Time Construction Tool}
 
-Now that we have a tool that takes a net and creates a 3D model from simulation, I want to take it a step further and make an interactive building tool that allows the user to build models from scratch and see their creations materialize in real-time.
+Now that we have a more stable inflation algorithm, let's take it a step further and make an interactive building tool that allows the user to build models from scratch and see their creations materialize in real-time.
 
-An example workflow would be: load a pre-existing pattern, do a full inflate, then add/delete pieces or connections and repeat ad infinitum. After each step, we don't want to do a full inflate because not only is that slow, it also breaks continuity from step to step. Instead, we do an incremental inflate that takes the precomputed pressure from Level 3 of the initial full inflate and use that to inflate the modified model. In most cases, the model would already be in near-steady state and it would just be adjusted slightly.
+As an example, the user may want to build something from scratch or modify an existing model. They should be able to add/delete faces and add/delete connections, and see the 3D model update quickly. They should be able to make these adjustments both in the 2D net and in the 3D inflated model.
 
-While experimenting with it, I came across some limitations involving unstable constructions. When we attach a new polygon to the model via an edge, the piece is inherently unstable. The inflation simulation can cause it to fluctuate/spin wildly and never reach convergence. For the construction tool to behave in a stable manner, we need to impose some additional stability constraints.
+It gets a little tricky if the user has multiple disjoint nets. Where would they be rendered in 3D? To resolve this issue, we will only allow one model to be edited at a time. The first face placed is the central node. As more faces get connected to it, they form a connected component that gets inflated and rendered in the 3D view--we call the whole thing the active group. Things outside the active group are unreachable nodes. Things inside are reachable nodes. Among reachable nodes, if it has degree 0 or 1, then it's a terminal node; otherwise it's a junction node.
 
-(When pieces are loosely constrained, the whole thing can move in many different directions and still have the same optimality. basically there are a lot of solutions so it can't settle on one unless we improve the optimality condition to prefer certain types of solutions)
+These categories help us define how to handle each type of node/face. In terms of connections, reachable nodes are allowed to connect to unreachable nodes, and in doing so, they become reachable as well. Unreachable nodes cannot connect to each other. This is to prevent a secondary active group from forming. We only want one active group, and any unreachable nodes are just faces in the process of being connected.
+
+As for rendering, only reachable nodes are rendered. First we take the set of junction nodes and inflate them. Then terminal nodes are attached flat, parallel to the faces they're being attached to. This is because terminal nodes are too unstable. We won't attempt to inflate them until they have at least 2 connections to stabilize them. Flat attachments are also much faster to render.
+
+Whether or not to reinflate depends on whether the set of junction nodes has changed. Adding/deleting a terminal/unreachable node would not result in reinflation. For every new build, the new inflation is a Full Inflate that goes from Level 0 to Level 3. Every subsequent inflation is a Diff Inflate, meaning it only incrementally inflates by taking the already established pressure value and applying it to the modified model at Level 3. Most of the time, this is sufficient. Occasionally, after too many Diff Inflates, the model may lose some symmetry or develop some imperfections. If so, the user can choose a manual Full Inflate to fix things.
+
+From experimentation, 5\% and 10\% seem to be good RMS stretch targets for open models and closed models, respectively. The interactive inflation tool checks for open/closedness and targets the appropriate stretch level.
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section*{Results}

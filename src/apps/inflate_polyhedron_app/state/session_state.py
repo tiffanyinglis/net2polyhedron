@@ -166,3 +166,16 @@ class SessionStateModel(BaseModel):
     level0_rotation: Optional[Tuple[float, float, float, float]] = None  # scipy Rotation (x, y, z, w)
     net_zoom: float = 1.0
     net_pan: Tuple[float, float] = (0.0, 0.0)
+    # Colour menu (2026-10-01, explicit: "add a Colour menu... these colours persist via
+    # Save/Load, even into different app, if the target app supports it"). "polygon" (default,
+    # matches every session saved before this existed) re-derives colors fresh from
+    # source_polygon_id every load, so face_colors stays None for it -- nothing to persist.
+    # "multi" needs face_colors: the actual per-base-face color list (one entry per
+    # `base_faces`, a plain color string each), since Multi-colour's own colors are RANDOM and
+    # must round-trip exactly, not be re-rolled on load. Any app sharing this same field-name
+    # convention in its own session schema can read these two fields out of a loaded .hippo (or
+    # this app can read them from a loaded .hippie) even without understanding the rest of the
+    # file -- an app that doesn't support Colour mode at all just leaves both at their defaults,
+    # same as any other unfamiliar-but-present field.
+    color_mode: str = "polygon"
+    face_colors: Optional[List[str]] = None
