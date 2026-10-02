@@ -58,8 +58,6 @@ Before applying the inflation, we need to first establish an initial configurati
 
 Next we apply the inflation as an outward pressure on the faces. To keep the pressure evenly distributed, it's scaled by area. Densely triangulated models take a long time to converge due to the number of vertices, so we use a hierarchical annealing process that alternates between inflating and subdividing. At each level, we inflate until convergence then subdivide the mesh (doubling the vertices each time). Three levels are enough to reach a sufficient smooth-looking model.
 
-When the pressure is too low, the animals often end up with inverted heads or feet. This can be fixed by using a high pressure initially to ``pop'' them out, then gradually lowering the pressure at later stages to reach the desired level of inflation. Since numerical instability occurs at high pressures, we introduce a cubic hardening term to the linear springs for stability. Physically, this mimics the real-life behaviour of balloons reaching stability under pressure rather than growing unbounded.
-
 For each level, we want choose the pressure that allows the model to stretch up to some amount (RMS stretch percent). Since this depends on a variety of factors, the easiest way is to just experiment with different values until you find something good enough. We run up to 8 trials for pressure estimation (up to 5000 steps), then take the best one and run it to completion if it hasn't converged already.
 
 The 8 trials for pressure estimation only needs to happen for Level 1, the coarsest inflation. For subsequent levels, each time the resolution doubles, the pressure needed also doubles (from empirical evidence). So we can extrapolate from Level 1 results, and massively speed up the estimation process.
@@ -90,7 +88,8 @@ Level 0:
 - if an n-gon face has self-joins, then it's split from the centroid into n triangles
 - Initial burst: an initial burst (200 steps) helps open things up to avoid too many self intersections and inversions
 - Repulsive phase: add repulsive forces to the vertices
-- Periodic burst: Every 200 steps, we check for convergence. If not converged yet, then add a 1-step burst to inflate a bit more.
+- Periodic burst: Every 50 steps, we add a 1-step burst to inflate a bit more.
+- Convergence check: Every 200 steps, we check for convergence.
 - Inversion check: For really small nets, it's possible for the random start to result in an inverted models. We check this by seeing if the outward vectors on the face are mostly pointing away from the model's centroid (not foolproof but works well enough in practice). Since Level 0 is fast, we allow 5 seconds for the Level 0 to retries multiple times (up to 5 times) and pick the best start.
 
 Level 1:

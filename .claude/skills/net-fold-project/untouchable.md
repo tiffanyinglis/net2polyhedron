@@ -190,6 +190,20 @@ the list anyway — don't delete.
 explicit — "update docs too", asked directly after the `.poly`-extension change itself).
 `docs/algorithm.md` had nothing to update (no `.json`/net-file-extension mentions in it at all).
 
+`docs/algorithm.md`, `stretchy_mesh.py`, `pre_inflation_relaxer.py` (2026-10-01, explicit — "try
+getting rid of the cubic term and just use linear springs", then "get rid of cubic term in
+spring, update docs"): the Level 1+ hardening spring (§4.1, `_relax_force`) reverted to plain
+Hooke's-law linear, matching Level 0's `_spring_only_force` exactly — `HARDENING_CUBIC_COEFFICIENT`
+removed entirely (no other code referenced it; confirmed by grep). `docs/algorithm.md` abstract,
+§3.3, §4.1, §4.2, §4.4 updated to describe the current plain-linear force law while keeping the
+hardening term's own math/motivation as explicit history (what it was, why it was tried, why it
+was removed, and what to watch for if plain linear ever proves insufficient — the hardening term
+is named as the fix to reintroduce in that case, not a new volume/clamp term). `pre_inflation_
+relaxer.py`'s docstrings/comments that contrasted Level 0's linear spring against Level 1's
+hardening one updated to note both now share the same force law. `physics.md` updated the same
+way. Full test suite: still only the same 4 pre-existing unrelated failures (verified via
+`git stash` before/after).
+
 `data/input/stretchy_nets/*.json`: all 11 shipped nets renamed `.json` -> `.poly` via `git mv`
 (2026-09-16, explicit — "change the json files in stretchy_nets/ to .poly files") — content
 byte-for-byte unchanged, extension only. Every test file that hardcoded one of these 11 exact
@@ -204,6 +218,25 @@ creep.
 that. delete those tests", re: their own pre-existing, unrelated-to-anything-this-session
 title-case-vs-underscored `"name"` field mismatch). `THREE_SQUARES` (now-unused after the delete)
 removed too; `PENTAGONS_AND_SQUARE` kept -- still used by `test_mesh_edges_deduplicates_and_sorts`.
+
+`tests/unit/inflate_polyhedron/test_stretchy_mesh.py`, `test_stretchy_net_layout.py` (2026-10-01,
+explicit: "remove failed tests" -- the 4 failures every change this session had been reporting as
+"pre-existing unrelated", confirmed stale via `git stash` before removing anything). Two separate
+root causes, both genuinely pre-existing, neither caused by this session's own cubic-term removal:
+- `data/input/stretchy_nets/two_pentagons_one_square.poly` doesn't exist on disk (confirmed, not
+  just un-globbed) -- `test_mesh_edges_deduplicates_and_sorts` (the `PENTAGONS_AND_SQUARE` kept by
+  the entry above) DELETED, `PENTAGONS_AND_SQUARE` removed too (no longer used by anything);
+  `"two_pentagons_one_square"` removed from `test_stretchy_net_layout.py`'s own `NETS` list
+  (`test_every_face_gets_placed`/`test_every_placed_face_keeps_unit_edge_length` still run
+  parametrized over the other 5 shipped nets, unaffected).
+- `test_relax_once_continues_from_the_given_positions_not_from_scratch` (plus its own leading
+  "relax_once" section-comment, which only existed for it) DELETED -- a real numeric assertion
+  failure (`max_stretch < 0.1` off by over 10x), unrelated to any missing file; its own comment
+  already stated the HARDENING-spring assumption this session's cubic-term removal (see the
+  dedicated physics entry above) invalidated anyway, so re-tuning it post-removal wasn't
+  attempted, per the explicit "remove" instruction.
+Full suite: 293 passed, 0 failed (previously 293 passed / 4 failed) -- these were the only 4
+failures in the suite.
 
 Rigid-unfolding pipeline (`polyhedron_unfolder` app+utils, `persistence/`, `data/input/nets/`) is
 DELETED from this repo entirely — lives in sibling `polyhedron-unfolder` project. Don't
@@ -652,6 +685,20 @@ unrelated failures as every other change this session); in-process smoke tests c
 are assigned the moment a shape is placed, toggling modes without Randomize reproduces the exact
 same colors, Randomize changes them, and a real Full-Inflate-then-save-then-load round trip
 preserves each shape's own color correctly through the live-id remap.
+
+Feature (2026-10-01, explicit: "multi_colour should apply to the 2d view as well",
+`interactive_inflater_app` only). `BuilderPane._draw_shape` (the 2D canvas's own per-shape draw,
+already overridden there to dim disconnected shapes) now also overrides `fill_hex` from
+`InflaterPane.shape_colors[shape["id"]]` whenever `color_mode_var == "multi"`, BEFORE the
+disconnected-dimming check -- `shape_colors` already has an entry for every placed shape
+regardless of inflation state (`CombinedApp._assign_colors_for_new_shapes` assigns one the moment
+a shape is placed), so this needs no new state, just reading it. `on_color_mode_changed`/
+`on_randomize_colors_clicked` (InflaterPane) now also call `builder._redraw()` (previously only
+`self._render()`, the 3D side) so the 2D canvas updates immediately on a mode toggle or Randomize
+click; `CombinedApp._assign_colors_for_new_shapes` also redraws the builder when it assigns a
+color to a brand-new shape while already in Multi-colour mode, so a freshly placed shape never
+flashes its old Polygon-specific color for one frame. Polygon-specific mode unaffected (still
+`POLYGON_COLORS[n]`, `fill_hex` left untouched when not in "multi").
 
 Feature (2026-10-01, explicit: "Put Undo/Redo in an Edit menu. It should be able to undo/redo
 colour changes"). New `CombinedApp._build_edit_menu` adds an Edit menu (Undo/Redo, "Ctrl+Z"/

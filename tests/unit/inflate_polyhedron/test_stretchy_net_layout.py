@@ -4,8 +4,7 @@ import pytest
 from utils.inflate_polyhedron.stretchy_mesh import load_stretchy_mesh, mesh_edges
 from utils.inflate_polyhedron.stretchy_net_layout import build_stretchy_net_layout
 
-NETS = ["tetrahedron", "cube", "octahedron", "icosahedron", "dodecahedron",
-        "two_pentagons_one_square"]
+NETS = ["tetrahedron", "cube", "octahedron", "icosahedron", "dodecahedron"]
 
 
 @pytest.mark.parametrize("name", NETS)

@@ -4,8 +4,9 @@ using PURE SPRING forces plus all-pairs repulsion -- no calibrated pressure at a
 there's nothing yet for pressure to push against in any precise sense. See physics.md's
 Pipeline section for where this sits relative to relax_once (Level 1+'s
 real pressure-based inflation, which takes over once this has produced a
-usable starting shape) and its own Force model section for why this uses
-a plain LINEAR spring rather than relax_once's hardening one.
+usable starting shape) and its own Force model section -- both this module's
+`_spring_only_force` and relax_once's own `_relax_force` use the same plain LINEAR spring
+(2026-10-01, explicit: the hardening cubic term was removed from `_relax_force`).
 
 Shares stretchy_mesh's own low-level primitives (_edge_setup,
 _face_index_groups, repulsion_force, _vertex_outward_normals,
@@ -23,19 +24,17 @@ from .mesh_stretch_checker import positions_and_stretch
 from .seed_selecter import SeedSelecter, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_SEARCH_TIME
 
 # relax_initial_configuration's OWN step-size cap, separate from relax_once's
-# STEP_MAX_MULTIPLIER -- since _spring_only_force is a plain LINEAR spring, not the hardening
-# one STEP_MAX_MULTIPLIER is tuned for, sharing that smaller value would needlessly throttle a
-# force law that never needed it. See physics.md's Force model section for the current value.
+# STEP_MAX_MULTIPLIER -- kept as its own, smaller-tuned constant rather than sharing
+# STEP_MAX_MULTIPLIER, even though both now use the same plain-linear spring law. See
+# physics.md's Force model section for the current value.
 LEVEL0_STEP_MAX_MULTIPLIER = 0.1
 
 
 def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
     """Pure Hooke's-law LINEAR spring force for relax_initial_configuration
-    -- deliberately NOT the hardening term relax_once's own _relax_force
+    -- the same plain linear spring law relax_once's own _relax_force now
     uses (see stretchy_mesh's module docstring and physics.md's Force
-    model section): with pressure=0, there's no outward force for a
-    hardening term to guard against, and plain linear settles faster
-    near rest. Faces aren't expected to be flat or non-self-intersecting
+    model section). Faces aren't expected to be flat or non-self-intersecting
     at this stage; the only goal is a well-separated, edge-length-
     plausible starting point to hand off to the real per-face pressure
     model afterward."""
@@ -65,8 +64,7 @@ def _spring_only_force(pts, edge_ai, edge_bi, edge_length):
 # physics.md's Level 0 orientation-retry section) -- reduces how often Level 0 lands in a
 # genuinely MIXED (locally self-folded) orientation, but doesn't eliminate it, which is why
 # relax_initial_configuration_with_orientation_retry (below) exists as the backstop. Small
-# enough, and the hardening term is NOT used here (see _pressure_only_force's own docstring),
-# to stay numerically safe even applied directly to raw, not-yet-relaxed random noise.
+# enough to stay numerically safe even applied directly to raw, not-yet-relaxed random noise.
 # 2026-10-01, explicit: "make the Level 0 bursts stronger" -- raised from 0.05 (2x).
 LEVEL0_INITIAL_BURST_PRESSURE = 0.1
 LEVEL0_INITIAL_BURST_STEPS = 200
@@ -121,11 +119,8 @@ def _pressure_only_force(pts, all_face_groups, pressure):
     """The pure per-face pressure term of stretchy_mesh._relax_force --
     `pressure * area * outward_normal`, split per vertex -- with NO spring
     term at all. Used only by the initial burst above/below; kept separate
-    from _spring_only_force so the burst can combine plain-LINEAR spring
-    (matching the rest of Level 0) with real pressure, rather than using
-    _relax_force's own HARDENING spring, whose cubic term explodes when
-    combined with real pressure on raw, not-yet-relaxed random noise (see
-    git history, 2026-09-30)."""
+    from _spring_only_force so the burst's own spring+pressure combination is
+    explicit here rather than calling _relax_force directly."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
     if not pressure:

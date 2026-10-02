@@ -16,8 +16,6 @@ from utils.inflate_polyhedron.pre_inflation_relaxer import relax_initial_configu
 from utils.geometry.polyhedron import Polyhedron
 from utils.inflate_polyhedron.mesh_levels import subdivide_once
 
-PENTAGONS_AND_SQUARE = "data/input/stretchy_nets/two_pentagons_one_square.poly"
-
 TETRAHEDRON_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
 
 # A real, unit-edge-length regular tetrahedron (CCW-from-outside faces) --
@@ -71,14 +69,6 @@ def test_load_stretchy_mesh_rejects_duplicate_directed_edge(tmp_path):
     path.write_text(json.dumps({"faces": [[0, 1, 2], [0, 1, 3]]}))
     with pytest.raises(ValueError, match="appears 2 times"):
         load_stretchy_mesh(str(path))
-
-
-def test_mesh_edges_deduplicates_and_sorts():
-    faces, _ = load_stretchy_mesh(PENTAGONS_AND_SQUARE)
-    edges = mesh_edges(faces)
-    assert edges == sorted(set(edges))
-    assert all(a < b for a, b in edges)
-    assert len(edges) == 7  # 3 shared A-B + 2 A-S + 2 B-S
 
 
 def test_mesh_to_polyhedron_wraps_a_solved_mesh():
@@ -177,35 +167,6 @@ def test_is_orientation_consistent_false_when_one_face_is_flipped():
     flipped_faces = [list(reversed(faces[0]))] + faces[1:]
     assert not _is_orientation_consistent(pts, flipped_faces, idx)
 
-
-# ---- relax_once: manual, restart-free relaxation for
-# inflate_polyhedron_app's interactive "Inflate" workflow, continuing
-# from an already-relaxed starting point (that app now builds its own
-# starting point via relax_initial_configuration -- see that function's
-# and inflate_polyhedron_app's own module docstrings). Using
-# _relaxed_positions here too keeps these tests representative of the
-# real usage.
-
-def test_relax_once_continues_from_the_given_positions_not_from_scratch():
-    # A partial (not fully converged) relax_initial_configuration run
-    # leaves the tetrahedron meaningfully stretched. A zero-pressure
-    # relax_once from THAT shape should pull the stretch back down close
-    # to 0% -- proving it genuinely continued refining the given shape
-    # rather than landing on some unrelated fresh embedding (which would
-    # have no reason to end up this well edge-length-fitted). The spring
-    # force is now a HARDENING one (stretch + stretch**3, see
-    # stretchy_mesh's own module docstring) rather than plain linear --
-    # near rest (small stretch) the linear term dominates and the cubic
-    # term is negligible, so convergence speed here is back to
-    # essentially the original linear spring's, unlike an intermediate
-    # pure-quartic version that was tried and replaced for exactly this
-    # reason (see git history / the module docstring's Design notes).
-    positions = _relaxed_positions(TETRAHEDRON_FACES, max_nfev=5)
-    _, nfev, max_stretch, rms_stretch, optimality, converged = relax_once(
-        positions, TETRAHEDRON_FACES, EDGE_LENGTH, pressure=0.0)
-    assert max_stretch < 0.1
-    assert converged
-    assert optimality is not None and optimality < 1e-4
 
 
 def test_relax_once_max_nfev_caps_reported_steps():

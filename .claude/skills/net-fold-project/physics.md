@@ -148,7 +148,7 @@ edge with no reverse partner is a valid open boundary (mesh need not be closed 2
    same convention `_relax_force`'s pressure term uses). No global orientation fix-up —
    orientation is left exactly as the physics settles it.
 3. Promote to Level 1 (same topology, no re-subdivide needed).
-4. `relax_once` ("Inflate") — pressure-driven, HARDENING spring (see below). One call = fixed
+4. `relax_once` ("Inflate") — pressure-driven, plain linear spring (see below). One call = fixed
    pressure; app recalibrates pressure fresh every Inflate click.
 5. `mesh_levels.subdivide_once` ("Subdivide", up to MAX_LEVEL=3) — quarters triangles via
    midpoints; positions interpolated from current (stretched) mesh, rest lengths derived from
@@ -156,19 +156,21 @@ edge with no reverse partner is a valid open boundary (mesh need not be closed 2
    levels.
 
 ## Force model
-- **Level 0** (`_spring_only_force`): plain Hooke, `f = stretch`. Deliberately NOT hardening —
-  plain linear settles faster, and the hardening term's cubic can explode combined with
-  `_pressure_only_force` on raw random noise. Own step constant `LEVEL0_STEP_MAX_MULTIPLIER = 0.1`.
-- **Level 1+** (`_relax_force`): HARDENING spring, `f = stretch + c*stretch^3`,
-  `c = HARDENING_CUBIC_COEFFICIENT = 0.5`. Needed because plain linear can't hold pressure past a
-  critical value (pressure push ~area~length^2, linear spring pull only ~length) — real rubber
-  avoids this via strain-stiffening, this is the model analogue. Own step constant
-  `STEP_MAX_MULTIPLIER = 0.05`.
+- **Level 0** (`_spring_only_force`): plain Hooke, `f = stretch`. Own step constant
+  `LEVEL0_STEP_MAX_MULTIPLIER = 0.1`.
+- **Level 1+** (`_relax_force`): plain Hooke, `f = stretch` (2026-10-01, explicit — "try getting
+  rid of the cubic term and just use linear springs"; removed the hardening cubic term and
+  `HARDENING_CUBIC_COEFFICIENT` entirely, now identical in form to Level 0's spring). Previously a
+  HARDENING spring (`f = stretch + c*stretch^3`, `c = 0.5`) added because plain linear can't hold
+  pressure past a critical value (pressure push ~area~length^2, linear spring pull only ~length) —
+  if pure-linear proves unable to hold pressure at useful stretch targets, that's the symptom to
+  expect and the hardening term is the fix to reintroduce. Own step constant
+  `STEP_MAX_MULTIPLIER = 0.05` (unchanged, not retuned for the new linear-only law yet).
   - **No hacky terms rule**: don't add a volume/target-volume term or a stretch clamp to this
     force model without the user explicitly asking — both were tried and rejected (papered over
-    a symptom instead of the physics). The hardening term and the adaptive step-shrink removal
-    (Integration, below) are both settled/current; don't reintroduce a step-shrink term or a
-    calibration-only step multiplier without new explicit permission.
+    a symptom instead of the physics). The adaptive step-shrink removal (Integration, below) is
+    settled/current; don't reintroduce a step-shrink term or a calibration-only step multiplier
+    without new explicit permission.
 - Each face: `pressure * area * outward_normal` (Newell's method), split across vertices. No
   planarity regularizer — the app's own pipeline fan-triangulates every face before Level 0/1
   ever run, so no face reaching `_relax_force` is ever 4+-gon in practice.
@@ -251,7 +253,8 @@ was insane.
 - `DEFAULT_TOLERANCE = 1e-4` (app's Tolerance spinner default)
 - `CONVERGENCE_GTOL = 1e-4` (module default when no gtol passed)
 - `INFLATE_SAFETY_STEP_CAP = 50000` (app, hard per-attempt step cap)
-- `HARDENING_CUBIC_COEFFICIENT = 0.5`, `STEP_MAX_MULTIPLIER = 0.05`, `LEVEL0_STEP_MAX_MULTIPLIER = 0.1`
+- `STEP_MAX_MULTIPLIER = 0.05`, `LEVEL0_STEP_MAX_MULTIPLIER = 0.1` (no hardening coefficient
+  anymore — see Force model above)
 - `CONVERGENCE_CHECK_INTERVAL = 200`
 
 ## Auto (app)

@@ -1163,6 +1163,9 @@ class BuilderPane(InteractiveBuilderApp):
         yet a real placed shape at all) falls past the range and is left alone."""
         if self._draw_shape_index < len(self.shapes):
             shape = self.shapes[self._draw_shape_index]
+            if (self.inflater_getter is not None
+                    and self.inflater_getter().color_mode_var.get() == "multi"):
+                fill_hex = self.inflater_getter().shape_colors.get(shape["id"], fill_hex)
             if shape["id"] not in self.central_shape_ids():
                 selected = False
                 fill_hex = mcolors.to_hex(
@@ -4572,6 +4575,7 @@ class InflaterPane:
         self._last_color_mode = new_mode
         if self.base_faces is not None:
             self._render()
+        builder._redraw()
 
     def on_randomize_colors_clicked(self):
         """Colour > Randomize -- re-rolls EVERY currently-inflated shape's own Multi-colour
@@ -4595,6 +4599,7 @@ class InflaterPane:
         self.shape_colors.update(
             coloring.random_shape_colors(shape_ids, neighbors, rng=random.Random()))
         self._render()
+        builder._redraw()
 
     def _groups_for_shape_ids(self, shape_ids):
         """Every 3D group whose own source_polygon_id is one of `shape_ids`. Reads via
@@ -6718,9 +6723,12 @@ class CombinedApp:
         has one), well before Multi-colour mode might ever be selected, so the mode's own colors
         are always ready rather than generated in one big batch the first time it's picked."""
         current_ids = {s["id"] for s in self.builder.shapes}
-        for shape_id in current_ids - self._known_shape_ids:
+        new_ids = current_ids - self._known_shape_ids
+        for shape_id in new_ids:
             self.inflater.ensure_shape_color(shape_id)
         self._known_shape_ids = current_ids
+        if new_ids and self.inflater.color_mode_var.get() == "multi":
+            self.builder._redraw()
 
     def _update_title(self):
         """Single source of truth for the window title (2026-09-29, explicit user request):

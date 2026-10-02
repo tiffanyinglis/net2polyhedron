@@ -9,10 +9,10 @@ physically plausible, inflated 3D shape. The method has two stages: (1) a
 random-start spring relaxation that recovers a well-separated, roughly
 edge-length-correct embedding with no notion of pressure or face
 orientation, and (2) an explicit, pressure-driven force relaxation that
-inflates the embedding, subject to a hardening (linear-plus-cubic)
-edge spring, an all-pairs short-range repulsion, and a per-face outward
-pressure force, walked in small steps to avoid the spurious equilibria a
-Newton-style solver can converge to. A calibration procedure estimates,
+inflates the embedding, subject to a linear edge spring, an all-pairs
+short-range repulsion, and a per-face outward pressure force, walked in
+small steps to avoid the spurious equilibria a Newton-style solver can
+converge to. A calibration procedure estimates,
 for a given mesh, the pressure that yields a target RMS edge stretch,
 exploiting an empirical near-linear relationship between pressure and
 total rest surface area.
@@ -79,11 +79,8 @@ $$
 $$
 
 applied as $+\mathbf f_{a\to b}$ on $b$ and $-\mathbf f_{a\to b}$ on $a$.
-No pressure is present at this stage. This stage
-deliberately keeps the spring purely linear even though Stage 2 (§4.1)
-does not: with no pressure to resist, there is no large-stretch stability
-concern for a hardening term to address, and the plain linear form
-settles to a well-separated shape faster.
+No pressure is present at this stage. This is the same plain linear
+spring force Stage 2 (§4.1) now also uses.
 
 ### 3.4 Orientation and repulsion
 
@@ -113,27 +110,31 @@ converged without waiting for a kick to re-settle first.
 
 ### 4.1 Force
 
-Each edge now contributes a *hardening* spring force — linear plus a
-cubic term in relative stretch $s = (\lVert p_b-p_a\rVert - \ell_0)/\ell_0$:
+Each edge contributes the same plain Hooke's-law linear spring force as
+Stage 1 (§3.3), in terms of relative stretch
+$s = (\lVert p_b-p_a\rVert - \ell_0)/\ell_0$:
 
 $$
-\mathbf f_{a\to b} = \left(s + c\,s^3\right)\hat u_{ab},\qquad c = 0.5,
+\mathbf f_{a\to b} = s\,\hat u_{ab},
 $$
 
-equivalent to a potential energy $U(s) = \tfrac12 s^2 + \tfrac{c}{4}s^4$
-per edge. This is a genuine physical addition, not a numerical patch: a
-plain linear spring's restoring force grows only linearly with stretch,
-while pressure's own push grows with face area ($\sim \ell^2$), so past
-some critical pressure no equilibrium exists at all and the mesh inflates
-without bound. Real rubber does not have this problem because its
-stress-strain curve stiffens sharply once its polymer chains run out of
-slack at large stretch (the same mechanism behind the two-balloon
-experiment's counter-intuitive behavior); the cubic term is the direct
-model analogue, small near $s=0$ (recovering the original linear spring's
-fast near-rest response) and dominant for $s \gtrsim 1$, where it grows
-faster than pressure's own quadratic area term and restores a genuine
-equilibrium at any pressure. §4.4 discusses this choice further and why
-it differs from two previously-rejected fixes for the same instability.
+equivalent to a potential energy $U(s) = \tfrac12 s^2$ per edge. An
+earlier version of this force law added a cubic hardening term,
+$s + c\,s^3$ with $c = 0.5$ (potential $U(s) = \tfrac12 s^2 + \tfrac{c}{4}s^4$),
+motivated by a genuine instability: a plain linear spring's restoring
+force grows only linearly with stretch, while pressure's own push grows
+with face area ($\sim \ell^2$), so past some critical pressure no
+equilibrium exists at all and the mesh inflates without bound. Real
+rubber does not have this problem because its stress-strain curve
+stiffens sharply once its polymer chains run out of slack at large
+stretch (the same mechanism behind the two-balloon experiment's
+counter-intuitive behavior); the cubic term was the direct model
+analogue, small near $s=0$ (recovering the linear spring's fast
+near-rest response) and dominant for $s \gtrsim 1$. That term was
+removed again (2026-10-01, explicit — "just use linear springs"), so
+the force law above is now plain Hooke's law throughout both stages.
+§4.4 discusses what the hardening term bought, why it was removed, and
+what to watch for if the plain linear form stops being sufficient.
 
 Each face additionally contributes a real per-face outward force,
 
@@ -163,10 +164,11 @@ p_v \leftarrow p_v + \Delta t\, \mathbf f_v,\qquad \Delta t = \Delta t_{\max}
 $$
 
 a fixed fraction of the mesh's own rest edge length (currently 0.05 for
-Stage 2's hardening spring, 0.2 for Stage 1's plain linear one — each
-force law tolerates a different step size before overshooting into an
-undamped oscillation, verified directly by bisecting the largest stable
-value on reproducing cases). $\Delta t$ was previously also divided by
+Stage 2, 0.1 for Stage 1 — even though both stages use the same linear
+spring force, each stage's full force mix, including repulsion gating,
+bursts, and pressure, tolerates a different step size before
+overshooting into an undamped oscillation, verified directly by
+bisecting the largest stable value on reproducing cases). $\Delta t$ was previously also divided by
 the current largest force, an adaptive term that shrunk the step when
 force was large; that term has been permanently removed (re-evaluated
 and re-declined), leaving a flat step size. Either way, this explicit
@@ -199,31 +201,32 @@ satisfies the tolerance) has been removed entirely: it used a threshold
 independent of $g_{\text{tol}}$, so at a sufficiently tight tolerance it
 could end a run well before the tolerance was actually satisfied.
 
-### 4.4 Why no volume or target term, and what changed about the stretch limit
+### 4.4 Why no volume or target term, and the status of the stretch limit
 
-A plain Hooke's-law spring cannot support unbounded pressure at all (§4.1
-above). Two additions were tried to paper over this and both were
-rejected as fixing the wrong layer: a
+A plain Hooke's-law spring cannot support unbounded pressure at all
+(§4.1 above) — past some critical pressure for a given stretch target,
+no linear-spring equilibrium exists. Two additions were tried to paper
+over this and both were rejected as fixing the wrong layer: a
 target/reference-volume pressure term (which silently follows wherever
 the mesh currently sits, compounding stretch across repeated
 subdivide-then-inflate cycles) and a per-edge soft stretch limit (which
 forces an equilibrium to exist even at a badly-chosen pressure, rather
-than choosing pressure well in the first place). At the time, the actual
-fix adopted for "how much pressure" was pressure calibration alone (§5).
+than choosing pressure well in the first place).
 
-The spring force since gained the cubic hardening term of §4.1, which is
-a literal, physically-motivated addition to the force law itself — not a
-clamp or a bolted-on limit, but a smooth potential (§4.1) whose force is
-just $-dU/ds$, same as the linear term it extends. This is deliberately
-distinct from the rejected per-edge stretch limit above: that limit
-existed purely to force an equilibrium into being regardless of how badly
-pressure had been chosen, whereas the hardening term reflects a real
-material property (real rubber's own strain-stiffening) that a plain
-linear spring was simply missing. Both calibration and the hardening term
-now work together — calibration still picks a sensible pressure per net
-and target, while the hardening term keeps that choice from becoming
-catastrophic if the target pushed close to or past a plain linear
-spring's own critical pressure.
+A third approach — a cubic hardening term added directly to the spring's
+own force law ($s + c\,s^3$, by analogy with real rubber's
+strain-stiffening at large stretch; see §4.1's earlier version) — was
+tried, adopted, and ultimately removed again (2026-10-01, explicit —
+"just use linear springs"), leaving plain Hooke's law throughout. Unlike
+the two rejected additions above, the hardening term was a literal,
+physically-motivated addition to the force law itself, not a clamp or a
+bolted-on limit — but it added a tuning parameter ($c$) and nonlinearity
+whose benefit, in practice, pressure calibration (§5) alone already
+captured: calibration picks a pressure appropriate to the target stretch
+and mesh, which for every net tested so far stays comfortably within the
+plain linear spring's own stable range. If a future net or target pushes
+close to or past that critical pressure, the hardening term above is the
+fix to reintroduce — not a volume/target term or a stretch clamp.
 
 ## 5. Pressure calibration
 

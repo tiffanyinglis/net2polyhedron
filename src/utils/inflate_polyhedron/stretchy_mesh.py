@@ -82,23 +82,18 @@ changing the physics.
 
 Design notes:
 - **relax_once is a genuine force balance, walked step by step -- no
-  volume anywhere** (_relax_force): each edge is a HARDENING spring; each
-  face applies a real outward force, `pressure * area * normal`, split
-  across its own vertices. Each call moves every vertex a small step
-  along its own net force (explicit relaxation), not a least_squares
-  solve: a Newton-style solver re-linearizes the whole mesh and can jump
-  past the physically-reachable equilibrium to a distant, spurious one
-  (see algorithm.md sec 4.2). Direction vectors use _safe_unit_vectors
-  (a fixed fallback at an exact zero vector) instead of a naive division.
-- **A hardening (linear + cubic) spring, not pure Hooke's-law linear.**
-  Pressure's quadratic area growth defeats a plain linear spring past
-  some critical value; a pure-cubic replacement settles as a slow power
-  law rather than exponentially near rest. See algorithm.md sec 4.1/4.4
-  and physics.md's Force model section.
+  volume anywhere** (_relax_force): each edge is a plain linear (Hooke's-
+  law) spring; each face applies a real outward force, `pressure * area *
+  normal`, split across its own vertices. Each call moves every vertex a
+  small step along its own net force (explicit relaxation), not a
+  least_squares solve: a Newton-style solver re-linearizes the whole mesh
+  and can jump past the physically-reachable equilibrium to a distant,
+  spurious one (see algorithm.md sec 4.2). Direction vectors use
+  _safe_unit_vectors (a fixed fallback at an exact zero vector) instead
+  of a naive division.
 - **pre_inflation_relaxer.relax_initial_configuration (Level 0's "Relax"
-  step) uses a PLAIN LINEAR spring, not the hardening one** -- no
-  pressure there for the hardening term to guard against, and plain
-  linear settles faster near rest.
+  step) uses the same plain linear spring as _relax_force** -- no
+  difference in spring law between Level 0 and Level 1+ currently.
 """
 import collections
 import json
@@ -344,22 +339,14 @@ def _safe_unit_vectors(vecs):
     return unit
 
 
-# The cubic term's own coefficient in _relax_force's hardening spring
-# (`stretch + HARDENING_CUBIC_COEFFICIENT * stretch**3`) -- see
-# physics.md's Force model section for the current value/rationale.
-HARDENING_CUBIC_COEFFICIENT = 0.5
-
-
 def _relax_force(pts, edge_ai, edge_bi, all_face_groups, edge_length, pressure=0.0):
     """relax_once's per-step force: a genuine mechanical force balance.
-    Each edge is a HARDENING spring (`stretch +
-    HARDENING_CUBIC_COEFFICIENT * stretch**3` -- see module docstring's
-    Design notes); each face applies a real outward pressure force,
-    `pressure * area * outward_normal` -- area and normal computed
-    together straight from its own vertex loop via
-    `0.5 * sum_i cross(p_i, p_{i+1})` (Newell's method) -- split evenly
-    across its own vertices. Returns the (N,3) net force on every vertex;
-    relax_once walks a small step along it."""
+    Each edge is a plain linear (Hooke's-law) spring; each face applies a
+    real outward pressure force, `pressure * area * outward_normal` --
+    area and normal computed together straight from its own vertex loop
+    via `0.5 * sum_i cross(p_i, p_{i+1})` (Newell's method) -- split
+    evenly across its own vertices. Returns the (N,3) net force on every
+    vertex; relax_once walks a small step along it."""
     n = pts.shape[0]
     force = np.zeros((n, 3))
 
@@ -367,7 +354,7 @@ def _relax_force(pts, edge_ai, edge_bi, all_face_groups, edge_length, pressure=0
     dist = np.linalg.norm(diff, axis=1)
     direction = _safe_unit_vectors(diff)
     stretch = (dist - edge_length) / edge_length
-    spring_on_a = (stretch + HARDENING_CUBIC_COEFFICIENT * stretch ** 3)[:, None] * direction
+    spring_on_a = stretch[:, None] * direction
     np.add.at(force, edge_ai, spring_on_a)
     np.add.at(force, edge_bi, -spring_on_a)
 
