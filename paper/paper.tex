@@ -95,7 +95,7 @@ Level 0:
 Level 1:
 - start from the converged result of Level 0
 - run up to 8 trials (each one up to 5000 steps) with bracket-and-bisect to determine the best pressure to reach the target stretch \%
-- each trial inflates the model (composite cubic + linear springs), and every 200 steps, apply Kabsch alignment to remove rotation/translation drift, and check for convergence.
+- each trial inflates the model (same linear springs as Level 0), and every 200 steps, apply Kabsch alignment to remove rotation/translation drift, and check for convergence.
 - run the chosen trial to completion
 
 Level 2:
