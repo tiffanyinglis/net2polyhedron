@@ -4,16 +4,75 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="../utils/style.css" />
+    <link rel="stylesheet" href="./builder.css" />
     <title>Net Builder</title>
   </head>
   <body>
     <div id="app">
-      <nav id="menubar"></nav>
-      <main class="stub-page">
-        <h1>Net Builder</h1>
-        <p>Not built yet.</p>
-      </main>
+      <nav id="menubar">
+        <div class="menu">
+          <button class="menu-title">File</button>
+          <div class="menu-items">
+            <button class="menu-item" id="new-item">New</button>
+            <button class="menu-item" id="load-item">Load...</button>
+            <hr />
+            <button class="menu-item" id="save-item">Save<kbd>Ctrl+S</kbd></button>
+            <button class="menu-item" id="save-as-item">Save As...</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Edit</button>
+          <div class="menu-items">
+            <button class="menu-item" id="undo-item" disabled>Undo<kbd>Ctrl+Z</kbd></button>
+            <button class="menu-item" id="redo-item" disabled>Redo<kbd>Ctrl+Y</kbd></button>
+          </div>
+        </div>
+      </nav>
+
+      <div id="builder">
+        <aside id="palette" aria-label="Shapes"></aside>
+        <div id="canvas-area"><canvas id="net-canvas"></canvas></div>
+        <aside id="toolbar" aria-label="Tools and selection actions">
+          <button id="mode-move" data-mode="move" title="Move (M)" aria-pressed="true">
+            <svg viewBox="0 0 56 56" aria-hidden="true"><path d="M12 6 L12 44 L21 35 L28 50 L34 47 L27 32 L40 32 Z" /></svg>
+          </button>
+          <button id="mode-join" data-mode="join" title="Join (J)" aria-pressed="false">
+            <svg viewBox="0 0 56 56" aria-hidden="true">
+              <circle cx="10" cy="28" r="6" />
+              <circle cx="46" cy="28" r="6" />
+              <path d="M16 28 C 22 10, 34 46, 40 28" />
+            </svg>
+          </button>
+          <hr />
+          <button id="flip-h" title="Flip horizontal (H)">
+            <svg viewBox="0 0 56 56" aria-hidden="true">
+              <path d="M22 14 L8 40 L22 40 Z" />
+              <path d="M34 14 L48 40 L34 40 Z" />
+              <path d="M28 6 V50" stroke-dasharray="4 4" />
+            </svg>
+          </button>
+          <button id="flip-v" title="Flip vertical (V)">
+            <svg viewBox="0 0 56 56" aria-hidden="true">
+              <path d="M14 22 L40 8 L40 22 Z" />
+              <path d="M14 34 L40 48 L40 34 Z" />
+              <path d="M6 28 H50" stroke-dasharray="4 4" />
+            </svg>
+          </button>
+        </aside>
+      </div>
+      <div id="builder-status"></div>
     </div>
+    <dialog id="leave-dialog" class="leave-dialog">
+      <form method="dialog">
+        <p>This net has unsaved changes. Save them before leaving?</p>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="discard">Don't save</button>
+          <button value="save" class="primary">Save</button>
+        </menu>
+      </form>
+    </dialog>
+    <input type="file" id="net-file" accept=".poly,.json" hidden />
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

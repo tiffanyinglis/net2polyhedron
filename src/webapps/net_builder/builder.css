@@ -1,0 +1,139 @@
+/* Net Builder layout: shape palette on the left, drawing area in the middle, selection actions on the right */
+#builder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+#palette,
+#toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px;
+  background: var(--plot-bg);
+}
+
+#palette {
+  border-right: 1px solid var(--border);
+}
+
+#toolbar {
+  border-left: 1px solid var(--border);
+}
+
+#palette button,
+#toolbar button {
+  padding: 4px;
+  background: var(--panel);
+  border: 2px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#palette button:hover:not(:disabled),
+#toolbar button:hover:not(:disabled) {
+  background: var(--menu-active);
+}
+
+#palette button.armed {
+  border-color: white;
+}
+
+/* Tool buttons match the palette's box size, with larger icons */
+#toolbar button {
+  box-sizing: border-box;
+  width: 54px;
+  height: 54px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--plot-fg);
+}
+
+#toolbar svg {
+  width: 32px;
+  height: 32px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#toolbar button.active {
+  border-color: white;
+}
+
+#toolbar hr {
+  width: 100%;
+  margin: 4px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+#toolbar button:disabled {
+  color: var(--menu-disabled);
+  cursor: default;
+}
+
+#palette canvas {
+  display: block;
+}
+
+#canvas-area {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  background: var(--plot-bg);
+}
+
+#net-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  cursor: crosshair;
+}
+
+#builder-status {
+  min-height: 1.6em;
+  padding: 4px 14px;
+  color: var(--info);
+}
+
+/* Leave-page prompt: Save / Don't save / Cancel for unsaved work */
+.leave-dialog {
+  background: var(--panel);
+  color: var(--plot-fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px 20px;
+  max-width: 380px;
+}
+
+.leave-dialog p {
+  margin: 0 0 14px;
+}
+
+.leave-dialog menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+
+.leave-dialog button {
+  padding: 6px 14px;
+  background: var(--plot-bg);
+  color: var(--plot-fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.leave-dialog button.primary {
+  border-color: white;
+}

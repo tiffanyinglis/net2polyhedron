@@ -1,0 +1,537 @@
+import { type Builder } from "./builder";
+import { type Point } from "../utils/geometry";
+import { connectionGeometry, distanceToSegment, edgeMidpoints, sampleCubic, type Connection, type End } from "./joins";
+import { shapeCssColor, shapeVertices, type Shape } from "./shapes";
+
+const ZOOM_STEP = 1.1;
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 5;
+const SELECTION_COLOR = "red";
+const OUTER_OUTLINE_COLOR = "white";
+const OUTER_OUTLINE_WIDTH = 1.5;
+const HATCH_SPACING = 10;
+const HATCH_WIDTH = 2;
+const CONNECTION_COLOR = "#b0b0b0";
+const CONNECTION_WIDTH = 1.5;
+const CONNECTION_SELECTED_WIDTH = 2.5;
+const HANDLE_COLOR = "white";
+const EDGE_HANDLE_RADIUS = 5;
+const EDGE_HANDLE_LINE_WIDTH = 1.5;
+/** Screen pixels within which a click lands on an edge handle, or on a join's curve. */
+const HANDLE_HIT_RADIUS = 9;
+const CONNECTION_HIT_RADIUS = 6;
+const BEZIER_HANDLE_RADIUS = 4;
+const BEZIER_HANDLE_LINE_WIDTH = 1;
+
+interface DragState {
+  startWorld: Point;
+  starts: Map<number, [number, number]>;
+}
+
+interface RotateState {
+  centre: Point;
+  lastAngle: number;
+}
+
+/** A join that has its first end chosen and is waiting for the second. */
+interface PendingJoin {
+  shape: number;
+  edge: number;
+}
+
+interface HandleDrag {
+  connectionId: number;
+  end: End;
+}
+
+/**
+ * The drawing area: draws the net, and turns pointer and wheel input into the Builder's moves, with the
+ * same gestures as the Python builder. Move mode: drop, click/Ctrl+click, marquee, drag, right-drag to rotate
+ * or pan, scroll to zoom. Join mode: click an edge handle, then another free edge's handle, to join them;
+ * click a join to select it, drag its red handles to bend it.
+ */
+export class BuilderCanvas {
+  private ctx: CanvasRenderingContext2D;
+  private scale = 1;
+  private offsetX = 0;
+  private offsetY = 0;
+  /** Mouse position in CSS pixels while the palette shape is armed, so its ghost can follow it. */
+  private ghost: Point | null = null;
+  private marquee: { x0: number; y0: number; x1: number; y1: number; additive: boolean } | null = null;
+  private drag: DragState | null = null;
+  private rotate: RotateState | null = null;
+  private panLast: Point | null = null;
+  private pending: PendingJoin | null = null;
+  /** The edge handle the pending join would connect to, while the cursor is over one. */
+  private hover: PendingJoin | null = null;
+  private pendingCursor: Point | null = null;
+  private handleDrag: HandleDrag | null = null;
+  private centred = false;
+
+  constructor(
+    private canvas: HTMLCanvasElement,
+    private builder: Builder,
+    /** Called after every change to the net or its selection, so the page can refresh its menus and title. */
+    private onChange: () => void,
+  ) {
+    this.ctx = canvas.getContext("2d")!;
+    new ResizeObserver(() => this.resize()).observe(canvas.parentElement!);
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+    canvas.addEventListener("pointerdown", (e) => this.onPointerDown(e));
+    canvas.addEventListener("pointermove", (e) => this.onPointerMove(e));
+    canvas.addEventListener("pointerup", (e) => this.onPointerUp(e));
+    canvas.addEventListener("pointerleave", () => {
+      this.ghost = null;
+      this.hover = null;
+      this.redraw();
+    });
+    canvas.addEventListener("wheel", (e) => this.onWheel(e), { passive: false });
+    this.resize();
+  }
+
+  /** The zoom level, saved with a net so reopening it keeps the same size. */
+  get viewScale(): number {
+    return this.scale;
+  }
+
+  /** Whether a join is part-way made (its first edge chosen). */
+  get isPending(): boolean {
+    return this.pending !== null;
+  }
+
+  setViewScale(scale: number) {
+    this.scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, scale));
+    this.redraw();
+  }
+
+  /** Drops a join that's waiting for its second edge (Escape, or a mode change). */
+  cancelPending() {
+    this.pending = null;
+    this.hover = null;
+    this.redraw();
+  }
+
+  /** Redraws everything. The page calls this after anything that changes what's shown. */
+  redraw() {
+    const { ctx, builder } = this;
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(0, 0, width, height);
+
+    this.dropStalePending();
+
+    for (const shape of builder.shapes) {
+      this.drawShape(shape, builder.selected.has(shape.id));
+    }
+
+    const joined = builder.joinedEdges();
+    for (const conn of builder.connections) {
+      const touchesSelection = builder.selected.has(conn.aShape) || builder.selected.has(conn.bShape);
+      this.drawConnection(conn, conn.id === builder.selectedConnection || touchesSelection);
+    }
+
+    if (this.pending && this.pendingCursor) {
+      const from = builder.shapeById(this.pending.shape);
+      if (from) {
+        const anchor = this.toScreen(...edgeMidpoints(from)[this.pending.edge]);
+        this.strokeLine(anchor, this.pendingCursor, SELECTION_COLOR, CONNECTION_SELECTED_WIDTH);
+      }
+    }
+
+    if (builder.mode === "join") {
+      this.drawEdgeHandles(joined);
+      this.drawBezierHandles();
+    }
+
+    if (builder.armedN !== null && this.ghost) {
+      const [wx, wy] = this.toWorld(this.ghost[0], this.ghost[1]);
+      this.drawShape({ id: -1, n: builder.armedN, cx: wx, cy: wy, rotation: 0, flipped: false }, true);
+    }
+    if (this.marquee) {
+      const { x0, y0, x1, y1 } = this.marquee;
+      ctx.save();
+      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = "white";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+      ctx.restore();
+    }
+  }
+
+  /** Sizes the canvas to its area. The first time, the origin is centred in it. */
+  private resize() {
+    const parent = this.canvas.parentElement!;
+    const width = parent.clientWidth;
+    const height = parent.clientHeight;
+    if (!this.centred) {
+      this.offsetX = width / 2;
+      this.offsetY = height / 2;
+      this.centred = true;
+    }
+    this.canvas.style.width = `${width}px`;
+    this.canvas.style.height = `${height}px`;
+    this.canvas.width = Math.max(1, Math.round(width * devicePixelRatio));
+    this.canvas.height = Math.max(1, Math.round(height * devicePixelRatio));
+    this.redraw();
+  }
+
+  private toWorld(sx: number, sy: number): Point {
+    return [(sx - this.offsetX) / this.scale, (sy - this.offsetY) / this.scale];
+  }
+
+  private toScreen(wx: number, wy: number): Point {
+    return [wx * this.scale + this.offsetX, wy * this.scale + this.offsetY];
+  }
+
+  /** A pending join whose shape was deleted, or whose edge got joined elsewhere (undo), has nothing to finish. */
+  private dropStalePending() {
+    if (!this.pending) return;
+    const shape = this.builder.shapeById(this.pending.shape);
+    const edgeJoined = this.builder.joinedEdges().has(`${this.pending.shape}:${this.pending.edge}`);
+    if (!shape || edgeJoined) {
+      this.pending = null;
+      this.hover = null;
+    }
+  }
+
+  private strokeLine(from: Point, to: Point, color: string, width: number) {
+    const { ctx } = this;
+    ctx.beginPath();
+    ctx.moveTo(from[0], from[1]);
+    ctx.lineTo(to[0], to[1]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+  }
+
+  private drawShape(shape: Shape, selected: boolean) {
+    const { ctx } = this;
+    const verts = shapeVertices(shape).map(([x, y]) => this.toScreen(x, y));
+    const fill = shapeCssColor(shape.n);
+
+    ctx.beginPath();
+    verts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    if (shape.flipped) {
+      // A flipped shape reads as its other side: diagonal hatching clipped to the polygon.
+      ctx.fillStyle = "#1c1c1c";
+      ctx.fill();
+      ctx.save();
+      ctx.clip();
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = HATCH_WIDTH;
+      const w = this.canvas.clientWidth;
+      const h = this.canvas.clientHeight;
+      for (let x = -h; x < w; x += HATCH_SPACING) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x + h, h);
+        ctx.stroke();
+      }
+      ctx.restore();
+    } else {
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
+    this.strokeOuterOutline(verts);
+    if (selected) {
+      ctx.strokeStyle = SELECTION_COLOR;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * A thin white line just outside the polygon, on every shape. The offset scales the regular polygon out from
+   * its centre, so every edge moves out by the same distance.
+   */
+  private strokeOuterOutline(verts: Point[]) {
+    const { ctx } = this;
+    const n = verts.length;
+    const cx = verts.reduce((sum, [x]) => sum + x, 0) / n;
+    const cy = verts.reduce((sum, [, y]) => sum + y, 0) / n;
+    const [x0, y0] = verts[0];
+    const [x1, y1] = verts[1];
+    const apothem = Math.hypot((x0 + x1) / 2 - cx, (y0 + y1) / 2 - cy) || 1;
+    // The line's inner edge sits a little inside the fill's edge, so no background shows between them.
+    const scale = (apothem + OUTER_OUTLINE_WIDTH / 2 - 0.5) / apothem;
+    ctx.beginPath();
+    verts.forEach(([x, y], i) => {
+      const px = cx + (x - cx) * scale;
+      const py = cy + (y - cy) * scale;
+      if (i) ctx.lineTo(px, py);
+      else ctx.moveTo(px, py);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = OUTER_OUTLINE_COLOR;
+    ctx.lineWidth = OUTER_OUTLINE_WIDTH;
+    ctx.stroke();
+  }
+
+  /** A join's bezier, in screen space. Null if one of its shapes is gone. */
+  private connectionCurve(conn: Connection): Point[] | null {
+    const geometry = connectionGeometry(conn, (id) => this.builder.shapeById(id));
+    if (!geometry) return null;
+    const [p0, p1, p2, p3] = geometry.map(([x, y]) => this.toScreen(x, y)) as [Point, Point, Point, Point];
+    return sampleCubic(p0, p1, p2, p3);
+  }
+
+  private drawConnection(conn: Connection, highlighted: boolean) {
+    const curve = this.connectionCurve(conn);
+    if (!curve) return;
+    const { ctx } = this;
+    ctx.beginPath();
+    curve.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.strokeStyle = highlighted ? SELECTION_COLOR : CONNECTION_COLOR;
+    ctx.lineWidth = highlighted ? CONNECTION_SELECTED_WIDTH : CONNECTION_WIDTH;
+    ctx.stroke();
+  }
+
+  /** Join mode shows every edge's handle: a solid white dot if the edge is joined, a ring if it's free, red if it's the current target. */
+  private drawEdgeHandles(joined: Set<string>) {
+    const { ctx } = this;
+    for (const shape of this.builder.shapes) {
+      edgeMidpoints(shape).forEach((mid, edge) => {
+        const [sx, sy] = this.toScreen(...mid);
+        const lit =
+          (this.pending?.shape === shape.id && this.pending.edge === edge) ||
+          (this.hover?.shape === shape.id && this.hover.edge === edge);
+        ctx.beginPath();
+        ctx.arc(sx, sy, EDGE_HANDLE_RADIUS, 0, Math.PI * 2);
+        if (lit) {
+          ctx.fillStyle = SELECTION_COLOR;
+          ctx.fill();
+        } else if (joined.has(`${shape.id}:${edge}`)) {
+          ctx.fillStyle = HANDLE_COLOR;
+          ctx.fill();
+        } else {
+          ctx.strokeStyle = HANDLE_COLOR;
+          ctx.lineWidth = EDGE_HANDLE_LINE_WIDTH;
+          ctx.stroke();
+        }
+      });
+    }
+  }
+
+  /** The selected join's two control points, each with a line back to its edge. Only shown in Join mode. */
+  private drawBezierHandles() {
+    const conn = this.builder.connections.find((c) => c.id === this.builder.selectedConnection);
+    if (!conn) return;
+    const geometry = connectionGeometry(conn, (id) => this.builder.shapeById(id));
+    if (!geometry) return;
+    const [aMid, aCtrl, bCtrl, bMid] = geometry.map(([x, y]) => this.toScreen(x, y)) as [Point, Point, Point, Point];
+    for (const [mid, ctrl] of [
+      [aMid, aCtrl],
+      [bMid, bCtrl],
+    ] as [Point, Point][]) {
+      this.strokeLine(mid, ctrl, SELECTION_COLOR, BEZIER_HANDLE_LINE_WIDTH);
+      this.ctx.beginPath();
+      this.ctx.arc(ctrl[0], ctrl[1], BEZIER_HANDLE_RADIUS, 0, Math.PI * 2);
+      this.ctx.fillStyle = SELECTION_COLOR;
+      this.ctx.fill();
+    }
+  }
+
+  /** The edge handle under a screen point, nearest first, or null. `exclude` is an edge that can't be the target (a join's own start). */
+  private handleHit(sx: number, sy: number, exclude: PendingJoin | null): PendingJoin | null {
+    const joined = this.builder.joinedEdges();
+    let best: PendingJoin | null = null;
+    let bestDist = HANDLE_HIT_RADIUS;
+    for (const shape of this.builder.shapes) {
+      edgeMidpoints(shape).forEach((mid, edge) => {
+        if (exclude && exclude.shape === shape.id && exclude.edge === edge) return;
+        if (joined.has(`${shape.id}:${edge}`)) return;
+        const [mx, my] = this.toScreen(...mid);
+        const dist = Math.hypot(sx - mx, sy - my);
+        if (dist <= bestDist) {
+          best = { shape: shape.id, edge };
+          bestDist = dist;
+        }
+      });
+    }
+    return best;
+  }
+
+  /** The join whose curve passes under a screen point, or null. */
+  private connectionHit(sx: number, sy: number): number | null {
+    let best: number | null = null;
+    let bestDist = CONNECTION_HIT_RADIUS;
+    for (const conn of this.builder.connections) {
+      const curve = this.connectionCurve(conn);
+      if (!curve) continue;
+      let dist = Infinity;
+      for (let i = 0; i < curve.length - 1; i++) {
+        dist = Math.min(dist, distanceToSegment([sx, sy], curve[i], curve[i + 1]));
+      }
+      if (dist < bestDist) {
+        best = conn.id;
+        bestDist = dist;
+      }
+    }
+    return best;
+  }
+
+  /** Which control point of the selected join is under a screen point: its A or B end, or null. */
+  private bezierHandleHit(sx: number, sy: number): End | null {
+    const conn = this.builder.connections.find((c) => c.id === this.builder.selectedConnection);
+    if (!conn) return null;
+    const geometry = connectionGeometry(conn, (id) => this.builder.shapeById(id));
+    if (!geometry) return null;
+    const aCtrl = this.toScreen(...geometry[1]);
+    const bCtrl = this.toScreen(...geometry[2]);
+    if (Math.hypot(sx - aCtrl[0], sy - aCtrl[1]) <= HANDLE_HIT_RADIUS) return "a";
+    if (Math.hypot(sx - bCtrl[0], sy - bCtrl[1]) <= HANDLE_HIT_RADIUS) return "b";
+    return null;
+  }
+
+  private onPointerDown(e: PointerEvent) {
+    const sx = e.offsetX;
+    const sy = e.offsetY;
+    this.canvas.setPointerCapture(e.pointerId);
+    if (e.button === 0) {
+      if (this.builder.mode === "join") this.onJoinPress(sx, sy);
+      else this.onMovePress(e, sx, sy);
+    } else if (e.button === 2) {
+      const centre = this.builder.mode === "move" ? this.builder.selectionCentre() : null;
+      if (centre) {
+        const [cx, cy] = this.toScreen(centre[0], centre[1]);
+        this.builder.beginGesture();
+        this.rotate = { centre, lastAngle: Math.atan2(sy - cy, sx - cx) };
+      } else {
+        this.panLast = [sx, sy];
+      }
+    }
+    this.redraw();
+    this.onChange();
+  }
+
+  private onMovePress(e: PointerEvent, sx: number, sy: number) {
+    const [wx, wy] = this.toWorld(sx, sy);
+    if (this.builder.armedN !== null) {
+      this.builder.drop(wx, wy);
+      return;
+    }
+    const hit = this.builder.hitTest(wx, wy);
+    if (!hit) {
+      this.builder.clickEmpty(e.ctrlKey);
+      this.marquee = { x0: sx, y0: sy, x1: sx, y1: sy, additive: e.ctrlKey };
+      return;
+    }
+    this.builder.clickShape(hit, e.ctrlKey);
+    // A shape that's (now) part of the selection drags the whole group, so it moves together.
+    if (this.builder.selected.has(hit.id)) {
+      const starts = new Map<number, [number, number]>();
+      for (const s of this.builder.selectedShapes) starts.set(s.id, [s.cx, s.cy]);
+      this.builder.beginGesture();
+      this.drag = { startWorld: [wx, wy], starts };
+    }
+  }
+
+  /**
+   * Join mode: a click starts a join from a free edge handle, completes one onto another free handle, drags a
+   * selected join's control point, or selects a join. Shapes can't be picked here, as in the Python builder.
+   */
+  private onJoinPress(sx: number, sy: number) {
+    if (!this.pending && this.builder.selectedConnection !== null) {
+      const end = this.bezierHandleHit(sx, sy);
+      if (end) {
+        this.builder.beginGesture();
+        this.handleDrag = { connectionId: this.builder.selectedConnection, end };
+        return;
+      }
+    }
+    if (this.pending) {
+      const target = this.handleHit(sx, sy, this.pending);
+      if (target) {
+        this.builder.join(this.pending.shape, this.pending.edge, target.shape, target.edge);
+        this.pending = null;
+        this.hover = null;
+        return;
+      }
+      // A click that isn't on a target cancels the join, and then does its normal job below.
+      this.pending = null;
+      this.hover = null;
+    }
+    const start = this.handleHit(sx, sy, null);
+    if (start) {
+      this.pending = start;
+      this.pendingCursor = [sx, sy];
+      this.builder.selectConnection(null);
+      return;
+    }
+    this.builder.selectConnection(this.connectionHit(sx, sy));
+  }
+
+  private onPointerMove(e: PointerEvent) {
+    const sx = e.offsetX;
+    const sy = e.offsetY;
+    if (this.builder.armedN !== null) this.ghost = [sx, sy];
+    if (this.builder.mode === "join") {
+      if (this.pending) {
+        this.pendingCursor = [sx, sy];
+        this.hover = this.handleHit(sx, sy, this.pending);
+      }
+      if (this.handleDrag) {
+        this.builder.setHandle(this.handleDrag.connectionId, this.handleDrag.end, this.toWorld(sx, sy));
+        this.onChange();
+      }
+    }
+    if (this.drag) {
+      const [wx, wy] = this.toWorld(sx, sy);
+      this.builder.dragSelection(this.drag.starts, wx - this.drag.startWorld[0], wy - this.drag.startWorld[1]);
+      this.onChange();
+    } else if (this.marquee) {
+      this.marquee.x1 = sx;
+      this.marquee.y1 = sy;
+    } else if (this.rotate) {
+      const [cx, cy] = this.toScreen(this.rotate.centre[0], this.rotate.centre[1]);
+      const angle = Math.atan2(sy - cy, sx - cx);
+      this.builder.rotateSelection(this.rotate.centre, angle - this.rotate.lastAngle);
+      this.rotate.lastAngle = angle;
+      this.onChange();
+    } else if (this.panLast) {
+      this.offsetX += sx - this.panLast[0];
+      this.offsetY += sy - this.panLast[1];
+      this.panLast = [sx, sy];
+    }
+    this.redraw();
+  }
+
+  private onPointerUp(_e: PointerEvent) {
+    if (this.drag || this.rotate || this.handleDrag) {
+      this.builder.commitGesture();
+      this.onChange();
+    }
+    if (this.marquee) {
+      const m = this.marquee;
+      if (m.x0 !== m.x1 || m.y0 !== m.y1) {
+        const [wx0, wy0] = this.toWorld(Math.min(m.x0, m.x1), Math.min(m.y0, m.y1));
+        const [wx1, wy1] = this.toWorld(Math.max(m.x0, m.x1), Math.max(m.y0, m.y1));
+        this.builder.marqueeSelect(wx0, wy0, wx1, wy1, m.additive);
+      }
+      this.onChange();
+    }
+    this.drag = null;
+    this.rotate = null;
+    this.panLast = null;
+    this.marquee = null;
+    this.handleDrag = null;
+    this.redraw();
+  }
+
+  /** Scroll to zoom, keeping the point under the cursor fixed. */
+  private onWheel(e: WheelEvent) {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 1 / ZOOM_STEP : ZOOM_STEP;
+    const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, this.scale * factor));
+    const [wx, wy] = this.toWorld(e.offsetX, e.offsetY);
+    this.scale = next;
+    this.offsetX = e.offsetX - wx * this.scale;
+    this.offsetY = e.offsetY - wy * this.scale;
+    this.redraw();
+  }
+}
