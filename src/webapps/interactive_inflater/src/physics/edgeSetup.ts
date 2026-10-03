@@ -8,6 +8,8 @@ export interface EdgeSetup {
   edgeA: number[];
   edgeB: number[];
   restLengths: number[];
+  /** Edge id behind each spring, index-aligned with edgeA/edgeB. */
+  ids: number[];
   scale: number;
 }
 
@@ -32,7 +34,16 @@ export function edgeSetup(mesh: Mesh): EdgeSetup {
   const edgeB = edges.map(([, b]) => idx.get(b)!);
   const restLengths = used.map((id) => mesh.restLengths[id]);
   const scale = restLengths.length ? Math.min(...restLengths) : 1.0;
-  return { vertexIds, idx, edges, edgeA, edgeB, restLengths, scale };
+  return { vertexIds, idx, edges, edgeA, edgeB, restLengths, ids: used, scale };
+}
+
+/** RMS mask over `setup`'s springs: false for every edge of an open face (mirrors stretchy_mesh's
+ * rms_exclude_edges, which the Python app builds from open fine triangles). Undefined when no face
+ * is open, so callers skip the masking entirely. */
+export function openRmsMask(mesh: Mesh, setup: EdgeSetup, openFaces?: boolean[]): boolean[] | undefined {
+  if (!openFaces?.some(Boolean)) return undefined;
+  const openIds = new Set(mesh.faceEdgeIds.flatMap((ids, f) => (openFaces[f] ? ids : [])));
+  return setup.ids.map((id) => !openIds.has(id));
 }
 
 export function positionsToPts(positions: Map<number, Vec3>, vertexIds: number[]): Vec3[] {

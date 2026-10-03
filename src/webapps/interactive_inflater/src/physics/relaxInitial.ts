@@ -1,6 +1,6 @@
 import { type Vec3, add, scale as scaleVec } from "./vec3";
 import { type Mesh } from "./mesh";
-import { edgeSetup, positionsToPts, ptsToPositions } from "./edgeSetup";
+import { edgeSetup, openRmsMask, positionsToPts, ptsToPositions } from "./edgeSetup";
 import { pressureForce, repulsionForce, springForce, vertexOutwardNormals } from "./forces";
 import { explicitRelaxLoop } from "./explicitRelaxLoop";
 import { CONVERGENCE_GTOL, positionsAndStretch } from "./convergence";
@@ -14,6 +14,8 @@ export const LEVEL0_PERIODIC_BURST_DISTANCE_FRACTION = 0.6;
 export interface RelaxInitialOptions {
   maxNfev?: number | null;
   gtol?: number;
+  /** Per face: open wedge -- excluded from the periodic burst's outward normal and from RMS. */
+  openFaces?: boolean[];
   shouldStop?: () => boolean;
   onProgress?: (
     positions: Map<number, Vec3>,
@@ -46,6 +48,8 @@ export async function relaxInitialConfiguration(
 ): Promise<RelaxInitialResult> {
   const setup = edgeSetup(mesh);
   const facesIdx = mesh.faces.map((face) => face.map((v) => setup.idx.get(v)!));
+  const open = options.openFaces?.some(Boolean) ? options.openFaces : undefined;
+  const rmsMask = openRmsMask(mesh, setup, options.openFaces);
   const gtol = options.gtol ?? CONVERGENCE_GTOL;
   let pts0 = positionsToPts(positions, setup.vertexIds);
 
@@ -73,7 +77,7 @@ export async function relaxInitialConfiguration(
     const repulsion = repulsionForce(pts);
     let force = spring.map((f, i) => add(f, repulsion[i]));
     if (shouldBurstNext && stepCount % LEVEL0_PERIODIC_BURST_INTERVAL_STEPS === 1) {
-      const outward = vertexOutwardNormals(pts, facesIdx);
+      const outward = vertexOutwardNormals(pts, facesIdx, open ? (i) => open[i] : undefined);
       force = force.map((f, i) => add(f, scaleVec(outward[i], burstDistance / burstDt)));
     }
     return force;
@@ -83,7 +87,7 @@ export async function relaxInitialConfiguration(
     shouldBurstNext = !converged;
     if (options.onProgress) {
       const { positions: pos, maxStretchPct, rmsStretchPct } = positionsAndStretch(
-        checkPts, setup.edgeA, setup.edgeB, setup.restLengths,
+        checkPts, setup.edgeA, setup.edgeB, setup.restLengths, rmsMask,
       );
       options.onProgress(
         ptsToPositions(pos, setup.vertexIds), steps, maxStretchPct, rmsStretchPct,
@@ -101,7 +105,7 @@ export async function relaxInitialConfiguration(
   });
 
   const { positions: finalPts, maxStretchPct, rmsStretchPct } = positionsAndStretch(
-    pts, setup.edgeA, setup.edgeB, setup.restLengths,
+    pts, setup.edgeA, setup.edgeB, setup.restLengths, rmsMask,
   );
   return {
     positions: ptsToPositions(finalPts, setup.vertexIds),

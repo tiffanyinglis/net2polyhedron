@@ -28,6 +28,8 @@ function spokeRestLength(n: number, edgeLength: number): number {
 export interface Level1Topology {
   mesh: Mesh;
   faceOfFine: number[];
+  /** Per fine triangle: its rim edge is an open boundary edge (see fanLevel0To1). */
+  faceOpen: boolean[];
 }
 
 /** Triangulates every base face via a centroid fan (mirrors mesh_levels._fan_level_0_to_1). Base
@@ -41,6 +43,9 @@ export function fanLevel0To1(base: Mesh): Level1Topology {
   const faces: number[][] = [];
   const faceEdgeIds: number[][] = [];
   const faceOfFine: number[] = [];
+  const faceOpen: boolean[] = [];
+  const uses = new Map<number, number>();
+  for (const id of base.faceEdgeIds.flat()) uses.set(id, (uses.get(id) ?? 0) + 1);
   base.faces.forEach((face, faceIdx) => {
     const n = face.length;
     const entries = SUBDIVISIONS[n];
@@ -62,15 +67,19 @@ export function fanLevel0To1(base: Mesh): Level1Topology {
       faces.push([face[p], face[q], centroid]);
       faceEdgeIds.push([baseIds[p], spokeOf(q), spokeOf(p)]);
       faceOfFine.push(faceIdx);
+      // A wedge is open when its own rim (base edge p) has only one face using it, as in
+      // Python's _level1_is_open. Open wedges get no pressure and are left out of RMS.
+      faceOpen.push(uses.get(baseIds[p]) === 1);
     }
   });
-  return { mesh: { faces, faceEdgeIds, edgeEnds, restLengths }, faceOfFine };
+  return { mesh: { faces, faceEdgeIds, edgeEnds, restLengths }, faceOfFine, faceOpen };
 }
 
 export interface MeshState {
   mesh: Mesh;
   positions: Map<number, Vec3>;
   faceOfFine: number[];
+  faceOpen: boolean[];
 }
 
 /** Splits every triangle into 4 via edge midpoints (mirrors mesh_levels._quarter_triangles for a
@@ -113,6 +122,7 @@ export function quarterTriangles(state: MeshState): MeshState {
   const faces: number[][] = [];
   const faceEdgeIds: number[][] = [];
   const faceOfFine: number[] = [];
+  const faceOpen: boolean[] = [];
   mesh.faces.forEach((face, f) => {
     const [a, b, c] = face;
     const [eab, ebc, eca] = mesh.faceEdgeIds[f];
@@ -129,11 +139,15 @@ export function quarterTriangles(state: MeshState): MeshState {
       [Y, halfAt(ebc, c), halfAt(eca, c)],
       [X, Y, Z],
     );
-    for (let i = 0; i < 4; i++) faceOfFine.push(state.faceOfFine[f]);
+    for (let i = 0; i < 4; i++) {
+      faceOfFine.push(state.faceOfFine[f]);
+      faceOpen.push(state.faceOpen[f]);
+    }
   });
   return {
     mesh: { faces, faceEdgeIds, edgeEnds, restLengths },
     positions,
     faceOfFine,
+    faceOpen,
   };
 }

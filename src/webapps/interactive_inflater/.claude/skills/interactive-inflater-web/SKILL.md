@@ -55,12 +55,11 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
   recolours in place) + wireframe.
 - **Nets** (`public/nets/`, copied from `data/input/stretchy_nets/`; `.poly` == `.json` format):
   5 Platonic, cone, tube, ravioli, samosa, spider_leg, turtle, goose, cannoli_open, cannoli_semiclosed.
-  goose is open -> **expected to error** (deliberate).
+  goose is open; runs like the other nets (open wedges excluded from pressure and RMS).
 - **Tests** (`physics/__tests__/`): `pipeline.test.ts` (loadNet, fullInflate on tetra/cube);
   `pythonParity.test.ts` — fixed-input values pinned against Python
   (`tests/unit/inflate_polyhedron/test_web_port_reference_values.py` in main repo; keep in sync).
 
 ## Not implemented
-Open/boundary nets (`pressure_exclude_faces`/`rms_exclude_edges`), 2D
-builder canvas, Net-panel connection curves, diff-inflate/undo/redo, saved sessions, worker thread, per-level debug buttons, real
+2D builder canvas, Net-panel connection curves, diff-inflate/undo/redo, saved sessions, worker thread, per-level debug buttons, real
 animal nets (giraffe/horse/hippo/hoodie; orientation-retry fails on some even in Python).

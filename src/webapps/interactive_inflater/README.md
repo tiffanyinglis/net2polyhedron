@@ -31,17 +31,15 @@ directly or host anywhere (it's pure client-side, no API calls).
     edges are glued to each other (a pinched leg, a folded cannoli). Two distinct edges can join the
     same two vertices, so edges are identified by the id in the file's `face_edge_ids`, not by
     vertex pair. Runs through the whole pipeline.
-  - **goose.poly -- a genuinely open/boundary net.** v1 has no `pressure_exclude_faces`/
-    `rms_exclude_edges` support yet (see below), so this one is expected to fail to converge --
-    included deliberately, to see the current limitation fail loudly rather than silently.
+  - **goose.poly -- a genuinely open/boundary net.** Open wedges get no pressure and their edges
+    are left out of the RMS stat, as in the Python app, so it runs like any other net.
 - Runs the full pipeline client-side: fan-triangulate -> Level 0 spring+repulsion relax (with
   orientation-consistency seed retry) -> Level 1 pressure calibration to a target RMS stretch,
   exactly mirroring `interactive_inflater_app`'s own "Full Inflate" for a single net.
 - Renders the inflated result in a simple orbit/zoom Three.js viewer, with a UI modelled on the
   Python app's release mode (Setup box, Convergence History table, Net + Level 0-3 panels, Colour menu; P/M/R keys).
 
-**Not yet ported** (future steps): open/boundary nets (`pressure_exclude_faces`/
-`rms_exclude_edges`), subdivision past Level 1 (Level 2/3), the 2D builder canvas, diff-inflate/
+**Not yet ported** (future steps): subdivision past Level 1 (Level 2/3), the 2D builder canvas, diff-inflate/
 undo/redo, saved sessions. See `src/physics/` -- each module names which Python module it mirrors.
 The real crochet-animal nets (giraffe/horse/hippo/hoodie/cannoli) aren't bundled yet -- hippo/
 horse/giraffe are closed but `physics.md` notes the orientation-retry search fails on them even in

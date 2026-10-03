@@ -1,6 +1,6 @@
 import { type Vec3 } from "./vec3";
 import { type Mesh } from "./mesh";
-import { edgeSetup, positionsToPts, ptsToPositions } from "./edgeSetup";
+import { edgeSetup, openRmsMask, positionsToPts, ptsToPositions } from "./edgeSetup";
 import { pressureForce, repulsionForce, springForce, REPULSION_STRENGTH } from "./forces";
 import { explicitRelaxLoop, STEP_MAX_MULTIPLIER } from "./explicitRelaxLoop";
 import { CONVERGENCE_GTOL, positionsAndStretch } from "./convergence";
@@ -15,6 +15,8 @@ export interface RelaxOnceOptions {
   maxNfev?: number | null;
   gtol?: number;
   repulsionStrength?: number;
+  /** Per face: open wedge -- no pressure on it, and its edges are left out of the RMS stat. */
+  openFaces?: boolean[];
   /** Restricts repulsion to these vertex ids, each scaled by its multiplier (absent: all vertices). */
   repulsionVertexMultipliers?: Map<number, number>;
   shouldStop?: () => boolean;
@@ -48,6 +50,8 @@ export async function relaxOnce(
   const setup = edgeSetup(mesh);
   const facesIdx = mesh.faces.map((face) => face.map((v) => setup.idx.get(v)!));
   const pts0 = positionsToPts(positions, setup.vertexIds);
+  const open = options.openFaces?.some(Boolean) ? options.openFaces : undefined;
+  const rmsMask = openRmsMask(mesh, setup, options.openFaces);
 
   let repIndices: number[] | undefined;
   let repMultipliers: number[] | undefined;
@@ -59,7 +63,7 @@ export async function relaxOnce(
 
   const forceFn = (pts: Vec3[]) => {
     const spring = springForce(pts, setup.edgeA, setup.edgeB, setup.restLengths);
-    const pressureF = pressureForce(pts, facesIdx, pressure);
+    const pressureF = pressureForce(pts, facesIdx, pressure, open ? (i) => open[i] : undefined);
     const repulsion = repIndices
       ? repulsionForce(pts, options.repulsionStrength ?? REPULSION_STRENGTH, repIndices, repMultipliers)
       : repulsionForce(pts, options.repulsionStrength ?? REPULSION_STRENGTH);
@@ -73,7 +77,7 @@ export async function relaxOnce(
   const onCheck = options.onProgress
     ? (checkPts: Vec3[], steps: number, optimality: number, converged: boolean) => {
         const { positions: pos, maxStretchPct, rmsStretchPct } = positionsAndStretch(
-          checkPts, setup.edgeA, setup.edgeB, setup.restLengths,
+          checkPts, setup.edgeA, setup.edgeB, setup.restLengths, rmsMask,
         );
         options.onProgress!(
           ptsToPositions(pos, setup.vertexIds), steps, maxStretchPct, rmsStretchPct,
@@ -91,7 +95,7 @@ export async function relaxOnce(
   });
 
   const { positions: finalPts, maxStretchPct, rmsStretchPct } = positionsAndStretch(
-    pts, setup.edgeA, setup.edgeB, setup.restLengths,
+    pts, setup.edgeA, setup.edgeB, setup.restLengths, rmsMask,
   );
   return {
     positions: ptsToPositions(finalPts, setup.vertexIds),

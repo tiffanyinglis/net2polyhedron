@@ -70,7 +70,7 @@ describe("quarterTriangles", () => {
       [1, [1, 0, 0]],
       [2, [0, 1, 0]],
     ]);
-    const out = quarterTriangles({ mesh: meshFromPairs([[0, 1, 2]]), positions, faceOfFine: [0] });
+    const out = quarterTriangles({ mesh: meshFromPairs([[0, 1, 2]]), positions, faceOfFine: [0], faceOpen: [false] });
     expect(out.mesh.faces).toHaveLength(4);
     expect(out.positions.get(3)).toEqual([0.5, 0, 0]);
     // Every edge the quartered triangle uses is half-length: halves of the three parent edges,

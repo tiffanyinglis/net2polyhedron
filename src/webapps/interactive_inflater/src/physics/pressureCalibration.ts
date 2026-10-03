@@ -19,6 +19,8 @@ export interface PressureCalibrationOptions {
   maxNfevPerTrial?: number;
   gtol?: number;
   initialPressureGuess?: number;
+  /** Per fine face: an open wedge that feels no pressure and is left out of RMS. */
+  openFaces?: boolean[];
   repulsionStrength?: number;
   repulsionVertexMultipliers?: Map<number, number>;
   shouldStop?: () => boolean;
@@ -58,6 +60,7 @@ export async function estimatePressureForTargetStretch(
   const gtol = options.gtol ?? CONVERGENCE_GTOL;
 
   const relaxOnceOpts = {
+    openFaces: options.openFaces,
     repulsionStrength: options.repulsionStrength,
     repulsionVertexMultipliers: options.repulsionVertexMultipliers,
     shouldStop: options.shouldStop,

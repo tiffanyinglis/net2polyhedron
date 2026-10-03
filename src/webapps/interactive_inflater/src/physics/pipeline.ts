@@ -68,8 +68,8 @@ function guessPressureFromHistory(history: CalibratedLevel[], level: number, tar
 /** Full "Full Inflate" pipeline for a single closed net, mirroring interactive_inflater_app's own
  * on_full_inflate_clicked: fan-triangulate -> Level 0 relax (with orientation-consistency seed
  * retry) -> Levels 1..MAX_LEVEL, each a pressure calibration to its own target RMS stretch %,
- * with every level after the first subdivided from the previous solved mesh. v1 scope: closed
- * meshes only (no pressure_exclude_faces/rms_exclude_edges handling for an open/boundary net yet). */
+ * with every level after the first subdivided from the previous solved mesh. Open wedges are
+ * excluded from pressure and RMS at every level, as in the Python app. */
 export async function fullInflate(
   spec: NetSpec,
   options: {
@@ -103,6 +103,7 @@ export async function fullInflate(
     {
       maxNfev: LEVEL0_SAFETY_STEP_CAP,
       gtol,
+      openFaces: topology.faceOpen,
       shouldStop: options.shouldStop,
     },
   );
@@ -123,6 +124,7 @@ export async function fullInflate(
     mesh: topology.mesh,
     positions: level0.positions,
     faceOfFine: topology.faceOfFine,
+    faceOpen: topology.faceOpen,
   };
   const history: CalibratedLevel[] = [];
   // Repulsion acts on the original net's own corners only, at a per-vertex strength halved per
@@ -146,6 +148,7 @@ export async function fullInflate(
       targetRmsPct,
       gtol,
       initialPressureGuess: guessPressureFromHistory(history, level, targetRmsPct),
+      openFaces: state.faceOpen,
       repulsionVertexMultipliers,
       shouldStop: options.shouldStop,
     });

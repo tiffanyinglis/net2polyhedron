@@ -38,15 +38,27 @@ export function positionsAndStretch(
   edgeA: number[],
   edgeB: number[],
   restLengths: number[],
+  /** Edges to leave out of the RMS only (max still uses every edge). Ignored if it would leave
+   * nothing, or excludes nothing (mirrors mesh_stretch_checker.positions_and_stretch). */
+  rmsMask?: boolean[],
 ): StretchResult {
   let sumSq = 0;
   let maxAbs = 0;
+  let rmsSumSq = 0;
+  let rmsCount = 0;
   for (let i = 0; i < edgeA.length; i++) {
     const length = norm(sub(pts[edgeA[i]], pts[edgeB[i]]));
     const stretchPct = (100 * (length - restLengths[i])) / restLengths[i];
     sumSq += stretchPct * stretchPct;
     maxAbs = Math.max(maxAbs, Math.abs(stretchPct));
+    if (!rmsMask || rmsMask[i]) {
+      rmsSumSq += stretchPct * stretchPct;
+      rmsCount++;
+    }
   }
-  const rmsStretchPct = Math.sqrt(sumSq / (edgeA.length || 1));
+  const useMask = rmsCount > 0 && rmsCount < edgeA.length;
+  const rmsStretchPct = useMask
+    ? Math.sqrt(rmsSumSq / rmsCount)
+    : Math.sqrt(sumSq / (edgeA.length || 1));
   return { positions: pts, maxStretchPct: maxAbs, rmsStretchPct };
 }

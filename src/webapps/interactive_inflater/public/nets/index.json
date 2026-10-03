@@ -12,7 +12,7 @@
   {"label": "Turtle (19-piece, closed)", "file": "turtle.poly"},
   {"label": "Cannoli (open)", "file": "cannoli_open.poly"},
   {"label": "Cannoli (semi-closed)", "file": "cannoli_semiclosed.poly"},
-  {"label": "Goose (open net -- expect an error)", "file": "goose.poly"},
+  {"label": "Goose (open)", "file": "goose.poly"},
   {"label": "Cannoli open, triangulated", "file": "cannoli_open_tri.poly"},
   {"label": "Cannoli semi-closed, triangulated", "file": "cannoli_semiclosed_tri.poly"},
   {"label": "Spider leg, triangulated", "file": "spider_leg_tri.poly"},
