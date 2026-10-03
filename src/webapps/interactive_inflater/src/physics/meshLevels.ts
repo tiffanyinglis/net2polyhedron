@@ -1,5 +1,6 @@
 import { type Vec3, mean } from "./vec3";
 import { edgeKey } from "./mesh";
+import { add, scale } from "./vec3";
 
 type FanEntry = [number | "C", number | "C", number | "C"];
 
@@ -83,4 +84,54 @@ export function fanLevel0To1(
     }
   });
   return { faces: newFaces, restLengths, faceOfFine };
+}
+
+export interface MeshState {
+  faces: number[][];
+  positions: Map<number, Vec3>;
+  restLengths: Map<string, number>;
+  faceOfFine: number[];
+}
+
+/** Splits every triangle into 4 via edge midpoints (mirrors mesh_levels._quarter_triangles for a
+ * closed mesh). Midpoints sit at their edge's endpoint average; a split edge's rest length halves,
+ * and each quartering's new internal edge takes half its opposite edge's rest length (midsegment
+ * theorem), so the target shape stays the original flat geometry at every level. */
+export function quarterTriangles(state: MeshState): MeshState {
+  const positions = new Map(state.positions);
+  const restLengths = new Map(state.restLengths);
+  let nextId = Math.max(...positions.keys()) + 1;
+  const midpointOf = new Map<string, number>();
+
+  const midpoint = (u: number, v: number): number => {
+    const key = edgeKey(u, v);
+    const existing = midpointOf.get(key);
+    if (existing !== undefined) return existing;
+    const mid = nextId++;
+    positions.set(mid, scale(add(positions.get(u)!, positions.get(v)!), 0.5));
+    const half = state.restLengths.get(key)! / 2;
+    restLengths.delete(key);
+    restLengths.set(edgeKey(u, mid), half);
+    restLengths.set(edgeKey(mid, v), half);
+    midpointOf.set(key, mid);
+    return mid;
+  };
+
+  const faces: number[][] = [];
+  const faceOfFine: number[] = [];
+  state.faces.forEach((face, f) => {
+    const [a, b, c] = face;
+    const mab = midpoint(a, b);
+    const mbc = midpoint(b, c);
+    const mca = midpoint(c, a);
+    const rab = state.restLengths.get(edgeKey(a, b))!;
+    const rbc = state.restLengths.get(edgeKey(b, c))!;
+    const rca = state.restLengths.get(edgeKey(c, a))!;
+    restLengths.set(edgeKey(mab, mbc), rca / 2);
+    restLengths.set(edgeKey(mbc, mca), rab / 2);
+    restLengths.set(edgeKey(mca, mab), rbc / 2);
+    faces.push([a, mab, mca], [mab, b, mbc], [mca, mbc, c], [mab, mbc, mca]);
+    for (let i = 0; i < 4; i++) faceOfFine.push(state.faceOfFine[f]);
+  });
+  return { faces, positions, restLengths, faceOfFine };
 }

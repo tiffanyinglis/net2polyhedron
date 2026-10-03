@@ -4,11 +4,19 @@ import { pressureForce, repulsionForce, springForce, REPULSION_STRENGTH } from "
 import { explicitRelaxLoop, STEP_MAX_MULTIPLIER } from "./explicitRelaxLoop";
 import { CONVERGENCE_GTOL, positionsAndStretch } from "./convergence";
 
+/** A snapshot of a relaxation in progress, kept for the debug-mode replay. */
+export interface ReplayFrame {
+  steps: number;
+  positions: Map<number, Vec3>;
+}
+
 export interface RelaxOnceOptions {
   maxNfev?: number | null;
   gtol?: number;
   edges?: [number, number][];
   repulsionStrength?: number;
+  /** Restricts repulsion to these vertex ids, each scaled by its multiplier (absent: all vertices). */
+  repulsionVertexMultipliers?: Map<number, number>;
   shouldStop?: () => boolean;
   onProgress?: (
     positions: Map<number, Vec3>,
@@ -43,10 +51,20 @@ export async function relaxOnce(
   const facesIdx = faces.map((face) => face.map((v) => setup.idx.get(v)!));
   const pts0 = positionsToPts(positions, setup.vertexIds);
 
+  let repIndices: number[] | undefined;
+  let repMultipliers: number[] | undefined;
+  if (options.repulsionVertexMultipliers) {
+    const entries = [...options.repulsionVertexMultipliers].filter(([v]) => setup.idx.has(v));
+    repIndices = entries.map(([v]) => setup.idx.get(v)!);
+    repMultipliers = entries.map(([, m]) => m);
+  }
+
   const forceFn = (pts: Vec3[]) => {
     const spring = springForce(pts, setup.edgeA, setup.edgeB, setup.restLengths);
     const pressureF = pressureForce(pts, facesIdx, pressure);
-    const repulsion = repulsionForce(pts, options.repulsionStrength ?? REPULSION_STRENGTH);
+    const repulsion = repIndices
+      ? repulsionForce(pts, options.repulsionStrength ?? REPULSION_STRENGTH, repIndices, repMultipliers)
+      : repulsionForce(pts, options.repulsionStrength ?? REPULSION_STRENGTH);
     return spring.map((f, i) => [
       f[0] + pressureF[i][0] + repulsion[i][0],
       f[1] + pressureF[i][1] + repulsion[i][1],

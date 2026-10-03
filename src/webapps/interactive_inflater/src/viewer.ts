@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { type Vec3 } from "./physics/vec3";
+import { repulsionForce } from "./physics/forces";
 
 /** [direction toward the light in camera space, intensity]: key, fill, headlight. */
 const LIGHT_RIG: [[number, number, number], number][] = [
@@ -7,6 +8,118 @@ const LIGHT_RIG: [[number, number, number], number][] = [
   [[-0.7, -0.2, 0.7], 0.5],
   [[0, 0, 1], 2.2],
 ];
+
+export interface DebugOverlays {
+  faceNormals: boolean;
+  vertexNormals: boolean;
+  repulsiveForces: boolean;
+}
+
+// Colours and length fraction match the Python app's debug overlays (NORMAL_COLOR, etc.).
+const FACE_NORMAL_COLOR = 0xffff00;
+const VERTEX_NORMAL_COLOR = 0x00ffff;
+const REPULSION_FORCE_COLOR = 0xff00ff;
+const NORMAL_LENGTH_FRACTION = 0.5;
+
+function sub3(a: Vec3, b: Vec3): Vec3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function len3(v: Vec3): number {
+  return Math.hypot(v[0], v[1], v[2]);
+}
+
+/** Unnormalised Newell normal of a (possibly non-triangular) face; its length is twice the area. */
+function faceNormal(face: number[], pts: Vec3[]): Vec3 {
+  const n: Vec3 = [0, 0, 0];
+  for (let i = 0; i < face.length; i++) {
+    const [x1, y1, z1] = pts[face[i]];
+    const [x2, y2, z2] = pts[face[(i + 1) % face.length]];
+    n[0] += (y1 - y2) * (z1 + z2);
+    n[1] += (z1 - z2) * (x1 + x2);
+    n[2] += (x1 - x2) * (y1 + y2);
+  }
+  return n;
+}
+
+function meanEdgeLength(face: number[], pts: Vec3[]): number {
+  let total = 0;
+  for (let i = 0; i < face.length; i++) total += len3(sub3(pts[face[i]], pts[face[(i + 1) % face.length]]));
+  return total / face.length;
+}
+
+function centroid(face: number[], pts: Vec3[]): Vec3 {
+  const c: Vec3 = [0, 0, 0];
+  for (const v of face) for (let k = 0; k < 3; k++) c[k] += pts[v][k] / face.length;
+  return c;
+}
+
+function pushSegment(out: number[], a: Vec3, b: Vec3) {
+  out.push(...a, ...b);
+}
+
+function faceNormalSegments(pts: Vec3[], faces: number[][]): number[] {
+  const out: number[] = [];
+  for (const face of faces) {
+    const n = faceNormal(face, pts);
+    const nl = len3(n);
+    if (nl < 1e-12) continue;
+    const c = centroid(face, pts);
+    const e = meanEdgeLength(face, pts) * NORMAL_LENGTH_FRACTION;
+    pushSegment(out, c, [c[0] + (n[0] / nl) * e, c[1] + (n[1] / nl) * e, c[2] + (n[2] / nl) * e]);
+  }
+  return out;
+}
+
+/** Normalised sum of incident faces' unit normals, each face weighted equally (as the Python app's vertex_normals). */
+function vertexNormalSegments(pts: Vec3[], faces: number[][]): number[] {
+  const sums: Vec3[] = pts.map(() => [0, 0, 0]);
+  const edgeSum = pts.map(() => 0);
+  const edgeCount = pts.map(() => 0);
+  for (const face of faces) {
+    const n = faceNormal(face, pts);
+    const nl = len3(n);
+    if (nl < 1e-12) continue;
+    const unit: Vec3 = [n[0] / nl, n[1] / nl, n[2] / nl];
+    for (const v of face) for (let k = 0; k < 3; k++) sums[v][k] += unit[k];
+    for (let i = 0; i < face.length; i++) {
+      const a = face[i];
+      const b = face[(i + 1) % face.length];
+      const length = len3(sub3(pts[a], pts[b]));
+      for (const v of [a, b]) {
+        edgeSum[v] += length;
+        edgeCount[v] += 1;
+      }
+    }
+  }
+  const out: number[] = [];
+  pts.forEach((p, v) => {
+    const s = len3(sums[v]);
+    if (s < 1e-12 || edgeCount[v] === 0) return;
+    const e = (edgeSum[v] / edgeCount[v]) * NORMAL_LENGTH_FRACTION;
+    pushSegment(out, p, [p[0] + (sums[v][0] / s) * e, p[1] + (sums[v][1] / s) * e, p[2] + (sums[v][2] / s) * e]);
+  });
+  return out;
+}
+
+/** Arrow per vertex in the repulsion force's own direction, scaled so the strongest one is a
+ * reference length (matching the Python app's "relative magnitude" rule). */
+function repulsionSegments(pts: Vec3[], faces: number[][]): number[] {
+  const forces = repulsionForce(pts);
+  const magnitudes = forces.map(len3);
+  const maxLen = Math.max(0, ...magnitudes);
+  if (maxLen < 1e-12) return [];
+  const edgeLengths = faces.map((face) => meanEdgeLength(face, pts));
+  const reference = (edgeLengths.reduce((a, b) => a + b, 0) / Math.max(1, edgeLengths.length)) * NORMAL_LENGTH_FRACTION;
+  const scale = reference / maxLen;
+  const out: number[] = [];
+  pts.forEach((p, v) => {
+    if (magnitudes[v] < 1e-12) return;
+    const f = forces[v];
+    pushSegment(out, p, [p[0] + f[0] * scale, p[1] + f[1] * scale, p[2] + f[2] * scale]);
+  });
+  return out;
+}
 
 /** Rotation/zoom shared by every Level panel (drag any panel -> all rotate together, as in the
  * Python app); each panel still auto-fits its own mesh's size. */
@@ -28,6 +141,11 @@ export class Viewer {
   private lights: { light: THREE.DirectionalLight; dir: THREE.Vector3 }[] = [];
   private dragging = false;
   private lastXY: [number, number] = [0, 0];
+  private overlayFlags: DebugOverlays = { faceNormals: false, vertexNormals: false, repulsiveForces: false };
+  private overlayObjects: THREE.LineSegments[] = [];
+  private meshData: { pts: Vec3[]; faces: number[][] } | null = null;
+  private vertexIds: number[] = [];
+  private center: Vec3 = [0, 0, 0];
 
   constructor(
     container: HTMLElement,
@@ -117,6 +235,8 @@ export class Viewer {
       center = [center[0] + p[0], center[1] + p[1], center[2] + p[2]];
     }
     center = center.map((c) => c / vertexIds.length) as Vec3;
+    this.center = center;
+    this.vertexIds = vertexIds;
     let maxRadius = 0;
     vertexIds.forEach((v, i) => {
       const p = positions.get(v)!;
@@ -169,6 +289,11 @@ export class Viewer {
     this.scene.add(this.wireframe);
 
     this.maxRadius = maxRadius;
+    this.meshData = {
+      pts: vertexIds.map((_, i) => [vertexArray[i * 3], vertexArray[i * 3 + 1], vertexArray[i * 3 + 2]] as Vec3),
+      faces: faces.map((face) => face.map((v) => idx.get(v)!)),
+    };
+    this.rebuildOverlays();
     this.render();
   }
 
@@ -181,7 +306,56 @@ export class Viewer {
     }
     this.mesh = null;
     this.wireframe = null;
+    this.meshData = null;
+    this.rebuildOverlays();
     this.render();
+  }
+
+  /** Shows another set of positions for the current mesh (a replay frame) without refitting the camera. */
+  showPositions(positions: Map<number, Vec3>) {
+    if (!this.mesh || !this.meshData) return;
+    const pts = this.vertexIds.map((v) => {
+      const p = positions.get(v)!;
+      return [p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]] as Vec3;
+    });
+    const attr = this.mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
+    pts.forEach((p, i) => attr.setXYZ(i, p[0], p[1], p[2]));
+    attr.needsUpdate = true;
+    this.wireframe!.geometry.dispose();
+    this.wireframe!.geometry = new THREE.WireframeGeometry(this.mesh.geometry);
+    this.meshData.pts = pts;
+    this.rebuildOverlays();
+    this.render();
+  }
+
+  setOverlays(flags: DebugOverlays) {
+    this.overlayFlags = flags;
+    this.rebuildOverlays();
+    this.render();
+  }
+
+  private rebuildOverlays() {
+    for (const line of this.overlayObjects) {
+      this.scene.remove(line);
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+    }
+    this.overlayObjects = [];
+    if (!this.meshData) return;
+    const { pts, faces } = this.meshData;
+    const { faceNormals, vertexNormals, repulsiveForces } = this.overlayFlags;
+    if (faceNormals) this.addOverlay(faceNormalSegments(pts, faces), FACE_NORMAL_COLOR);
+    if (vertexNormals) this.addOverlay(vertexNormalSegments(pts, faces), VERTEX_NORMAL_COLOR);
+    if (repulsiveForces) this.addOverlay(repulsionSegments(pts, faces), REPULSION_FORCE_COLOR);
+  }
+
+  private addOverlay(segments: number[], color: number) {
+    if (!segments.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(segments, 3));
+    const line = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color }));
+    this.scene.add(line);
+    this.overlayObjects.push(line);
   }
 
   /** Recolours the current mesh in place (one colour per original face) without refitting the camera. */

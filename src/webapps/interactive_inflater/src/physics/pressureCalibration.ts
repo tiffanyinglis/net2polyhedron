@@ -1,6 +1,6 @@
 import { type Vec3 } from "./vec3";
 import { totalRestArea } from "./forces";
-import { relaxOnce, type RelaxOnceResult } from "./relaxOnce";
+import { relaxOnce, type RelaxOnceResult, type ReplayFrame } from "./relaxOnce";
 import { CONVERGENCE_GTOL } from "./convergence";
 import { InsideOutChecker } from "./insideOutChecker";
 import { positionsToPts } from "./edgeSetup";
@@ -21,8 +21,8 @@ export interface PressureCalibrationOptions {
   initialPressureGuess?: number;
   edges?: [number, number][];
   repulsionStrength?: number;
+  repulsionVertexMultipliers?: Map<number, number>;
   shouldStop?: () => boolean;
-  onProgress?: (cumulativeSteps: number) => void;
   /** Called after each trial (for diagnostics). */
   onTrial?: (t: { pressure: number; rmsStretchPct: number; steps: number; converged: boolean; usable: boolean }) => void;
 }
@@ -36,6 +36,8 @@ export interface PressureCalibrationResult {
   optimality: number | null;
   converged: boolean;
   pressureFound: boolean;
+  /** Replay snapshots of the winning trial (its relaxation, plus any top-up). */
+  frames: ReplayFrame[];
 }
 
 /** Runs several relaxOnce trials at different pressures to find one whose result lands within
@@ -59,9 +61,11 @@ export async function estimatePressureForTargetStretch(
   const relaxOnceOpts = {
     edges: options.edges,
     repulsionStrength: options.repulsionStrength,
+    repulsionVertexMultipliers: options.repulsionVertexMultipliers,
     shouldStop: options.shouldStop,
     gtol,
   };
+  let bestFrames: ReplayFrame[] = [{ steps: 0, positions }];
 
   let pressure: number;
   if (options.initialPressureGuess !== undefined) {
@@ -89,14 +93,13 @@ export async function estimatePressureForTargetStretch(
 
   for (let iter = 0; iter < maxIterations; iter++) {
     const trialBase = cumulativeSteps;
-    const onProgress = options.onProgress
-      ? (_pos: Map<number, Vec3>, steps: number) => options.onProgress!(trialBase + steps)
-      : undefined;
+    const trialFrames: ReplayFrame[] = [{ steps: 0, positions }];
     result = await relaxOnce(positions, faces, edgeLength, pressure, {
       ...relaxOnceOpts,
       maxNfev: maxNfevPerTrial,
-      onProgress,
+      onProgress: (pos, steps) => trialFrames.push({ steps: trialBase + steps, positions: pos }),
     });
+    trialFrames.push({ steps: trialBase + result.stepsTaken, positions: result.positions });
     cumulativeSteps += result.stepsTaken;
     const rmsStretch = result.rmsStretchPct;
     const sane = rmsStretch < insaneCeiling;
@@ -111,6 +114,7 @@ export async function estimatePressureForTargetStretch(
         bestError = error;
         bestPressure = pressure;
         bestResult = result;
+        bestFrames = trialFrames;
       }
     }
     const stopped = options.shouldStop?.() ?? false;
@@ -148,13 +152,13 @@ export async function estimatePressureForTargetStretch(
     finalPressure = bestPressure!;
     finalResult = bestResult;
     if (!finalResult.converged && !stopped) {
+      const topUpBase = cumulativeSteps;
       const topUp = await relaxOnce(finalResult.positions, faces, edgeLength, finalPressure, {
         ...relaxOnceOpts,
         maxNfev: null,
-        onProgress: options.onProgress
-          ? (_pos, steps) => options.onProgress!(cumulativeSteps + steps)
-          : undefined,
+        onProgress: (pos, steps) => bestFrames.push({ steps: topUpBase + steps, positions: pos }),
       });
+      bestFrames.push({ steps: topUpBase + topUp.stepsTaken, positions: topUp.positions });
       finalResult = { ...topUp, stepsTaken: finalResult.stepsTaken + topUp.stepsTaken };
     }
   }
@@ -168,5 +172,6 @@ export async function estimatePressureForTargetStretch(
     optimality: finalResult.optimality,
     converged: finalResult.converged,
     pressureFound,
+    frames: bestFrames,
   };
 }

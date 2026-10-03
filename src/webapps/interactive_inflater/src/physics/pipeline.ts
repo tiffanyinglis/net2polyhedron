@@ -1,20 +1,15 @@
 import { type Vec3 } from "./vec3";
 import { EDGE_LENGTH, loadNet, type NetSpec } from "./mesh";
-import { fanLevel0To1 } from "./meshLevels";
+import { fanLevel0To1, quarterTriangles, type MeshState } from "./meshLevels";
 import { relaxInitialConfigurationWithOrientationRetry } from "./orientationRetry";
+import { type ReplayFrame } from "./relaxOnce";
 import { estimatePressureForTargetStretch } from "./pressureCalibration";
 import { CONVERGENCE_GTOL } from "./convergence";
 
 export const LEVEL0_SEED = 0;
 export const LEVEL0_SAFETY_STEP_CAP = 50_000;
 export const DEFAULT_TARGET_RMS_PCT = 10.0;
-
-export interface InflateStatus {
-  stage: "level0" | "level1";
-  steps: number;
-  rmsStretchPct?: number;
-  pressure?: number;
-}
+export const MAX_LEVEL = 3;
 
 /** One Convergence History row (one per level visited). */
 export interface LevelRecord {
@@ -40,21 +35,46 @@ export interface InflateResult {
   pressure: number;
 }
 
+type Calibration = Awaited<ReturnType<typeof estimatePressureForTargetStretch>>;
+
+interface CalibratedLevel {
+  level: number;
+  pressure: number;
+  rmsStretchPct: number;
+}
+
+/** Mirrors pressure_history_guess.guess_pressure_from_history: the prior level whose achieved RMS
+ * landed closest to the new target, its pressure doubled per level of resolution difference. */
+function guessPressureFromHistory(history: CalibratedLevel[], level: number, targetRmsPct: number): number | undefined {
+  let best: CalibratedLevel | undefined;
+  let bestError = Infinity;
+  for (const prior of history) {
+    if (prior.level >= level || !prior.pressure) continue;
+    const error = Math.abs(prior.rmsStretchPct - targetRmsPct);
+    if (error < bestError) {
+      bestError = error;
+      best = prior;
+    }
+  }
+  return best ? best.pressure * 2 ** (level - best.level) : undefined;
+}
+
 /** Full "Full Inflate" pipeline for a single closed net, mirroring interactive_inflater_app's own
  * on_full_inflate_clicked: fan-triangulate -> Level 0 relax (with orientation-consistency seed
- * retry) -> Level 1 pressure calibration to a target RMS stretch %. v1 scope: closed meshes only
- * (no pressure_exclude_faces/rms_exclude_edges handling for an open/boundary net yet). */
+ * retry) -> Levels 1..MAX_LEVEL, each a pressure calibration to its own target RMS stretch %,
+ * with every level after the first subdivided from the previous solved mesh. v1 scope: closed
+ * meshes only (no pressure_exclude_faces/rms_exclude_edges handling for an open/boundary net yet). */
 export async function fullInflate(
   spec: NetSpec,
   options: {
-    targetRmsPct?: number;
+    /** Target RMS stretch % per level (1..MAX_LEVEL); missing levels use DEFAULT_TARGET_RMS_PCT. */
+    targetRmsPctByLevel?: Record<number, number>;
     gtol?: number;
-    /** Live mesh positions for a level (Level 0 on every convergence check, Level 1 once solved). */
-    onLevelPositions?: (level: number, positions: Map<number, Vec3>) => void;
+    /** A level's solved positions, plus the replay snapshots of the trial that produced them. */
+    onLevelResult?: (level: number, positions: Map<number, Vec3>, frames: ReplayFrame[]) => void;
     onRecord?: (record: LevelRecord) => void;
-    /** Called once the shared Level 0/1 mesh topology is known, before any positions arrive. */
-    onTopology?: (faces: number[][], faceOfFine: number[]) => void;
-    onStatus?: (status: InflateStatus) => void;
+    /** Called once a level's mesh topology is known, before its result arrives. */
+    onTopology?: (level: number, faces: number[][], faceOfFine: number[]) => void;
     shouldStop?: () => boolean;
   } = {},
 ): Promise<InflateResult> {
@@ -63,8 +83,12 @@ export async function fullInflate(
   const elapsed = (since: number) => (performance.now() - since) / 1000;
   const topology = fanLevel0To1(baseFaces, new Map(baseFaces.flat().map((v) => [v, [0, 0, 0] as Vec3])), EDGE_LENGTH);
 
-  options.onTopology?.(topology.faces, topology.faceOfFine);
+  options.onTopology?.(0, topology.faces, topology.faceOfFine);
   const t0 = performance.now();
+  options.onRecord?.({
+    level: 0, state: "running", steps: 0, optimality: null, gtol,
+    rmsStretchPct: null, pressure: null, simTimeS: 0,
+  });
   const level0 = await relaxInitialConfigurationWithOrientationRetry(
     topology.faces,
     topology.restLengths,
@@ -74,17 +98,9 @@ export async function fullInflate(
       maxNfev: LEVEL0_SAFETY_STEP_CAP,
       gtol,
       shouldStop: options.shouldStop,
-      onProgress: (positions, steps, _max, rms, optimality) => {
-        options.onStatus?.({ stage: "level0", steps });
-        options.onLevelPositions?.(0, positions);
-        options.onRecord?.({
-          level: 0, state: "running", steps, optimality, gtol,
-          rmsStretchPct: rms, pressure: null, simTimeS: elapsed(t0),
-        });
-      },
     },
   );
-  options.onLevelPositions?.(0, level0.positions);
+  options.onLevelResult?.(0, level0.positions, level0.frames);
   options.onRecord?.({
     level: 0, state: level0.converged ? "converged" : "not_converged", steps: level0.stepsTaken,
     optimality: level0.optimality, gtol, rmsStretchPct: level0.rmsStretchPct, pressure: null,
@@ -97,47 +113,62 @@ export async function fullInflate(
     );
   }
 
-  const targetRmsPct = options.targetRmsPct ?? DEFAULT_TARGET_RMS_PCT;
-  const t1 = performance.now();
-  let level1Steps = 0;
-  options.onRecord?.({
-    level: 1, state: "running", steps: 0, optimality: null, gtol,
-    rmsStretchPct: null, pressure: null, simTimeS: 0,
-  });
-  const calibration = await estimatePressureForTargetStretch(level0.positions, topology.faces, topology.restLengths, {
-    targetRmsPct,
-    gtol,
-    shouldStop: options.shouldStop,
-    onProgress: (steps) => {
-      level1Steps = steps;
-      options.onStatus?.({ stage: "level1", steps });
-      options.onRecord?.({
-        level: 1, state: "running", steps, optimality: null, gtol,
-        rmsStretchPct: null, pressure: null, simTimeS: elapsed(t1),
-      });
-    },
-  });
-  options.onRecord?.({
-    level: 1,
-    state: calibration.pressureFound && calibration.converged ? "converged" : "not_converged",
-    steps: Math.max(level1Steps, calibration.stepsTaken),
-    optimality: calibration.optimality, gtol,
-    rmsStretchPct: calibration.pressureFound ? calibration.rmsStretchPct : null,
-    pressure: calibration.pressureFound ? calibration.pressure : null,
-    simTimeS: elapsed(t1),
-  });
-  if (!calibration.pressureFound) {
-    throw new Error(`No pressure tried produced a usable result at target RMS ${targetRmsPct}%.`);
+  let mesh: MeshState = {
+    faces: topology.faces,
+    positions: level0.positions,
+    restLengths: topology.restLengths,
+    faceOfFine: topology.faceOfFine,
+  };
+  const history: CalibratedLevel[] = [];
+  // Repulsion acts on the original net's own corners only, at a per-vertex strength halved per
+  // level past Level 1 (mirrors inflate_polyhedron_app's _repulsion_vertex_ids/_multipliers): all
+  // Subdivide-added vertices would otherwise swamp the springs and pressure.
+  const repulsionCorners = [...new Set(baseFaces.flat())];
+  let calibration: Calibration | undefined;
+  for (let level = 1; level <= MAX_LEVEL; level++) {
+    if (level > 1) mesh = quarterTriangles(mesh);
+    const repulsionMultiplier = 1 / 2 ** (level - 1);
+    const repulsionVertexMultipliers = new Map(repulsionCorners.map((v) => [v, repulsionMultiplier]));
+    options.onTopology?.(level, mesh.faces, mesh.faceOfFine);
+
+    const targetRmsPct = options.targetRmsPctByLevel?.[level] ?? DEFAULT_TARGET_RMS_PCT;
+    const t = performance.now();
+    options.onRecord?.({
+      level, state: "running", steps: 0, optimality: null, gtol,
+      rmsStretchPct: null, pressure: null, simTimeS: 0,
+    });
+    calibration = await estimatePressureForTargetStretch(mesh.positions, mesh.faces, mesh.restLengths, {
+      targetRmsPct,
+      gtol,
+      initialPressureGuess: guessPressureFromHistory(history, level, targetRmsPct),
+      repulsionVertexMultipliers,
+      shouldStop: options.shouldStop,
+    });
+    options.onRecord?.({
+      level,
+      state: calibration.pressureFound && calibration.converged ? "converged" : "not_converged",
+      steps: calibration.stepsTaken,
+      optimality: calibration.optimality, gtol,
+      rmsStretchPct: calibration.pressureFound ? calibration.rmsStretchPct : null,
+      pressure: calibration.pressureFound ? calibration.pressure : null,
+      simTimeS: elapsed(t),
+    });
+    if (!calibration.pressureFound) {
+      throw new Error(`No pressure tried produced a usable result at Level ${level}, target RMS ${targetRmsPct}%.`);
+    }
+
+    options.onLevelResult?.(level, calibration.positions, calibration.frames);
+    history.push({ level, pressure: calibration.pressure, rmsStretchPct: calibration.rmsStretchPct });
+    mesh = { ...mesh, positions: calibration.positions };
   }
 
-  options.onLevelPositions?.(1, calibration.positions);
   return {
-    faces: topology.faces,
+    faces: mesh.faces,
     baseFaces,
-    faceOfFine: topology.faceOfFine,
-    positions: calibration.positions,
-    rmsStretchPct: calibration.rmsStretchPct,
-    maxStretchPct: calibration.maxStretchPct,
-    pressure: calibration.pressure,
+    faceOfFine: mesh.faceOfFine,
+    positions: calibration!.positions,
+    rmsStretchPct: calibration!.rmsStretchPct,
+    maxStretchPct: calibration!.maxStretchPct,
+    pressure: calibration!.pressure,
   };
 }

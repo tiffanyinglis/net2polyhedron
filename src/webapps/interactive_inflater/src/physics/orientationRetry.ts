@@ -1,6 +1,7 @@
 import { randomInitialPositions } from "./mesh";
 import { orientationSigns } from "./forces";
 import { relaxInitialConfiguration, type RelaxInitialOptions, type RelaxInitialResult } from "./relaxInitial";
+import { type ReplayFrame } from "./relaxOnce";
 import { DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_SEARCH_TIME, SeedSelecter } from "./seedSelecter";
 
 function fractionFlipped(signs: number[]): number {
@@ -11,6 +12,8 @@ function fractionFlipped(signs: number[]): number {
 
 export interface OrientationRetryResult extends RelaxInitialResult {
   seedUsed: number;
+  /** Replay snapshots of the accepted attempt only. */
+  frames: ReplayFrame[];
 }
 
 /** Runs relaxInitialConfiguration up to `maxRetries` times from fresh random starts, stopping at
@@ -33,16 +36,21 @@ export async function relaxInitialConfigurationWithOrientationRetry(
 
   const attemptFn = async (attemptSeed: number) => {
     const pos0 = randomInitialPositions(faces, 5.0, attemptSeed);
-    const relaxResult = await relaxInitialConfiguration(pos0, faces, edgeLength, options);
+    const frames: ReplayFrame[] = [];
+    const relaxResult = await relaxInitialConfiguration(pos0, faces, edgeLength, {
+      ...options,
+      onProgress: (positions, steps) => frames.push({ steps, positions }),
+    });
+    frames.push({ steps: relaxResult.stepsTaken, positions: relaxResult.positions });
     const vertexIds = [...relaxResult.positions.keys()].sort((a, b) => a - b);
     const pts = vertexIds.map((v) => relaxResult.positions.get(v)!);
     const idx = new Map(vertexIds.map((v, i) => [v, i]));
     const remapped = orientationFaces.map((face) => face.map((v) => idx.get(v)!));
     const signs = orientationSigns(pts, remapped);
-    return { relaxResult, signs };
+    return { relaxResult, signs, frames };
   };
 
-  const scoreFn = (attempt: { relaxResult: RelaxInitialResult; signs: number[] }): [boolean, number] => {
+  const scoreFn = (attempt: { relaxResult: RelaxInitialResult; signs: number[]; frames: ReplayFrame[] }): [boolean, number] => {
     const signs = new Set(attempt.signs.filter((s) => s !== 0));
     // Only all-outward (+1) counts: an all-inward (-1) shell is inside-out, not consistent
     // (mirrors stretchy_mesh._is_orientation_consistent: signs <= {+1}).
@@ -54,5 +62,5 @@ export async function relaxInitialConfigurationWithOrientationRetry(
     shouldStop: options.shouldStop,
   });
 
-  return { ...result.relaxResult, seedUsed };
+  return { ...result.relaxResult, seedUsed, frames: result.frames };
 }
