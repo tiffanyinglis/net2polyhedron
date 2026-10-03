@@ -1,5 +1,5 @@
-import { type BuilderConnection, type NetSpec } from "./physics/mesh";
-import { polygonColor } from "./colors";
+import { type BuilderConnection, type NetSpec } from "../utils/physics/mesh";
+import { polygonColor } from "../utils/colors";
 import { type NetView } from "./editState";
 import { type CameraHooks } from "./viewer";
 

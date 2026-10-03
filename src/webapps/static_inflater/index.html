@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="../utils/style.css" />
+    <title>Static Inflater</title>
+    
+  </head>
+  <body>
+    <div id="app">
+      <nav id="menubar">
+        <div class="menu">
+          <button class="menu-title">File</button>
+          <div class="menu-items">
+            <button class="menu-item" id="load-model-item">Load Model...</button>
+            <button class="menu-item" id="load-session-item">Load Session...</button>
+            <hr />
+            <button class="menu-item" id="save-session-item" disabled>Save Session...</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Edit</button>
+          <div class="menu-items">
+            <button class="menu-item" id="undo-item" disabled>Undo<kbd>Ctrl+Z</kbd></button>
+            <button class="menu-item" id="redo-item" disabled>Redo<kbd>Ctrl+Y</kbd></button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Run</button>
+          <div class="menu-items">
+            <button class="menu-item" id="run-all-item">Run All</button>
+            <button class="menu-item" id="debug-all-item" hidden>Debug All</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Colour</button>
+          <div class="menu-items">
+            <button class="menu-item" data-color-mode="polygon"><span class="check"></span>Polygon-specific<kbd>P</kbd></button>
+            <button class="menu-item" data-color-mode="multi"><span class="check"></span>Multi-colour<kbd>M</kbd></button>
+            <hr />
+            <button class="menu-item" id="randomize-item">Randomize<kbd>R</kbd></button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">View</button>
+          <div class="menu-items">
+            <button class="menu-item" data-view="inflater"><span class="check"></span>Inflater</button>
+            <button class="menu-item" data-view="viewer"><span class="check"></span>Viewer</button>
+          </div>
+        </div>
+      </nav>
+
+      <div id="inflater-view">
+        <fieldset id="setup">
+          <legend>Setup</legend>
+          <div class="setup-row">
+            <label>Choose a net: <select id="net-select"><option value="">(none)</option></select></label>
+            <div class="param-group">
+              <span>Target RMS stretch:</span>
+              <label>Level 1: <input id="target-1" size="4" value="10%" /></label>
+              <label>Level 2: <input id="target-2" size="4" value="10%" /></label>
+              <label>Level 3: <input id="target-3" size="4" value="10%" /></label>
+            </div>
+            <label>Tolerance: <input id="tolerance" size="10" value="1e-04" /></label>
+            <button id="inflate-btn" disabled>Run Simulation</button>
+          </div>
+          <div id="layer-row" class="debug-row">
+            <label><input type="checkbox" id="show-polygon-outlines" checked /> Show polygon outlines</label>
+            <label><input type="checkbox" id="show-subdivisions" /> Show subdivisions</label>
+          </div>
+          <div id="debug-row" class="debug-row" hidden>
+            <label><input type="checkbox" id="show-face-normals" /> Show face normals</label>
+            <label><input type="checkbox" id="show-vertex-normals" /> Show vertex normals</label>
+            <label><input type="checkbox" id="show-repulsive-forces" /> Show repulsive forces</label>
+          </div>
+        </fieldset>
+
+        <div id="status-row">
+          <span id="spinner" class="spinner" hidden></span>
+          <div id="status" class="info"></div>
+        </div>
+
+        <fieldset id="history-box">
+          <legend>Convergence History</legend>
+          <table id="history">
+            <thead>
+              <tr><th>Level</th><th>Pressure</th><th>Steps</th><th>RMS Stretch %</th><th>Simulation Time</th><th>Cumulative Time</th><th>Convergence</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </fieldset>
+
+        <div id="panels">
+          <section class="panel"><div class="panel-title">Net</div><div class="panel-body" id="panel-net"></div></section>
+          <section class="panel"><div class="panel-title">Level 0</div><div class="panel-body" id="panel-0"></div></section>
+          <section class="panel"><div class="panel-title">Level 1</div><div class="panel-body" id="panel-1"></div></section>
+          <section class="panel"><div class="panel-title">Level 2</div><div class="panel-body" id="panel-2"></div></section>
+          <section class="panel"><div class="panel-title">Level 3</div><div class="panel-body" id="panel-3"></div></section>
+        </div>
+      </div>
+
+      <div id="viewer-view" hidden>
+        <div id="viewer-grid">
+          <div class="viewer-cell" id="vpanel-0"></div>
+          <div class="viewer-cell" id="vpanel-1"></div>
+          <div class="viewer-cell" id="vpanel-2"></div>
+          <div class="viewer-cell" id="vpanel-3"></div>
+          <div id="viewer-message" hidden></div>
+        </div>
+        <div id="viewer-counter"></div>
+      </div>
+    </div>
+    <input type="file" id="model-file" accept=".poly,.json" hidden />
+    <input type="file" id="session-file" accept=".hippo" hidden />
+    <dialog id="unsaved-dialog">
+      <form method="dialog">
+        <p id="unsaved-text"></p>
+        <div class="dialog-buttons">
+          <button value="cancel">Cancel</button>
+          <button value="discard">Don't Save</button>
+          <button value="save" id="unsaved-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

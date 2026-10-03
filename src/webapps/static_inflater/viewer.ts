@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { type Vec3 } from "./physics/vec3";
-import { repulsionForce } from "./physics/forces";
+import { type Vec3 } from "../utils/physics/vec3";
+import { repulsionForce } from "../utils/physics/forces";
 
 /** [direction toward the light in camera space, intensity]: key, fill, headlight. */
 const LIGHT_RIG: [[number, number, number], number][] = [

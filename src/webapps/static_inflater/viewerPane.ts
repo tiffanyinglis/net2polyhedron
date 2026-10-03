@@ -1,7 +1,7 @@
-import { displayColors, fitMultiColors, randomFaceColors, type ColorMode, type ColorState } from "./colors";
+import { displayColors, fitMultiColors, randomFaceColors, type ColorMode, type ColorState } from "../utils/colors";
 import { copyCamera, copyColors, copyEdit, sameCamera, sameColors, UndoStack, type EditSnapshot } from "./editState";
-import { loadNet } from "./physics/mesh";
-import { parseSession, restoreLevel, serializeSession, type SessionData } from "./session";
+import { loadNet } from "../utils/physics/mesh";
+import { parseSession, restoreLevel, serializeSession, type SessionData } from "../utils/session";
 import { SharedCamera, Viewer, type CameraHooks, type CameraState } from "./viewer";
 
 const LEVELS = [0, 1, 2, 3];
@@ -235,7 +235,7 @@ export class ViewerPane {
   private async load(name: string): Promise<ViewedFile> {
     const cached = this.files.get(name);
     if (cached) return cached;
-    const res = await fetch(`outputs/${encodeURIComponent(name)}`);
+    const res = await fetch(`../outputs/${encodeURIComponent(name)}`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = parseSession(await res.text());
     const colors: ColorState = { mode: data.colorMode, multiColors: [...data.multiColors] };

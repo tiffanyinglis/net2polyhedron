@@ -50,6 +50,14 @@ export default defineConfig({
   publicDir: "data",
   build: {
     outDir: "dist",
+    // One page per app (plus the root redirect), so each app can be built and opened on its own.
+    rollupOptions: {
+      input: Object.fromEntries(
+        ["index.html", "static_inflater/index.html", "net_builder/index.html", "interactive_inflater/index.html"].map(
+          (page) => [page.replace(/(\/index)?\.html$/, "") || "index", fileURLToPath(new URL(`./${page}`, import.meta.url))],
+        ),
+      ),
+    },
   },
   plugins: [batchRunEndpoints()],
 });

@@ -1,14 +1,14 @@
-import "./style.css";
 import { SharedCamera, Viewer, type CameraHooks, type DebugOverlays } from "./viewer";
 import { NetPanel } from "./netPanel";
-import { displayColors, fitMultiColors, randomFaceColors, type ColorMode, type ColorState } from "./colors";
+import { displayColors, fitMultiColors, randomFaceColors, type ColorMode, type ColorState } from "../utils/colors";
 import { copyColors, sameCamera, sameNetView, UndoStack, type EditSnapshot } from "./editState";
 import { ViewerPane } from "./viewerPane";
-import { defaultTargetRmsPct, fullInflate, type LevelRecord } from "./physics/pipeline";
-import { type ReplayFrame } from "./physics/relaxOnce";
-import { loadNet, type NetSpec } from "./physics/mesh";
-import { type Vec3 } from "./physics/vec3";
-import { CONVERGENCE_GTOL } from "./physics/convergence";
+import { mountAppNav, revealPage } from "../utils/appNav";
+import { defaultTargetRmsPct, fullInflate, type LevelRecord } from "../utils/physics/pipeline";
+import { type ReplayFrame } from "../utils/physics/relaxOnce";
+import { loadNet, type NetSpec } from "../utils/physics/mesh";
+import { type Vec3 } from "../utils/physics/vec3";
+import { CONVERGENCE_GTOL } from "../utils/physics/convergence";
 import {
   SESSION_EXTENSION,
   parseSession,
@@ -16,7 +16,7 @@ import {
   serializeSession,
   snapshotLevel,
   type SessionData,
-} from "./session";
+} from "../utils/session";
 
 const LEVELS = [0, 1, 2, 3];
 let defaultTargetRms = 10;
@@ -590,7 +590,7 @@ async function runBatch(save: boolean, pause: boolean) {
       run.jumpTo = null;
       setStatus(`${label} -- ${i + 1} of ${files.length}: ${name}`);
       try {
-        installNet(await fetchJson<NetSpec>(`inputs/${files[i]}`), { label: name, file: "" });
+        installNet(await fetchJson<NetSpec>(`../inputs/${files[i]}`), { label: name, file: "" });
       } catch (err) {
         console.error(err);
         failed.push(name);
@@ -661,7 +661,7 @@ async function selectNet(net: NetIndexEntry) {
   setStatus(`Loading ${net.label}...`);
   setLoading(netPanelEl, true);
   try {
-    installNet(await fetchJson<NetSpec>(`inputs/${net.file}`), net);
+    installNet(await fetchJson<NetSpec>(`../inputs/${net.file}`), net);
   } catch (err) {
     console.error(err);
     setStatus(err instanceof Error ? err.message : String(err), "error");
@@ -906,8 +906,8 @@ function refreshMenus() {
     view === "viewer"
       ? viewer.title()
       : debugMode
-        ? "Interactive Inflater (debug mode)"
-        : "Interactive Inflater";
+        ? "Static Inflater (debug mode)"
+        : "Static Inflater";
   refreshViewerCounter();
 }
 
@@ -954,6 +954,7 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 async function init() {
+  mountAppNav("static_inflater");
   renderHistory();
   inflateBtn.addEventListener("click", onInflateButton);
   colorItems.forEach((item) => item.addEventListener("click", () => setColorMode(item.dataset.colorMode as ColorMode)));
@@ -997,7 +998,7 @@ async function init() {
 
   setBusy(1);
   try {
-    const nets = (await fetchJson<NetIndexEntry[]>("inputs/index.json")).sort((a, b) =>
+    const nets = (await fetchJson<NetIndexEntry[]>("../inputs/index.json")).sort((a, b) =>
       a.label.localeCompare(b.label),
     );
     for (const net of nets) {
@@ -1020,6 +1021,7 @@ async function init() {
     setStatus(err instanceof Error ? err.message : String(err), "error");
   } finally {
     setBusy(-1);
+    revealPage();
   }
 }
 

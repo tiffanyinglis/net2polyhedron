@@ -1,4 +1,4 @@
-import { type ColorState } from "./colors";
+import { type ColorState } from "../utils/colors";
 import { type CameraState } from "./viewer";
 
 /** The net panel's own pan (CSS pixels) and zoom. Only the Inflater view has one. */

@@ -54,7 +54,7 @@ directly or host anywhere (it's pure client-side, no API calls).
   view. The Viewer's stack covers the file on screen and resets when you move to another file.
 
 **Not yet ported** (future steps): the 2D builder canvas (net editing, so Inflater's own undo doesn't
-yet cover net edits), diff-inflate, Python-compatible session files. See `src/physics/` -- each module
+yet cover net edits), diff-inflate, Python-compatible session files. See `utils/physics/` -- each module
 names which Python module it mirrors.
 The real crochet-animal nets (giraffe/horse/hippo/hoodie/cannoli) aren't bundled yet -- hippo/
 horse/giraffe are closed but `physics.md` notes the orientation-retry search fails on them even in

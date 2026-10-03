@@ -438,3 +438,83 @@ button#inflate-btn:disabled {
 #unsaved-dialog button:hover {
   background: var(--menu-active);
 }
+
+/* Hamburger button and the left-hand app panel (utils/appNav.ts) */
+#hamburger {
+  padding: 4px 10px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+#hamburger:hover,
+#hamburger[aria-expanded="true"] {
+  background: var(--menu-active);
+}
+
+#app-panel {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 30;
+  width: 240px;
+  padding-bottom: 12px;
+  background: var(--plot-bg);
+  border-right: 1px solid var(--border);
+  box-shadow: 2px 0 12px rgba(0, 0, 0, 0.4);
+}
+
+#app-panel[hidden] {
+  display: none;
+}
+
+.app-panel-heading {
+  padding: 12px 14px 6px;
+  color: var(--menu-disabled);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.app-tab {
+  display: block;
+  padding: 8px 14px 8px 11px;
+  color: var(--plot-fg);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+}
+
+.app-tab:hover {
+  background: var(--menu-active);
+}
+
+.app-tab.current {
+  border-left-color: var(--info);
+  background: var(--panel);
+  font-weight: 600;
+}
+
+/* Placeholder page for an app that isn't built yet */
+.stub-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--menu-disabled);
+}
+
+.stub-page h1 {
+  margin: 0;
+  color: var(--plot-fg);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+/* Pages stay hidden until their app has finished laying out (revealPage in utils/appNav.ts) */
+html:not(.ready) #app {
+  visibility: hidden;
+}

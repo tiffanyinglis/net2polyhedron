@@ -1,19 +1,19 @@
 ---
 name: interactive-inflater-web
-description: Status, layout, and conventions of the client-side TypeScript/Three.js port of the stretchy-mesh inflater (src/webapps/interactive_inflater). Load before changing the web app.
+description: Status, layout, and conventions of the client-side TypeScript/Three.js port of the stretchy-mesh inflater (src/webapps). Load before changing the web app.
 ---
 
 # interactive_inflater (web) — what exists
 
 > **MAINTENANCE: keep this file succinct. No bloat.** Terse, load-bearing facts only; update
 > existing lines rather than appending; delete stale items. All web-app docs/skills live in this
-> folder (`src/webapps/interactive_inflater/`) so the app can move to its own repo — never put
+> folder (`src/webapps/`) so the app can move to its own repo — never put
 > web-app notes in the main project's `.claude/`. User-facing docs go in `README.md`.
 
 Pure client-side (Vite + TS + three). Run: `npm install`, `npm run dev`; `npm test` (vitest);
 `npm run build`. Port of Python `src/utils/inflate_polyhedron/` (physics reference: main repo's
 `.claude/skills/net-fold-project/physics.md` — external to this folder; copy facts here when
-the repo is split). Each `src/physics/*.ts` header names the Python module it mirrors.
+the repo is split). Each `utils/physics/*.ts` header names the Python module it mirrors.
 
 ## Implemented (v1)
 - **UI** (same top-to-bottom layout as Python `inflate_polyhedron_app`; dark, `style.css` uses
