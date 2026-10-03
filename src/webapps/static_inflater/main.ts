@@ -4,11 +4,21 @@ import { displayColors, fitMultiColors, randomFaceColors, type ColorMode, type C
 import { copyColors, sameCamera, sameNetView, UndoStack, type EditSnapshot } from "./editState";
 import { ViewerPane } from "./viewerPane";
 import { mountAppNav, revealPage } from "../utils/appNav";
-import { defaultTargetRmsPct, fullInflate, type LevelRecord } from "../utils/physics/pipeline";
+import { defaultTargetRmsPct } from "../utils/physics/pipeline";
 import { type ReplayFrame } from "../utils/physics/relaxOnce";
 import { loadNet, type NetSpec } from "../utils/physics/mesh";
 import { type Vec3 } from "../utils/physics/vec3";
-import { CONVERGENCE_GTOL } from "../utils/physics/convergence";
+import {
+  LEVELS,
+  LevelStore,
+  renderHistoryTable,
+  readTargetRmsPct,
+  readTolerance,
+  runFullInflate,
+  wireParamInput,
+  type RunOutcome,
+  type StatusKind,
+} from "../utils/inflaterRun";
 import {
   SESSION_EXTENSION,
   parseSession,
@@ -18,7 +28,6 @@ import {
   type SessionData,
 } from "../utils/session";
 
-const LEVELS = [0, 1, 2, 3];
 let defaultTargetRms = 10;
 
 /** The slice of the File System Access API used for Save Session (not in every TS DOM lib). */
@@ -144,8 +153,6 @@ interface NetIndexEntry {
   file: string;
 }
 
-type StatusKind = "info" | "success" | "error" | "warn";
-
 let currentNet: NetIndexEntry | null = null;
 let currentSpec: NetSpec | null = null;
 let baseFaces: number[][] = [];
@@ -153,20 +160,14 @@ let running = false;
 let stopRequested = false;
 let debugMode = false;
 let busyCount = 0;
-/** performance.now() when the currently running level started; null when nothing is running. */
-let runningSince: number | null = null;
-let historyTimer: number | null = null;
-const HISTORY_REFRESH_MS = 100;
 
 /** The Inflater view's Colour state (the Viewer keeps its own per file). */
 const inflaterColors: ColorState = { mode: "polygon", multiColors: [] };
 /** Inflater's undo/redo: its Colour state plus its camera, as in the Python app. */
 const inflaterUndo = new UndoStack<EditSnapshot>();
 
-// Shown mesh topology per level (Level 1 reuses Level 0's triangulation; 2 and 3 are subdivisions).
-const levelTopology: ({ faces: number[][]; faceOfFine: number[]; faceEdgeIds: number[][]; outlineEdgeIds: Set<number> } | null)[] = LEVELS.map(() => null);
-const levelPositions: (Map<number, Vec3> | null)[] = LEVELS.map(() => null);
-const history: (LevelRecord | null)[] = LEVELS.map(() => null);
+/** Topology, positions and convergence record per level (Level 1 reuses Level 0's triangulation; 2 and 3 are subdivisions). */
+const store = new LevelStore();
 
 interface Replay {
   wrap: HTMLDivElement;
@@ -230,7 +231,7 @@ function currentBaseColors(): number[] {
 function applyInflaterColors() {
   fitMultiColors(inflaterColors, baseFaces);
   const colors = currentBaseColors();
-  viewers.forEach((v, level) => levelPositions[level] && v.setBaseColors(colors));
+  viewers.forEach((v, level) => store.positions[level] && v.setBaseColors(colors));
   netPanel.setColors(inflaterColors.mode, inflaterColors.multiColors);
 }
 
@@ -366,9 +367,8 @@ function clearReplays() {
 // ---- Panels --------------------------------------------------------------------------------
 
 function showLevel(level: number, positions: Map<number, Vec3>) {
-  const topo = levelTopology[level];
+  const topo = store.topology[level];
   if (!topo) return;
-  levelPositions[level] = positions;
   viewers[level].setMesh(topo.faces, topo.faceEdgeIds, positions, topo.faceOfFine, currentBaseColors(), topo.outlineEdgeIds);
 }
 
@@ -379,83 +379,35 @@ function onLevelResult(level: number, positions: Map<number, Vec3>, frames: Repl
 
 function clearComputedLevels() {
   for (const level of LEVELS) {
-    levelPositions[level] = null;
     viewers[level].clear();
     setLoading(levelPanels[level], false);
-    history[level] = null;
   }
+  store.clear();
   clearReplays();
   renderHistory();
 }
 
 // ---- Convergence history -------------------------------------------------------------------
 
-function mmss(seconds: number): string {
-  const total = Math.round(seconds);
-  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
-}
-
+/** Redraws the Convergence History table from the shared store. */
 function renderHistory() {
-  let cumulative = 0;
-  const now = performance.now();
-  historyBody.replaceChildren(
-    ...LEVELS.map((level) => {
-      const rec = history[level];
-      // A running level's sim time is live elapsed time, not its (not-yet-known) final value.
-      const simTimeS = rec && rec.state === "running" && runningSince !== null ? (now - runningSince) / 1000 : rec?.simTimeS ?? 0;
-      if (rec) cumulative += simTimeS;
-      const cells = rec
-        ? [
-            rec.pressure === null ? "--" : rec.pressure.toFixed(2),
-            String(rec.steps),
-            rec.rmsStretchPct === null ? "--" : rec.rmsStretchPct.toFixed(1),
-            mmss(simTimeS),
-            mmss(cumulative),
-            rec.optimality === null
-              ? "--"
-              : `${rec.optimality.toExponential(2)} ${rec.optimality < rec.gtol ? "<" : "≥"} ${rec.gtol.toExponential(0)}` +
-                (rec.state === "converged" ? " ✓" : ""),
-          ]
-        : ["--", "--", "--", "--", "--", "--"];
-      const tr = document.createElement("tr");
-      if (rec) tr.className = rec.state;
-      for (const text of [String(level), ...cells]) {
-        const td = document.createElement("td");
-        td.textContent = text;
-        tr.appendChild(td);
-      }
-      return tr;
-    }),
-  );
+  renderHistoryTable(historyBody, store);
 }
 
 // ---- Parameters ----------------------------------------------------------------------------
 
 function readTargetRms(input: HTMLInputElement): number {
-  const parsed = parseFloat(input.value);
-  const value = Number.isFinite(parsed) ? Math.min(100, Math.max(0, Math.round(parsed))) : defaultTargetRms;
-  input.value = `${value}%`;
-  return value;
-}
-
-function readTolerance(): number {
-  const parsed = parseFloat(toleranceInput.value);
-  const value = Number.isFinite(parsed) && parsed > 0 ? parsed : CONVERGENCE_GTOL;
-  toleranceInput.value = value.toExponential(0).replace(/e([+-])(\d)$/, (_m, sign, d) => `e${sign}0${d}`);
-  return value;
+  return readTargetRmsPct(input, defaultTargetRms);
 }
 
 for (const input of targetInputs) {
-  input.addEventListener("focus", () => (input.value = String(parseFloat(input.value))));
-  input.addEventListener("blur", () => readTargetRms(input));
+  wireParamInput(
+    input,
+    () => readTargetRms(input),
+    () => (input.value = String(parseFloat(input.value))),
+  );
 }
-toleranceInput.addEventListener("blur", readTolerance);
-for (const input of [...targetInputs, toleranceInput]) {
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") input.blur();
-    e.stopPropagation(); // keep typing from triggering the P/M/R shortcuts
-  });
-}
+wireParamInput(toleranceInput, () => readTolerance(toleranceInput));
 
 // ---- Inflate -------------------------------------------------------------------------------
 
@@ -467,44 +419,27 @@ function setRunning(value: boolean) {
   refreshMenus();
 }
 
-type RunOutcome = "done" | "stopped" | "error";
-
 /** One Full Inflate of the current net. Doesn't touch `running` -- the caller (inflate / runAll) owns it. */
 async function runSimulation(): Promise<RunOutcome> {
   const targetRmsPctByLevel = Object.fromEntries(targetInputs.map((input, i) => [i + 1, readTargetRms(input)]));
-  const gtol = readTolerance();
+  const gtol = readTolerance(toleranceInput);
   clearComputedLevels();
   setBusy(1);
-  // Re-render the history table on a timer so the running level's time (and cumulative) tick live.
-  historyTimer = window.setInterval(renderHistory, HISTORY_REFRESH_MS);
   try {
-    const result = await fullInflate(currentSpec!, {
+    return await runFullInflate(currentSpec!, {
+      label: "Full Inflate",
       targetRmsPctByLevel,
       gtol,
-      onRecord,
-      onTopology: (level, faces, faceOfFine, faceEdgeIds, outlineEdgeIds) =>
-        (levelTopology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds }),
-      onLevelResult,
+      store,
       shouldStop: runInterrupted,
+      hooks: {
+        status: setStatus,
+        loading: (level, on) => setLoading(levelPanels[level], on),
+        showLevel: onLevelResult,
+        historyChanged: renderHistory,
+      },
     });
-    setStatus(
-      `Full Inflate -- Done. RMS stretch ${result.rmsStretchPct.toFixed(1)}%, pressure ${result.pressure.toFixed(2)}.`,
-      "success",
-    );
-    return "done";
-  } catch (err) {
-    console.error(err);
-    for (const panel of levelPanels) setLoading(panel, false);
-    setStatus(
-      stopRequested ? "Full Inflate -- Stopped." : `Full Inflate -- ${err instanceof Error ? err.message : String(err)}`,
-      stopRequested ? "warn" : "error",
-    );
-    return stopRequested ? "stopped" : "error";
   } finally {
-    window.clearInterval(historyTimer!);
-    historyTimer = null;
-    runningSince = null;
-    renderHistory();
     setBusy(-1);
   }
 }
@@ -515,19 +450,6 @@ async function inflate() {
   setRunning(true);
   await runSimulation();
   setRunning(false);
-}
-
-function onRecord(record: LevelRecord) {
-  history[record.level] = record;
-  if (record.state === "running") {
-    runningSince = performance.now();
-    setLoading(levelPanels[record.level], true);
-    setStatus(`Full Inflate -- Computing Level ${record.level}...`);
-  } else {
-    runningSince = null;
-    setLoading(levelPanels[record.level], false);
-  }
-  renderHistory();
 }
 
 // ---- Run All -------------------------------------------------------------------------------
@@ -657,7 +579,6 @@ async function selectNet(net: NetIndexEntry) {
   setBusy(1);
   netPanel.setNet(null);
   clearComputedLevels();
-  levelTopology.fill(null);
   setStatus(`Loading ${net.label}...`);
   setLoading(netPanelEl, true);
   try {
@@ -682,7 +603,6 @@ function installNet(spec: NetSpec, net: NetIndexEntry) {
   defaultTargetRms = defaultTargetRmsPct(mesh);
   for (const input of targetInputs) input.value = `${defaultTargetRms}%`;
   inflaterColors.multiColors = randomFaceColors(baseFaces);
-  levelTopology.fill(null);
   netPanel.setNet(spec);
   applyInflaterColors();
   clearComputedLevels();
@@ -749,14 +669,15 @@ function restoreSession(data: SessionData, fileName: string) {
   applyInflaterColors();
   targetInputs.forEach((input, i) => (input.value = `${data.targetRmsPct[i]}%`));
   toleranceInput.value = String(data.tolerance);
-  readTolerance();
+  readTolerance(toleranceInput);
 
   LEVELS.forEach((level) => {
     const snap = data.levels[level];
-    history[level] = data.history[level] ?? null;
+    store.history[level] = data.history[level] ?? null;
     if (!snap) return;
     const { topology, positions, frames } = restoreLevel(snap);
-    levelTopology[level] = topology;
+    store.topology[level] = topology;
+    store.positions[level] = positions;
     showLevel(level, positions);
     if (frames.length) setReplayFrames(level, frames); // sessions saved without frames just skip this
   });
@@ -780,13 +701,13 @@ function buildSessionData(): SessionData {
     netSpec: currentSpec!,
     colorMode: inflaterColors.mode,
     multiColors: inflaterColors.multiColors,
-    targetRmsPct: targetInputs.map(readTargetRms),
-    tolerance: readTolerance(),
+    targetRmsPct: targetInputs.map((input) => readTargetRms(input)),
+    tolerance: readTolerance(toleranceInput),
     camera: camera.snapshot(),
-    history: [...history],
+    history: [...store.history],
     levels: LEVELS.map((level) => {
-      const topology = levelTopology[level];
-      const positions = levelPositions[level];
+      const topology = store.topology[level];
+      const positions = store.positions[level];
       return topology && positions
         ? snapshotLevel(topology, positions, replays[level].frames)
         : null;

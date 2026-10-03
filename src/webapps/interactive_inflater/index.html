@@ -23,31 +23,42 @@
             <button class="menu-item" id="redo-item" disabled>Redo<kbd>Ctrl+Y</kbd></button>
           </div>
         </div>
+        <div class="menu">
+          <button class="menu-title">Colour</button>
+          <div class="menu-items">
+            <button class="menu-item" data-color-mode="polygon"><span class="check"></span>Polygon-specific<kbd>P</kbd></button>
+            <button class="menu-item" data-color-mode="multi"><span class="check"></span>Multi-colour<kbd>M</kbd></button>
+            <hr />
+            <button class="menu-item" id="randomize-item">Randomize<kbd>R</kbd></button>
+          </div>
+        </div>
       </nav>
 
       <!-- Each pane's parts are direct grid items, so the two drawing areas share rows and line up exactly. -->
       <div id="interactive">
         <aside id="palette" class="pane-header" aria-label="Shapes"></aside>
-        <fieldset id="setup" class="pane-header" disabled>
+        <fieldset id="setup" class="pane-header">
           <legend>Setup</legend>
           <div class="setup-row">
+            <button id="inflate-btn" type="button" disabled>Reinflate</button>
+          </div>
+          <!-- Debug mode only ('d'), as in the Python app's release vs debug split. -->
+          <div id="debug-row" class="debug-row" hidden>
             <div class="param-group">
               <span>Target RMS stretch:</span>
-              <label>L1 <input id="target-1" type="number" min="0" step="0.5" value="10" /> %</label>
-              <label>L2 <input id="target-2" type="number" min="0" step="0.5" value="10" /> %</label>
-              <label>L3 <input id="target-3" type="number" min="0" step="0.5" value="10" /> %</label>
+              <label>Level 1: <input id="target-1" size="4" value="10%" /></label>
+              <label>Level 2: <input id="target-2" size="4" value="10%" /></label>
+              <label>Level 3: <input id="target-3" size="4" value="10%" /></label>
             </div>
-            <div class="param-group">
-              <label>Tolerance: <input id="tolerance" type="text" /></label>
-            </div>
-            <button id="inflate-btn" type="button" disabled>Run Simulation</button>
+            <label>Tolerance: <input id="tolerance" size="10" value="1e-04" /></label>
+            <label><input type="checkbox" id="show-face-normals" /> Face normals</label>
+            <label><input type="checkbox" id="show-vertex-normals" /> Vertex normals</label>
+            <label><input type="checkbox" id="show-repulsive-forces" /> Repulsive forces</label>
           </div>
         </fieldset>
 
         <div id="canvas-area" class="drawing"><canvas id="net-canvas"></canvas></div>
-        <div id="viewer" class="drawing">
-          <p class="placeholder">Build a net on the left, then click Inflate.</p>
-        </div>
+        <div id="viewer" class="drawing"></div>
 
         <div id="builder-status" class="status"></div>
         <div id="inflater-status" class="status"></div>
