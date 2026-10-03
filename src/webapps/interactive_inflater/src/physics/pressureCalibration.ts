@@ -23,6 +23,8 @@ export interface PressureCalibrationOptions {
   repulsionStrength?: number;
   shouldStop?: () => boolean;
   onProgress?: (cumulativeSteps: number) => void;
+  /** Called after each trial (for diagnostics). */
+  onTrial?: (t: { pressure: number; rmsStretchPct: number; steps: number; converged: boolean; usable: boolean }) => void;
 }
 
 export interface PressureCalibrationResult {
@@ -101,6 +103,7 @@ export async function estimatePressureForTargetStretch(
     const trialPts = positionsToPts(result.positions, vertexIds);
     const insideOut = sane && insideOutChecker.isInsideOut(trialPts);
     const usable = sane && !insideOut;
+    options.onTrial?.({ pressure, rmsStretchPct: rmsStretch, steps: result.stepsTaken, converged: result.converged, usable });
     let error = Infinity;
     if (usable) {
       error = Math.abs(rmsStretch - targetRmsPct);

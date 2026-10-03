@@ -1,7 +1,18 @@
 import { type Vec3 } from "./vec3";
 
+/** One placed polygon of the builder's flat layout (pixels, y down; edge length 70). */
+export interface NetLayoutEntry {
+  shape_id?: number;
+  n?: number;
+  cx: number;
+  cy: number;
+  rotation: number;
+}
+
 export interface NetSpec {
   faces: number[][];
+  net_layout?: NetLayoutEntry[];
+  source_polygon_id?: number[];
 }
 
 export const EDGE_LENGTH = 1.0;

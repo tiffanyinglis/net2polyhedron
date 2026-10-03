@@ -40,3 +40,16 @@ export function randomFaceColors(baseFaces: number[][], palette: number[] = FACE
   }
   return colors;
 }
+
+/** Fixed colour per polygon side count (mirrors utils/polygon_colors.POLYGON_COLORS); sides >8 reuse 8's. */
+const POLYGON_COLORS: Record<number, number> = {
+  3: 0x30914a, 4: 0x24a897, 5: 0x2d85d2, 6: 0x584eda, 7: 0x692dd2, 8: 0x9b2dd2,
+};
+
+export function polygonColor(sides: number): number {
+  return POLYGON_COLORS[Math.min(8, Math.max(3, sides))];
+}
+
+export function polygonFaceColors(baseFaces: number[][]): number[] {
+  return baseFaces.map((f) => polygonColor(f.length));
+}

@@ -33,7 +33,8 @@ directly or host anywhere (it's pure client-side, no API calls).
 - Runs the full pipeline client-side: fan-triangulate -> Level 0 spring+repulsion relax (with
   orientation-consistency seed retry) -> Level 1 pressure calibration to a target RMS stretch,
   exactly mirroring `interactive_inflater_app`'s own "Full Inflate" for a single net.
-- Renders the inflated result in a simple orbit/zoom Three.js viewer.
+- Renders the inflated result in a simple orbit/zoom Three.js viewer, with a UI modelled on the
+  Python app's release mode (Setup box, Convergence History table, Net + Level 0-3 panels, Colour menu; P/M/R keys).
 
 **Not yet ported** (future steps): open/boundary nets (`pressure_exclude_faces`/
 `rms_exclude_edges`), subdivision past Level 1 (Level 2/3), the 2D builder canvas, diff-inflate/

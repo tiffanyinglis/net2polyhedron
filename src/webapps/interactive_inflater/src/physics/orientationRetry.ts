@@ -44,7 +44,9 @@ export async function relaxInitialConfigurationWithOrientationRetry(
 
   const scoreFn = (attempt: { relaxResult: RelaxInitialResult; signs: number[] }): [boolean, number] => {
     const signs = new Set(attempt.signs.filter((s) => s !== 0));
-    const accepted = signs.size > 0 && [...signs].every((s) => s <= 1);
+    // Only all-outward (+1) counts: an all-inward (-1) shell is inside-out, not consistent
+    // (mirrors stretchy_mesh._is_orientation_consistent: signs <= {+1}).
+    const accepted = [...signs].every((s) => s === 1);
     return [accepted, fractionFlipped(attempt.signs)];
   };
 

@@ -8,6 +8,13 @@ const LIGHT_RIG: [[number, number, number], number][] = [
   [[0, 0, 1], 2.2],
 ];
 
+/** Rotation/zoom shared by every Level panel (drag any panel -> all rotate together, as in the
+ * Python app); each panel still auto-fits its own mesh's size. */
+export class SharedCamera {
+  orientation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.5, 0.6, 0, "YXZ"));
+  zoom = 1;
+}
+
 /** Minimal Three.js mesh viewer: a camera-relative key/fill/headlight rig (matching the Python
  * apps' own plotter_lighting rig), drag-to-orbit, scroll-to-zoom, auto-fit on load. No build-step-free CDN
  * dependency here since this whole webapp goes through Vite/npm -- three is a normal dependency. */
@@ -17,13 +24,16 @@ export class Viewer {
   private camera: THREE.PerspectiveCamera;
   private mesh: THREE.Mesh | null = null;
   private wireframe: THREE.LineSegments | null = null;
-  private orientation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.5, 0.6, 0, "YXZ"));
-  private distance = 4;
+  private maxRadius = 1;
   private lights: { light: THREE.DirectionalLight; dir: THREE.Vector3 }[] = [];
   private dragging = false;
   private lastXY: [number, number] = [0, 0];
 
-  constructor(container: HTMLElement) {
+  constructor(
+    container: HTMLElement,
+    private cam: SharedCamera,
+    private onCameraChange: () => void,
+  ) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     container.appendChild(this.renderer.domElement);
@@ -59,16 +69,16 @@ export class Viewer {
       // Rotate about the camera's own axes so the drag direction always matches the screen,
       // even after going over the poles (yaw/pitch angles flip the horizontal direction there).
       const delta = new THREE.Quaternion().setFromEuler(new THREE.Euler(-dy * 0.01, -dx * 0.01, 0));
-      this.orientation.multiply(delta).normalize();
-      this.render();
+      this.cam.orientation.multiply(delta).normalize();
+      this.onCameraChange();
     });
     this.renderer.domElement.addEventListener(
       "wheel",
       (e) => {
         e.preventDefault();
-        this.distance *= e.deltaY > 0 ? 1.1 : 0.9;
-        this.distance = Math.max(0.5, Math.min(50, this.distance));
-        this.render();
+        this.cam.zoom *= e.deltaY > 0 ? 1 / 1.1 : 1.1;
+        this.cam.zoom = Math.max(0.3, Math.min(4, this.cam.zoom));
+        this.onCameraChange();
       },
       { passive: false },
     );
@@ -158,16 +168,41 @@ export class Viewer {
     );
     this.scene.add(this.wireframe);
 
-    this.distance = Math.max(1, maxRadius * 2.6);
+    this.maxRadius = maxRadius;
     this.render();
   }
 
-  private render() {
-    this.camera.quaternion.copy(this.orientation);
-    this.camera.position.set(0, 0, this.distance).applyQuaternion(this.orientation);
+  /** Empties the panel (a level that hasn't been computed yet). */
+  clear() {
+    for (const obj of [this.mesh, this.wireframe]) {
+      if (!obj) continue;
+      this.scene.remove(obj);
+      obj.geometry.dispose();
+    }
+    this.mesh = null;
+    this.wireframe = null;
+    this.render();
+  }
+
+  /** Recolours the current mesh in place (one colour per original face) without refitting the camera. */
+  setBaseColors(baseColors: number[]) {
+    if (!this.mesh) return;
+    (this.mesh.material as THREE.MeshPhongMaterial[]).forEach((m, b) => m.color.set(baseColors[b]));
+    this.render();
+  }
+
+  /** Distance that fits the mesh's bounding sphere, widened for a panel narrower than tall. */
+  private fitDistance(): number {
+    return (Math.max(1, this.maxRadius * 2.6)) / Math.min(1, this.camera.aspect);
+  }
+
+  render() {
+    const orientation = this.cam.orientation;
+    this.camera.quaternion.copy(orientation);
+    this.camera.position.set(0, 0, this.fitDistance() / this.cam.zoom).applyQuaternion(orientation);
     // Directional lights (aimed at the origin) follow the camera's orientation.
     for (const { light, dir } of this.lights) {
-      light.position.copy(dir).normalize().multiplyScalar(10).applyQuaternion(this.orientation);
+      light.position.copy(dir).normalize().multiplyScalar(10).applyQuaternion(orientation);
     }
     this.renderer.render(this.scene, this.camera);
   }

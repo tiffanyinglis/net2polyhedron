@@ -29,29 +29,15 @@ describe("loadNet", () => {
 });
 
 describe("fullInflate", () => {
-  // Deliberately NOT asserting an exact target match here. The stretch-vs-pressure response
-  // isn't always monotonic (multi_trial_inflater.estimate_pressure_for_target_stretch's own
-  // docstring documents this on the Python side too: "stretch isn't always monotonic in
-  // pressure (three_squares.poly stretches LESS as pressure rises)") -- confirmed directly here:
-  // at near-zero pressure this topology's own Level 0 output settles to a residual ~7% RMS
-  // stretch floor (repulsion-vs-spring equilibrium, independent of pressure), dips to a local
-  // minimum around pressure~1.5, then rises again toward a buckling ceiling where the plain-
-  // linear-spring force law has no equilibrium at all (pressure push ~area, spring pull only
-  // ~length -- physics.md's Force model section; test_stretchy_mesh.py's own
-  // test_relax_once_pressure_increases_stretch_over_a_normal_working_range documents the same
-  // ceiling in Python: "a range comfortably below the pressure where a plain cube stops having
-  // any equilibrium at all... no runaway guard"). Which target is reachable from Level 0's own
-  // random starting cloud is therefore genuinely seed-dependent in BOTH languages -- this JS
-  // port uses an uncorrelated PRNG from Python's numpy, so a specific target that happens to
-  // work for one seed in one language has no reason to work for an unrelated seed in the other.
-  // The actual correctness check against Python lives in pythonParity.test.ts (identical fixed
-  // inputs, no RNG, matching Python's reference values bit-for-bit) -- this test is just an
-  // end-to-end smoke test that the full random-seeded pipeline runs to completion and produces a
-  // sane, positive, finite result.
+  // Regression: orientationRetry once accepted an all-inward (inside-out) Level 0, which left
+  // the tetrahedron's pressure response near-flat (~2.6% RMS) and blowing up at higher pressure.
+  // With the fix it lands near the target, as the Python solver does (9.7% for target 10).
+  // Exact cross-language values live in pythonParity.test.ts.
   it("inflates a tetrahedron end-to-end without throwing", async () => {
     const result = await fullInflate(TETRAHEDRON, { targetRmsPct: 10 });
     expect(Number.isFinite(result.rmsStretchPct)).toBe(true);
-    expect(result.rmsStretchPct).toBeGreaterThan(0);
+    expect(result.rmsStretchPct).toBeGreaterThan(8);
+    expect(result.rmsStretchPct).toBeLessThan(12);
     expect(result.positions.size).toBeGreaterThan(4);
     expect(result.faces.length).toBe(12); // 4 base faces, fanned into 3 triangles each
   }, 30_000);

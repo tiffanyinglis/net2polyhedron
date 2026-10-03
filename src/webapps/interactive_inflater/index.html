@@ -3,33 +3,57 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Interactive Inflater (web)</title>
+    <title>Interactive Inflater</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
     <div id="app">
-      <aside id="controls">
-        <h1>Interactive Inflater</h1>
-
-        <label for="net-select">Net</label>
-        <select id="net-select"></select>
-
-        <div class="button-row">
-          <button id="relax-btn" disabled>Inflate</button>
+      <nav id="menubar">
+        <div class="menu">
+          <button class="menu-title">Colour</button>
+          <div class="menu-items">
+            <button class="menu-item" data-color-mode="polygon"><span class="check"></span>Polygon-specific<kbd>P</kbd></button>
+            <button class="menu-item" data-color-mode="multi"><span class="check"></span>Multi-colour<kbd>M</kbd></button>
+            <hr />
+            <button class="menu-item" id="randomize-item">Randomize<kbd>R</kbd></button>
+          </div>
         </div>
+      </nav>
 
-        <dl id="status">
-          <dt>Stage</dt>
-          <dd id="status-stage">idle</dd>
-          <dt>Steps</dt>
-          <dd id="status-steps">--</dd>
-          <dt>RMS stretch %</dt>
-          <dd id="status-rms">--</dd>
-          <dt>Pressure</dt>
-          <dd id="status-pressure">--</dd>
-        </dl>
-      </aside>
-      <main id="viewer"></main>
+      <fieldset id="setup">
+        <legend>Setup</legend>
+        <div class="setup-row">
+          <label>Choose a net: <select id="net-select"><option value="">(none)</option></select></label>
+          <div class="param-group">
+            <span>Target RMS stretch:</span>
+            <label>Level 1: <input id="target-1" size="4" value="10%" /></label>
+            <label title="Level 2 is not implemented yet">Level 2: <input id="target-2" size="4" value="10%" disabled /></label>
+            <label title="Level 3 is not implemented yet">Level 3: <input id="target-3" size="4" value="10%" disabled /></label>
+          </div>
+          <label>Tolerance: <input id="tolerance" size="10" value="1e-04" /></label>
+          <button id="inflate-btn" disabled>Run Simulation</button>
+        </div>
+      </fieldset>
+
+      <div id="status" class="info"></div>
+
+      <fieldset id="history-box">
+        <legend>Convergence History</legend>
+        <table id="history">
+          <thead>
+            <tr><th>Level</th><th>Pressure</th><th>Steps</th><th>RMS Stretch %</th><th>Simulation Time</th><th>Cumulative Time</th><th>Convergence</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </fieldset>
+
+      <div id="panels">
+        <section class="panel"><div class="panel-title">Net</div><div class="panel-body" id="panel-net"></div></section>
+        <section class="panel"><div class="panel-title">Level 0</div><div class="panel-body" id="panel-0"><div class="panel-msg"></div></div></section>
+        <section class="panel"><div class="panel-title">Level 1</div><div class="panel-body" id="panel-1"><div class="panel-msg"></div></div></section>
+        <section class="panel"><div class="panel-title">Level 2</div><div class="panel-body" id="panel-2"><div class="panel-msg"></div></div></section>
+        <section class="panel"><div class="panel-title">Level 3</div><div class="panel-body" id="panel-3"><div class="panel-msg"></div></div></section>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

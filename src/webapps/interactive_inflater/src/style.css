@@ -1,10 +1,16 @@
+/* Dark look mirroring the Python apps (common/ui_theme: PLOT_THEME, STATUS_COLORS, menu colours). */
 :root {
   color-scheme: dark;
-  --bg: #1b1d22;
-  --panel: #24262c;
-  --fg: #e6e6e6;
-  --accent: #5fa8ff;
-  --border: #3a3d45;
+  --plot-bg: #1c1c1c;
+  --plot-fg: #e0e0e0;
+  --panel: #2b2b2b;
+  --menu-active: #3a3a3a;
+  --menu-disabled: #6e6e6e;
+  --border: #4a4a4a;
+  --info: #3b6ea5;
+  --success: #1a7f37;
+  --error: #cf222e;
+  --warn: #9a6700;
 }
 
 * {
@@ -14,86 +20,237 @@
 html, body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: system-ui, sans-serif;
+  background: var(--panel);
+  color: var(--plot-fg);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
 }
 
 #app {
   display: flex;
+  flex-direction: column;
   height: 100%;
 }
 
-#controls {
-  width: 260px;
-  flex-shrink: 0;
-  padding: 1rem;
-  background: var(--panel);
-  border-right: 1px solid var(--border);
+/* Menu bar */
+#menubar {
   display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+  background: var(--plot-bg);
+  user-select: none;
 }
 
-#controls h1 {
-  font-size: 1.1rem;
-  margin: 0 0 0.5rem;
+.menu {
+  position: relative;
 }
 
-#controls label {
-  font-size: 0.85rem;
-  opacity: 0.8;
+.menu-title {
+  padding: 4px 10px;
+  background: none;
+  border: 0;
+  cursor: default;
 }
 
-#controls select, #controls button {
+.menu:hover > .menu-title,
+.menu:focus-within > .menu-title {
+  background: var(--menu-active);
+}
+
+.menu-items {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 190px;
+  padding: 2px 0;
+  background: var(--plot-bg);
+  border: 1px solid var(--border);
+  z-index: 10;
+}
+
+.menu:hover > .menu-items,
+.menu:focus-within > .menu-items {
+  display: block;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
   width: 100%;
-  padding: 0.4rem;
-  background: var(--bg);
-  color: var(--fg);
+  padding: 4px 12px 4px 4px;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: default;
+}
+
+.menu-item:hover:not(:disabled) {
+  background: var(--menu-active);
+}
+
+.menu-item:disabled {
+  color: var(--menu-disabled);
+}
+
+.menu-item .check {
+  width: 18px;
+  text-align: center;
+}
+
+.menu-item.selected .check::before {
+  content: "\25CF";
+  font-size: 9px;
+}
+
+.menu-item kbd {
+  margin-left: auto;
+  padding-left: 24px;
+  font-family: inherit;
+  color: var(--menu-disabled);
+}
+
+.menu-heading {
+  padding: 3px 12px;
+  color: var(--menu-disabled);
+}
+
+.menu hr {
+  margin: 2px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* Setup box (net picker, target stretch, tolerance, run button) */
+fieldset {
+  margin: 0 14px 8px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 4px;
 }
 
-#controls button {
+#setup { margin-top: 12px; }
+
+legend {
+  padding: 0 4px;
+}
+
+.setup-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px 48px;
+}
+
+.param-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+input, select, button#inflate-btn {
+  padding: 3px 6px;
+  background: var(--plot-bg);
+  color: var(--plot-fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+}
+
+input:disabled {
+  color: var(--menu-disabled);
+}
+
+button#inflate-btn {
+  padding: 5px 14px;
+  background: var(--panel);
   cursor: pointer;
 }
 
-#controls button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+button#inflate-btn:hover:not(:disabled) {
+  background: var(--menu-active);
 }
 
-.button-row {
-  display: flex;
-  gap: 0.5rem;
+button#inflate-btn:disabled {
+  color: var(--menu-disabled);
+  cursor: default;
 }
 
-.button-row button {
+/* Five drawing areas side by side: Net, Levels 0-3 */
+#panels {
   flex: 1;
-}
-
-#status {
-  margin: 0;
+  min-height: 200px;
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.25rem 0.75rem;
-  font-size: 0.85rem;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0;
+  padding: 0 14px 14px;
 }
 
-#status dt {
-  opacity: 0.7;
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
-#status dd {
-  margin: 0;
-  text-align: right;
+.panel-title {
+  padding-bottom: 2px;
+  text-align: center;
+  font-size: 15px;
 }
 
-#viewer {
+.panel-body {
   flex: 1;
   position: relative;
+  min-height: 0;
+  border: 1px solid var(--plot-fg);
+  background: var(--plot-bg);
+  overflow: hidden;
 }
 
-#viewer canvas {
+.panel-body canvas {
   display: block;
 }
+
+.panel-msg {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  color: var(--plot-fg);
+  pointer-events: none;
+}
+
+/* Convergence history table: coloured text per row state, like the Treeview tags */
+#history {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+#history th, #history td {
+  padding: 3px 6px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+#history th {
+  border-bottom: 1px solid var(--border);
+}
+
+#history tr.running td { color: #e0b400; }
+#history tr.converged td { color: var(--success); }
+#history tr.not_converged td { color: var(--error); }
+
+/* Status bar: coloured text, like the Python apps' status_label */
+#status {
+  padding: 0 14px 8px;
+  min-height: 1.6em;
+}
+
+#status.info { color: var(--info); }
+#status.success { color: var(--success); }
+#status.error { color: var(--error); }
+#status.warn { color: var(--warn); }
