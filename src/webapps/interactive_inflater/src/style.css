@@ -229,7 +229,8 @@ button#inflate-btn:disabled {
 }
 
 /* Centred loading spinner, shown while a panel's own content is being computed or loaded. */
-.panel-body.loading::after {
+.panel-body.loading::after,
+.viewer-cell.loading::after {
   content: "";
   position: absolute;
   left: 50%;
@@ -312,6 +313,15 @@ button#inflate-btn:disabled {
   display: none;
 }
 
+/* Same height as a Level panel's replay bar, kept invisible under the Net panel in debug mode so the drawing areas line up. */
+.replay.spacer {
+  visibility: hidden;
+}
+
+.menu-item[hidden] {
+  display: none;
+}
+
 .replay input {
   flex: 1;
   min-width: 0;
@@ -322,3 +332,109 @@ button#inflate-btn:disabled {
 #status.success { color: var(--success); }
 #status.error { color: var(--error); }
 #status.warn { color: var(--warn); }
+
+
+/* Views: Inflater (setup, history, five panels) and Viewer (2x2 grid over saved sessions) */
+#inflater-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#inflater-view[hidden],
+#viewer-view[hidden] {
+  display: none;
+}
+
+#viewer-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+}
+
+#viewer-grid {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 0;
+}
+
+.viewer-cell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--plot-fg);
+  background: var(--plot-bg);
+  overflow: hidden;
+}
+
+.viewer-cell canvas {
+  display: block;
+}
+
+#viewer-message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--menu-disabled);
+  pointer-events: none;
+}
+
+#viewer-message[hidden] {
+  display: none;
+}
+
+#viewer-counter {
+  min-height: 1.6em;
+  padding-top: 4px;
+  text-align: center;
+  color: var(--menu-disabled);
+}
+
+/* Unsaved-changes prompt when leaving the Viewer (or closing the page) */
+#unsaved-dialog {
+  max-width: 420px;
+  padding: 16px 18px;
+  background: var(--plot-bg);
+  color: var(--plot-fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+#unsaved-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+#unsaved-dialog p {
+  margin: 0;
+  white-space: pre-line;
+}
+
+#unsaved-dialog .dialog-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+#unsaved-dialog button {
+  padding: 4px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+#unsaved-dialog button:hover {
+  background: var(--menu-active);
+}

@@ -22,10 +22,14 @@ const REPULSION_FORCE_COLOR = 0xff00ff;
 const NORMAL_LENGTH_FRACTION = 0.5;
 
 // White outline tracing each original (base) face's boundary: a tube per edge with a sphere at
-// every joint, so caps and corners are rounded. Radius is a fraction of the mesh's own size.
+// every joint. Widths are in CSS pixels; the tube radius is recomputed as the camera zooms, so the
+// outline keeps that width on screen. The thin width is used when subdivision lines are hidden.
 const OUTLINE_COLOR = 0xffffff;
-const OUTLINE_RADIUS_FRACTION = 0.005;
+const OUTLINE_WIDTH_PX = 3;
+const OUTLINE_THIN_WIDTH_PX = 1.5;
 const OUTLINE_RADIAL_SEGMENTS = 8;
+/** How far the zoom must change (as a fraction) before the outline tubes are rebuilt at the new radius. */
+const OUTLINE_REBUILD_TOLERANCE = 0.02;
 
 function sub3(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -140,6 +144,13 @@ function repulsionSegments(pts: Vec3[], faces: number[][]): number[] {
   return out;
 }
 
+/** A camera's full value, as plain numbers so it can be copied, compared and saved. */
+export interface CameraState {
+  orientation: [number, number, number, number];
+  zoom: number;
+  pan: [number, number];
+}
+
 /** Rotation/zoom shared by every Level panel (drag any panel -> all rotate together, as in the
  * Python app); each panel still auto-fits its own mesh's size. */
 export class SharedCamera {
@@ -158,6 +169,27 @@ export class SharedCamera {
     this.zoom = 1;
     this.pan = [0, 0];
   }
+
+  snapshot(): CameraState {
+    const { x, y, z, w } = this.orientation;
+    return { orientation: [x, y, z, w], zoom: this.zoom, pan: [this.pan[0], this.pan[1]] };
+  }
+
+  apply(state: CameraState) {
+    this.orientation.set(...state.orientation);
+    this.zoom = state.zoom;
+    this.pan = [state.pan[0], state.pan[1]];
+  }
+}
+
+/** Notifications a Viewer gives its owner, so undo/redo can record what the camera was before a change. */
+export interface CameraHooks {
+  /** A drag or pan gesture is starting (before the camera moves). */
+  onGestureStart?: () => void;
+  /** A drag or pan gesture has ended (after its last move). */
+  onGestureEnd?: () => void;
+  /** A single discrete change (one wheel tick, a middle-click reset) is about to happen. */
+  onBeforeDiscreteEdit?: () => void;
 }
 
 /** Minimal Three.js mesh viewer: a camera-relative key/fill/headlight rig (matching the Python
@@ -185,18 +217,24 @@ export class Viewer {
   private outlineMaterial = new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR });
   private outlineTube = new THREE.CylinderGeometry(1, 1, 1, OUTLINE_RADIAL_SEGMENTS); // unit length along Y
   private outlineJoint = new THREE.SphereGeometry(1, OUTLINE_RADIAL_SEGMENTS, 6);
+  /** Tube radius (world units) the outline was last built with. */
+  private builtOutlineRadius = 0;
+  private showOutline = true;
+  private showSubdivisions = false;
 
   constructor(
     container: HTMLElement,
     private cam: SharedCamera,
     private onCameraChange: () => void,
+    private hooks: CameraHooks = {},
   ) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1b1d22);
+    // Same as the net panel's background (--plot-bg in style.css), so every drawing area matches.
+    this.scene.background = new THREE.Color(0x1c1c1c);
 
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
 
@@ -219,16 +257,25 @@ export class Viewer {
       if (e.button === 1) {
         // Middle-click resets the whole shared view (rotation, zoom and pan).
         e.preventDefault();
-        this.cam.reset();
-        this.onCameraChange();
+        // Resetting an already-default view changes nothing, so it's not an undo step.
+        if (!this.isDefaultView()) {
+          this.hooks.onBeforeDiscreteEdit?.();
+          this.cam.reset();
+          this.onCameraChange();
+        }
         return;
       }
       if (e.button !== 0 && e.button !== 2) return;
       this.dragging = true;
       this.panning = e.button === 2;
       this.lastXY = [e.clientX, e.clientY];
+      this.hooks.onGestureStart?.();
     });
-    window.addEventListener("pointerup", () => (this.dragging = false));
+    window.addEventListener("pointerup", () => {
+      if (!this.dragging) return;
+      this.dragging = false;
+      this.hooks.onGestureEnd?.();
+    });
     window.addEventListener("pointermove", (e) => {
       if (!this.dragging) return;
       const dx = e.clientX - this.lastXY[0];
@@ -252,14 +299,25 @@ export class Viewer {
       "wheel",
       (e) => {
         e.preventDefault();
-        this.cam.zoom *= e.deltaY > 0 ? 1 / 1.1 : 1.1;
-        this.cam.zoom = Math.max(0.3, Math.min(4, this.cam.zoom));
+        const zoom = Math.max(0.3, Math.min(4, this.cam.zoom * (e.deltaY > 0 ? 1 / 1.1 : 1.1)));
+        // At the zoom limit a tick changes nothing, so it's not an undo step.
+        if (zoom === this.cam.zoom) return;
+        this.hooks.onBeforeDiscreteEdit?.();
+        this.cam.zoom = zoom;
         this.onCameraChange();
       },
       { passive: false },
     );
 
     this.render();
+  }
+
+  /** True when the shared camera is at its starting rotation, zoom 1 and no pan. */
+  private isDefaultView(): boolean {
+    const d = new SharedCamera().snapshot();
+    const c = this.cam.snapshot();
+    return c.zoom === d.zoom && c.pan[0] === 0 && c.pan[1] === 0 &&
+      c.orientation.every((v, i) => Math.abs(v - d.orientation[i]) < 1e-9);
   }
 
   private resize(container: HTMLElement) {
@@ -354,6 +412,7 @@ export class Viewer {
       wireGeometry,
       new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.25, transparent: true }),
     );
+    this.wireframe.visible = this.showSubdivisions;
     this.scene.add(this.wireframe);
 
     this.maxRadius = maxRadius;
@@ -401,13 +460,31 @@ export class Viewer {
     this.render();
   }
 
+  /** Shows or hides the base-face outline and the subdivision (fine triangle) wireframe. */
+  setLayers(outline: boolean, subdivisions: boolean) {
+    this.showOutline = outline;
+    this.showSubdivisions = subdivisions;
+    this.rebuildOutline(); // the width depends on whether subdivisions are shown too
+    if (this.wireframe) this.wireframe.visible = subdivisions;
+    this.render();
+  }
+
   setOverlays(flags: DebugOverlays) {
     this.overlayFlags = flags;
     this.rebuildOverlays();
     this.render();
   }
 
-  /** Rebuilds the base-face outline at the current positions (tubes + joint spheres as instanced meshes). */
+  /** Tube radius, in world units, that makes the outline `OUTLINE_WIDTH_PX` (or the thin width) wide on screen at the current zoom. */
+  private outlineWorldRadius(): number {
+    // Same camera distance and 45° field of view as render(): one pixel spans this many world units.
+    const distance = this.fitDistance() / this.cam.zoom;
+    const worldPerPixel = (2 * distance * Math.tan(Math.PI / 8)) / this.height;
+    const widthPx = this.showSubdivisions ? OUTLINE_WIDTH_PX : OUTLINE_THIN_WIDTH_PX;
+    return (worldPerPixel * widthPx) / 2;
+  }
+
+  /** Rebuilds the base-face outline at the current positions and the current zoom (tubes + joint spheres as instanced meshes). */
   private rebuildOutline() {
     for (const obj of this.outlineObjects) {
       this.scene.remove(obj);
@@ -417,7 +494,8 @@ export class Viewer {
     if (!this.meshData || !this.outlineEdges.length) return;
 
     const { pts } = this.meshData;
-    const radius = this.maxRadius * OUTLINE_RADIUS_FRACTION;
+    const radius = this.outlineWorldRadius();
+    this.builtOutlineRadius = radius;
     const up = new THREE.Vector3(0, 1, 0);
     const tubeMatrices: THREE.Matrix4[] = [];
     const jointIds = new Set<number>();
@@ -449,6 +527,7 @@ export class Viewer {
   private addOutlineInstances(geometry: THREE.BufferGeometry, matrices: THREE.Matrix4[]) {
     if (!matrices.length) return;
     const instances = new THREE.InstancedMesh(geometry, this.outlineMaterial, matrices.length);
+    instances.visible = this.showOutline;
     matrices.forEach((m, i) => instances.setMatrixAt(i, m));
     instances.instanceMatrix.needsUpdate = true;
     this.scene.add(instances);
@@ -492,6 +571,13 @@ export class Viewer {
   }
 
   render() {
+    // The outline's pixel width needs a new tube radius whenever the zoom (or the panel's height) changes.
+    if (this.outlineEdges.length) {
+      const radius = this.outlineWorldRadius();
+      if (Math.abs(radius - this.builtOutlineRadius) > OUTLINE_REBUILD_TOLERANCE * this.builtOutlineRadius) {
+        this.rebuildOutline();
+      }
+    }
     const orientation = this.cam.orientation;
     this.camera.quaternion.copy(orientation);
     const fit = this.fitDistance();

@@ -1,5 +1,7 @@
 import { type BuilderConnection, type NetSpec } from "./physics/mesh";
 import { polygonColor } from "./colors";
+import { type NetView } from "./editState";
+import { type CameraHooks } from "./viewer";
 
 /** Builder canvas edge length in pixels (net_layout's cx/cy and connection handles are in these units). */
 const BUILDER_EDGE_LENGTH = 70;
@@ -108,20 +110,28 @@ export class NetPanel {
   private panning = false;
   private lastXY: [number, number] = [0, 0];
 
-  constructor(private container: HTMLElement) {
+  /** `hooks` report the start and end of a pan, and each zoom or reset, so the owner can record undo steps. */
+  constructor(
+    private container: HTMLElement,
+    private hooks: CameraHooks = {},
+  ) {
     container.appendChild(this.canvas);
     new ResizeObserver(() => this.redraw()).observe(container);
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault()); // right-drag pans, no menu
     this.canvas.addEventListener("pointerdown", (e) => {
       if (e.button === 1) {
         e.preventDefault();
-        this.pan = [0, 0];
-        this.zoom = 1;
-        this.redraw();
+        if (this.pan[0] !== 0 || this.pan[1] !== 0 || this.zoom !== 1) {
+          this.hooks.onBeforeDiscreteEdit?.();
+          this.pan = [0, 0];
+          this.zoom = 1;
+          this.redraw();
+        }
       } else if (e.button === 2) {
         this.panning = true;
         this.lastXY = [e.clientX, e.clientY];
         this.canvas.setPointerCapture(e.pointerId);
+        this.hooks.onGestureStart?.();
       }
     });
     this.canvas.addEventListener("pointermove", (e) => {
@@ -134,14 +144,32 @@ export class NetPanel {
       "wheel",
       (e) => {
         e.preventDefault();
-        this.zoom = Math.max(0.2, Math.min(8, this.zoom * (e.deltaY > 0 ? 1 / 1.1 : 1.1)));
+        const zoom = Math.max(0.2, Math.min(8, this.zoom * (e.deltaY > 0 ? 1 / 1.1 : 1.1)));
+        if (zoom === this.zoom) return; // at the limit a tick changes nothing
+        this.hooks.onBeforeDiscreteEdit?.();
+        this.zoom = zoom;
         this.redraw();
       },
       { passive: false },
     );
-    const endPan = () => (this.panning = false);
+    const endPan = () => {
+      if (!this.panning) return;
+      this.panning = false;
+      this.hooks.onGestureEnd?.();
+    };
     this.canvas.addEventListener("pointerup", endPan);
     this.canvas.addEventListener("pointercancel", endPan);
+  }
+
+  /** The current pan and zoom, for undo/redo. */
+  view(): NetView {
+    return { pan: [this.pan[0], this.pan[1]], zoom: this.zoom };
+  }
+
+  setView(view: NetView) {
+    this.pan = [view.pan[0], view.pan[1]];
+    this.zoom = view.zoom;
+    this.redraw();
   }
 
   setNet(spec: NetSpec | null) {

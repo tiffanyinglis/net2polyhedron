@@ -83,6 +83,8 @@ Open models are meshes that are not closed. When inflated naively, because there
 
 The improved algorithm can handle incremental inflation, open models (as opposed to closed), small features like legs/head, self-joined polygons, etc.
 
+Don't forget to mention pressure and RMS calculation exclusion near open edges.
+
 Level 0:
 - start with a random set of points. the edges are basic springs with $F=ks$ where $s$ is relative stretch
 - if an n-gon face has self-joins, then it's split from the centroid into n triangles

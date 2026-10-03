@@ -1,4 +1,12 @@
-import { type NetLayoutEntry } from "./physics/mesh";
+import { type NetLayoutEntry, type NetSpec } from "./physics/mesh";
+
+export type ColorMode = "polygon" | "multi";
+
+/** The Colour menu's state for one view: the mode, plus the Multi-colour palette (one colour per base face). */
+export interface ColorState {
+  mode: ColorMode;
+  multiColors: number[];
+}
 
 /** Multi-colour support (mirrors common/ui_theme.FACE_COLORS and utils/graph_face_coloring). */
 const BRIGHT = [0x003a7d, 0x008dff, 0xff73b6, 0xc701ff, 0x4ecb8d, 0xff9d3a, 0xf9e858, 0xd83034];
@@ -71,4 +79,21 @@ export function polygonFaceColors(
     if (entry.shape_id !== undefined && entry.n !== undefined) sidesOf.set(entry.shape_id, entry.n);
   }
   return sourcePolygonIds.map((id) => polygonColor(sidesOf.get(id) ?? faceCount.get(id) ?? 3));
+}
+
+/** The colour each base face draws with under `colors` -- the one place Inflater and Viewer both get it. */
+export function displayColors(
+  colors: ColorState,
+  baseFaces: number[][],
+  spec: Pick<NetSpec, "source_polygon_id" | "net_layout"> | null,
+): number[] {
+  return colors.mode === "polygon"
+    ? polygonFaceColors(baseFaces, spec?.source_polygon_id, spec?.net_layout)
+    : colors.multiColors;
+}
+
+/** Regenerates the Multi-colour palette when it's missing or doesn't match the net's face count
+ * (mirrors inflate_polyhedron_app's lazy regeneration in _apply_color_mode). */
+export function fitMultiColors(colors: ColorState, baseFaces: number[][]) {
+  if (colors.multiColors.length !== baseFaces.length) colors.multiColors = randomFaceColors(baseFaces);
 }

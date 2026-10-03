@@ -27,6 +27,18 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
   zoom any panel moves all; each auto-fits own mesh). L0 redraws live; L1 shows "Computing..."
   until solved; L2/L3 likewise once solved. Choosing a net only loads it (no auto-run). Default colour =
   polygon-specific (`colors.ts`). `main.ts` wires it.
+- **File menu** (`index.html`, wired in `main.ts`): Load Model... (`.poly`/`.json` from disk ->
+  `installNet`, shown as a custom "Choose a net" option), Load Session... / Save Session... (`.hippo`).
+  File > Include Replay Frames is a checkable option (default off). Save opens the system save
+  picker (`showSaveFilePicker`, startIn downloads, suggested `<netName>.hippo`; fallback where
+  unsupported: plain anchor download). Disabled while running / with no net. Format + (de)serialization
+  lives in `src/session.ts` (pure, tested in `src/__tests__/session.test.ts`): own schema, tagged
+  `format: "hippo-session"`, `version: 1` -- NOT the Python app's `.hippo` schema (not compatible).
+  Saves net spec, colour mode/multi colours, Target RMS, tolerance, camera (orientation/zoom/pan),
+  history, each level's topology+positions, and per-level replay frames as
+  `replay: {vertexIds, frames: [{steps, xyz}]}` (always written; optional on load, so older
+  frame-less files still open).
+  Not saved: Net-panel zoom/pan.
 - **Debug mode** ("d" key, same as Python; title gets " (debug mode)"): reveals a Setup-box row of
   three toggles -- face normals (yellow), vertex normals (cyan), repulsive-force arrows (magenta)
   -- drawn per panel by `Viewer.setOverlays` (`viewer.ts`). Turning debug off clears them. No
@@ -54,13 +66,23 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
 - **Viewer** (`viewer.ts`): Three.js, drag-orbit (camera-axis quaternion), wheel zoom, key/fill/
   headlight rig matching Python plotter_lighting, per-base-face colors (`setBaseColors`
   recolours in place) + wireframe.
-- **Nets** (`public/nets/`, copied from `data/input/stretchy_nets/`; `.poly` == `.json` format):
+- **Nets** (`data/inputs/`, copied from `data/input/stretchy_nets/`; `.poly` == `.json` format):
   5 Platonic, cone, tube, ravioli, samosa, spider_leg, turtle, goose, cannoli_open, cannoli_semiclosed.
   goose is open; runs like the other nets (open wedges excluded from pressure and RMS).
 - **Tests** (`physics/__tests__/`): `pipeline.test.ts` (loadNet, fullInflate on tetra/cube);
   `pythonParity.test.ts` — fixed-input values pinned against Python
   (`tests/unit/inflate_polyhedron/test_web_port_reference_values.py` in main repo; keep in sync).
 
+- **View menu** (Inflater | Viewer; mirrors `inflate_polyhedron_app`'s ViewerPane): `viewerPane.ts`
+  browses `data/outputs/*.hippo` (listed via dev-only `/api/output-names`, read via `/outputs/<name>`,
+  saved via POST `/api/outputs/<name>`). 2x2 grid of Viewers sharing one `SharedCamera` per file;
+  `#viewer-view` vs `#inflater-view` toggled with `hidden`. Leaving with dirty files -> `#unsaved-dialog`.
+- **Undo/redo** (`editState.ts`, `UndoStack`, mirrors Python's `_inflater_*`/`_viewer_*` undo): one
+  stack per view; entries are `{camera, colors}` snapshots taken BEFORE a change. Camera gestures use
+  `CameraHooks` (`viewer.ts`): a drag/pan pushes ONE step on release only if the camera moved; wheel
+  ticks and middle-click reset push each step. Viewer stack resets on file change; Inflater's never
+  resets (as in Python). Ctrl+Z/Ctrl+Y, Edit menu.
+
 ## Not implemented
-2D builder canvas, diff-inflate/undo/redo, saved sessions, worker thread, per-level debug buttons, real
-animal nets (giraffe/horse/hippo/hoodie; orientation-retry fails on some even in Python).
+2D builder canvas (so no net-edit undo), diff-inflate, Python-compatible session files, worker thread,
+per-level debug buttons, real animal nets (giraffe/horse/hippo/hoodie; orientation-retry fails on some even in Python).

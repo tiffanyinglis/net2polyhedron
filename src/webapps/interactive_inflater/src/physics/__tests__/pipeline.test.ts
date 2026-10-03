@@ -1,9 +1,9 @@
 /// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
 import { fullInflate } from "../pipeline";
-import spiderLegText from "../../../public/nets/spider_leg.poly?raw";
-import cannoliOpenText from "../../../public/nets/cannoli_open.poly?raw";
-import cannoliSemiclosedText from "../../../public/nets/cannoli_semiclosed.poly?raw";
+import spiderLegText from "../../../data/inputs/spider_leg.poly?raw";
+import cannoliOpenText from "../../../data/inputs/cannoli_open.poly?raw";
+import cannoliSemiclosedText from "../../../data/inputs/cannoli_semiclosed.poly?raw";
 import { loadNet, meshFromPairs } from "../mesh";
 import { quarterTriangles } from "../meshLevels";
 
