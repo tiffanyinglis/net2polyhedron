@@ -4,16 +4,62 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="../utils/style.css" />
+    <link rel="stylesheet" href="./inflater.css" />
     <title>Interactive Inflater</title>
   </head>
   <body>
     <div id="app">
-      <nav id="menubar"></nav>
-      <main class="stub-page">
-        <h1>Interactive Inflater</h1>
-        <p>Not built yet.</p>
-      </main>
+      <nav id="menubar">
+        <div class="menu">
+          <button class="menu-title">File</button>
+          <div class="menu-items">
+            <button class="menu-item" id="load-item">Load Net...</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Edit</button>
+          <div class="menu-items">
+            <button class="menu-item" id="undo-item" disabled>Undo<kbd>Ctrl+Z</kbd></button>
+            <button class="menu-item" id="redo-item" disabled>Redo<kbd>Ctrl+Y</kbd></button>
+          </div>
+        </div>
+      </nav>
+
+      <!-- Each pane's parts are direct grid items, so the two drawing areas share rows and line up exactly. -->
+      <div id="interactive">
+        <aside id="palette" class="pane-header" aria-label="Shapes"></aside>
+        <fieldset id="setup" class="pane-header" disabled>
+          <legend>Setup</legend>
+          <div class="setup-row">
+            <div class="param-group">
+              <span>Target RMS stretch:</span>
+              <label>L1 <input id="target-1" type="number" min="0" step="0.5" value="10" /> %</label>
+              <label>L2 <input id="target-2" type="number" min="0" step="0.5" value="10" /> %</label>
+              <label>L3 <input id="target-3" type="number" min="0" step="0.5" value="10" /> %</label>
+            </div>
+            <div class="param-group">
+              <label>Tolerance: <input id="tolerance" type="text" /></label>
+            </div>
+            <button id="inflate-btn" type="button" disabled>Run Simulation</button>
+          </div>
+        </fieldset>
+
+        <div id="canvas-area" class="drawing"><canvas id="net-canvas"></canvas></div>
+        <div id="viewer" class="drawing">
+          <p class="placeholder">Build a net on the left, then click Inflate.</p>
+        </div>
+
+        <div id="builder-status" class="status"></div>
+        <div id="inflater-status" class="status"></div>
+      </div>
     </div>
+    <dialog id="reject-dialog" class="reject-dialog">
+      <p id="reject-message"></p>
+      <form method="dialog">
+        <button id="reject-ok" value="ok">OK</button>
+      </form>
+    </dialog>
+    <input id="net-file" type="file" accept=".poly,.json" hidden />
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

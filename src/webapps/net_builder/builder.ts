@@ -1,6 +1,8 @@
 import { pointInPolygon, rectIntersectsPolygon, type Point } from "../utils/geometry";
 import { UndoStack } from "../utils/undoStack";
 import { defaultHandles, handleFromWorld, type Connection, type End } from "./joins";
+import { isValidNet, pickOwner } from "./faceTypes";
+import { exportMesh, NetValidationError } from "./netExport";
 import { DEFAULT_SHAPE_EDGE_LENGTH, shapeVertices, type Shape } from "./shapes";
 
 export { DEFAULT_SHAPE_EDGE_LENGTH, POLYGON_NS, shapeCssColor, shapeVertices, type Shape } from "./shapes";
@@ -18,6 +20,7 @@ interface Snapshot {
   connections: Connection[];
   nextId: number;
   nextConnectionId: number;
+  ownerId: number | null;
 }
 
 /** Plain copies of shapes and connections, safe to hold in snapshots and the clipboard. */
@@ -41,6 +44,13 @@ export class Builder {
   shapes: Shape[] = [];
   connections: Connection[] = [];
   mode: BuilderMode = "move";
+  /**
+   * Move and Join at once, as the Python builder's Edit mode: every edit that needs Move mode or Join mode
+   * is allowed, and `mode` is ignored. Off for net_builder, which keeps its two modes.
+   */
+  combined = false;
+  /** The owner piece's id, kept by ownerShapeId(). Null until a piece exists. */
+  private ownerId: number | null = null;
   /** Ids of the selected shapes. A drag, rotate or delete acts on all of them. */
   selected = new Set<number>();
   /** The selected join, in Join mode, or null. */
@@ -99,6 +109,7 @@ export class Builder {
     const copy = copyState(shapes, connections);
     this.shapes = copy.shapes;
     this.connections = copy.connections;
+    this.ownerId = copy.shapes[0]?.id ?? null;
     this.nextId = Math.max(0, ...shapes.map((s) => s.id)) + 1;
     this.nextConnectionId = Math.max(0, ...connections.map((c) => c.id)) + 1;
     this.selected.clear();
@@ -107,6 +118,56 @@ export class Builder {
     this.undo.clear();
     this.pendingGesture = null;
     this.markSaved();
+  }
+
+  /**
+   * The owner: the piece the net grows from. The first piece placed or loaded. If it's deleted, the
+   * best-connected survivor takes over, so the main junction stays the owner. Null when there are no pieces.
+   */
+  ownerShapeId(): number | null {
+    this.ownerId = pickOwner(this.shapes, this.connections, this.ownerId);
+    return this.ownerId;
+  }
+
+  /** Called with the reason whenever an edit is refused, so the page can say why. */
+  onRejected: ((message: string) => void) | null = null;
+
+  /** Refuses an edit that would break the net's rule (see isValidNet). Nothing changes. */
+  private reject(message: string) {
+    this.onRejected?.(message);
+  }
+
+  /**
+   * Whether a candidate net may be made: no edge may fold so that its two ends meet at one vertex, and it must
+   * follow the group rule (see isValidNet). A refusal is reported as "Can't <what>: ...".
+   */
+  private wouldBeValid(shapes: Shape[], connections: Connection[], what: string): boolean {
+    // Only the combined page enforces these; net_builder lets any net be built.
+    if (!this.combined) return true;
+    if (shapes.length) {
+      try {
+        exportMesh(shapes, connections);
+      } catch (err) {
+        if (!(err instanceof NetValidationError)) throw err;
+        this.reject(`Can't ${what}: an edge would fold so that its two ends meet at the same vertex.`);
+        return false;
+      }
+    }
+    if (!isValidNet(shapes, connections, pickOwner(shapes, connections, this.ownerShapeId()))) {
+      this.reject(`Can't ${what}: the net can have only one group of more than one face, and the owner must be in it.`);
+      return false;
+    }
+    return true;
+  }
+
+  /** Whether Move-only edits apply: in Move mode, or always when combined. */
+  private get canMove(): boolean {
+    return this.combined || this.mode === "move";
+  }
+
+  /** Whether Join-only edits apply: in Join mode, or always when combined. */
+  private get canJoin(): boolean {
+    return this.combined || this.mode === "join";
   }
 
   /** Switches between Move and Join. Anything that only made sense in the mode being left is cleared. */
@@ -120,14 +181,14 @@ export class Builder {
 
   /** Arms or disarms a palette shape: clicking the armed one again disarms it. Arming clears the selection. Move mode only. */
   toggleArmed(n: number) {
-    if (this.mode !== "move") return;
+    if (!this.canMove) return;
     this.armedN = this.armedN === n ? null : n;
     if (this.armedN !== null) this.selected.clear();
   }
 
   /** Drops a new shape at (wx, wy), selects it, and disarms the palette. */
   drop(wx: number, wy: number) {
-    if (this.armedN === null || this.mode !== "move") return;
+    if (this.armedN === null || !this.canMove) return;
     this.pushUndo();
     const shape: Shape = { id: this.nextId++, n: this.armedN, cx: wx, cy: wy, rotation: 0, flipped: false };
     this.shapes.push(shape);
@@ -225,23 +286,28 @@ export class Builder {
    * selected join.
    */
   deleteSelected() {
-    if (this.mode === "join") {
+    if (this.mode === "join" || (this.combined && this.selectedConnection !== null)) {
       if (this.selectedConnection === null) return;
+      const connections = this.connections.filter((c) => c.id !== this.selectedConnection);
+      if (!this.wouldBeValid(this.shapes, connections, "remove that join")) return;
       this.pushUndo();
-      this.connections = this.connections.filter((c) => c.id !== this.selectedConnection);
+      this.connections = connections;
       this.selectedConnection = null;
       return;
     }
     if (!this.selected.size) return;
+    const shapes = this.shapes.filter((s) => !this.selected.has(s.id));
+    const connections = this.connections.filter((c) => !this.selected.has(c.aShape) && !this.selected.has(c.bShape));
+    if (!this.wouldBeValid(shapes, connections, "delete that")) return;
     this.pushUndo();
-    this.shapes = this.shapes.filter((s) => !this.selected.has(s.id));
-    this.connections = this.connections.filter((c) => !this.selected.has(c.aShape) && !this.selected.has(c.bShape));
+    this.shapes = shapes;
+    this.connections = connections;
     this.selected.clear();
   }
 
   /** F: toggles the "flipped" side of every selected shape. */
   toggleFlipSelected() {
-    if (!this.selected.size || this.mode !== "move") return;
+    if (!this.selected.size || !this.canMove) return;
     this.pushUndo();
     for (const shape of this.selectedShapes) shape.flipped = !shape.flipped;
   }
@@ -253,7 +319,7 @@ export class Builder {
    */
   mirrorSelection(axis: "horizontal" | "vertical") {
     const shapes = this.selectedShapes;
-    if (!shapes.length || this.mode !== "move") return;
+    if (!shapes.length || !this.canMove) return;
     this.pushUndo();
     const points = shapes.flatMap((s) => shapeVertices(s));
     const coord = axis === "horizontal" ? 0 : 1;
@@ -276,24 +342,27 @@ export class Builder {
    * (a Polygon Fold). Each edge can be joined only once. Returns false if the join isn't allowed.
    */
   join(aShape: number, aEdge: number, bShape: number, bEdge: number): boolean {
-    if (this.mode !== "join") return false;
+    if (!this.canJoin) return false;
     if (aShape === bShape && aEdge === bEdge) return false;
     const joined = this.joinedEdges();
     if (joined.has(`${aShape}:${aEdge}`) || joined.has(`${bShape}:${bEdge}`)) return false;
     const a = this.shapeById(aShape);
     const b = this.shapeById(bShape);
     if (!a || !b) return false;
-    this.pushUndo();
     const handles = defaultHandles(a, aEdge, b, bEdge);
-    this.connections.push({
-      id: this.nextConnectionId++,
+    const conn: Connection = {
+      id: this.nextConnectionId,
       aShape,
       aEdge,
       bShape,
       bEdge,
       aHandle: handles.aHandle,
       bHandle: handles.bHandle,
-    });
+    };
+    if (!this.wouldBeValid(this.shapes, [...this.connections, conn], "join those")) return false;
+    this.pushUndo();
+    this.nextConnectionId++;
+    this.connections.push(conn);
     this.selected.clear();
     this.selectedConnection = null;
     return true;
@@ -313,7 +382,7 @@ export class Builder {
 
   /** Ctrl+C: remembers the selected shapes, and the joins between them. */
   copy() {
-    if (!this.selected.size || this.mode !== "move") return;
+    if (!this.selected.size || !this.canMove) return;
     const shapes = this.selectedShapes;
     const connections = this.connections.filter((c) => this.selected.has(c.aShape) && this.selected.has(c.bShape));
     this.clipboard = copyState(shapes, connections);
@@ -324,8 +393,7 @@ export class Builder {
    * Move mode only.
    */
   paste() {
-    if (!this.clipboard?.shapes.length || this.mode !== "move") return;
-    this.pushUndo();
+    if (!this.clipboard?.shapes.length || !this.canMove) return;
     // Each paste moves the clipboard itself, so repeated pastes cascade instead of stacking.
     for (const shape of this.clipboard.shapes) {
       shape.cx += PASTE_OFFSET;
@@ -342,6 +410,10 @@ export class Builder {
       c.bShape = idMap.get(c.bShape)!;
       c.id = this.nextConnectionId++;
     }
+    if (!this.wouldBeValid([...this.shapes, ...pasted.shapes], [...this.connections, ...pasted.connections], "paste that")) {
+      return;
+    }
+    this.pushUndo();
     this.shapes.push(...pasted.shapes);
     this.connections.push(...pasted.connections);
     this.selected = new Set(pasted.shapes.map((s) => s.id));
@@ -360,7 +432,13 @@ export class Builder {
 
   private snapshot(): Snapshot {
     const copy = copyState(this.shapes, this.connections);
-    return { ...copy, nextId: this.nextId, nextConnectionId: this.nextConnectionId };
+    return {
+      ...copy,
+      nextId: this.nextId,
+      nextConnectionId: this.nextConnectionId,
+      // Resolved now, so the owner an undo step returns to is the one on screen at that step.
+      ownerId: this.ownerShapeId(),
+    };
   }
 
   private restore(snap: Snapshot) {
@@ -369,6 +447,7 @@ export class Builder {
     this.connections = copy.connections;
     this.nextId = snap.nextId;
     this.nextConnectionId = snap.nextConnectionId;
+    this.ownerId = snap.ownerId;
     this.selected.clear();
     this.selectedConnection = null;
     this.pendingGesture = null;

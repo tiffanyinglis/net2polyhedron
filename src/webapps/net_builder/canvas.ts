@@ -1,7 +1,23 @@
 import { type Builder } from "./builder";
+import { faceInfo, type FaceInfo, type FaceRole } from "./faceTypes";
 import { type Point } from "../utils/geometry";
 import { connectionGeometry, distanceToSegment, edgeMidpoints, sampleCubic, type Connection, type End } from "./joins";
-import { shapeCssColor, shapeVertices, type Shape } from "./shapes";
+import { DEFAULT_SHAPE_EDGE_LENGTH, shapeCssColor, shapeVertices, type Shape } from "./shapes";
+
+/**
+ * An equilateral triangle centred on (cx, cy), vertices at radius `r`, pointing up unless `turn` rotates it
+ * (Math.PI points it down). Adds to the current path.
+ */
+function trianglePath(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, turn = 0) {
+  for (let i = 0; i < 3; i++) {
+    const angle = -Math.PI / 2 + turn + (i * 2 * Math.PI) / 3;
+    const x = cx + r * Math.cos(angle);
+    const y = cy + r * Math.sin(angle);
+    if (i) ctx.lineTo(x, y);
+    else ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
 
 const ZOOM_STEP = 1.1;
 const ZOOM_MIN = 0.2;
@@ -15,6 +31,14 @@ const CONNECTION_COLOR = "#b0b0b0";
 const CONNECTION_WIDTH = 1.5;
 const CONNECTION_SELECTED_WIDTH = 2.5;
 const HANDLE_COLOR = "white";
+/** An unreachable piece is drawn at this opacity, as the Python app's orphaned pieces are. */
+const UNREACHABLE_OPACITY = 0.5;
+/** Debug-mode face marks: outer radius of the star and the triangle, 1.5x the old 8px mark. */
+const MARK_RADIUS = 12;
+/** Edge circles and face marks smaller than this (screen px radius) aren't drawn at all. */
+const MIN_DRAWN_RADIUS = 1.5;
+/** Edge circles in combined mode, where they're always filled: a bit smaller than the net_builder's rings. */
+const COMBINED_EDGE_HANDLE_RADIUS = 3.5;
 const EDGE_HANDLE_RADIUS = 5;
 const EDGE_HANDLE_LINE_WIDTH = 1.5;
 /** Screen pixels within which a click lands on an edge handle, or on a join's curve. */
@@ -67,12 +91,21 @@ export class BuilderCanvas {
   private pendingCursor: Point | null = null;
   private handleDrag: HandleDrag | null = null;
   private centred = false;
+  /** Debug mode (the page's D key): shows the owner's anchor glyph. Only the combined page uses it. */
+  debug = false;
+  /** Each piece's reachable/role classification for this redraw. Empty outside combined mode. */
+  private faces: Map<number, FaceInfo> = new Map();
 
   constructor(
     private canvas: HTMLCanvasElement,
     private builder: Builder,
     /** Called after every change to the net or its selection, so the page can refresh its menus and title. */
     private onChange: () => void,
+    /**
+     * Move and Join in one mode, as the Python builder's Edit mode: a press on an edge handle or a join
+     * starts a join, anything else moves shapes, and the handles are always shown. Ignores builder.mode.
+     */
+    private combined = false,
   ) {
     this.ctx = canvas.getContext("2d")!;
     new ResizeObserver(() => this.resize()).observe(canvas.parentElement!);
@@ -124,6 +157,7 @@ export class BuilderCanvas {
 
     this.dropStalePending();
 
+    this.faces = this.combined ? faceInfo(builder.shapes, builder.connections, builder.ownerShapeId()) : new Map();
     for (const shape of builder.shapes) {
       this.drawShape(shape, builder.selected.has(shape.id));
     }
@@ -142,7 +176,7 @@ export class BuilderCanvas {
       }
     }
 
-    if (builder.mode === "join") {
+    if (this.showsJoin()) {
       this.drawEdgeHandles(joined);
       this.drawBezierHandles();
     }
@@ -212,6 +246,9 @@ export class BuilderCanvas {
     const { ctx } = this;
     const verts = shapeVertices(shape).map(([x, y]) => this.toScreen(x, y));
     const fill = shapeCssColor(shape.n);
+    const info = this.faces.get(shape.id);
+    const dimmed = info !== undefined && !info.reachable;
+    ctx.globalAlpha = dimmed ? UNREACHABLE_OPACITY : 1;
 
     ctx.beginPath();
     verts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
@@ -237,10 +274,67 @@ export class BuilderCanvas {
       ctx.fillStyle = fill;
       ctx.fill();
     }
-    this.strokeOuterOutline(verts);
-    if (selected) {
-      ctx.strokeStyle = SELECTION_COLOR;
-      ctx.lineWidth = 2;
+    ctx.globalAlpha = 1;
+    if (dimmed) {
+      // Unreachable: a dashed outline instead of the solid one, red when selected.
+      this.strokeDashedOutline(verts, selected ? SELECTION_COLOR : OUTER_OUTLINE_COLOR);
+    } else {
+      this.strokeOuterOutline(verts);
+      if (selected) {
+        ctx.strokeStyle = SELECTION_COLOR;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+    if (info?.role) this.drawRoleMark(shape, info.role, info.joins);
+  }
+
+  private strokeDashedOutline(verts: Point[], color: string) {
+    const { ctx } = this;
+    ctx.beginPath();
+    verts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = OUTER_OUTLINE_WIDTH;
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /**
+   * Debug mode only: the face category at the piece's centre. The owner is a six-pointed star (filled with two
+   * or more joins), a junction a filled triangle, a terminal a hollow one.
+   */
+  private drawRoleMark(shape: Shape, role: FaceRole, joins: number) {
+    if (!this.debug) return;
+    // A mark is at most a third of its face's diameter, and shrinks with it when zoomed out.
+    const radius = Math.min(MARK_RADIUS, this.faceDiameter(shape.n) / 6);
+    if (radius < MIN_DRAWN_RADIUS) return;
+    const { ctx } = this;
+    const [sx, sy] = this.toScreen(shape.cx, shape.cy);
+    ctx.beginPath();
+    if (role === "owner") {
+      // Filled with two or more joins, unfilled as a terminal.
+      // A six-pointed star: an upward and a downward triangle, the same size as the other faces' marks.
+      trianglePath(ctx, sx, sy, radius);
+      trianglePath(ctx, sx, sy, radius, Math.PI);
+      if (joins >= 2) {
+        ctx.fillStyle = HANDLE_COLOR;
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = HANDLE_COLOR;
+        ctx.lineWidth = EDGE_HANDLE_LINE_WIDTH;
+        ctx.stroke();
+      }
+      return;
+    }
+    trianglePath(ctx, sx, sy, radius);
+    if (role === "junction") {
+      ctx.fillStyle = HANDLE_COLOR;
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = HANDLE_COLOR;
+      ctx.lineWidth = EDGE_HANDLE_LINE_WIDTH;
       ctx.stroke();
     }
   }
@@ -291,9 +385,26 @@ export class BuilderCanvas {
     ctx.stroke();
   }
 
+  /**
+   * An edge circle's radius: its diameter is at most a fifth of the shape's side length on screen, so the
+   * circles shrink as the view is zoomed out.
+   */
+  private edgeHandleRadius(): number {
+    const base = this.combined ? COMBINED_EDGE_HANDLE_RADIUS : EDGE_HANDLE_RADIUS;
+    const side = DEFAULT_SHAPE_EDGE_LENGTH * this.scale;
+    return Math.min(base, side / 10);
+  }
+
+  /** On-screen diameter of an n-sided face: twice its circumradius (the side length fixes that). */
+  private faceDiameter(n: number): number {
+    return (DEFAULT_SHAPE_EDGE_LENGTH * this.scale) / Math.sin(Math.PI / n);
+  }
+
   /** Join mode shows every edge's handle: a solid white dot if the edge is joined, a ring if it's free, red if it's the current target. */
   private drawEdgeHandles(joined: Set<string>) {
     const { ctx } = this;
+    const radius = this.edgeHandleRadius();
+    if (radius < MIN_DRAWN_RADIUS) return;
     for (const shape of this.builder.shapes) {
       edgeMidpoints(shape).forEach((mid, edge) => {
         const [sx, sy] = this.toScreen(...mid);
@@ -301,11 +412,11 @@ export class BuilderCanvas {
           (this.pending?.shape === shape.id && this.pending.edge === edge) ||
           (this.hover?.shape === shape.id && this.hover.edge === edge);
         ctx.beginPath();
-        ctx.arc(sx, sy, EDGE_HANDLE_RADIUS, 0, Math.PI * 2);
+        ctx.arc(sx, sy, radius, 0, Math.PI * 2);
         if (lit) {
           ctx.fillStyle = SELECTION_COLOR;
           ctx.fill();
-        } else if (joined.has(`${shape.id}:${edge}`)) {
+        } else if (this.combined || joined.has(`${shape.id}:${edge}`)) {
           ctx.fillStyle = HANDLE_COLOR;
           ctx.fill();
         } else {
@@ -388,15 +499,41 @@ export class BuilderCanvas {
     return null;
   }
 
+  /** Whether join gestures apply: always in combined mode, otherwise only in Join mode. */
+  private showsJoin(): boolean {
+    return this.combined || this.builder.mode === "join";
+  }
+
+  /** Whether right-drag rotates the selection: in combined mode always, otherwise only in Move mode. */
+  private showsMoveRotate(): boolean {
+    return this.combined || this.builder.mode === "move";
+  }
+
+  /** Combined mode: whether a press at this point belongs to a join rather than a move. */
+  private isJoinPress(sx: number, sy: number): boolean {
+    return (
+      this.pending !== null ||
+      this.handleHit(sx, sy, null) !== null ||
+      this.bezierHandleHit(sx, sy) !== null ||
+      this.connectionHit(sx, sy) !== null
+    );
+  }
+
   private onPointerDown(e: PointerEvent) {
     const sx = e.offsetX;
     const sy = e.offsetY;
     this.canvas.setPointerCapture(e.pointerId);
     if (e.button === 0) {
-      if (this.builder.mode === "join") this.onJoinPress(sx, sy);
+      if (this.combined) {
+        if (this.isJoinPress(sx, sy)) this.onJoinPress(sx, sy);
+        else {
+          this.builder.selectConnection(null);
+          this.onMovePress(e, sx, sy);
+        }
+      } else if (this.builder.mode === "join") this.onJoinPress(sx, sy);
       else this.onMovePress(e, sx, sy);
     } else if (e.button === 2) {
-      const centre = this.builder.mode === "move" ? this.builder.selectionCentre() : null;
+      const centre = this.showsMoveRotate() ? this.builder.selectionCentre() : null;
       if (centre) {
         const [cx, cy] = this.toScreen(centre[0], centre[1]);
         this.builder.beginGesture();
@@ -470,7 +607,7 @@ export class BuilderCanvas {
     const sx = e.offsetX;
     const sy = e.offsetY;
     if (this.builder.armedN !== null) this.ghost = [sx, sy];
-    if (this.builder.mode === "join") {
+    if (this.showsJoin()) {
       if (this.pending) {
         this.pendingCursor = [sx, sy];
         this.hover = this.handleHit(sx, sy, this.pending);
