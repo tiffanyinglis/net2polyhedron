@@ -4,7 +4,7 @@ import { relaxOnce, type RelaxOnceResult, type ReplayFrame } from "./relaxOnce";
 import { CONVERGENCE_GTOL } from "./convergence";
 import { InsideOutChecker } from "./insideOutChecker";
 import { positionsToPts } from "./edgeSetup";
-import { vertexIdsOf } from "./mesh";
+import { type Mesh, vertexIdsOf } from "./mesh";
 
 const PRESSURE_AREA_PRODUCT_ESTIMATE = 25.0;
 const PRESSURE_RATIO_CLAMP: [number, number] = [0.2, 5.0];
@@ -19,7 +19,6 @@ export interface PressureCalibrationOptions {
   maxNfevPerTrial?: number;
   gtol?: number;
   initialPressureGuess?: number;
-  edges?: [number, number][];
   repulsionStrength?: number;
   repulsionVertexMultipliers?: Map<number, number>;
   shouldStop?: () => boolean;
@@ -48,10 +47,10 @@ export interface PressureCalibrationResult {
  * with one further uncapped relaxOnce call. */
 export async function estimatePressureForTargetStretch(
   positions: Map<number, Vec3>,
-  faces: number[][],
-  edgeLength: number | Map<string, number>,
+  mesh: Mesh,
   options: PressureCalibrationOptions = {},
 ): Promise<PressureCalibrationResult> {
+  const faces = mesh.faces;
   const targetRmsPct = options.targetRmsPct ?? DEFAULT_TARGET_RMS_STRETCH_PCT;
   const maxIterations = options.maxIterations ?? 8;
   const tolPct = options.tolPct ?? 1.0;
@@ -59,7 +58,6 @@ export async function estimatePressureForTargetStretch(
   const gtol = options.gtol ?? CONVERGENCE_GTOL;
 
   const relaxOnceOpts = {
-    edges: options.edges,
     repulsionStrength: options.repulsionStrength,
     repulsionVertexMultipliers: options.repulsionVertexMultipliers,
     shouldStop: options.shouldStop,
@@ -71,7 +69,7 @@ export async function estimatePressureForTargetStretch(
   if (options.initialPressureGuess !== undefined) {
     pressure = options.initialPressureGuess;
   } else {
-    const totalArea = totalRestArea(faces, edgeLength);
+    const totalArea = totalRestArea(mesh);
     pressure = (PRESSURE_AREA_PRODUCT_ESTIMATE * (targetRmsPct / 100.0)) / totalArea;
   }
   const insaneCeiling = Math.max(INSANE_STRETCH_FLOOR_PCT, targetRmsPct * INSANE_STRETCH_TARGET_MULTIPLE);
@@ -94,7 +92,7 @@ export async function estimatePressureForTargetStretch(
   for (let iter = 0; iter < maxIterations; iter++) {
     const trialBase = cumulativeSteps;
     const trialFrames: ReplayFrame[] = [{ steps: 0, positions }];
-    result = await relaxOnce(positions, faces, edgeLength, pressure, {
+    result = await relaxOnce(positions, mesh, pressure, {
       ...relaxOnceOpts,
       maxNfev: maxNfevPerTrial,
       onProgress: (pos, steps) => trialFrames.push({ steps: trialBase + steps, positions: pos }),
@@ -153,7 +151,7 @@ export async function estimatePressureForTargetStretch(
     finalResult = bestResult;
     if (!finalResult.converged && !stopped) {
       const topUpBase = cumulativeSteps;
-      const topUp = await relaxOnce(finalResult.positions, faces, edgeLength, finalPressure, {
+      const topUp = await relaxOnce(finalResult.positions, mesh, finalPressure, {
         ...relaxOnceOpts,
         maxNfev: null,
         onProgress: (pos, steps) => bestFrames.push({ steps: topUpBase + steps, positions: pos }),

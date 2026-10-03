@@ -6,7 +6,14 @@ import { relaxOnce } from "../relaxOnce";
 import { relaxInitialConfiguration } from "../relaxInitial";
 import { estimatePressureForTargetStretch } from "../pressureCalibration";
 import { fanLevel0To1 } from "../meshLevels";
-import { EDGE_LENGTH } from "../mesh";
+import { EDGE_LENGTH, type Mesh, meshFromPairs } from "../mesh";
+import { mean } from "../vec3";
+
+/** Rest length of the (single) edge joining vertices a and b. */
+function restBetween(mesh: Mesh, a: number, b: number): number {
+  const id = mesh.edgeEnds.findIndex(([x, y]) => (x === a && y === b) || (x === b && y === a));
+  return mesh.restLengths[id];
+}
 
 /**
  * Cross-language parity tests: every input here is FIXED (no RNG anywhere), and every expected
@@ -42,25 +49,23 @@ function unitEdgeTetrahedron(): Map<number, Vec3> {
 
 describe("fanLevel0To1 (single triangle)", () => {
   it("matches Python's fan_level_0_to_1 exactly", () => {
-    const dummy = new Map<number, Vec3>([[0, [0, 0, 0]], [1, [0, 0, 0]], [2, [0, 0, 0]]]);
-    const topo = fanLevel0To1([[0, 1, 2]], dummy, EDGE_LENGTH);
+    const topo = fanLevel0To1(meshFromPairs([[0, 1, 2]], EDGE_LENGTH));
 
-    expect(topo.faces).toEqual([[0, 1, 3], [1, 2, 3], [2, 0, 3]]);
+    expect(topo.mesh.faces).toEqual([[0, 1, 3], [1, 2, 3], [2, 0, 3]]);
     expect(topo.faceOfFine).toEqual([0, 0, 0]);
-    expect(topo.restLengths.get("0_1")).toBeCloseTo(1.0, 9);
-    expect(topo.restLengths.get("0_2")).toBeCloseTo(1.0, 9);
-    expect(topo.restLengths.get("1_2")).toBeCloseTo(1.0, 9);
-    expect(topo.restLengths.get("0_3")).toBeCloseTo(0.5773502691896258, 9);
-    expect(topo.restLengths.get("1_3")).toBeCloseTo(0.5773502691896258, 9);
-    expect(topo.restLengths.get("2_3")).toBeCloseTo(0.5773502691896258, 9);
+    expect(restBetween(topo.mesh, 0, 1)).toBeCloseTo(1.0, 9);
+    expect(restBetween(topo.mesh, 0, 2)).toBeCloseTo(1.0, 9);
+    expect(restBetween(topo.mesh, 1, 2)).toBeCloseTo(1.0, 9);
+    expect(restBetween(topo.mesh, 0, 3)).toBeCloseTo(0.5773502691896258, 9);
+    expect(restBetween(topo.mesh, 1, 3)).toBeCloseTo(0.5773502691896258, 9);
+    expect(restBetween(topo.mesh, 2, 3)).toBeCloseTo(0.5773502691896258, 9);
   });
 });
 
 describe("totalRestArea (dict branch)", () => {
   it("matches the original unfanned triangle's closed-form area", () => {
-    const dummy = new Map<number, Vec3>([[0, [0, 0, 0]], [1, [0, 0, 0]], [2, [0, 0, 0]]]);
-    const topo = fanLevel0To1([[0, 1, 2]], dummy, EDGE_LENGTH);
-    const area = totalRestArea(topo.faces, topo.restLengths);
+    const topo = fanLevel0To1(meshFromPairs([[0, 1, 2]], EDGE_LENGTH));
+    const area = totalRestArea(topo.mesh);
     expect(area).toBeCloseTo(0.43301270189221913, 9);
   });
 });
@@ -90,7 +95,7 @@ describe("removeRigidMotion", () => {
 describe("relaxOnce (fixed unit tetrahedron)", () => {
   it("matches Python's relax_once reference to high precision", async () => {
     const positions = unitEdgeTetrahedron();
-    const result = await relaxOnce(positions, RIGID_TETRAHEDRON_FACES, EDGE_LENGTH, 0.5, {
+    const result = await relaxOnce(positions, meshFromPairs(RIGID_TETRAHEDRON_FACES), 0.5, {
       maxNfev: 200,
       gtol: 1e-4,
     });
@@ -115,14 +120,18 @@ describe("relaxInitialConfiguration (fixed perturbed start)", () => {
     const basePositions = new Map<number, Vec3>(
       RIGID_TETRAHEDRON_VERTICES.map((v, i) => [i, v]),
     );
-    const topo = fanLevel0To1(RIGID_TETRAHEDRON_FACES, basePositions, EDGE_LENGTH);
-    // fanLevel0To1 mutates `basePositions` in place, adding the new centroid entries.
+    const topo = fanLevel0To1(meshFromPairs(RIGID_TETRAHEDRON_FACES, EDGE_LENGTH));
+    // Each fan centroid sits at its own face's vertex mean (the centroid id is the 3rd entry of
+    // that face's first fan triangle), added here so the perturbed start covers every vertex.
+    RIGID_TETRAHEDRON_FACES.forEach((face, f) => {
+      basePositions.set(topo.mesh.faces[3 * f][2], mean(face.map((v) => RIGID_TETRAHEDRON_VERTICES[v])));
+    });
     const perturbed = new Map<number, Vec3>();
     for (const [v, p] of basePositions) {
       perturbed.set(v, [p[0] + 0.05 * (v % 3), p[1] - 0.03 * (v % 2), p[2] + 0.02]);
     }
 
-    const result = await relaxInitialConfiguration(perturbed, topo.faces, topo.restLengths, {
+    const result = await relaxInitialConfiguration(perturbed, topo.mesh, {
       maxNfev: 400,
       gtol: 1e-4,
     });
@@ -137,7 +146,7 @@ describe("relaxInitialConfiguration (fixed perturbed start)", () => {
 describe("estimatePressureForTargetStretch (fixed unit tetrahedron)", () => {
   it("matches Python's bracket-search reference pressure bit-for-bit", async () => {
     const positions = unitEdgeTetrahedron();
-    const result = await estimatePressureForTargetStretch(positions, RIGID_TETRAHEDRON_FACES, EDGE_LENGTH, {
+    const result = await estimatePressureForTargetStretch(positions, meshFromPairs(RIGID_TETRAHEDRON_FACES), {
       targetRmsPct: 5.0,
       maxNfevPerTrial: 2000,
     });

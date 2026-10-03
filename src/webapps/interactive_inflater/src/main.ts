@@ -2,14 +2,14 @@ import "./style.css";
 import { SharedCamera, Viewer, type DebugOverlays } from "./viewer";
 import { NetPanel } from "./netPanel";
 import { polygonFaceColors, randomFaceColors } from "./colors";
-import { fullInflate, type LevelRecord } from "./physics/pipeline";
+import { defaultTargetRmsPct, fullInflate, type LevelRecord } from "./physics/pipeline";
 import { type ReplayFrame } from "./physics/relaxOnce";
 import { loadNet, type NetSpec } from "./physics/mesh";
 import { type Vec3 } from "./physics/vec3";
 import { CONVERGENCE_GTOL } from "./physics/convergence";
 
 const LEVELS = [0, 1, 2, 3];
-const DEFAULT_TARGET_RMS_PCT = 10;
+let defaultTargetRms = 10;
 
 const netSelect = document.getElementById("net-select") as HTMLSelectElement;
 const inflateBtn = document.getElementById("inflate-btn") as HTMLButtonElement;
@@ -101,7 +101,9 @@ async function fetchJson<T>(path: string): Promise<T> {
 // ---- Colours -------------------------------------------------------------------------------
 
 function currentBaseColors(): number[] {
-  return colorMode === "polygon" ? polygonFaceColors(baseFaces) : multiColors;
+  return colorMode === "polygon"
+    ? polygonFaceColors(baseFaces, currentSpec?.source_polygon_id, currentSpec?.net_layout)
+    : multiColors;
 }
 
 function applyColors() {
@@ -242,7 +244,7 @@ function renderHistory() {
 
 function readTargetRms(input: HTMLInputElement): number {
   const parsed = parseFloat(input.value);
-  const value = Number.isFinite(parsed) ? Math.min(100, Math.max(0, Math.round(parsed))) : DEFAULT_TARGET_RMS_PCT;
+  const value = Number.isFinite(parsed) ? Math.min(100, Math.max(0, Math.round(parsed))) : defaultTargetRms;
   input.value = `${value}%`;
   return value;
 }
@@ -327,8 +329,11 @@ async function selectNet(net: NetIndexEntry) {
   setStatus(`Loading ${net.label}...`);
   try {
     const spec = await fetchJson<NetSpec>(`nets/${net.file}`);
-    baseFaces = loadNet(spec).faces;
+    const mesh = loadNet(spec);
+    baseFaces = mesh.faces;
     currentSpec = spec;
+    defaultTargetRms = defaultTargetRmsPct(mesh);
+    for (const input of targetInputs) input.value = `${defaultTargetRms}%`;
     multiColors = randomFaceColors(baseFaces);
     levelTopology.fill(null);
     netPanel.setNet(spec);

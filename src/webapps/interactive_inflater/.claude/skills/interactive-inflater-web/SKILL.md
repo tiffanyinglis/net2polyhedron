@@ -39,6 +39,13 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
   Level 0 spring+repulsion relax with orientation-retry seeds -> pressure calibration to target
   RMS (default 10%). Emits `onRecord` (LevelRecord for the history table), `onLevelPositions`, `onTopology`. Mirrors Python app's "Full Inflate" for a single net. Throws if L0 fails
   to converge or no pressure works.
+- **Edge identity** (`physics/mesh.ts` `Mesh`): faces = vertex loops, `faceEdgeIds[f][i]` = id of
+  edge `faces[f][i]->faces[f][i+1]`; `edgeEnds`/`restLengths` indexed by id. Physics keys springs and
+  rest lengths by id, never vertex pair (mirrors Python `face_edge_ids`), so two distinct edges
+  joining the same vertex pair (self-joined polygon: spider_leg, cannoli) stay separate. A `.poly`
+  with `face_edge_ids` uses them as-is. Without them (`meshFromPairs`), edges are vertex pairs and a
+  face with a repeated vertex is fan-split from a centroid (Python `self_join_triangulator`); a pair
+  shared by two faces is then ambiguous and throws -- such nets need `face_edge_ids` (Save writes them).
 - **Physics modules**: vec3, mesh (NetSpec/loadNet validation), meshLevels, edgeSetup, forces,
   explicitRelaxLoop (shared driver, yields to UI; no worker), relaxOnce, relaxInitial,
   orientationRetry, seedSelecter, insideOutChecker, convergence, kabsch (rigid-motion removal),
@@ -47,7 +54,7 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
   headlight rig matching Python plotter_lighting, per-base-face colors (`setBaseColors`
   recolours in place) + wireframe.
 - **Nets** (`public/nets/`, copied from `data/input/stretchy_nets/`; `.poly` == `.json` format):
-  5 Platonic, cone, tube, ravioli, samosa, spider_leg, turtle, goose.
+  5 Platonic, cone, tube, ravioli, samosa, spider_leg, turtle, goose, cannoli_open, cannoli_semiclosed.
   goose is open -> **expected to error** (deliberate).
 - **Tests** (`physics/__tests__/`): `pipeline.test.ts` (loadNet, fullInflate on tetra/cube);
   `pythonParity.test.ts` — fixed-input values pinned against Python
@@ -56,4 +63,4 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
 ## Not implemented
 Open/boundary nets (`pressure_exclude_faces`/`rms_exclude_edges`), 2D
 builder canvas, Net-panel connection curves, diff-inflate/undo/redo, saved sessions, worker thread, per-level debug buttons, real
-animal nets (giraffe/horse/hippo/hoodie/cannoli; orientation-retry fails on some even in Python).
+animal nets (giraffe/horse/hippo/hoodie; orientation-retry fails on some even in Python).

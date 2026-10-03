@@ -1,5 +1,5 @@
 import { type Vec3 } from "./vec3";
-import { EDGE_LENGTH, loadNet, type NetSpec } from "./mesh";
+import { isOpenMesh, loadNet, type Mesh, type NetSpec } from "./mesh";
 import { fanLevel0To1, quarterTriangles, type MeshState } from "./meshLevels";
 import { relaxInitialConfigurationWithOrientationRetry } from "./orientationRetry";
 import { type ReplayFrame } from "./relaxOnce";
@@ -9,6 +9,12 @@ import { CONVERGENCE_GTOL } from "./convergence";
 export const LEVEL0_SEED = 0;
 export const LEVEL0_SAFETY_STEP_CAP = 50_000;
 export const DEFAULT_TARGET_RMS_PCT = 10.0;
+/** Open (boundary) nets default lower, matching the Python app. */
+export const OPEN_TARGET_RMS_PCT = 5.0;
+
+export function defaultTargetRmsPct(mesh: Mesh): number {
+  return isOpenMesh(mesh) ? OPEN_TARGET_RMS_PCT : DEFAULT_TARGET_RMS_PCT;
+}
 export const MAX_LEVEL = 3;
 
 /** One Convergence History row (one per level visited). */
@@ -78,20 +84,20 @@ export async function fullInflate(
     shouldStop?: () => boolean;
   } = {},
 ): Promise<InflateResult> {
-  const { faces: baseFaces } = loadNet(spec);
+  const base = loadNet(spec);
+  const baseFaces = base.faces;
   const gtol = options.gtol ?? CONVERGENCE_GTOL;
   const elapsed = (since: number) => (performance.now() - since) / 1000;
-  const topology = fanLevel0To1(baseFaces, new Map(baseFaces.flat().map((v) => [v, [0, 0, 0] as Vec3])), EDGE_LENGTH);
+  const topology = fanLevel0To1(base);
 
-  options.onTopology?.(0, topology.faces, topology.faceOfFine);
+  options.onTopology?.(0, topology.mesh.faces, topology.faceOfFine);
   const t0 = performance.now();
   options.onRecord?.({
     level: 0, state: "running", steps: 0, optimality: null, gtol,
     rmsStretchPct: null, pressure: null, simTimeS: 0,
   });
   const level0 = await relaxInitialConfigurationWithOrientationRetry(
-    topology.faces,
-    topology.restLengths,
+    topology.mesh,
     LEVEL0_SEED,
     baseFaces,
     {
@@ -113,10 +119,9 @@ export async function fullInflate(
     );
   }
 
-  let mesh: MeshState = {
-    faces: topology.faces,
+  let state: MeshState = {
+    mesh: topology.mesh,
     positions: level0.positions,
-    restLengths: topology.restLengths,
     faceOfFine: topology.faceOfFine,
   };
   const history: CalibratedLevel[] = [];
@@ -126,18 +131,18 @@ export async function fullInflate(
   const repulsionCorners = [...new Set(baseFaces.flat())];
   let calibration: Calibration | undefined;
   for (let level = 1; level <= MAX_LEVEL; level++) {
-    if (level > 1) mesh = quarterTriangles(mesh);
+    if (level > 1) state = quarterTriangles(state);
     const repulsionMultiplier = 1 / 2 ** (level - 1);
     const repulsionVertexMultipliers = new Map(repulsionCorners.map((v) => [v, repulsionMultiplier]));
-    options.onTopology?.(level, mesh.faces, mesh.faceOfFine);
+    options.onTopology?.(level, state.mesh.faces, state.faceOfFine);
 
-    const targetRmsPct = options.targetRmsPctByLevel?.[level] ?? DEFAULT_TARGET_RMS_PCT;
+    const targetRmsPct = options.targetRmsPctByLevel?.[level] ?? defaultTargetRmsPct(base);
     const t = performance.now();
     options.onRecord?.({
       level, state: "running", steps: 0, optimality: null, gtol,
       rmsStretchPct: null, pressure: null, simTimeS: 0,
     });
-    calibration = await estimatePressureForTargetStretch(mesh.positions, mesh.faces, mesh.restLengths, {
+    calibration = await estimatePressureForTargetStretch(state.positions, state.mesh, {
       targetRmsPct,
       gtol,
       initialPressureGuess: guessPressureFromHistory(history, level, targetRmsPct),
@@ -159,13 +164,13 @@ export async function fullInflate(
 
     options.onLevelResult?.(level, calibration.positions, calibration.frames);
     history.push({ level, pressure: calibration.pressure, rmsStretchPct: calibration.rmsStretchPct });
-    mesh = { ...mesh, positions: calibration.positions };
+    state = { ...state, positions: calibration.positions };
   }
 
   return {
-    faces: mesh.faces,
+    faces: state.mesh.faces,
     baseFaces,
-    faceOfFine: mesh.faceOfFine,
+    faceOfFine: state.faceOfFine,
     positions: calibration!.positions,
     rmsStretchPct: calibration!.rmsStretchPct,
     maxStretchPct: calibration!.maxStretchPct,

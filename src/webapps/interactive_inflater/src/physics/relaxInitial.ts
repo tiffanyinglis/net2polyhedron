@@ -1,4 +1,5 @@
 import { type Vec3, add, scale as scaleVec } from "./vec3";
+import { type Mesh } from "./mesh";
 import { edgeSetup, positionsToPts, ptsToPositions } from "./edgeSetup";
 import { pressureForce, repulsionForce, springForce, vertexOutwardNormals } from "./forces";
 import { explicitRelaxLoop } from "./explicitRelaxLoop";
@@ -13,7 +14,6 @@ export const LEVEL0_PERIODIC_BURST_DISTANCE_FRACTION = 0.6;
 export interface RelaxInitialOptions {
   maxNfev?: number | null;
   gtol?: number;
-  edges?: [number, number][];
   shouldStop?: () => boolean;
   onProgress?: (
     positions: Map<number, Vec3>,
@@ -41,12 +41,11 @@ export interface RelaxInitialResult {
  * currently disabled upstream -- LEVEL0_REPULSION_GATE_ENABLED=False -- so it's omitted here). */
 export async function relaxInitialConfiguration(
   positions: Map<number, Vec3>,
-  faces: number[][],
-  edgeLength: number | Map<string, number>,
+  mesh: Mesh,
   options: RelaxInitialOptions = {},
 ): Promise<RelaxInitialResult> {
-  const setup = edgeSetup(faces, edgeLength, options.edges);
-  const facesIdx = faces.map((face) => face.map((v) => setup.idx.get(v)!));
+  const setup = edgeSetup(mesh);
+  const facesIdx = mesh.faces.map((face) => face.map((v) => setup.idx.get(v)!));
   const gtol = options.gtol ?? CONVERGENCE_GTOL;
   let pts0 = positionsToPts(positions, setup.vertexIds);
 

@@ -1,4 +1,5 @@
 import { type Vec3 } from "./vec3";
+import { type Mesh } from "./mesh";
 import { edgeSetup, positionsToPts, ptsToPositions } from "./edgeSetup";
 import { pressureForce, repulsionForce, springForce, REPULSION_STRENGTH } from "./forces";
 import { explicitRelaxLoop, STEP_MAX_MULTIPLIER } from "./explicitRelaxLoop";
@@ -13,7 +14,6 @@ export interface ReplayFrame {
 export interface RelaxOnceOptions {
   maxNfev?: number | null;
   gtol?: number;
-  edges?: [number, number][];
   repulsionStrength?: number;
   /** Restricts repulsion to these vertex ids, each scaled by its multiplier (absent: all vertices). */
   repulsionVertexMultipliers?: Map<number, number>;
@@ -38,17 +38,15 @@ export interface RelaxOnceResult {
 }
 
 /** One pressure-driven relaxation pass at a fixed pressure -- no automatic ramp (mirrors
- * stretchy_mesh.relax_once). `faces` are vertex-id loops; `edgeLength` is a uniform scalar or a
- * per-edge rest-length map. */
+ * stretchy_mesh.relax_once). `mesh` supplies faces and per-edge-id rest lengths (see Mesh). */
 export async function relaxOnce(
   positions: Map<number, Vec3>,
-  faces: number[][],
-  edgeLength: number | Map<string, number>,
+  mesh: Mesh,
   pressure: number,
   options: RelaxOnceOptions = {},
 ): Promise<RelaxOnceResult> {
-  const setup = edgeSetup(faces, edgeLength, options.edges);
-  const facesIdx = faces.map((face) => face.map((v) => setup.idx.get(v)!));
+  const setup = edgeSetup(mesh);
+  const facesIdx = mesh.faces.map((face) => face.map((v) => setup.idx.get(v)!));
   const pts0 = positionsToPts(positions, setup.vertexIds);
 
   let repIndices: number[] | undefined;

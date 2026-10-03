@@ -10,37 +10,95 @@ export interface NetLayoutEntry {
 }
 
 export interface NetSpec {
+  name?: string;
   faces: number[][];
+  /** Explicit per-face edge identities, parallel to `faces` (see Mesh.faceEdgeIds). */
+  face_edge_ids?: number[][];
   net_layout?: NetLayoutEntry[];
   source_polygon_id?: number[];
 }
 
 export const EDGE_LENGTH = 1.0;
 
-function faceEdges(face: number[]): [number, number][] {
-  const k = face.length;
-  return face.map((v, i) => [v, face[(i + 1) % k]] as [number, number]);
+/** A mesh whose edges have IDENTITY separate from their vertex pair, mirroring stretchy_mesh's
+ * face_edge_ids. Two distinct edges can join the same two vertex ids (a self-joined polygon, e.g.
+ * spider_leg's pinched legs), so every edge is referenced by id, never by its vertex pair.
+ * faceEdgeIds[f][i] is the id of face f's edge faces[f][i] -> faces[f][i+1]; edgeEnds/restLengths
+ * are indexed by that id. Ids not referenced by any face are harmless leftovers. */
+export interface Mesh {
+  faces: number[][];
+  faceEdgeIds: number[][];
+  edgeEnds: [number, number][];
+  restLengths: number[];
 }
 
-export function edgeKey(a: number, b: number): string {
-  return a < b ? `${a}_${b}` : `${b}_${a}`;
+function spokeRestLength(n: number, edgeLength: number): number {
+  return edgeLength / (2 * Math.sin(Math.PI / n));
 }
 
-/** Validates winding (mirrors stretchy_mesh._load_stretchy_mesh_spec's directed-edge check) and
- * returns the face loops unchanged. Throws if a directed edge appears more than once. */
-export function loadNet(spec: NetSpec): { faces: number[][] } {
-  const faces = spec.faces ?? [];
-  if (!faces.length) throw new Error("no faces declared");
-  for (const face of faces) {
-    if (face.length < 3) throw new Error(`a face needs at least 3 vertices, got ${face}`);
-  }
-  const counts = new Map<string, number>();
-  for (const face of faces) {
-    for (const [v, w] of faceEdges(face)) {
-      const key = `${v}->${w}`;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
+function hasSelfJoin(face: number[]): boolean {
+  return new Set(face).size < face.length;
+}
+
+/** Builds a Mesh from vertex loops alone, identifying each edge by its undirected vertex pair
+ * (every edge gets `edgeLength`). Enforces the winding check: a directed edge may appear at most
+ * once. A self-joined face (repeated vertex id) is first fan-triangulated from a fresh centroid,
+ * mirroring self_join_triangulator.split_self_joined_faces, with each spoke given its own id. */
+export function meshFromPairs(faces: number[][], edgeLength = EDGE_LENGTH): Mesh {
+  const pairIds = new Map<string, number>();
+  const edgeEnds: [number, number][] = [];
+  const restLengths: number[] = [];
+  const pairId = (a: number, b: number): number => {
+    const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+    let id = pairIds.get(key);
+    if (id === undefined) {
+      id = edgeEnds.length;
+      pairIds.set(key, id);
+      edgeEnds.push([Math.min(a, b), Math.max(a, b)]);
+      restLengths.push(edgeLength);
     }
+    return id;
+  };
+  const freshId = (a: number, b: number, len: number): number => {
+    edgeEnds.push([a, b]);
+    restLengths.push(len);
+    return edgeEnds.length - 1;
+  };
+
+  let nextVertex = Math.max(...faces.flat()) + 1;
+  const outFaces: number[][] = [];
+  const faceEdgeIds: number[][] = [];
+  for (const face of faces) {
+    const n = face.length;
+    if (!hasSelfJoin(face)) {
+      outFaces.push(face);
+      faceEdgeIds.push(face.map((v, i) => pairId(v, face[(i + 1) % n])));
+      continue;
+    }
+    const centroid = nextVertex++;
+    const spokeLen = spokeRestLength(n, edgeLength);
+    const spokes = face.map((v) => freshId(centroid, v, spokeLen));
+    face.forEach((v, i) => {
+      const w = face[(i + 1) % n];
+      outFaces.push([centroid, v, w]);
+      faceEdgeIds.push([spokes[i], pairId(v, w), spokes[(i + 1) % n]]);
+    });
   }
+  checkDirectedEdgesUnique(outFaces, faceEdgeIds);
+  return { faces: outFaces, faceEdgeIds, edgeEnds, restLengths };
+}
+
+/** Each directed edge (edge id + direction) may be used by at most one face; the edge's two
+ * sides must traverse it in opposite directions. Throws otherwise. */
+function checkDirectedEdgesUnique(faces: number[][], faceEdgeIds: number[][]): void {
+  const counts = new Map<string, number>();
+  faces.forEach((face, f) => {
+    face.forEach((v, i) => {
+      const w = face[(i + 1) % face.length];
+      const key = `${faceEdgeIds[f][i]}:${v}->${w}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+  });
   const problems = [...counts.entries()].filter(([, c]) => c > 1);
   if (problems.length) {
     throw new Error(
@@ -49,21 +107,44 @@ export function loadNet(spec: NetSpec): { faces: number[][] } {
         .join("\n  ")}`,
     );
   }
-  return { faces };
 }
 
-/** Undirected edges (a, b) with a < b, deduplicated (mirrors stretchy_mesh.mesh_edges' plain-set
- * fallback -- fine here since we never carry an explicit "face_edge_ids" field). */
-export function meshEdges(faces: number[][]): [number, number][] {
-  const seen = new Map<string, [number, number]>();
+/** Loads a net file's spec into a Mesh. With explicit `face_edge_ids` (every Save from
+ * interactive_builder_app writes them) those ids ARE the edge identities, so a self-joined net
+ * loads as-is; without them, edges are identified by vertex pair (see meshFromPairs). */
+export function loadNet(spec: NetSpec): Mesh {
+  const faces = spec.faces ?? [];
+  if (!faces.length) throw new Error("no faces declared");
   for (const face of faces) {
-    for (const [v, w] of faceEdges(face)) {
-      const a = Math.min(v, w);
-      const b = Math.max(v, w);
-      seen.set(edgeKey(a, b), [a, b]);
-    }
+    if (face.length < 3) throw new Error(`a face needs at least 3 vertices, got ${face}`);
   }
-  return [...seen.values()].sort((x, y) => (x[0] - y[0]) || (x[1] - y[1]));
+  if (!spec.face_edge_ids) return meshFromPairs(faces);
+  if (spec.face_edge_ids.length !== faces.length) {
+    throw new Error(`face_edge_ids has ${spec.face_edge_ids.length} entries for ${faces.length} faces`);
+  }
+  const edgeEnds: [number, number][] = [];
+  const restLengths: number[] = [];
+  faces.forEach((face, f) => {
+    face.forEach((v, i) => {
+      const id = spec.face_edge_ids![f][i];
+      if (edgeEnds[id] === undefined) {
+        edgeEnds[id] = [v, face[(i + 1) % face.length]];
+        restLengths[id] = EDGE_LENGTH;
+      }
+    });
+  });
+  for (let id = 0; id < edgeEnds.length; id++) {
+    if (edgeEnds[id] === undefined) throw new Error(`face_edge_ids skips edge id ${id}`);
+  }
+  checkDirectedEdgesUnique(faces, spec.face_edge_ids);
+  return { faces, faceEdgeIds: spec.face_edge_ids, edgeEnds, restLengths };
+}
+
+/** True if some edge has only one face using it (an open boundary net, e.g. goose or tube). */
+export function isOpenMesh(mesh: Mesh): boolean {
+  const uses = new Map<number, number>();
+  for (const id of mesh.faceEdgeIds.flat()) uses.set(id, (uses.get(id) ?? 0) + 1);
+  return [...uses.values()].some((count) => count === 1);
 }
 
 export function vertexIdsOf(faces: number[][]): number[] {

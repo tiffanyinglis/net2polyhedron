@@ -27,6 +27,10 @@ directly or host anywhere (it's pure client-side, no API calls).
   - **Closed "pillow" shapes** (cone, tube, ravioli, samosa) -- 2-3 faces glued along every edge,
     a real test case from `physics.md` (ravioli's own pressure-cancelling pathology).
   - **Multi-piece closed nets** (spider_leg, turtle) -- more faces/vertices, still closed.
+  - **Self-joined nets** (spider_leg, cannoli_open, cannoli_semiclosed) -- a polygon whose own
+    edges are glued to each other (a pinched leg, a folded cannoli). Two distinct edges can join the
+    same two vertices, so edges are identified by the id in the file's `face_edge_ids`, not by
+    vertex pair. Runs through the whole pipeline.
   - **goose.poly -- a genuinely open/boundary net.** v1 has no `pressure_exclude_faces`/
     `rms_exclude_edges` support yet (see below), so this one is expected to fail to converge --
     included deliberately, to see the current limitation fail loudly rather than silently.

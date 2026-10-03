@@ -1,5 +1,5 @@
 import { type Vec3 } from "./vec3";
-import { edgeKey, meshEdges, vertexIdsOf } from "./mesh";
+import { type Mesh, vertexIdsOf } from "./mesh";
 
 export interface EdgeSetup {
   vertexIds: number[];
@@ -11,32 +11,27 @@ export interface EdgeSetup {
   scale: number;
 }
 
-/** Shared setup for relaxOnce/relaxInitialConfiguration: vertex/edge index arrays plus each
- * edge's own rest length, resolved from either a uniform scalar or a per-edge map (mirrors
- * stretchy_mesh._edge_setup). */
-export function edgeSetup(
-  faces: number[][],
-  edgeLength: number | Map<string, number>,
-  explicitEdges?: [number, number][],
-): EdgeSetup {
-  const vertexIds = vertexIdsOf(faces);
+/** Shared setup for relaxOnce/relaxInitialConfiguration: vertex index arrays plus one spring per
+ * edge id the mesh's faces actually reference, sorted by vertex pair (mirrors stretchy_mesh.
+ * _edge_setup's ordering). Two distinct ids joining the same vertex pair stay two springs. */
+export function edgeSetup(mesh: Mesh): EdgeSetup {
+  const vertexIds = vertexIdsOf(mesh.faces);
   const idx = new Map(vertexIds.map((v, i) => [v, i]));
-  const edges = explicitEdges ?? meshEdges(faces);
+  const used = [...new Set(mesh.faceEdgeIds.flat())];
+  const ends = (id: number): [number, number] => {
+    const [a, b] = mesh.edgeEnds[id];
+    return a < b ? [a, b] : [b, a];
+  };
+  used.sort((x, y) => {
+    const [ax, bx] = ends(x);
+    const [ay, by] = ends(y);
+    return ax - ay || bx - by || x - y;
+  });
+  const edges = used.map(ends);
   const edgeA = edges.map(([a]) => idx.get(a)!);
   const edgeB = edges.map(([, b]) => idx.get(b)!);
-  let restLengths: number[];
-  let scale: number;
-  if (typeof edgeLength === "number") {
-    restLengths = edges.map(() => edgeLength);
-    scale = edgeLength;
-  } else {
-    restLengths = edges.map(([a, b]) => {
-      const len = edgeLength.get(edgeKey(a, b));
-      if (len === undefined) throw new Error(`missing rest length for edge ${a}-${b}`);
-      return len;
-    });
-    scale = restLengths.length ? Math.min(...restLengths) : 1.0;
-  }
+  const restLengths = used.map((id) => mesh.restLengths[id]);
+  const scale = restLengths.length ? Math.min(...restLengths) : 1.0;
   return { vertexIds, idx, edges, edgeA, edgeB, restLengths, scale };
 }
 

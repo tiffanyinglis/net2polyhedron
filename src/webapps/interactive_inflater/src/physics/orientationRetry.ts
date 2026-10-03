@@ -1,4 +1,4 @@
-import { randomInitialPositions } from "./mesh";
+import { type Mesh, randomInitialPositions } from "./mesh";
 import { orientationSigns } from "./forces";
 import { relaxInitialConfiguration, type RelaxInitialOptions, type RelaxInitialResult } from "./relaxInitial";
 import { type ReplayFrame } from "./relaxOnce";
@@ -19,15 +19,15 @@ export interface OrientationRetryResult extends RelaxInitialResult {
 /** Runs relaxInitialConfiguration up to `maxRetries` times from fresh random starts, stopping at
  * the first attempt that comes back fully orientation-consistent (mirrors pre_inflation_relaxer.
  * relax_initial_configuration_with_orientation_retry). `baseFaces`, if given, is checked instead
- * of `faces` (the fan-triangulated mesh) -- a fan hub vertex can bulge out on its own even while
- * the real macro polygon is caved in, see physics.md's Level 0 orientation-retry section. */
+ * of `mesh`'s faces (the fan-triangulated mesh) -- a fan hub vertex can bulge out on its own even
+ * while the real macro polygon is caved in, see physics.md's Level 0 orientation-retry section. */
 export async function relaxInitialConfigurationWithOrientationRetry(
-  faces: number[][],
-  edgeLength: number | Map<string, number>,
+  mesh: Mesh,
   seed: number,
   baseFaces: number[][] | undefined,
   options: RelaxInitialOptions & { maxRetries?: number; maxSearchTime?: number } = {},
 ): Promise<OrientationRetryResult> {
+  const faces = mesh.faces;
   const orientationFaces = baseFaces ?? faces;
   const selecter = new SeedSelecter(
     options.maxRetries ?? DEFAULT_MAX_ATTEMPTS,
@@ -37,7 +37,7 @@ export async function relaxInitialConfigurationWithOrientationRetry(
   const attemptFn = async (attemptSeed: number) => {
     const pos0 = randomInitialPositions(faces, 5.0, attemptSeed);
     const frames: ReplayFrame[] = [];
-    const relaxResult = await relaxInitialConfiguration(pos0, faces, edgeLength, {
+    const relaxResult = await relaxInitialConfiguration(pos0, mesh, {
       ...options,
       onProgress: (positions, steps) => frames.push({ steps, positions }),
     });

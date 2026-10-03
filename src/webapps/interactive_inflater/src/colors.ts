@@ -1,3 +1,5 @@
+import { type NetLayoutEntry } from "./physics/mesh";
+
 /** Multi-colour support (mirrors common/ui_theme.FACE_COLORS and utils/graph_face_coloring). */
 const BRIGHT = [0x003a7d, 0x008dff, 0xff73b6, 0xc701ff, 0x4ecb8d, 0xff9d3a, 0xf9e858, 0xd83034];
 const ALTERNATING_LIGHT_DARK = [0x8fd7d7, 0x00b0be, 0xff8ca1, 0xf45f74, 0xbdd373, 0x98c127, 0xffcd8e, 0xffb255];
@@ -50,6 +52,23 @@ export function polygonColor(sides: number): number {
   return POLYGON_COLORS[Math.min(8, Math.max(3, sides))];
 }
 
-export function polygonFaceColors(baseFaces: number[][]): number[] {
-  return baseFaces.map((f) => polygonColor(f.length));
+/** Per-face colour by the ORIGINAL polygon's side count, so a hexagon fanned into triangles keeps
+ * hexagon colour. A face's polygon is `sourcePolygonIds[f]` (the file's own list); its side count
+ * is that shape's `n` in `netLayout`, else the number of faces it was split into. Without
+ * sourcePolygonIds (a plain net), each face is its own polygon. */
+export function polygonFaceColors(
+  baseFaces: number[][],
+  sourcePolygonIds?: number[],
+  netLayout?: NetLayoutEntry[],
+): number[] {
+  if (!sourcePolygonIds || sourcePolygonIds.length !== baseFaces.length) {
+    return baseFaces.map((f) => polygonColor(f.length));
+  }
+  const faceCount = new Map<number, number>();
+  for (const id of sourcePolygonIds) faceCount.set(id, (faceCount.get(id) ?? 0) + 1);
+  const sidesOf = new Map<number, number>();
+  for (const entry of netLayout ?? []) {
+    if (entry.shape_id !== undefined && entry.n !== undefined) sidesOf.set(entry.shape_id, entry.n);
+  }
+  return sourcePolygonIds.map((id) => polygonColor(sidesOf.get(id) ?? faceCount.get(id) ?? 3));
 }

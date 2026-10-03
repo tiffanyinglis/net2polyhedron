@@ -1,6 +1,10 @@
+/// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
 import { fullInflate } from "../pipeline";
-import { loadNet } from "../mesh";
+import spiderLegText from "../../../public/nets/spider_leg.poly?raw";
+import cannoliOpenText from "../../../public/nets/cannoli_open.poly?raw";
+import cannoliSemiclosedText from "../../../public/nets/cannoli_semiclosed.poly?raw";
+import { loadNet, meshFromPairs } from "../mesh";
 import { quarterTriangles } from "../meshLevels";
 
 const TETRAHEDRON = { faces: [[0, 1, 2], [3, 1, 0], [0, 2, 3], [2, 1, 3]] };
@@ -61,18 +65,57 @@ describe("fullInflate", () => {
 
 describe("quarterTriangles", () => {
   it("halves each parent edge and gives new internal edges half the opposite edge", () => {
-    const restLengths = new Map([["0_1", 1], ["1_2", 1], ["0_2", 1]]);
     const positions = new Map<number, [number, number, number]>([
       [0, [0, 0, 0]],
       [1, [1, 0, 0]],
       [2, [0, 1, 0]],
     ]);
-    const out = quarterTriangles({ faces: [[0, 1, 2]], positions, restLengths, faceOfFine: [0] });
-    expect(out.faces).toHaveLength(4);
+    const out = quarterTriangles({ mesh: meshFromPairs([[0, 1, 2]]), positions, faceOfFine: [0] });
+    expect(out.mesh.faces).toHaveLength(4);
     expect(out.positions.get(3)).toEqual([0.5, 0, 0]);
-    expect(out.restLengths.get("0_3")).toBe(0.5);
-    expect(out.restLengths.get("3_4")).toBe(0.5);
-    expect(out.restLengths.has("0_1")).toBe(false);
-    for (const len of out.restLengths.values()) expect(len).toBe(0.5);
+    // Every edge the quartered triangle uses is half-length: halves of the three parent edges,
+    // plus three internal midsegments, each half its opposite parent edge.
+    const used = new Set(out.mesh.faceEdgeIds.flat());
+    expect(used.size).toBe(9);
+    for (const id of used) expect(out.mesh.restLengths[id]).toBe(0.5);
   });
+});
+
+describe("self-joined nets", () => {
+  // A hexagon whose corner 3 is glued onto corner 1 and corner 4 onto corner 0 (a pinched leg).
+  const PINCHED_HEXAGON = { faces: [[0, 1, 3, 1, 0, 4]] };
+
+  it("splits a self-joined face instead of rejecting it", () => {
+    const mesh = loadNet(PINCHED_HEXAGON);
+    expect(mesh.faces).toHaveLength(6);
+    expect(mesh.faces.every((f) => new Set(f).size === f.length)).toBe(true);
+  });
+
+  it("loads the shipped spider_leg net by its explicit face_edge_ids", () => {
+    const spec = JSON.parse(spiderLegText);
+    const mesh = loadNet(spec);
+    expect(mesh.faces).toHaveLength(18);
+    // Two distinct edges join vertices 1 and 2 in spider_leg: they must keep separate identities.
+    const edgesBetween12 = mesh.edgeEnds.filter(([a, b]) => Math.min(a, b) === 1 && Math.max(a, b) === 2);
+    expect(edgesBetween12.length).toBeGreaterThan(1);
+  });
+});
+
+describe("bundled self-joined nets", () => {
+  // spider_leg/cannoli carry explicit face_edge_ids, so their repeated vertex pairs stay distinct.
+  it.each([
+    ["spider_leg", spiderLegText],
+    ["cannoli_open", cannoliOpenText],
+    ["cannoli_semiclosed", cannoliSemiclosedText],
+  ])("inflates %s to its target RMS stretch", async (_name, text) => {
+    const result = await fullInflate(JSON.parse(text), { targetRmsPctByLevel: { 1: 10, 2: 10, 3: 10 } });
+    expect(result.rmsStretchPct).toBeGreaterThan(8);
+    expect(result.rmsStretchPct).toBeLessThan(12);
+  }, 120_000);
+
+  it("inflates a single pinched hexagon split from a raw self-joined face", async () => {
+    const result = await fullInflate({ faces: [[0, 1, 3, 1, 0, 4]] }, { targetRmsPctByLevel: { 1: 10, 2: 10, 3: 10 } });
+    expect(result.rmsStretchPct).toBeGreaterThan(8);
+    expect(result.rmsStretchPct).toBeLessThan(12);
+  }, 120_000);
 });

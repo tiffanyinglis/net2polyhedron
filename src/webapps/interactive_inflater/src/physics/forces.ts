@@ -1,5 +1,5 @@
 import { type Vec3, add, cross, dot, mean, norm, safeUnit, scale, sub, zero } from "./vec3";
-import { edgeKey } from "./mesh";
+import { type Mesh } from "./mesh";
 
 export const REPULSION_STRENGTH = 0.015;
 export const MIN_REPULSION_DISTANCE = 0.05;
@@ -140,28 +140,23 @@ export function meshVolume(pts: Vec3[], faces: number[][]): number {
   return total;
 }
 
-/** Exact total rest surface area: closed-form regular-polygon area per face for a uniform scalar
- * edge length, else Heron's formula per triangle for a per-edge rest-length map -- correct even
- * with mixed rest lengths (a fan-triangulated mesh's wedge triangles have a short spoke and a
- * long rim edge, not a uniform side length) unlike assuming every face is regular (mirrors
- * stretchy_mesh._total_rest_area, including its own "every dict-keyed mesh here is all-triangle"
- * assumption). */
-export function totalRestArea(faces: number[][], edgeLength: number | Map<string, number>): number {
-  if (typeof edgeLength === "number") {
-    let total = 0;
-    for (const face of faces) {
-      const n = face.length;
-      total += (n / 4 / Math.tan(Math.PI / n)) * edgeLength * edgeLength;
-    }
-    return total;
-  }
+/** Exact total rest surface area from each face's own edges' rest lengths: Heron's formula for a
+ * triangle, else the regular-polygon area at the face's mean rest length (mirrors
+ * stretchy_mesh._total_rest_area). Correct for mixed rest lengths (a fan-triangulated mesh's
+ * wedges have a short spoke and a long rim edge) -- it never assumes every face is regular. */
+export function totalRestArea(mesh: Mesh): number {
   let total = 0;
-  for (const [a, b, c] of faces) {
-    const la = edgeLength.get(edgeKey(b, c))!;
-    const lb = edgeLength.get(edgeKey(a, c))!;
-    const lc = edgeLength.get(edgeKey(a, b))!;
-    const s = (la + lb + lc) / 2;
-    total += Math.sqrt(Math.max(0, s * (s - la) * (s - lb) * (s - lc)));
-  }
+  mesh.faces.forEach((face, f) => {
+    const n = face.length;
+    const lens = mesh.faceEdgeIds[f].map((id) => mesh.restLengths[id]);
+    if (n === 3) {
+      const [la, lb, lc] = lens;
+      const s = (la + lb + lc) / 2;
+      total += Math.sqrt(Math.max(0, s * (s - la) * (s - lb) * (s - lc)));
+    } else {
+      const side = lens.reduce((x, y) => x + y, 0) / n;
+      total += (n / 4 / Math.tan(Math.PI / n)) * side * side;
+    }
+  });
   return total;
 }
