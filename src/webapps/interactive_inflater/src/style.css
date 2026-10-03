@@ -1,0 +1,99 @@
+:root {
+  color-scheme: dark;
+  --bg: #1b1d22;
+  --panel: #24262c;
+  --fg: #e6e6e6;
+  --accent: #5fa8ff;
+  --border: #3a3d45;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, sans-serif;
+}
+
+#app {
+  display: flex;
+  height: 100%;
+}
+
+#controls {
+  width: 260px;
+  flex-shrink: 0;
+  padding: 1rem;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+#controls h1 {
+  font-size: 1.1rem;
+  margin: 0 0 0.5rem;
+}
+
+#controls label {
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+#controls select, #controls button {
+  width: 100%;
+  padding: 0.4rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+#controls button {
+  cursor: pointer;
+}
+
+#controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.button-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.button-row button {
+  flex: 1;
+}
+
+#status {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+#status dt {
+  opacity: 0.7;
+}
+
+#status dd {
+  margin: 0;
+  text-align: right;
+}
+
+#viewer {
+  flex: 1;
+  position: relative;
+}
+
+#viewer canvas {
+  display: block;
+}

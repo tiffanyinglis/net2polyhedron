@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Interactive Inflater (web)</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="controls">
+        <h1>Interactive Inflater</h1>
+
+        <label for="net-select">Net</label>
+        <select id="net-select"></select>
+
+        <div class="button-row">
+          <button id="relax-btn" disabled>Inflate</button>
+        </div>
+
+        <dl id="status">
+          <dt>Stage</dt>
+          <dd id="status-stage">idle</dd>
+          <dt>Steps</dt>
+          <dd id="status-steps">--</dd>
+          <dt>RMS stretch %</dt>
+          <dd id="status-rms">--</dd>
+          <dt>Pressure</dt>
+          <dd id="status-pressure">--</dd>
+        </dl>
+      </aside>
+      <main id="viewer"></main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

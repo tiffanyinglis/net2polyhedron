@@ -1,0 +1,14 @@
+[
+  { "label": "Tetrahedron", "file": "tetrahedron.json" },
+  { "label": "Cube", "file": "cube.json" },
+  { "label": "Octahedron", "file": "octahedron.json" },
+  { "label": "Dodecahedron", "file": "dodecahedron.json" },
+  { "label": "Icosahedron", "file": "icosahedron.json" },
+  { "label": "Cone (2-face pillow)", "file": "cone.poly" },
+  { "label": "Tube (2-face pillow)", "file": "tube.poly" },
+  { "label": "Ravioli (pressure-cancelling)", "file": "ravioli.poly" },
+  { "label": "Samosa", "file": "samosa.poly" },
+  { "label": "Spider leg (18-piece chain)", "file": "spider_leg.poly" },
+  { "label": "Turtle (19-piece, closed)", "file": "turtle.poly" },
+  { "label": "Goose (open net -- expect an error)", "file": "goose.poly" }
+]
