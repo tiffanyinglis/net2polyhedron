@@ -20,9 +20,10 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
   ui_theme colours): Colour menu (Polygon-specific[P]/Multi-colour[M]/Randomize[R]); "Setup" box
   (net combobox, Target RMS stretch L1-L3 each editable, Tolerance = gtol, Run/Stop
   Simulation button); coloured status line; "Convergence History" table (Level, Pressure, Steps,
-  RMS %, Sim/Cumulative time, Convergence = optimality vs gtol; row text green/red/yellow =
-  converged/not/running); one row of 5 equal panels: Net (2D, `netPanel.ts`, canvas from
-  `net_layout`, no bezier connections), Level 0-3 (one `Viewer` each, ONE `SharedCamera`: drag/
+  RMS %, Sim/Cumulative time (running level ticks live via `historyTimer` in `main.ts`),
+  Convergence = optimality vs gtol; row text green/red/yellow = converged/not/running); one row of
+  5 equal panels: Net (2D, `netPanel.ts`, canvas from `net_layout` + read-only white bezier
+  `builder_connections`, handles from the saved file), Level 0-3 (one `Viewer` each, ONE `SharedCamera`: drag/
   zoom any panel moves all; each auto-fits own mesh). L0 redraws live; L1 shows "Computing..."
   until solved; L2/L3 likewise once solved. Choosing a net only loads it (no auto-run). Default colour =
   polygon-specific (`colors.ts`). `main.ts` wires it.
@@ -61,5 +62,5 @@ the repo is split). Each `src/physics/*.ts` header names the Python module it mi
   (`tests/unit/inflate_polyhedron/test_web_port_reference_values.py` in main repo; keep in sync).
 
 ## Not implemented
-2D builder canvas, Net-panel connection curves, diff-inflate/undo/redo, saved sessions, worker thread, per-level debug buttons, real
+2D builder canvas, diff-inflate/undo/redo, saved sessions, worker thread, per-level debug buttons, real
 animal nets (giraffe/horse/hippo/hoodie; orientation-retry fails on some even in Python).

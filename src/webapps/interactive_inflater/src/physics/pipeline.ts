@@ -1,6 +1,6 @@
 import { type Vec3 } from "./vec3";
 import { isOpenMesh, loadNet, type Mesh, type NetSpec } from "./mesh";
-import { fanLevel0To1, quarterTriangles, type MeshState } from "./meshLevels";
+import { fanLevel0To1, polygonOutlineEdgeIds, quarterTriangles, type MeshState } from "./meshLevels";
 import { relaxInitialConfigurationWithOrientationRetry } from "./orientationRetry";
 import { type ReplayFrame } from "./relaxOnce";
 import { estimatePressureForTargetStretch } from "./pressureCalibration";
@@ -80,7 +80,13 @@ export async function fullInflate(
     onLevelResult?: (level: number, positions: Map<number, Vec3>, frames: ReplayFrame[]) => void;
     onRecord?: (record: LevelRecord) => void;
     /** Called once a level's mesh topology is known, before its result arrives. */
-    onTopology?: (level: number, faces: number[][], faceOfFine: number[]) => void;
+    onTopology?: (
+      level: number,
+      faces: number[][],
+      faceOfFine: number[],
+      faceEdgeIds: number[][],
+      outlineEdgeIds: Set<number>,
+    ) => void;
     shouldStop?: () => boolean;
   } = {},
 ): Promise<InflateResult> {
@@ -89,8 +95,9 @@ export async function fullInflate(
   const gtol = options.gtol ?? CONVERGENCE_GTOL;
   const elapsed = (since: number) => (performance.now() - since) / 1000;
   const topology = fanLevel0To1(base);
+  const outlineEdgeIds = polygonOutlineEdgeIds(base, spec.source_polygon_id ?? baseFaces.map((_, i) => i));
 
-  options.onTopology?.(0, topology.mesh.faces, topology.faceOfFine);
+  options.onTopology?.(0, topology.mesh.faces, topology.faceOfFine, topology.mesh.faceEdgeIds, outlineEdgeIds);
   const t0 = performance.now();
   options.onRecord?.({
     level: 0, state: "running", steps: 0, optimality: null, gtol,
@@ -125,6 +132,7 @@ export async function fullInflate(
     positions: level0.positions,
     faceOfFine: topology.faceOfFine,
     faceOpen: topology.faceOpen,
+    outlineEdgeIds,
   };
   const history: CalibratedLevel[] = [];
   // Repulsion acts on the original net's own corners only, at a per-vertex strength halved per
@@ -136,7 +144,7 @@ export async function fullInflate(
     if (level > 1) state = quarterTriangles(state);
     const repulsionMultiplier = 1 / 2 ** (level - 1);
     const repulsionVertexMultipliers = new Map(repulsionCorners.map((v) => [v, repulsionMultiplier]));
-    options.onTopology?.(level, state.mesh.faces, state.faceOfFine);
+    options.onTopology?.(level, state.mesh.faces, state.faceOfFine, state.mesh.faceEdgeIds, state.outlineEdgeIds);
 
     const targetRmsPct = options.targetRmsPctByLevel?.[level] ?? defaultTargetRmsPct(base);
     const t = performance.now();

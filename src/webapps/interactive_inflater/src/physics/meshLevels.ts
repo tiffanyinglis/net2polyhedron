@@ -80,6 +80,9 @@ export interface MeshState {
   positions: Map<number, Vec3>;
   faceOfFine: number[];
   faceOpen: boolean[];
+  /** Edge ids lying on an original polygon's outer boundary (see polygonOutlineEdgeIds); halves of
+   * a subdivided outline edge stay in the set. */
+  outlineEdgeIds: Set<number>;
 }
 
 /** Splits every triangle into 4 via edge midpoints (mirrors mesh_levels._quarter_triangles for a
@@ -110,11 +113,13 @@ export function quarterTriangles(state: MeshState): MeshState {
     return edgeEnds.length - 1;
   };
   /** The half of `edge` running from `endpoint` to its midpoint. */
+  const outlineEdgeIds = new Set<number>();
   const halfAt = (edge: number, endpoint: number): number => {
     const key = `${edge}:${endpoint}`;
     const existing = halfOf.get(key);
     if (existing !== undefined) return existing;
     const id = addEdge(endpoint, midpoint(edge), mesh.restLengths[edge] / 2);
+    if (state.outlineEdgeIds.has(edge)) outlineEdgeIds.add(id);
     halfOf.set(key, id);
     return id;
   };
@@ -149,5 +154,34 @@ export function quarterTriangles(state: MeshState): MeshState {
     positions,
     faceOfFine,
     faceOpen,
+    outlineEdgeIds,
   };
+}
+
+/** Edge ids on each original polygon's outer boundary, by id (a glued seam shares one id, so it
+ * counts as outer on both of its sides). A Polygon-Fold polygon is one or more triangles fanned
+ * from a centroid vertex shared by all of them, so its outer edges are the ones not touching that
+ * centroid. Any other face is a whole polygon: all of its edges are outer. `groupOfBase[f]` is the
+ * polygon that base face f belongs to (its source_polygon_id, or f itself). */
+export function polygonOutlineEdgeIds(base: Mesh, groupOfBase: number[]): Set<number> {
+  const facesOfGroup = new Map<number, number[]>();
+  groupOfBase.forEach((group, f) => facesOfGroup.set(group, [...(facesOfGroup.get(group) ?? []), f]));
+  const out = new Set<number>();
+  for (const faces of facesOfGroup.values()) {
+    if (faces.length === 1) {
+      for (const id of base.faceEdgeIds[faces[0]]) out.add(id);
+      continue;
+    }
+    let shared = new Set(base.faces[faces[0]]);
+    for (const f of faces.slice(1)) shared = new Set([...shared].filter((v) => base.faces[f].includes(v)));
+    const centroid = [...shared][0];
+    for (const f of faces) {
+      const face = base.faces[f];
+      face.forEach((v, i) => {
+        const w = face[(i + 1) % face.length];
+        if (v !== centroid && w !== centroid) out.add(base.faceEdgeIds[f][i]);
+      });
+    }
+  }
+  return out;
 }

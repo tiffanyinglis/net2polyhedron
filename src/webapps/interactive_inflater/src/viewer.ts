@@ -21,6 +21,12 @@ const VERTEX_NORMAL_COLOR = 0x00ffff;
 const REPULSION_FORCE_COLOR = 0xff00ff;
 const NORMAL_LENGTH_FRACTION = 0.5;
 
+// White outline tracing each original (base) face's boundary: a tube per edge with a sphere at
+// every joint, so caps and corners are rounded. Radius is a fraction of the mesh's own size.
+const OUTLINE_COLOR = 0xffffff;
+const OUTLINE_RADIUS_FRACTION = 0.005;
+const OUTLINE_RADIAL_SEGMENTS = 8;
+
 function sub3(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
@@ -52,6 +58,19 @@ function centroid(face: number[], pts: Vec3[]): Vec3 {
   const c: Vec3 = [0, 0, 0];
   for (const v of face) for (let k = 0; k < 3; k++) c[k] += pts[v][k] / face.length;
   return c;
+}
+
+/** Outline segments: each fine triangle edge whose id is on an original polygon's outer boundary
+ * (`outlineEdgeIds`, from the topology). Keyed by id, so a glued seam is drawn once. */
+function outlineSegmentEnds(faces: number[][], faceEdgeIds: number[][], outlineEdgeIds: Set<number>): [number, number][] {
+  const ends = new Map<number, [number, number]>();
+  faces.forEach((face, f) => {
+    face.forEach((a, i) => {
+      const id = faceEdgeIds[f][i];
+      if (outlineEdgeIds.has(id) && !ends.has(id)) ends.set(id, [a, face[(i + 1) % face.length]]);
+    });
+  });
+  return [...ends.values()];
 }
 
 function pushSegment(out: number[], a: Vec3, b: Vec3) {
@@ -124,8 +143,21 @@ function repulsionSegments(pts: Vec3[], faces: number[][]): number[] {
 /** Rotation/zoom shared by every Level panel (drag any panel -> all rotate together, as in the
  * Python app); each panel still auto-fits its own mesh's size. */
 export class SharedCamera {
-  orientation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.5, 0.6, 0, "YXZ"));
+  orientation = new THREE.Quaternion();
   zoom = 1;
+  /** Right-drag pan, in camera-screen axes and in units of each panel's own fit distance. */
+  pan: [number, number] = [0, 0];
+
+  constructor() {
+    this.reset();
+  }
+
+  /** Back to the default view: starting rotation, zoom 1, no pan. */
+  reset() {
+    this.orientation.setFromEuler(new THREE.Euler(-0.5, 0.6, 0, "YXZ"));
+    this.zoom = 1;
+    this.pan = [0, 0];
+  }
 }
 
 /** Minimal Three.js mesh viewer: a camera-relative key/fill/headlight rig (matching the Python
@@ -140,12 +172,19 @@ export class Viewer {
   private maxRadius = 1;
   private lights: { light: THREE.DirectionalLight; dir: THREE.Vector3 }[] = [];
   private dragging = false;
+  private panning = false;
+  private height = 1;
   private lastXY: [number, number] = [0, 0];
   private overlayFlags: DebugOverlays = { faceNormals: false, vertexNormals: false, repulsiveForces: false };
   private overlayObjects: THREE.LineSegments[] = [];
   private meshData: { pts: Vec3[]; faces: number[][] } | null = null;
   private vertexIds: number[] = [];
   private center: Vec3 = [0, 0, 0];
+  private outlineEdges: [number, number][] = [];
+  private outlineObjects: THREE.InstancedMesh[] = [];
+  private outlineMaterial = new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR });
+  private outlineTube = new THREE.CylinderGeometry(1, 1, 1, OUTLINE_RADIAL_SEGMENTS); // unit length along Y
+  private outlineJoint = new THREE.SphereGeometry(1, OUTLINE_RADIAL_SEGMENTS, 6);
 
   constructor(
     container: HTMLElement,
@@ -174,8 +213,19 @@ export class Viewer {
     this.resize(container);
     new ResizeObserver(() => this.resize(container)).observe(container);
 
-    this.renderer.domElement.addEventListener("pointerdown", (e) => {
+    const canvas = this.renderer.domElement;
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault()); // right-drag pans, no menu
+    canvas.addEventListener("pointerdown", (e) => {
+      if (e.button === 1) {
+        // Middle-click resets the whole shared view (rotation, zoom and pan).
+        e.preventDefault();
+        this.cam.reset();
+        this.onCameraChange();
+        return;
+      }
+      if (e.button !== 0 && e.button !== 2) return;
       this.dragging = true;
+      this.panning = e.button === 2;
       this.lastXY = [e.clientX, e.clientY];
     });
     window.addEventListener("pointerup", () => (this.dragging = false));
@@ -184,6 +234,14 @@ export class Viewer {
       const dx = e.clientX - this.lastXY[0];
       const dy = e.clientY - this.lastXY[1];
       this.lastXY = [e.clientX, e.clientY];
+      if (this.panning) {
+        // One pixel is 2*tan(fov/2) of the view height at the camera's distance (fitDistance / zoom);
+        // express that in fitDistance units, so the pan stays the same across panels of similar size.
+        const k = (2 * Math.tan(Math.PI / 8)) / (this.cam.zoom * this.height);
+        this.cam.pan = [this.cam.pan[0] - dx * k, this.cam.pan[1] + dy * k];
+        this.onCameraChange();
+        return;
+      }
       // Rotate about the camera's own axes so the drag direction always matches the screen,
       // even after going over the poles (yaw/pitch angles flip the horizontal direction there).
       const delta = new THREE.Quaternion().setFromEuler(new THREE.Euler(-dy * 0.01, -dx * 0.01, 0));
@@ -206,6 +264,7 @@ export class Viewer {
 
   private resize(container: HTMLElement) {
     const { clientWidth: w, clientHeight: h } = container;
+    this.height = h || 1;
     this.renderer.setSize(w, h);
     this.camera.aspect = w / (h || 1);
     this.camera.updateProjectionMatrix();
@@ -214,7 +273,16 @@ export class Viewer {
 
   /** `faceOfFine[i]` is the original (un-subdivided) face that `faces[i]` belongs to, and
    * `baseColors[b]` the colour of original face b. */
-  setMesh(faces: number[][], positions: Map<number, Vec3>, faceOfFine: number[], baseColors: number[]) {
+  /** `faceEdgeIds` parallels `faces` (edge identity, see Mesh.faceEdgeIds); `outlineEdgeIds` are the
+   * ids drawn as the white polygon outline. */
+  setMesh(
+    faces: number[][],
+    faceEdgeIds: number[][],
+    positions: Map<number, Vec3>,
+    faceOfFine: number[],
+    baseColors: number[],
+    outlineEdgeIds: Set<number>,
+  ) {
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -293,6 +361,8 @@ export class Viewer {
       pts: vertexIds.map((_, i) => [vertexArray[i * 3], vertexArray[i * 3 + 1], vertexArray[i * 3 + 2]] as Vec3),
       faces: faces.map((face) => face.map((v) => idx.get(v)!)),
     };
+    this.outlineEdges = outlineSegmentEnds(this.meshData.faces, faceEdgeIds, outlineEdgeIds);
+    this.rebuildOutline();
     this.rebuildOverlays();
     this.render();
   }
@@ -307,6 +377,8 @@ export class Viewer {
     this.mesh = null;
     this.wireframe = null;
     this.meshData = null;
+    this.outlineEdges = [];
+    this.rebuildOutline();
     this.rebuildOverlays();
     this.render();
   }
@@ -324,6 +396,7 @@ export class Viewer {
     this.wireframe!.geometry.dispose();
     this.wireframe!.geometry = new THREE.WireframeGeometry(this.mesh.geometry);
     this.meshData.pts = pts;
+    this.rebuildOutline();
     this.rebuildOverlays();
     this.render();
   }
@@ -332,6 +405,54 @@ export class Viewer {
     this.overlayFlags = flags;
     this.rebuildOverlays();
     this.render();
+  }
+
+  /** Rebuilds the base-face outline at the current positions (tubes + joint spheres as instanced meshes). */
+  private rebuildOutline() {
+    for (const obj of this.outlineObjects) {
+      this.scene.remove(obj);
+      obj.dispose();
+    }
+    this.outlineObjects = [];
+    if (!this.meshData || !this.outlineEdges.length) return;
+
+    const { pts } = this.meshData;
+    const radius = this.maxRadius * OUTLINE_RADIUS_FRACTION;
+    const up = new THREE.Vector3(0, 1, 0);
+    const tubeMatrices: THREE.Matrix4[] = [];
+    const jointIds = new Set<number>();
+    for (const [a, b] of this.outlineEdges) {
+      const start = new THREE.Vector3(...pts[a]);
+      const end = new THREE.Vector3(...pts[b]);
+      const dir = end.clone().sub(start);
+      const length = dir.length();
+      if (length < 1e-12) continue;
+      const rotation = new THREE.Quaternion().setFromUnitVectors(up, dir.divideScalar(length));
+      const midpoint = start.add(end).multiplyScalar(0.5);
+      tubeMatrices.push(
+        new THREE.Matrix4().compose(midpoint, rotation, new THREE.Vector3(radius, length, radius)),
+      );
+      jointIds.add(a);
+      jointIds.add(b);
+    }
+    const jointMatrices = [...jointIds].map((v) =>
+      new THREE.Matrix4().compose(
+        new THREE.Vector3(...pts[v]),
+        new THREE.Quaternion(),
+        new THREE.Vector3(radius, radius, radius),
+      ),
+    );
+    this.addOutlineInstances(this.outlineTube, tubeMatrices);
+    this.addOutlineInstances(this.outlineJoint, jointMatrices);
+  }
+
+  private addOutlineInstances(geometry: THREE.BufferGeometry, matrices: THREE.Matrix4[]) {
+    if (!matrices.length) return;
+    const instances = new THREE.InstancedMesh(geometry, this.outlineMaterial, matrices.length);
+    matrices.forEach((m, i) => instances.setMatrixAt(i, m));
+    instances.instanceMatrix.needsUpdate = true;
+    this.scene.add(instances);
+    this.outlineObjects.push(instances);
   }
 
   private rebuildOverlays() {
@@ -373,7 +494,9 @@ export class Viewer {
   render() {
     const orientation = this.cam.orientation;
     this.camera.quaternion.copy(orientation);
-    this.camera.position.set(0, 0, this.fitDistance() / this.cam.zoom).applyQuaternion(orientation);
+    const fit = this.fitDistance();
+    const [panX, panY] = this.cam.pan;
+    this.camera.position.set(panX * fit, panY * fit, fit / this.cam.zoom).applyQuaternion(orientation);
     // Directional lights (aimed at the origin) follow the camera's orientation.
     for (const { light, dir } of this.lights) {
       light.position.copy(dir).normalize().multiplyScalar(10).applyQuaternion(orientation);

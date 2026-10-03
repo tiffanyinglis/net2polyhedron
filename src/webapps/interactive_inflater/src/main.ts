@@ -16,6 +16,7 @@ const inflateBtn = document.getElementById("inflate-btn") as HTMLButtonElement;
 const randomizeItem = document.getElementById("randomize-item") as HTMLButtonElement;
 const colorItems = document.querySelectorAll<HTMLButtonElement>("[data-color-mode]");
 const statusEl = document.getElementById("status")!;
+const statusRowEl = document.getElementById("status-row")!;
 const spinnerEl = document.getElementById("spinner")!;
 const targetInputs = [1, 2, 3].map((level) => document.getElementById(`target-${level}`) as HTMLInputElement);
 const toleranceInput = document.getElementById("tolerance") as HTMLInputElement;
@@ -31,8 +32,13 @@ const camera = new SharedCamera();
 const viewers: Viewer[] = LEVELS.map(
   (level) => new Viewer(document.getElementById(`panel-${level}`)!, camera, renderAll),
 );
-const levelMessages = LEVELS.map((level) => document.querySelector<HTMLElement>(`#panel-${level} .panel-msg`)!);
-const netPanel = new NetPanel(document.getElementById("panel-net")!);
+const levelPanels = LEVELS.map((level) => document.getElementById(`panel-${level}`)!);
+const netPanelEl = document.getElementById("panel-net")!;
+const netPanel = new NetPanel(netPanelEl);
+
+function setLoading(el: HTMLElement, on: boolean) {
+  el.classList.toggle("loading", on);
+}
 
 function renderAll() {
   viewers.forEach((v) => v.render());
@@ -55,9 +61,13 @@ let running = false;
 let stopRequested = false;
 let debugMode = false;
 let busyCount = 0;
+/** performance.now() when the currently running level started; null when nothing is running. */
+let runningSince: number | null = null;
+let historyTimer: number | null = null;
+const HISTORY_REFRESH_MS = 100;
 
 // Shown mesh topology per level (Level 1 reuses Level 0's triangulation; 2 and 3 are subdivisions).
-const levelTopology: ({ faces: number[][]; faceOfFine: number[] } | null)[] = LEVELS.map(() => null);
+const levelTopology: ({ faces: number[][]; faceOfFine: number[]; faceEdgeIds: number[][]; outlineEdgeIds: Set<number> } | null)[] = LEVELS.map(() => null);
 const levelPositions: (Map<number, Vec3> | null)[] = LEVELS.map(() => null);
 const history: (LevelRecord | null)[] = LEVELS.map(() => null);
 
@@ -82,14 +92,29 @@ const replays: Replay[] = LEVELS.map((level) => {
   return { wrap, input, frames: [] };
 });
 
+let lastStatus: { text: string; kind: StatusKind } = { text: "", kind: "info" };
+
 function setStatus(text: string, kind: StatusKind = "info") {
-  statusEl.textContent = text;
-  statusEl.className = kind;
+  lastStatus = { text, kind };
+  applyStatus();
+}
+
+/** Info (blue) messages are debug-only; errors, warnings, and success always show. */
+function applyStatus() {
+  statusEl.textContent = lastStatus.text;
+  statusEl.className = lastStatus.kind;
+  // Release mode: only errors stay visible; the row is hidden entirely otherwise (no empty gap).
+  statusRowEl.hidden = lastStatus.kind !== "error" && !debugMode;
 }
 
 function setBusy(delta: number) {
   busyCount += delta;
-  spinnerEl.hidden = busyCount <= 0;
+  applySpinner();
+}
+
+/** The status-row spinner is debug-only, like the blue info message it sits beside. */
+function applySpinner() {
+  spinnerEl.hidden = busyCount <= 0 || !debugMode;
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
@@ -140,6 +165,8 @@ function applyDebugOverlays() {
 
 function setDebugMode(on: boolean) {
   debugMode = on;
+  applyStatus();
+  applySpinner();
   debugRow.hidden = !on;
   document.title = on ? "Interactive Inflater (debug mode)" : "Interactive Inflater";
   if (!on) for (const box of Object.values(debugBoxes)) box.checked = false;
@@ -183,7 +210,7 @@ function showLevel(level: number, positions: Map<number, Vec3>) {
   const topo = levelTopology[level];
   if (!topo) return;
   levelPositions[level] = positions;
-  viewers[level].setMesh(topo.faces, positions, topo.faceOfFine, currentBaseColors());
+  viewers[level].setMesh(topo.faces, topo.faceEdgeIds, positions, topo.faceOfFine, currentBaseColors(), topo.outlineEdgeIds);
 }
 
 function onLevelResult(level: number, positions: Map<number, Vec3>, frames: ReplayFrame[]) {
@@ -195,7 +222,7 @@ function clearComputedLevels() {
   for (const level of LEVELS) {
     levelPositions[level] = null;
     viewers[level].clear();
-    levelMessages[level].textContent = "";
+    setLoading(levelPanels[level], false);
     history[level] = null;
   }
   clearReplays();
@@ -211,16 +238,19 @@ function mmss(seconds: number): string {
 
 function renderHistory() {
   let cumulative = 0;
+  const now = performance.now();
   historyBody.replaceChildren(
     ...LEVELS.map((level) => {
       const rec = history[level];
-      if (rec) cumulative += rec.simTimeS;
+      // A running level's sim time is live elapsed time, not its (not-yet-known) final value.
+      const simTimeS = rec && rec.state === "running" && runningSince !== null ? (now - runningSince) / 1000 : rec?.simTimeS ?? 0;
+      if (rec) cumulative += simTimeS;
       const cells = rec
         ? [
             rec.pressure === null ? "--" : rec.pressure.toFixed(2),
             String(rec.steps),
             rec.rmsStretchPct === null ? "--" : rec.rmsStretchPct.toFixed(1),
-            mmss(rec.simTimeS),
+            mmss(simTimeS),
             mmss(cumulative),
             rec.optimality === null
               ? "--"
@@ -273,16 +303,19 @@ for (const input of [...targetInputs, toleranceInput]) {
 function setRunning(value: boolean) {
   running = value;
   inflateBtn.textContent = value ? "Stop Simulation" : "Run Simulation";
-  inflateBtn.disabled = !value && !currentNet;
+  // Enabled while running (so it can be stopped) or once the selected net file has loaded.
+  inflateBtn.disabled = !value && !currentSpec;
 }
 
 function onRecord(record: LevelRecord) {
   history[record.level] = record;
   if (record.state === "running") {
-    levelMessages[record.level].textContent = "Computing...";
+    runningSince = performance.now();
+    setLoading(levelPanels[record.level], true);
     setStatus(`Full Inflate -- Computing Level ${record.level}...`);
   } else {
-    levelMessages[record.level].textContent = "";
+    runningSince = null;
+    setLoading(levelPanels[record.level], false);
   }
   renderHistory();
 }
@@ -295,12 +328,15 @@ async function inflate() {
   setRunning(true);
   clearComputedLevels();
   setBusy(1);
+  // Re-render the history table on a timer so the running level's time (and cumulative) tick live.
+  historyTimer = window.setInterval(renderHistory, HISTORY_REFRESH_MS);
   try {
     const result = await fullInflate(currentSpec, {
       targetRmsPctByLevel,
       gtol,
       onRecord,
-      onTopology: (level, faces, faceOfFine) => (levelTopology[level] = { faces, faceOfFine }),
+      onTopology: (level, faces, faceOfFine, faceEdgeIds, outlineEdgeIds) =>
+        (levelTopology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds }),
       onLevelResult,
       shouldStop: () => stopRequested,
     });
@@ -310,12 +346,16 @@ async function inflate() {
     );
   } catch (err) {
     console.error(err);
-    for (const level of LEVELS) levelMessages[level].textContent = "";
+    for (const panel of levelPanels) setLoading(panel, false);
     setStatus(
       stopRequested ? "Full Inflate -- Stopped." : `Full Inflate -- ${err instanceof Error ? err.message : String(err)}`,
       stopRequested ? "warn" : "error",
     );
   } finally {
+    window.clearInterval(historyTimer!);
+    historyTimer = null;
+    runningSince = null;
+    renderHistory();
     setBusy(-1);
     setRunning(false);
   }
@@ -326,12 +366,17 @@ async function selectNet(net: NetIndexEntry) {
   currentSpec = null;
   setRunning(false);
   setBusy(1);
+  netPanel.setNet(null);
+  clearComputedLevels();
+  levelTopology.fill(null);
   setStatus(`Loading ${net.label}...`);
+  setLoading(netPanelEl, true);
   try {
     const spec = await fetchJson<NetSpec>(`nets/${net.file}`);
     const mesh = loadNet(spec);
     baseFaces = mesh.faces;
     currentSpec = spec;
+    setRunning(false);
     defaultTargetRms = defaultTargetRmsPct(mesh);
     for (const input of targetInputs) input.value = `${defaultTargetRms}%`;
     multiColors = randomFaceColors(baseFaces);
@@ -344,6 +389,7 @@ async function selectNet(net: NetIndexEntry) {
     console.error(err);
     setStatus(err instanceof Error ? err.message : String(err), "error");
   } finally {
+    setLoading(netPanelEl, false);
     setBusy(-1);
   }
 }
@@ -375,7 +421,9 @@ async function init() {
 
   setBusy(1);
   try {
-    const nets = await fetchJson<NetIndexEntry[]>("nets/index.json");
+    const nets = (await fetchJson<NetIndexEntry[]>("nets/index.json")).sort((a, b) =>
+      a.label.localeCompare(b.label),
+    );
     for (const net of nets) {
       const option = document.createElement("option");
       option.value = net.file;

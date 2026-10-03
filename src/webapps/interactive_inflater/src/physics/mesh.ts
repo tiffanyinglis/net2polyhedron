@@ -9,6 +9,25 @@ export interface NetLayoutEntry {
   rotation: number;
 }
 
+/** Bezier handle offset from an edge midpoint, in builder pixels (along the edge tangent / outward normal). */
+export interface BuilderHandle {
+  t: number;
+  n: number;
+}
+
+/** One saved bezier connection between two placed polygons' edges (interactive_builder_app's format). */
+export interface BuilderConnection {
+  /** Current format keys by shape_id; legacy files key by a_face/b_face (position in net_layout). */
+  a_shape_id?: number;
+  a_face?: number;
+  a_edge: number;
+  b_shape_id?: number;
+  b_face?: number;
+  b_edge: number;
+  a_handle?: BuilderHandle;
+  b_handle?: BuilderHandle;
+}
+
 export interface NetSpec {
   name?: string;
   faces: number[][];
@@ -16,6 +35,7 @@ export interface NetSpec {
   face_edge_ids?: number[][];
   net_layout?: NetLayoutEntry[];
   source_polygon_id?: number[];
+  builder_connections?: BuilderConnection[];
 }
 
 export const EDGE_LENGTH = 1.0;
