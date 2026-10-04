@@ -44,6 +44,8 @@ describe("junction and terminal placement", () => {
         expect(plan.solve).not.toBeNull();
         expect(new Set(plan.solve!.source_polygon_id)).toEqual(new Set(junctions.map((s) => s.id)));
         expect(() => loadNet(plan.solve!)).not.toThrow();
+        // Folded (self-joined) nets are always full solves, so they get no slots for a diff to start from.
+        expect(plan.slots === null).toBe(folded);
         // The solver wants edge ids 0..k-1 with no gaps, even after the terminals are dropped.
         const edgeIds = new Set(plan.solve!.face_edge_ids!.flat());
         expect([...edgeIds].sort((a, b) => a - b)).toEqual([...edgeIds].map((_, i) => i));

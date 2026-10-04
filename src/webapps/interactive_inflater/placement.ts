@@ -117,23 +117,34 @@ export function planPlacement(shapes: Shape[], connections: Connection[], ownerI
     solveToFull,
     flats,
     seedPositions: solved || !seed ? null : seedPositions(seed),
-    slots: solve ? junctionSlots(shapes, solve, solveToFull, full) : null,
+    // A self-joined (folded) piece is always a Full Inflate, never a Diff: its fan of triangles distorts far
+    // too much for a diff to start from, so it gets no slots, which makes every edit involving it a full solve.
+    slots: solve && folded.size === 0 ? junctionSlots(shapes, solve, solveToFull, full) : null,
   };
 }
 
-/** Each junction corner's vertex id in the solve, by slot. Null if a junction face isn't a plain n-gon (folded). */
+/**
+ * Each junction corner's vertex id in the solve, by slot. Null if a junction piece's faces don't match its
+ * corners. (Folded pieces never reach this: planPlacement gives them no slots, so they are always full solves.)
+ */
 function junctionSlots(shapes: Shape[], solve: NetSpec, solveToFull: number[], full: NetSpec): Map<string, number> | null {
   const slots = new Map<string, number>();
-  for (let k = 0; k < solve.faces.length; k++) {
-    const face = solve.faces[k];
+  const facesOf = new Map<number, number[]>();
+  solveToFull.forEach((_, k) => {
     const shapeId = full.source_polygon_id![solveToFull[k]];
+    facesOf.set(shapeId, [...(facesOf.get(shapeId) ?? []), k]);
+  });
+  for (const [shapeId, faces] of facesOf) {
     const shape = shapes.find((s) => s.id === shapeId)!;
-    if (face.length !== shape.n) return null;
-    // Loop position p reads corner order[p]: a flipped piece's loop runs in reverse (netExport's faceCornerOrder).
-    face.forEach((vertex, p) => {
-      const corner = shape.flipped ? shape.n - 1 - p : p;
-      slots.set(`${shapeId}:${corner}`, vertex);
-    });
+    if (faces.length === 1 && solve.faces[faces[0]].length === shape.n) {
+      // Loop position p reads corner order[p]: a flipped piece's loop runs in reverse (netExport's faceCornerOrder).
+      solve.faces[faces[0]].forEach((vertex, p) => {
+        const corner = shape.flipped ? shape.n - 1 - p : p;
+        slots.set(`${shapeId}:${corner}`, vertex);
+      });
+    } else {
+      return null;
+    }
   }
   return slots;
 }
@@ -199,7 +210,7 @@ const unit = (a: Vec3): Vec3 => scaleBy(a, 1 / norm(a));
  * 2D shape, scaled to the solved edge length. Returns the new corner positions by corner index.
  */
 export function attachFlat(
-  flat: FlatPiece,
+  flat: Pick<FlatPiece, "shape" | "cornerIds" | "neighbour">,
   full: NetSpec,
   positions: Map<number, Vec3>,
 ): Map<number, Vec3> {

@@ -25,6 +25,28 @@ export interface Connection {
   bHandle: Handle;
 }
 
+/**
+ * The edges that light up together for one edge: if it's joined, its join and both edges the join connects;
+ * if it's open, just that edge (connection null).
+ */
+export function edgeGroup(
+  connections: Connection[],
+  shape: number,
+  edge: number,
+): { connection: Connection | null; edges: { shape: number; edge: number }[] } {
+  const conn = connections.find(
+    (c) => (c.aShape === shape && c.aEdge === edge) || (c.bShape === shape && c.bEdge === edge),
+  );
+  if (!conn) return { connection: null, edges: [{ shape, edge }] };
+  return {
+    connection: conn,
+    edges: [
+      { shape: conn.aShape, edge: conn.aEdge },
+      { shape: conn.bShape, edge: conn.bEdge },
+    ],
+  };
+}
+
 /** Bezier samples per connection, as the Python builder draws them. */
 const CURVE_STEPS = 24;
 

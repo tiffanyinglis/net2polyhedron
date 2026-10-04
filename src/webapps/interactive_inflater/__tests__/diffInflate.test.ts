@@ -32,9 +32,9 @@ describe("Diff Inflate", () => {
     });
     expect(level3).not.toBeNull();
     const slots = slotsOf(TETRAHEDRON);
-    const last: LastSolve = { slots, positions: level3!, pressure: pressure! };
+    const last: LastSolve = { slots, positions: level3!, pressure: pressure!, triangles: [] };
     expect(canDiff(slots, last)).toBe(true);
-    const result = await diffInflate(TETRAHEDRON, slots, last, { targetRmsPct: 10, gtol: 1e-4, shouldStop: () => false });
+    const result = await diffInflate(TETRAHEDRON, slots, last, { targetRmsPct: 10, gtol: 1e-4, shouldStop: () => false, sourceOfFace: [0, 1, 2, 3] });
     expect(result.rmsStretchPct).toBeGreaterThan(9);
     expect(result.rmsStretchPct).toBeLessThan(11);
     // Each triangle fans into 3, then two quarterings: 4 faces x 3 x 16 fine triangles.
@@ -42,6 +42,6 @@ describe("Diff Inflate", () => {
   }, 120_000);
 
   it("has nothing to diff from when no corner matches", () => {
-    expect(canDiff(new Map([["9:0", 0]]), { slots: new Map([["0:0", 0]]), positions: new Map(), pressure: 1 })).toBe(false);
+    expect(canDiff(new Map([["9:0", 0]]), { slots: new Map([["0:0", 0]]), positions: new Map(), pressure: 1, triangles: [] })).toBe(false);
   });
 });

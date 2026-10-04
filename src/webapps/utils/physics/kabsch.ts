@@ -124,9 +124,9 @@ function cross3(a: Vec3, b: Vec3): Vec3 {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 }
 
-/** Re-expresses `after` in the same rigid frame (rotation + translation) `before` was in, via
- * Kabsch/orthogonal-Procrustes alignment (mirrors convergence_checker.remove_rigid_motion). */
-export function removeRigidMotion(before: Vec3[], after: Vec3[]): Vec3[] {
+/** The rigid motion (rotation + translation, no scaling) that best maps `after` onto `before` in the
+ * least-squares sense, by Kabsch/orthogonal Procrustes. `before[i]` and `after[i]` are the same point. */
+export function rigidTransformFrom(before: Vec3[], after: Vec3[]): (p: Vec3) => Vec3 {
   const cBefore = mean(before);
   const cAfter = mean(after);
   const a = before.map((p) => sub(p, cBefore));
@@ -139,5 +139,12 @@ export function removeRigidMotion(before: Vec3[], after: Vec3[]): Vec3[] {
   const d = Math.sign(det3(multiply3(v, transpose3(u)))) || 1;
   const diag: Mat3 = [[1, 0, 0], [0, 1, 0], [0, 0, d]];
   const r = multiply3(multiply3(v, diag), transpose3(u));
-  return b.map((bi) => add(mulVec3(r, bi), cBefore));
+  return (p) => add(mulVec3(r, sub(p, cAfter)), cBefore);
+}
+
+/** Re-expresses `after` in the same rigid frame (rotation + translation) `before` was in, via
+ * Kabsch/orthogonal-Procrustes alignment (mirrors convergence_checker.remove_rigid_motion). */
+export function removeRigidMotion(before: Vec3[], after: Vec3[]): Vec3[] {
+  const transform = rigidTransformFrom(before, after);
+  return after.map(transform);
 }

@@ -3,6 +3,7 @@ import { faceInfo, type FaceInfo, type FaceRole } from "./faceTypes";
 import { type Point } from "../utils/geometry";
 import { connectionGeometry, distanceToSegment, edgeMidpoints, sampleCubic, type Connection, type End } from "./joins";
 import { DEFAULT_SHAPE_EDGE_LENGTH, shapeCssColor, shapeVertices, type Shape } from "./shapes";
+import { edgeGroup } from "./joins";
 
 /**
  * An equilateral triangle centred on (cx, cy), vertices at radius `r`, pointing up unless `turn` rotates it
@@ -32,6 +33,8 @@ const CONNECTION_WIDTH = 1.5;
 const CONNECTION_SELECTED_WIDTH = 2.5;
 /** Outline of the piece under the pointer, in either view (matches the 3D hover highlight). */
 const HOVER_COLOR = "#ffd400";
+/** How close (CSS px) a pointer must be to a polygon line to count as on that edge. */
+const EDGE_LINE_HIT_RADIUS = 6;
 const HANDLE_COLOR = "white";
 /** An unreachable piece is drawn at this opacity, as the Python app's orphaned pieces are. */
 const UNREACHABLE_OPACITY = 0.5;
@@ -59,7 +62,7 @@ interface RotateState {
   lastAngle: number;
 }
 
-/** A join that has its first end chosen and is waiting for the second. */
+/** A join being dragged: its first end is pressed, and the release picks the second. */
 interface PendingJoin {
   shape: number;
   edge: number;
@@ -73,8 +76,8 @@ interface HandleDrag {
 /**
  * The drawing area: draws the net, and turns pointer and wheel input into the Builder's moves, with the
  * same gestures as the Python builder. Move mode: drop, click/Ctrl+click, marquee, drag, right-drag to rotate
- * or pan, scroll to zoom. Join mode: click an edge handle, then another free edge's handle, to join them;
- * click a join to select it, drag its red handles to bend it.
+ * or pan, scroll to zoom. Join mode: drag from an edge handle to another free edge's handle and release, to
+ * join them; click a join to select it, drag its red handles to bend it.
  */
 export class BuilderCanvas {
   private ctx: CanvasRenderingContext2D;
@@ -99,6 +102,14 @@ export class BuilderCanvas {
   hoverPiece: number | null = null;
   /** Called when the piece under the pointer changes (null when the pointer leaves the pieces). */
   onHoverPiece: ((id: number | null) => void) | null = null;
+  /** The edge under the pointer (its join's bezier, its edge circle, or its polygon line), or null. */
+  hoverEdge: { shape: number; edge: number } | null = null;
+  /** The selected open edge (a joined edge selects its join instead). Set by the page. */
+  selectedEdge: { shape: number; edge: number } | null = null;
+  /** Called when the edge under the pointer changes. */
+  onHoverEdge: ((edge: { shape: number; edge: number } | null) => void) | null = null;
+  /** Called when a polygon line is clicked (not a join gesture): the page selects that edge's group. */
+  onSelectEdge: ((edge: { shape: number; edge: number }) => void) | null = null;
   /** A piece's fill colour as a CSS colour. Set by the page (its Colour menu); the default is the polygon colour. */
   fillOf: (shape: Shape) => string = (shape) => shapeCssColor(shape.n);
   /** Each piece's reachable/role classification for this redraw. Empty outside combined mode. */
@@ -176,6 +187,7 @@ export class BuilderCanvas {
       const touchesSelection = builder.selected.has(conn.aShape) || builder.selected.has(conn.bShape);
       this.drawConnection(conn, conn.id === builder.selectedConnection || touchesSelection);
     }
+    this.drawEdgeGroups();
 
     if (this.pending && this.pendingCursor) {
       const from = builder.shapeById(this.pending.shape);
@@ -543,8 +555,11 @@ export class BuilderCanvas {
     this.canvas.setPointerCapture(e.pointerId);
     if (e.button === 0) {
       if (this.combined) {
+        const line = this.isJoinPress(sx, sy) ? null : this.polygonEdgeHit(sx, sy);
         if (this.isJoinPress(sx, sy)) this.onJoinPress(sx, sy);
-        else {
+        else if (line) {
+          this.onSelectEdge?.(line);
+        } else {
           this.builder.selectConnection(null);
           this.onMovePress(e, sx, sy);
         }
@@ -587,29 +602,18 @@ export class BuilderCanvas {
   }
 
   /**
-   * Join mode: a click starts a join from a free edge handle, completes one onto another free handle, drags a
-   * selected join's control point, or selects a join. Shapes can't be picked here, as in the Python builder.
+   * Join mode: a press on a free edge handle starts a join, which the drag carries to another free handle and
+   * the release completes (see onPointerUp). A press drags a selected join's control point, or selects a join.
+   * Shapes can't be picked here, as in the Python builder.
    */
   private onJoinPress(sx: number, sy: number) {
-    if (!this.pending && this.builder.selectedConnection !== null) {
+    if (this.builder.selectedConnection !== null) {
       const end = this.bezierHandleHit(sx, sy);
       if (end) {
         this.builder.beginGesture();
         this.handleDrag = { connectionId: this.builder.selectedConnection, end };
         return;
       }
-    }
-    if (this.pending) {
-      const target = this.handleHit(sx, sy, this.pending);
-      if (target) {
-        this.builder.join(this.pending.shape, this.pending.edge, target.shape, target.edge);
-        this.pending = null;
-        this.hover = null;
-        return;
-      }
-      // A click that isn't on a target cancels the join, and then does its normal job below.
-      this.pending = null;
-      this.hover = null;
     }
     const start = this.handleHit(sx, sy, null);
     if (start) {
@@ -619,6 +623,85 @@ export class BuilderCanvas {
       return;
     }
     this.builder.selectConnection(this.connectionHit(sx, sy));
+  }
+
+  /** Sets the hovered edge, and tells the page if it changed. */
+  setHoverEdge(edge: { shape: number; edge: number } | null) {
+    const same = edge === null ? this.hoverEdge === null : this.hoverEdge !== null && this.hoverEdge.shape === edge.shape && this.hoverEdge.edge === edge.edge;
+    if (same) return;
+    this.hoverEdge = edge;
+    this.onHoverEdge?.(edge);
+    this.redraw();
+  }
+
+  /** Which edge's polygon line is under a screen point (within a few px), or null. */
+  private polygonEdgeHit(sx: number, sy: number): { shape: number; edge: number } | null {
+    let best: { shape: number; edge: number } | null = null;
+    let bestDist = EDGE_LINE_HIT_RADIUS;
+    for (const shape of this.builder.shapes) {
+      const verts = shapeVertices(shape).map(([x, y]) => this.toScreen(x, y));
+      verts.forEach((a, i) => {
+        const b = verts[(i + 1) % verts.length];
+        const dist = distanceToSegment([sx, sy], a, b);
+        if (dist < bestDist) {
+          best = { shape: shape.id, edge: i };
+          bestDist = dist;
+        }
+      });
+    }
+    return best;
+  }
+
+  /** The edge a pointer is over in 2D, in priority order: a join's bezier, an open edge's circle, a polygon line. */
+  private edgeUnder(sx: number, sy: number): { shape: number; edge: number } | null {
+    const conn = this.connectionHit(sx, sy);
+    if (conn !== null) {
+      const c = this.builder.connections.find((x) => x.id === conn);
+      if (c) return { shape: c.aShape, edge: c.aEdge };
+    }
+    const circle = this.handleHit(sx, sy, null);
+    if (circle) return { shape: circle.shape, edge: circle.edge };
+    return this.polygonEdgeHit(sx, sy);
+  }
+
+  /** Draws the hovered group in yellow and the selected group in red: each edge's line, plus its join's bezier. */
+  private drawEdgeGroups() {
+    const selected = this.builder.selectedConnection !== null
+      ? (() => {
+          const c = this.builder.connections.find((x) => x.id === this.builder.selectedConnection);
+          return c ? { shape: c.aShape, edge: c.aEdge } : null;
+        })()
+      : this.selectedEdge;
+    if (this.hoverEdge) this.drawEdgeGroup(this.hoverEdge, HOVER_COLOR);
+    if (selected) this.drawEdgeGroup(selected, SELECTION_COLOR);
+  }
+
+  private drawEdgeGroup(edge: { shape: number; edge: number }, color: string) {
+    const { ctx } = this;
+    const group = edgeGroup(this.builder.connections, edge.shape, edge.edge);
+    if (group.connection) {
+      const curve = this.connectionCurve(group.connection);
+      if (curve) {
+        ctx.beginPath();
+        curve.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+        ctx.strokeStyle = color;
+        ctx.lineWidth = CONNECTION_SELECTED_WIDTH;
+        ctx.stroke();
+      }
+    }
+    for (const e of group.edges) {
+      const shape = this.builder.shapeById(e.shape);
+      if (!shape) continue;
+      const verts = shapeVertices(shape).map(([x, y]) => this.toScreen(x, y));
+      const a = verts[e.edge];
+      const b = verts[(e.edge + 1) % verts.length];
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = CONNECTION_SELECTED_WIDTH + 1;
+      ctx.stroke();
+    }
   }
 
   /** Sets the hovered piece, and tells the page if it changed. */
@@ -635,6 +718,7 @@ export class BuilderCanvas {
     if (!this.drag && !this.handleDrag && this.builder.armedN === null) {
       const shape = this.builder.hitTest(...this.toWorld(sx, sy));
       this.setHoverPiece(shape ? shape.id : null);
+      this.setHoverEdge(this.edgeUnder(sx, sy));
     }
     if (this.builder.armedN !== null) this.ghost = [sx, sy];
     if (this.showsJoin()) {
@@ -668,9 +752,17 @@ export class BuilderCanvas {
     this.redraw();
   }
 
-  private onPointerUp(_e: PointerEvent) {
+  private onPointerUp(e: PointerEvent) {
     if (this.drag || this.rotate || this.handleDrag) {
       this.builder.commitGesture();
+      this.onChange();
+    }
+    if (this.pending) {
+      // Released on another free edge handle: join the two. Anywhere else, the drag is dropped.
+      const target = this.handleHit(e.offsetX, e.offsetY, this.pending);
+      if (target) this.builder.join(this.pending.shape, this.pending.edge, target.shape, target.edge);
+      this.pending = null;
+      this.hover = null;
       this.onChange();
     }
     if (this.marquee) {

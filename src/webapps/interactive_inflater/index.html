@@ -39,22 +39,24 @@
         <aside id="palette" class="pane-header" aria-label="Shapes"></aside>
         <fieldset id="setup" class="pane-header">
           <legend>Setup</legend>
-          <div class="setup-row">
-            <button id="inflate-btn" type="button" disabled>Reinflate</button>
+          <!-- Browser-style controls above the 3D view: Back (undo), Forward (redo), Refresh (full inflate). -->
+          <div id="nav-row" class="setup-row nav-buttons">
+            <button id="undo-btn" type="button" class="nav-button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12H3M10 5l-7 7 7 7"/></svg>
+            </button>
+            <button id="redo-btn" type="button" class="nav-button" title="Redo (Ctrl+Y)" aria-label="Redo" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h18M14 5l7 7-7 7"/></svg>
+            </button>
+            <button id="inflate-btn" type="button" class="nav-button" title="Re-inflate (full inflate)" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
+            </button>
           </div>
           <!-- Debug mode only ('d'), as in the Python app's release vs debug split. -->
           <div id="debug-row" class="debug-row" hidden>
-            <div class="param-group">
-              <span>Target RMS stretch:</span>
-              <label>Level 1: <input id="target-1" size="4" value="10%" /></label>
-              <label>Level 2: <input id="target-2" size="4" value="10%" /></label>
-              <label>Level 3: <input id="target-3" size="4" value="10%" /></label>
-            </div>
-            <label>Tolerance: <input id="tolerance" size="10" value="1e-04" /></label>
             <label><input type="checkbox" id="show-face-normals" /> Face normals</label>
             <label><input type="checkbox" id="show-vertex-normals" /> Vertex normals</label>
             <label><input type="checkbox" id="show-repulsive-forces" /> Repulsive forces</label>
-            <label class="replay-control">Replay <input type="range" id="replay-slider" min="0" max="0" value="0" disabled /></label>
+            <div class="replay-control"><span>Replay</span><input type="range" id="replay-slider" min="0" max="0" value="0" disabled /></div>
           </div>
         </fieldset>
 

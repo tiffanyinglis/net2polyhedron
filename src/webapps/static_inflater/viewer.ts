@@ -229,6 +229,8 @@ export class Viewer {
   private maxRadius = 1;
   private lights: { light: THREE.DirectionalLight; dir: THREE.Vector3 }[] = [];
   private dragging = false;
+  /** Whether a press on the view orbits, pans or zooms. Turned off for presses that start a join. */
+  private orbitEnabled = true;
   private panning = false;
   private height = 1;
   private lastXY: [number, number] = [0, 0];
@@ -302,6 +304,7 @@ export class Viewer {
         return;
       }
       if (e.button !== 0 && e.button !== 2) return;
+      if (!this.orbitEnabled) return;
       this.dragging = true;
       this.panning = e.button === 2;
       this.lastXY = [e.clientX, e.clientY];
@@ -539,6 +542,11 @@ export class Viewer {
     return { indices, multipliers };
   }
 
+  /** Turns the press-to-orbit gesture on or off. */
+  setOrbitEnabled(on: boolean) {
+    this.orbitEnabled = on;
+  }
+
   setOverlays(flags: DebugOverlays) {
     this.overlayFlags = flags;
     this.rebuildOverlays();
@@ -657,6 +665,11 @@ export class Viewer {
     return !hit || hit.distance >= dist - this.maxRadius * 0.5;
   }
 
+  /** Client coordinates of a point given in setMesh's coordinates (public, for overlays drawn on the view). */
+  clientPoint(p: Vec3): [number, number] {
+    return this.toClient(p, this.renderer.domElement.getBoundingClientRect());
+  }
+
   /** Client coordinates of a point given in setMesh's coordinates. */
   private toClient(p: Vec3, rect: DOMRect): [number, number] {
     const v = new THREE.Vector3(p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]).project(this.camera);
@@ -708,6 +721,18 @@ export class Viewer {
       this.edgeHighlightObjects.push(group);
     }
     this.render();
+  }
+
+  /** The point on the mesh under a screen point (client coordinates), in setMesh's coordinates, or null. */
+  pickPoint(clientX: number, clientY: number): Vec3 | null {
+    if (!this.mesh) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, this.camera);
+    const hit = raycaster.intersectObject(this.mesh)[0];
+    if (!hit) return null;
+    return [hit.point.x + this.center[0], hit.point.y + this.center[1], hit.point.z + this.center[2]];
   }
 
   /** The base face under a screen point (client coordinates), or null if the pointer isn't over the mesh. */

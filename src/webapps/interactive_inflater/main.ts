@@ -15,15 +15,16 @@ import { type Vec3 } from "../utils/physics/vec3";
 import {
   LEVELS,
   LevelStore,
-  readTargetRmsPct,
-  readTolerance,
   runFullInflate,
-  wireParamInput,
   type RunOutcome,
   type StatusKind,
 } from "../utils/inflaterRun";
 import { activeGroup, structureKey } from "./bridge";
 import { buildDisplay, edgePath, junctionKey, NO_SOLVE_TOPOLOGY, planPlacement, type Display, type Placement } from "./placement";
+import { edgeGroup } from "../net_builder/joins";
+import { rigidTransformFrom } from "../utils/physics/kabsch";
+import { CONVERGENCE_GTOL } from "../utils/physics/convergence";
+import { surfaceTriangles } from "./diffInflate";
 import { canDiff, diffInflate, type LastSolve } from "./diffInflate";
 
 mountAppNav("interactive_inflater");
@@ -45,7 +46,12 @@ const paletteEl = $("palette");
 const builderStatusEl = $("builder-status");
 const inflaterStatusEl = $("inflater-status");
 const inflateBtn = $<HTMLButtonElement>("inflate-btn");
-const toleranceInput = $<HTMLInputElement>("tolerance");
+const undoBtn = $<HTMLButtonElement>("undo-btn");
+const redoBtn = $<HTMLButtonElement>("redo-btn");
+/** The Re-inflate button's icon, and its Stop icon while a run is going (its name is hover text only). */
+const REFRESH_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>';
+const STOP_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>';
+const navRow = $("nav-row");
 const undoItem = $<HTMLButtonElement>("undo-item");
 const redoItem = $<HTMLButtonElement>("redo-item");
 const loadItem = $<HTMLButtonElement>("load-item");
@@ -58,7 +64,6 @@ const debugBoxes = {
   vertexNormals: $<HTMLInputElement>("show-vertex-normals"),
   repulsiveForces: $<HTMLInputElement>("show-repulsive-forces"),
 };
-const targetInputs = [1, 2, 3].map((level) => $<HTMLInputElement>(`target-${level}`));
 
 const builder = new Builder();
 // Combined Move/Join: no mode switch, the canvas picks join or move per press (as the Python builder's Edit mode).
@@ -105,21 +110,23 @@ let lastSolve: LastSolve | null = null;
 /** Key of the net last seen by refresh(); a change schedules an auto Full Inflate. */
 let seenKey: string | null = null;
 let autoTimer: number | null = null;
+/** An edit that needs a new inflate is waiting to start: a spinner shows over the 3D view until it does. */
+let inflatePending = false;
+/** The red selection as it was last drawn with something selected. Kept while an inflate is pending, so
+ * a deleted selection still reads as there until the new result replaces the old one. */
+let lastRed: { faces: Set<number>; edges: Vec3[][] } | null = null;
 /** The display on screen (its piece corners and positions), for picking edges. */
 let shownDisplay: Display | null = null;
 /** The full net's source piece per face, for the display on screen. */
 let shownSource: number[] | null = null;
 /** Each edge's real path on the display on screen, by "piece:edge". Filled on demand. */
 let shownPaths = new Map<string, Vec3[]>();
-/** The edge under the pointer in 3D, if any. */
-let hoverEdge: { shape: number; edge: number } | null = null;
+
 /** Multi-colour: each piece's own colour (0xRRGGBB), kept as pieces are added. The 2D view and the 3D model both use it. */
 const pieceColors = new Map<number, number>();
 /** The replay frames of the result on screen (debug mode's slider), and the level they belong to. */
 let replayFrames: ReplayFrame[] = [];
 let replayLevel = 3;
-/** The default target the Level fields were last set to (5% open, 10% closed); null forces a reset. */
-let appliedDefaultPct: number | null = null;
 
 // ---- status and controls ------------------------------------------------------------------------
 
@@ -154,8 +161,8 @@ function refresh() {
     netChanged(key);
   }
   const editable = !running;
-  undoItem.disabled = !editable || !builder.canUndo;
-  redoItem.disabled = !editable || !builder.canRedo;
+  undoItem.disabled = undoBtn.disabled = !editable || !builder.canUndo;
+  redoItem.disabled = redoBtn.disabled = !editable || !builder.canRedo;
   loadItem.disabled = !editable;
   canvasEl.style.pointerEvents = editable ? "" : "none";
   for (const button of paletteEl.querySelectorAll<HTMLButtonElement>("button")) {
@@ -166,6 +173,7 @@ function refresh() {
   builderStatusEl.textContent = hintText();
   builderStatusEl.style.color = "var(--info)";
   syncPieceColors();
+  if (builder.selected.size) canvas.selectedEdge = null;
   refreshColorMenu();
   canvas.redraw();
   syncHighlights();
@@ -221,13 +229,8 @@ function tryPlan(): Placement | null {
  * closed one, as the Python app and the Static Inflater do). They're reset when the open/closed status
  * changes or a file is loaded, so a value typed in between is kept.
  */
-function applyDefaultTargets(full: NetSpec): number {
-  const pct = defaultTargetRmsPct(loadNet(full));
-  if (pct !== appliedDefaultPct) {
-    for (const input of targetInputs) input.value = `${pct}%`;
-    appliedDefaultPct = pct;
-  }
-  return pct;
+function defaultTargetFor(full: NetSpec): number {
+  return defaultTargetRmsPct(loadNet(full));
 }
 
 /** Shows a placement over the stored solve, without running anything. */
@@ -241,6 +244,7 @@ function showPlan(plan: Placement) {
 /** No junctions to solve: the seed is laid flat (Python's place mode), and the flag is cleared. */
 function showNoSolve(plan: Placement) {
   fullyInflated = false;
+  inflatePending = false;
   junctionTarget = null;
   store.clear();
   store.topology[0] = NO_SOLVE_TOPOLOGY;
@@ -251,6 +255,7 @@ function showNoSolve(plan: Placement) {
 
 function scheduleAutoInflate() {
   cancelAutoInflate();
+  inflatePending = true;
   autoTimer = window.setTimeout(() => {
     autoTimer = null;
     if (running) {
@@ -270,7 +275,8 @@ function cancelAutoInflate() {
 
 function setRunning(on: boolean) {
   running = on;
-  inflateBtn.textContent = on ? "Stop" : "Reinflate";
+  inflateBtn.innerHTML = on ? STOP_ICON_SVG : REFRESH_ICON_SVG;
+  inflateBtn.title = on ? "Stop" : "Re-inflate (full inflate)";
   updateReplayControl();
   refresh();
 }
@@ -278,15 +284,13 @@ function setRunning(on: boolean) {
 // ---- palette ------------------------------------------------------------------------------------
 
 /** Palette icons share one circumradius whatever their side count, so the row reads as evenly sized. */
-const ICON_SIZE = 42;
-const ICON_RADIUS = 16;
+const ICON_SIZE = 54;
+const ICON_RADIUS = 20;
 
 function drawIcon(n: number): HTMLCanvasElement {
   const icon = document.createElement("canvas");
   icon.width = ICON_SIZE * devicePixelRatio;
   icon.height = ICON_SIZE * devicePixelRatio;
-  icon.style.width = `${ICON_SIZE}px`;
-  icon.style.height = `${ICON_SIZE}px`;
   const ctx = icon.getContext("2d")!;
   ctx.scale(devicePixelRatio, devicePixelRatio);
   const edge = 2 * ICON_RADIUS * Math.sin(Math.PI / n);
@@ -341,7 +345,6 @@ netFileInput.addEventListener("change", async () => {
   try {
     const { shapes, connections } = shapesFrom(JSON.parse(await file.text()));
     builder.loadShapes(shapes, connections);
-    appliedDefaultPct = null;
     // A load always runs a Full Inflate (Python's on_load_success): a new net has nothing to diff against.
     fullyInflated = false;
     // A load always inflates, even when the active group is unchanged (as the Python app does).
@@ -451,29 +454,6 @@ function facesOfPieces(ids: Iterable<number>): Set<number> {
   return faces;
 }
 
-/** Shows the hovered piece in yellow and the selected pieces in red, in both views. */
-function syncHighlights() {
-  const hovered = canvas.hoverPiece === null || builder.selected.has(canvas.hoverPiece) ? [] : [canvas.hoverPiece];
-  viewer.setHighlights([
-    { baseFaces: facesOfPieces(builder.selected), color: SELECT_HIGHLIGHT },
-    { baseFaces: facesOfPieces(hovered), color: HOVER_HIGHLIGHT },
-  ]);
-  // Edges: the hovered one in yellow; a selected join's two ends in red.
-  const edges: { path: Vec3[]; color: number }[] = [];
-  if (hoverEdge) {
-    const path = pathOf(hoverEdge.shape, hoverEdge.edge);
-    if (path) edges.push({ path, color: HOVER_HIGHLIGHT });
-  }
-  const conn = builder.connections.find((c) => c.id === builder.selectedConnection);
-  if (conn) {
-    for (const [shape, edge] of [[conn.aShape, conn.aEdge], [conn.bShape, conn.bEdge]] as const) {
-      const path = pathOf(shape, edge);
-      if (path) edges.push({ path, color: SELECT_HIGHLIGHT });
-    }
-  }
-  viewer.setEdgeHighlights(edges);
-}
-
 /** An edge's real path on the shown display (its subdivision points, end to end), cached. */
 function pathOf(shape: number, edge: number): Vec3[] | null {
   if (!shownDisplay || !shownSource) return null;
@@ -487,7 +467,7 @@ function pathOf(shape: number, edge: number): Vec3[] | null {
   return path;
 }
 
-/** The edge under a client point (within EDGE_PICK_PX of its real path, and facing the camera), as a piece and its edge index. */
+/** The edge under a client point in 3D (within EDGE_PICK_PX of its real path, and facing the camera), or null. */
 function pickEdge(clientX: number, clientY: number): { shape: number; edge: number } | null {
   if (!shownDisplay) return null;
   let best: { shape: number; edge: number } | null = null;
@@ -509,24 +489,134 @@ function pickEdge(clientX: number, clientY: number): { shape: number; edge: numb
   return best;
 }
 
-function setHoverEdge(edge: { shape: number; edge: number } | null) {
-  const same = edge === null ? hoverEdge === null : hoverEdge !== null && hoverEdge.shape === edge.shape && hoverEdge.edge === edge.edge;
-  if (same) return;
-  hoverEdge = edge;
-  syncHighlights();
+/** The edge group's 3D paths: every edge of the group, as paths on the shown display. */
+function groupPaths(edge: { shape: number; edge: number }): Vec3[][] {
+  const group = edgeGroup(builder.connections, edge.shape, edge.edge);
+  return group.edges.map((e) => pathOf(e.shape, e.edge)).filter((p): p is Vec3[] => p !== null);
 }
 
-/** Selects the join an edge belongs to; a free edge selects its piece instead. */
-function selectEdge(edge: { shape: number; edge: number }) {
-  const conn = builder.connections.find(
-    (c) => (c.aShape === edge.shape && c.aEdge === edge.edge) || (c.bShape === edge.shape && c.bEdge === edge.edge),
-  );
+/**
+ * Shows the hovered edge group in yellow and the selected one in red, in both views: a 3D tube along each
+ * edge, and the faces of the pieces the selection covers. Selection is a join (both of its edges), an open
+ * edge, or a set of pieces.
+ */
+function syncHighlights() {
+  const hovered = canvas.hoverEdge
+    ? { baseFaces: new Set<number>(), color: HOVER_HIGHLIGHT }
+    : { baseFaces: facesOfPieces(canvas.hoverPiece === null || builder.selected.has(canvas.hoverPiece) ? [] : [canvas.hoverPiece]), color: HOVER_HIGHLIGHT };
+
+  // The red selection: the selected pieces' faces, the selected edge group's tubes, and a selected join's red
+  // line between the middles of its two edges.
+  const redEdges: Vec3[][] = [];
+  const selected = selectedEdgeGroup();
+  if (selected) for (const path of groupPaths(selected)) redEdges.push(path);
+  const conn = builder.connections.find((c) => c.id === builder.selectedConnection);
   if (conn) {
-    builder.selected = new Set();
-    builder.selectedConnection = conn.id;
+    if (joinLine && joinLine.conn === conn.id) {
+      const a = pointOnEdge(joinLine.a);
+      const b = pointOnEdge(joinLine.b);
+      if (a && b) redEdges.push([a, b]);
+    } else {
+      const pa = pathOf(conn.aShape, conn.aEdge);
+      const pb = pathOf(conn.bShape, conn.bEdge);
+      if (pa && pb && pa.length && pb.length) redEdges.push([middleOf(pa), middleOf(pb)]);
+    }
+  }
+  let red = { faces: facesOfPieces(builder.selected), edges: redEdges };
+  const empty = red.faces.size === 0 && red.edges.length === 0;
+  if (inflatePending && empty && lastRed) red = lastRed;
+  else lastRed = red;
+
+  viewer.setHighlights([
+    { baseFaces: red.faces, color: SELECT_HIGHLIGHT },
+    hovered,
+  ]);
+  const edges: { path: Vec3[]; color: number }[] = [];
+  if (canvas.hoverEdge) for (const path of groupPaths(canvas.hoverEdge)) edges.push({ path, color: HOVER_HIGHLIGHT });
+  // The edge a drag started on stays red until the drag ends.
+  if (pressEdge) {
+    const path = pathOf(pressEdge.shape, pressEdge.edge);
+    if (path) edges.push({ path, color: SELECT_HIGHLIGHT });
+  }
+  for (const path of red.edges) edges.push({ path, color: SELECT_HIGHLIGHT });
+  viewer.setEdgeHighlights(edges);
+  viewerEl.classList.toggle("loading", inflatePending || running);
+}
+
+/**
+ * The anchor of the point on an edge nearest the pointer, found on the edge as it's drawn on screen: the
+ * closest point of its path in screen space, so the end is where the user actually pointed at the edge.
+ */
+function anchorOnEdge(shape: number, edge: number, clientX: number, clientY: number): EdgeAnchor {
+  const path = pathOf(shape, edge);
+  if (!path || path.length < 2) return { shape, edge, t: 0.5 };
+  const screen = path.map((p) => viewer.clientPoint(p));
+  const lens: number[] = [];
+  for (let i = 0; i + 1 < path.length; i++) lens.push(Math.hypot(...sub3(path[i + 1], path[i])));
+  const total = lens.reduce((a, b) => a + b, 0) || 1;
+  let best = { d: Infinity, t: 0.5 };
+  let acc = 0;
+  for (let i = 0; i + 1 < path.length; i++) {
+    const [ax, ay] = screen[i];
+    const [bx, by] = screen[i + 1];
+    const [dx, dy] = [bx - ax, by - ay];
+    const len2 = dx * dx + dy * dy;
+    const u = len2 ? Math.max(0, Math.min(1, ((clientX - ax) * dx + (clientY - ay) * dy) / len2)) : 0;
+    const d = Math.hypot(clientX - (ax + u * dx), clientY - (ay + u * dy));
+    if (d < best.d) best = { d, t: (acc + u * lens[i]) / total };
+    acc += lens[i];
+  }
+  return { shape, edge, t: best.t };
+}
+
+/** The point at an anchor's fraction along its edge's current path, or null if the edge isn't shown. */
+function pointOnEdge(anchor: EdgeAnchor): Vec3 | null {
+  const path = pathOf(anchor.shape, anchor.edge);
+  if (!path || path.length < 2) return null;
+  const lens: number[] = [];
+  for (let i = 0; i + 1 < path.length; i++) lens.push(Math.hypot(...sub3(path[i + 1], path[i])));
+  const total = lens.reduce((a, b) => a + b, 0) || 1;
+  let target = anchor.t * total;
+  for (let i = 0; i + 1 < path.length; i++) {
+    if (target <= lens[i] || i === path.length - 2) {
+      const u = lens[i] ? Math.max(0, Math.min(1, target / lens[i])) : 0;
+      const a = path[i];
+      const ab = sub3(path[i + 1], a);
+      return [a[0] + u * ab[0], a[1] + u * ab[1], a[2] + u * ab[2]];
+    }
+    target -= lens[i];
+  }
+  return null;
+}
+
+function sub3(a: Vec3, b: Vec3): Vec3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+/** The point halfway along an edge path (the middle of its subdivision points). */
+function middleOf(path: Vec3[]): Vec3 {
+  return path[Math.floor(path.length / 2)];
+}
+
+/** The selected edge: the selected join's first edge, or the selected open edge. */
+function selectedEdgeGroup(): { shape: number; edge: number } | null {
+  if (builder.selectedConnection !== null) {
+    const conn = builder.connections.find((c) => c.id === builder.selectedConnection);
+    return conn ? { shape: conn.aShape, edge: conn.aEdge } : null;
+  }
+  return canvas.selectedEdge;
+}
+
+/** Selects an edge's group: its join if it's joined, otherwise the open edge alone. */
+function selectEdge(edge: { shape: number; edge: number }) {
+  const group = edgeGroup(builder.connections, edge.shape, edge.edge);
+  builder.selected = new Set();
+  if (group.connection) {
+    builder.selectedConnection = group.connection.id;
+    canvas.selectedEdge = null;
   } else {
-    builder.selected = new Set([edge.shape]);
     builder.selectedConnection = null;
+    canvas.selectedEdge = edge;
   }
   refresh();
 }
@@ -538,17 +628,72 @@ function pieceAt(clientX: number, clientY: number): number | null {
   return resultPlan.full.source_polygon_id![base];
 }
 
+canvas.onHoverEdge = () => syncHighlights();
+canvas.onSelectEdge = (edge) => selectEdge(edge);
+
 const viewerEl = $("viewer");
 let pressAt: [number, number] | null = null;
+/** The edge a 3D press started on: a drag from it to another edge makes a join. */
+let pressEdge: { shape: number; edge: number } | null = null;
+/**
+ * A point on an edge, as a fraction t of its length along its path. The line a drag made is kept as two of
+ * these, so it stays on its edges when a re-solve moves the mesh.
+ */
+type EdgeAnchor = { shape: number; edge: number; t: number };
+/** The line a drag made, kept while its join is selected: from where the drag began to where it ended. */
+let joinLine: { conn: number; a: EdgeAnchor; b: EdgeAnchor } | null = null;
+/** The red line a join drag draws from its start edge to the pointer (an SVG over the 3D view). */
+const SVG_NS = "http://www.w3.org/2000/svg";
+const dragSvg = document.createElementNS(SVG_NS, "svg");
+dragSvg.setAttribute("class", "drag-line");
+const dragLineEl = document.createElementNS(SVG_NS, "line");
+dragLineEl.setAttribute("stroke", "#e53935");
+dragLineEl.setAttribute("stroke-width", "3");
+dragLineEl.setAttribute("stroke-linecap", "round");
+dragSvg.append(dragLineEl);
+dragSvg.style.display = "none";
+viewerEl.append(dragSvg);
+
+/** Draws the join drag: the red line from the start edge's middle to the pointer, and the edge under the pointer in yellow. */
+function updateDrag(e: PointerEvent) {
+  const start = pressEdge;
+  if (!start) return;
+  const rect = viewerEl.getBoundingClientRect();
+  // The line starts where the press was, so it reads as dragged out from that point of the edge.
+  if (pressAt) {
+    dragLineEl.setAttribute("x1", String(pressAt[0] - rect.left));
+    dragLineEl.setAttribute("y1", String(pressAt[1] - rect.top));
+  }
+  dragLineEl.setAttribute("x2", String(e.clientX - rect.left));
+  dragLineEl.setAttribute("y2", String(e.clientY - rect.top));
+  dragSvg.style.display = "";
+  const target = pickEdge(e.clientX, e.clientY);
+  const other = target && !(target.shape === start.shape && target.edge === start.edge) ? target : null;
+  canvas.setHoverEdge(other);
+}
+// Capture phase, so the orbit is turned off before the viewer's own press handler runs.
+viewerEl.addEventListener(
+  "pointerdown",
+  (e) => {
+    if (e.button !== 0) return;
+    pressEdge = pickEdge(e.clientX, e.clientY);
+    viewer.setOrbitEnabled(pressEdge === null);
+    if (pressEdge) syncHighlights();
+  },
+  { capture: true },
+);
 viewerEl.addEventListener("pointermove", (e) => {
-  if (pressAt) return;
+  if (pressAt) {
+    if (pressEdge) updateDrag(e);
+    return;
+  }
   // Edges first: if one is under the pointer, it wins over the face behind it.
   const edge = pickEdge(e.clientX, e.clientY);
-  setHoverEdge(edge);
+  canvas.setHoverEdge(edge);
   canvas.setHoverPiece(edge ? null : pieceAt(e.clientX, e.clientY));
 });
 viewerEl.addEventListener("pointerleave", () => {
-  setHoverEdge(null);
+  canvas.setHoverEdge(null);
   canvas.setHoverPiece(null);
 });
 viewerEl.addEventListener("pointerdown", (e) => {
@@ -556,8 +701,32 @@ viewerEl.addEventListener("pointerdown", (e) => {
 });
 viewerEl.addEventListener("pointerup", (e) => {
   const start = pressAt;
+  const from = pressEdge;
   pressAt = null;
-  if (!start || Math.hypot(e.clientX - start[0], e.clientY - start[1]) > CLICK_SLOP_PX) return;
+  pressEdge = null;
+  viewer.setOrbitEnabled(true);
+  dragSvg.style.display = "none";
+  if (!start) return;
+  if (Math.hypot(e.clientX - start[0], e.clientY - start[1]) > CLICK_SLOP_PX) {
+    // A drag that began on an edge joins it to the edge it's released on, and the new join is selected so
+    // both of its edges and the join read as one red connection (as in the 2D view).
+    const to = from ? pickEdge(e.clientX, e.clientY) : null;
+    canvas.setHoverEdge(null);
+    if (from && to && !(to.shape === from.shape && to.edge === from.edge)) {
+      if (builder.join(from.shape, from.edge, to.shape, to.edge)) {
+        const conn = builder.connections[builder.connections.length - 1];
+        builder.selectConnection(conn.id);
+        // The line the drag drew stays, from where it began to where it ended, as anchors on those edges.
+        joinLine = {
+          conn: conn.id,
+          a: anchorOnEdge(from.shape, from.edge, start[0], start[1]),
+          b: anchorOnEdge(to.shape, to.edge, e.clientX, e.clientY),
+        };
+      }
+    }
+    refresh();
+    return;
+  }
   const edge = pickEdge(e.clientX, e.clientY);
   if (edge) {
     selectEdge(edge);
@@ -567,6 +736,7 @@ viewerEl.addEventListener("pointerup", (e) => {
   const piece = pieceAt(e.clientX, e.clientY);
   builder.selected = piece === null ? new Set() : new Set([piece]);
   builder.selectedConnection = null;
+  canvas.selectedEdge = null;
   refresh();
 });
 
@@ -578,6 +748,10 @@ function setDebugMode(on: boolean) {
   canvas.debug = on;
   document.title = on ? "Interactive Inflater (debug mode)" : "Interactive Inflater";
   debugRow.hidden = !on;
+  // Debug mode: Reinflate moves to after the replay slider, and undo/redo are left to the Edit menu.
+  (on ? debugRow : navRow).append(inflateBtn);
+  navRow.hidden = on;
+  undoBtn.hidden = redoBtn.hidden = on;
   // Leaving debug mode clears the overlays, as in the Static Inflater, and goes back to the finished result.
   for (const box of Object.values(debugBoxes)) box.checked = false;
   applyOverlays();
@@ -624,14 +798,6 @@ for (const box of Object.values(debugBoxes)) box.addEventListener("change", appl
 
 // ---- Setup fields -------------------------------------------------------------------------------
 
-for (const input of targetInputs) {
-  wireParamInput(
-    input,
-    () => readTargetRmsPct(input, appliedDefaultPct ?? 10),
-    () => (input.value = String(parseFloat(input.value))),
-  );
-}
-wireParamInput(toleranceInput, () => readTolerance(toleranceInput));
 
 // ---- Drawing the result -------------------------------------------------------------------------
 
@@ -693,6 +859,34 @@ function clearResults() {
 // ---- Full Inflate -------------------------------------------------------------------------------
 
 /**
+ * Keeps a new level where the old result was: the rigid motion (rotation and translation, Kabsch) that best
+ * maps the corners both solves share onto their old positions is applied to the level's positions. A re-solve
+ * then reads as the same shape moving a little, not a jump. Null if there are fewer than three shared corners.
+ */
+function alignPositions(prev: LastSolve, slots: Map<string, number>, positions: Map<number, Vec3>): Map<number, Vec3> | null {
+  const before: Vec3[] = [];
+  const after: Vec3[] = [];
+  for (const [slot, id] of slots) {
+    const oldId = prev.slots.get(slot);
+    if (oldId === undefined) continue;
+    const p = prev.positions.get(oldId);
+    const q = positions.get(id);
+    if (p && q) {
+      before.push(p);
+      after.push(q);
+    }
+  }
+  if (before.length < 3) return null;
+  const transform = rigidTransformFrom(before, after);
+  return new Map([...positions].map(([id, p]) => [id, transform(p)]));
+}
+
+/** The piece each solve face belongs to, in the solve's face order. */
+function sourceOfFace(plan: Placement): number[] {
+  return plan.solveToFull.map((f) => plan.full.source_polygon_id![f]);
+}
+
+/**
  * One Diff Inflate: a single Level-3 calibration from the last solve's positions and pressure (see
  * diffInflate.ts). Leaves Levels 0-2 empty, since they no longer describe this net.
  */
@@ -703,15 +897,18 @@ async function runDiff(plan: Placement, targetRmsPct: number, gtol: number): Pro
       targetRmsPct,
       gtol,
       shouldStop: () => stopRequested,
+      sourceOfFace: sourceOfFace(plan),
+      shapes: plan.shapes,
     });
     store.clear();
     store.topology[3] = result.topo;
-    store.positions[3] = result.positions;
+    const aligned = alignPositions(lastSolve!, plan.slots!, result.positions) ?? result.positions;
+    store.positions[3] = aligned;
     store.history[3] = {
       level: 3, state: "converged", steps: 0, optimality: null, gtol,
       rmsStretchPct: result.rmsStretchPct, pressure: result.pressure, simTimeS: 0,
     };
-    drawLevel(plan, 3, result.positions);
+    drawLevel(plan, 3, aligned);
     setReplay(3, result.frames);
     setInflaterStatus(
       `Diff Inflate -- Done. RMS stretch ${result.rmsStretchPct.toFixed(1)}%, pressure ${result.pressure.toFixed(2)}.`,
@@ -735,7 +932,7 @@ async function runDiff(plan: Placement, targetRmsPct: number, gtol: number): Pro
  * failure, puts back the previous result (Python's MeshSnapshotManager). Edits made during the run
  * are picked up when it stops: a junction change solves again, a terminal-only change re-places.
  */
-async function inflate() {
+async function inflate(forceFull = false) {
   const plan = tryPlan();
   if (!plan) return;
   if (plan.solve === null) {
@@ -745,13 +942,13 @@ async function inflate() {
   const solve = plan.solve;
   const runJunction = junctionKey(plan);
   // A Diff Inflate once a solve has finished and its corners still match; otherwise a Full Inflate.
-  const useDiff = fullyInflated && canDiff(plan.slots, lastSolve);
+  // Reinflate always runs a Full Inflate; an edit runs a Diff when one is possible.
+  const useDiff = !forceFull && fullyInflated && canDiff(plan.slots, lastSolve);
 
-  const defaultPct = applyDefaultTargets(plan.full);
-  const targetRmsPctByLevel = Object.fromEntries(
-    targetInputs.map((input, i) => [i + 1, readTargetRmsPct(input, defaultPct)]),
-  );
-  const gtol = readTolerance(toleranceInput);
+  // Every level uses the net's default target (5% open, 10% closed) and the default tolerance.
+  const defaultPct = defaultTargetFor(plan.full);
+  const targetRmsPctByLevel = { 1: defaultPct, 2: defaultPct, 3: defaultPct };
+  const gtol = CONVERGENCE_GTOL;
 
   const before = store.snapshot();
   const beforePlan = resultPlan;
@@ -776,7 +973,10 @@ async function inflate() {
             status: setInflaterStatus,
             loading: () => {},
             showLevel: (level, positions, frames) => {
-              drawLevel(plan, level, positions);
+              // Each level lands where the previous result was, so the picture moves smoothly through the solve.
+              const aligned = beforeLast && plan.slots ? alignPositions(beforeLast, plan.slots, positions) : null;
+              if (aligned) store.positions[level] = aligned;
+              drawLevel(plan, level, aligned ?? positions);
               setReplay(level, frames);
             },
             historyChanged: () => {},
@@ -789,8 +989,13 @@ async function inflate() {
     fullyInflated = true;
     resultPlan = plan;
     resultSpec = plan.full;
-    lastSolve = plan.slots && store.positions[3] && store.history[3]?.pressure != null
-      ? { slots: plan.slots, positions: store.positions[3]!, pressure: store.history[3]!.pressure! }
+    lastSolve = plan.slots && store.positions[3] && store.topology[3] && store.history[3]?.pressure != null
+      ? {
+          slots: plan.slots,
+          positions: store.positions[3]!,
+          pressure: store.history[3]!.pressure!,
+          triangles: surfaceTriangles(store.topology[3]!, store.positions[3]!, sourceOfFace(plan)),
+        }
       : null;
     refreshColorMenu();
   } else {
@@ -803,6 +1008,8 @@ async function inflate() {
     redrawFinest();
   }
 
+  // The solve is over, so nothing is waiting any more. A change made during the run re-arms it below.
+  inflatePending = false;
   // What changed while the run was going. A junction change, or a rerun the run asked for, solves again.
   // A terminal-only change just re-places the flat pieces on the result that's now on screen.
   const now = tryPlan();
@@ -814,6 +1021,7 @@ async function inflate() {
   } else if (outcome === "done") {
     showPlan(now);
   }
+  syncHighlights();
 }
 
 inflateBtn.addEventListener("click", () => {
@@ -824,9 +1032,11 @@ inflateBtn.addEventListener("click", () => {
     setInflaterStatus("Stopping after the current step...", "warn");
   } else {
     cancelAutoInflate();
-    void inflate();
+    void inflate(true);
   }
 });
+undoBtn.addEventListener("click", () => undoItem.click());
+redoBtn.addEventListener("click", () => redoItem.click());
 
 setDebugMode(false);
 refresh();
