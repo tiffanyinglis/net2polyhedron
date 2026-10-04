@@ -30,6 +30,8 @@ const HATCH_WIDTH = 2;
 const CONNECTION_COLOR = "#b0b0b0";
 const CONNECTION_WIDTH = 1.5;
 const CONNECTION_SELECTED_WIDTH = 2.5;
+/** Outline of the piece under the pointer, in either view (matches the 3D hover highlight). */
+const HOVER_COLOR = "#ffd400";
 const HANDLE_COLOR = "white";
 /** An unreachable piece is drawn at this opacity, as the Python app's orphaned pieces are. */
 const UNREACHABLE_OPACITY = 0.5;
@@ -93,6 +95,12 @@ export class BuilderCanvas {
   private centred = false;
   /** Debug mode (the page's D key): shows the owner's anchor glyph. Only the combined page uses it. */
   debug = false;
+  /** The piece under the pointer (drawn with a yellow outline), or null. Set by the pointer; the page can set it too. */
+  hoverPiece: number | null = null;
+  /** Called when the piece under the pointer changes (null when the pointer leaves the pieces). */
+  onHoverPiece: ((id: number | null) => void) | null = null;
+  /** A piece's fill colour as a CSS colour. Set by the page (its Colour menu); the default is the polygon colour. */
+  fillOf: (shape: Shape) => string = (shape) => shapeCssColor(shape.n);
   /** Each piece's reachable/role classification for this redraw. Empty outside combined mode. */
   private faces: Map<number, FaceInfo> = new Map();
 
@@ -116,6 +124,7 @@ export class BuilderCanvas {
     canvas.addEventListener("pointerleave", () => {
       this.ghost = null;
       this.hover = null;
+      this.setHoverPiece(null);
       this.redraw();
     });
     canvas.addEventListener("wheel", (e) => this.onWheel(e), { passive: false });
@@ -245,7 +254,7 @@ export class BuilderCanvas {
   private drawShape(shape: Shape, selected: boolean) {
     const { ctx } = this;
     const verts = shapeVertices(shape).map(([x, y]) => this.toScreen(x, y));
-    const fill = shapeCssColor(shape.n);
+    const fill = this.fillOf(shape);
     const info = this.faces.get(shape.id);
     const dimmed = info !== undefined && !info.reachable;
     ctx.globalAlpha = dimmed ? UNREACHABLE_OPACITY : 1;
@@ -275,6 +284,15 @@ export class BuilderCanvas {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+    // A selected piece keeps its red outline even while hovered.
+    if (shape.id === this.hoverPiece && !selected) {
+      ctx.strokeStyle = HOVER_COLOR;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      verts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath();
+      ctx.stroke();
+    }
     if (dimmed) {
       // Unreachable: a dashed outline instead of the solid one, red when selected.
       this.strokeDashedOutline(verts, selected ? SELECTION_COLOR : OUTER_OUTLINE_COLOR);
@@ -603,9 +621,21 @@ export class BuilderCanvas {
     this.builder.selectConnection(this.connectionHit(sx, sy));
   }
 
+  /** Sets the hovered piece, and tells the page if it changed. */
+  setHoverPiece(id: number | null) {
+    if (id === this.hoverPiece) return;
+    this.hoverPiece = id;
+    this.onHoverPiece?.(id);
+    this.redraw();
+  }
+
   private onPointerMove(e: PointerEvent) {
     const sx = e.offsetX;
     const sy = e.offsetY;
+    if (!this.drag && !this.handleDrag && this.builder.armedN === null) {
+      const shape = this.builder.hitTest(...this.toWorld(sx, sy));
+      this.setHoverPiece(shape ? shape.id : null);
+    }
     if (this.builder.armedN !== null) this.ghost = [sx, sy];
     if (this.showsJoin()) {
       if (this.pending) {

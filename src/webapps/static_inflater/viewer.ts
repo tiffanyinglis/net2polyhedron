@@ -1,6 +1,10 @@
 import * as THREE from "three";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { type Vec3 } from "../utils/physics/vec3";
-import { repulsionForce } from "../utils/physics/forces";
+import { REPULSION_STRENGTH, repulsionForce } from "../utils/physics/forces";
+import { EDGE_LENGTH } from "../utils/physics/mesh";
 
 /** [direction toward the light in camera space, intensity]: key, fill, headlight. */
 const LIGHT_RIG: [[number, number, number], number][] = [
@@ -125,15 +129,36 @@ function vertexNormalSegments(pts: Vec3[], faces: number[][]): number[] {
   return out;
 }
 
-/** Arrow per vertex in the repulsion force's own direction, scaled so the strongest one is a
- * reference length (matching the Python app's "relative magnitude" rule). */
-function repulsionSegments(pts: Vec3[], faces: number[][]): number[] {
-  const forces = repulsionForce(pts);
+/** Width in CSS pixels of the 3D hover and selection outlines. */
+const HIGHLIGHT_LINE_WIDTH = 4;
+/** How far a highlight outline is lifted off the surface, as a fraction of the mesh's radius. */
+const HIGHLIGHT_LIFT_FRACTION = 0.005;
+/** Radius of an edge's tube, as a fraction of the mesh's radius. */
+const EDGE_TUBE_RADIUS_FRACTION = 0.012;
+
+/** Unit normal of a polygon (Newell's method), for any winding of its points. */
+function unitNormal(points: Vec3[]): Vec3 {
+  const n: Vec3 = [0, 0, 0];
+  points.forEach((p, i) => {
+    const q = points[(i + 1) % points.length];
+    n[0] += (p[1] - q[1]) * (p[2] + q[2]);
+    n[1] += (p[2] - q[2]) * (p[0] + q[0]);
+    n[2] += (p[0] - q[0]) * (p[1] + q[1]);
+  });
+  const len = Math.hypot(n[0], n[1], n[2]) || 1;
+  return [n[0] / len, n[1] / len, n[2] / len];
+}
+
+/** Arrow per repelling vertex in the repulsion force's own direction, scaled so the strongest one is a
+ * reference length (matching the Python app's "relative magnitude" rule). The reference is a fixed
+ * solver edge, not this mesh's own edges, so a level's arrows don't shrink as the mesh is subdivided.
+ * Only the vertices in `repIndices` repel, as the solver's own repulsion does. */
+function repulsionSegments(pts: Vec3[], repIndices: number[], repMultipliers: number[]): number[] {
+  const forces = repulsionForce(pts, REPULSION_STRENGTH, repIndices, repMultipliers);
   const magnitudes = forces.map(len3);
   const maxLen = Math.max(0, ...magnitudes);
   if (maxLen < 1e-12) return [];
-  const edgeLengths = faces.map((face) => meanEdgeLength(face, pts));
-  const reference = (edgeLengths.reduce((a, b) => a + b, 0) / Math.max(1, edgeLengths.length)) * NORMAL_LENGTH_FRACTION;
+  const reference = EDGE_LENGTH * NORMAL_LENGTH_FRACTION;
   const scale = reference / maxLen;
   const out: number[] = [];
   pts.forEach((p, v) => {
@@ -211,6 +236,17 @@ export class Viewer {
   private overlayObjects: THREE.LineSegments[] = [];
   private meshData: { pts: Vec3[]; faces: number[][] } | null = null;
   private vertexIds: number[] = [];
+  /** Per triangle of the current mesh: the base face it belongs to (what pick() returns). */
+  private triangleBaseFace: number[] = [];
+  /** Per fine face of the current mesh: its base face. */
+  private fineBaseFace: number[] = [];
+  /** Highlight outlines on the current mesh (rebuilt when the mesh or the highlights change). */
+  private highlightObjects: LineSegments2[] = [];
+  /** Their materials, so a resize can keep the line width in pixels. */
+  private highlightMaterials: LineMaterial[] = [];
+  private edgeHighlightObjects: THREE.Group[] = [];
+  private edgeHighlightGeometries: THREE.BufferGeometry[] = [];
+  private repulsion: Map<number, number> | null = null;
   private center: Vec3 = [0, 0, 0];
   private outlineEdges: [number, number][] = [];
   private outlineObjects: THREE.InstancedMesh[] = [];
@@ -326,7 +362,14 @@ export class Viewer {
     this.renderer.setSize(w, h);
     this.camera.aspect = w / (h || 1);
     this.camera.updateProjectionMatrix();
+    this.updateHighlightResolution();
     this.render();
+  }
+
+  /** Line materials measure their width in pixels of the drawing buffer, so they follow its size. */
+  private updateHighlightResolution() {
+    const { width, height } = this.renderer.domElement;
+    for (const material of this.highlightMaterials) material.resolution.set(width, height);
   }
 
   /** `faceOfFine[i]` is the original (un-subdivided) face that `faces[i]` belongs to, and
@@ -378,12 +421,15 @@ export class Viewer {
     // Triangles are emitted grouped by original face, one geometry group (= one material) each.
     const indexArray: number[] = [];
     const geometry = new THREE.BufferGeometry();
+    this.triangleBaseFace = [];
+    this.fineBaseFace = faceOfFine.slice();
     baseColors.forEach((_, b) => {
       const start = indexArray.length;
       faces.forEach((face, f) => {
         if (faceOfFine[f] !== b) return;
         for (let i = 1; i < face.length - 1; i++) {
           indexArray.push(idx.get(face[0])!, idx.get(face[i])!, idx.get(face[i + 1])!);
+          this.triangleBaseFace.push(b);
         }
       });
       geometry.addGroup(start, indexArray.length - start, b);
@@ -469,6 +515,30 @@ export class Viewer {
     this.render();
   }
 
+  /**
+   * The vertices that repel, with their multipliers, as the solver applies them at the level on screen
+   * (repulsionMultipliers). Null: no overlay of repulsive forces.
+   */
+  setRepulsion(multipliers: Map<number, number> | null) {
+    this.repulsion = multipliers;
+    this.rebuildOverlays();
+    this.render();
+  }
+
+  /** The repelling vertices' indices in the current mesh, and their multipliers. */
+  private repulsionIndices(): { indices: number[]; multipliers: number[] } {
+    const indices: number[] = [];
+    const multipliers: number[] = [];
+    this.vertexIds.forEach((v, i) => {
+      const m = this.repulsion?.get(v);
+      if (m !== undefined) {
+        indices.push(i);
+        multipliers.push(m);
+      }
+    });
+    return { indices, multipliers };
+  }
+
   setOverlays(flags: DebugOverlays) {
     this.overlayFlags = flags;
     this.rebuildOverlays();
@@ -546,7 +616,10 @@ export class Viewer {
     const { faceNormals, vertexNormals, repulsiveForces } = this.overlayFlags;
     if (faceNormals) this.addOverlay(faceNormalSegments(pts, faces), FACE_NORMAL_COLOR);
     if (vertexNormals) this.addOverlay(vertexNormalSegments(pts, faces), VERTEX_NORMAL_COLOR);
-    if (repulsiveForces) this.addOverlay(repulsionSegments(pts, faces), REPULSION_FORCE_COLOR);
+    if (repulsiveForces && this.repulsion) {
+      const { indices, multipliers } = this.repulsionIndices();
+      this.addOverlay(repulsionSegments(pts, indices, multipliers), REPULSION_FORCE_COLOR);
+    }
   }
 
   private addOverlay(segments: number[], color: number) {
@@ -556,6 +629,152 @@ export class Viewer {
     const line = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color }));
     this.scene.add(line);
     this.overlayObjects.push(line);
+  }
+
+  /** Screen distance in CSS px from a client point to the segment a-b (both in the coordinates given to setMesh). */
+  edgeDistance(clientX: number, clientY: number, a: Vec3, b: Vec3): number {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const sa = this.toClient(a, rect);
+    const sb = this.toClient(b, rect);
+    const [px, py] = [clientX, clientY];
+    const [dx, dy] = [sb[0] - sa[0], sb[1] - sa[1]];
+    const len2 = dx * dx + dy * dy;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - sa[0]) * dx + (py - sa[1]) * dy) / len2));
+    return Math.hypot(px - (sa[0] + t * dx), py - (sa[1] + t * dy));
+  }
+
+  /** True if nothing of the mesh hides point p (setMesh's coordinates) from the camera. */
+  isVisible(p: Vec3): boolean {
+    if (!this.mesh) return false;
+    const target = new THREE.Vector3(p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]);
+    const origin = this.camera.position.clone();
+    const dist = origin.distanceTo(target);
+    const dir = target.clone().sub(origin).normalize();
+    const hit = new THREE.Raycaster(origin, dir).intersectObject(this.mesh)[0];
+    // A silhouette edge is nearly tangent to the view, so the surface can sit a fair way in front of it
+    // along the ray (about a fifth of the radius on a tetrahedron). A back edge is behind the body's
+    // whole thickness, which is much more, so half a radius separates the two.
+    return !hit || hit.distance >= dist - this.maxRadius * 0.5;
+  }
+
+  /** Client coordinates of a point given in setMesh's coordinates. */
+  private toClient(p: Vec3, rect: DOMRect): [number, number] {
+    const v = new THREE.Vector3(p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]).project(this.camera);
+    return [rect.left + ((v.x + 1) / 2) * rect.width, rect.top + ((1 - v.y) / 2) * rect.height];
+  }
+
+  /**
+   * Draws each edge path (points in setMesh's coordinates) as a tube of real 3D geometry: a cylinder per
+   * segment with a sphere at every joint and end, so the joins and caps are round. The tube is lifted
+   * toward the camera by its own radius so it sits in front of the surface it runs along, and the depth
+   * test hides whichever part is behind the surface.
+   */
+  setEdgeHighlights(paths: { path: Vec3[]; color: number }[]) {
+    for (const group of this.edgeHighlightObjects) this.scene.remove(group);
+    for (const geometry of this.edgeHighlightGeometries) geometry.dispose();
+    this.edgeHighlightObjects = [];
+    this.edgeHighlightGeometries = [];
+    const radius = this.maxRadius * EDGE_TUBE_RADIUS_FRACTION;
+    const sphere = new THREE.SphereGeometry(radius, 10, 8);
+    const tube = new THREE.CylinderGeometry(radius, radius, 1, 10, 1, false);
+    this.edgeHighlightGeometries.push(sphere, tube);
+    const c = this.camera.position;
+    const toward = (p: Vec3): THREE.Vector3 => {
+      const q = new THREE.Vector3(p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]);
+      return q.add(c.clone().sub(q).normalize().multiplyScalar(radius));
+    };
+    for (const { path, color } of paths) {
+      if (path.length < 2) continue;
+      const material = new THREE.MeshBasicMaterial({ color });
+      const group = new THREE.Group();
+      const points = path.map(toward);
+      for (const p of points) {
+        const m = new THREE.Mesh(sphere, material);
+        m.position.copy(p);
+        group.add(m);
+      }
+      for (let i = 0; i + 1 < points.length; i++) {
+        const a = points[i];
+        const b = points[i + 1];
+        const len = a.distanceTo(b);
+        if (len < 1e-12) continue;
+        const m = new THREE.Mesh(tube, material);
+        m.position.copy(a).add(b).multiplyScalar(0.5);
+        m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+        m.scale.set(1, len, 1);
+        group.add(m);
+      }
+      this.scene.add(group);
+      this.edgeHighlightObjects.push(group);
+    }
+    this.render();
+  }
+
+  /** The base face under a screen point (client coordinates), or null if the pointer isn't over the mesh. */
+  pick(clientX: number, clientY: number): number | null {
+    if (!this.mesh) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, this.camera);
+    const hit = raycaster.intersectObject(this.mesh)[0];
+    if (!hit || hit.faceIndex == null) return null;
+    return this.triangleBaseFace[hit.faceIndex] ?? null;
+  }
+
+  /**
+   * Outlines the region covered by each layer's base faces, in that layer's colour, on top of the mesh.
+   * A region's outline is the edges its own fine triangles share with a triangle outside it.
+   */
+  setHighlights(layers: { baseFaces: Set<number>; color: number }[]) {
+    for (const obj of this.highlightObjects) {
+      this.scene.remove(obj);
+      obj.geometry.dispose();
+    }
+    for (const material of this.highlightMaterials) material.dispose();
+    this.highlightObjects = [];
+    this.highlightMaterials = [];
+    if (!this.meshData) return;
+    const { pts, faces } = this.meshData;
+    for (const { baseFaces, color } of layers) {
+      if (baseFaces.size === 0) continue;
+      const inside = faces.map((_, f) => baseFaces.has(this.fineBaseFace[f]));
+      const edgeCount = new Map<string, { a: number; b: number; n: number; normal: Vec3 }>();
+      faces.forEach((face, f) => {
+        if (!inside[f]) return;
+        const normal = unitNormal(face.map((v) => pts[v]));
+        face.forEach((a, i) => {
+          const b = face[(i + 1) % face.length];
+          const key = a < b ? `${a},${b}` : `${b},${a}`;
+          const entry = edgeCount.get(key);
+          if (entry) entry.n += 1;
+          else edgeCount.set(key, { a, b, n: 1, normal });
+        });
+      });
+      // The outline is real 3D geometry, depth-tested, so the surface hides whatever is behind it. It's
+      // lifted a little off the surface along its own face's normal, so it doesn't fight the faces for depth.
+      const lift = this.maxRadius * HIGHLIGHT_LIFT_FRACTION;
+      const segments: number[] = [];
+      for (const { a, b, n, normal } of edgeCount.values()) {
+        if (n !== 1) continue;
+        const up = (p: Vec3): Vec3 => [p[0] + normal[0] * lift, p[1] + normal[1] * lift, p[2] + normal[2] * lift];
+        pushSegment(segments, up(pts[a]), up(pts[b]));
+      }
+      if (!segments.length) continue;
+      // WebGL draws plain lines one pixel wide, so the highlight is a fat line measured in device pixels.
+      const geometry = new LineSegmentsGeometry().setPositions(segments);
+      const material = new LineMaterial({
+        color,
+        linewidth: HIGHLIGHT_LINE_WIDTH * this.renderer.getPixelRatio(),
+        depthTest: true,
+      });
+      this.highlightMaterials.push(material);
+      const line = new LineSegments2(geometry, material);
+      this.scene.add(line);
+      this.highlightObjects.push(line);
+    }
+    this.updateHighlightResolution();
+    this.render();
   }
 
   /** Recolours the current mesh in place (one colour per original face) without refitting the camera. */

@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { activeGroup, flatPiece, netSpecFromBuilder, structureKey } from "../bridge";
+import { activeGroup, netSpecFromBuilder, structureKey } from "../bridge";
 import { exportMesh } from "../../net_builder/netExport";
 import { shapesFrom } from "../../net_builder/netFile";
 import { loadNet } from "../../utils/physics/mesh";
-import { shapeVertices } from "../../net_builder/shapes";
 import { displayColors, polygonColor } from "../../utils/colors";
 
 /** The saved nets under data/inputs. */
@@ -79,25 +78,5 @@ describe("builder to solver bridge", () => {
   it("changes the structure key when pieces are joined or split", () => {
     const { shapes, connections } = shapesFrom(joined[0].raw);
     expect(structureKey(shapes, connections.slice(1))).not.toBe(structureKey(shapes, connections));
-  });
-
-  it("shows a lone square flat: four fan triangles on its own four corners and centroid", () => {
-    const square = { id: 7, n: 4, cx: 10, cy: 20, rotation: 0, flipped: false };
-    const flat = flatPiece(square);
-    expect(flat.spec.faces[0]).toEqual([0, 1, 2, 3]);
-    expect(flat.topology.faces).toHaveLength(4);
-    const ids = new Set(flat.topology.faces.flat());
-    for (const id of ids) expect(flat.positions.has(id)).toBe(true);
-    expect(flat.positions.get(0)![2]).toBe(0);
-    // Scaled to unit edge length, as the solver's output is.
-    const corners = shapeVertices(square);
-    const edge = Math.hypot(corners[1][0] - corners[0][0], corners[1][1] - corners[0][1]);
-    corners.forEach(([x, y], i) => {
-      const p = flat.positions.get(i)!;
-      expect(p[0]).toBeCloseTo(x / edge);
-      expect(p[1]).toBeCloseTo(y / edge);
-      expect(p[2]).toBe(0);
-    });
-    expect(Math.hypot(flat.positions.get(1)![0] - flat.positions.get(0)![0], flat.positions.get(1)![1] - flat.positions.get(0)![1])).toBeCloseTo(1);
   });
 });

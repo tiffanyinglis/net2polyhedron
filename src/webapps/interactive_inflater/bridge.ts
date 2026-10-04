@@ -1,10 +1,7 @@
 import { exportMesh } from "../net_builder/netExport";
 import { type Connection } from "../net_builder/joins";
-import { shapeVertices, type Shape } from "../net_builder/shapes";
-import { loadNet, type NetSpec } from "../utils/physics/mesh";
-import { fanLevel0To1, polygonOutlineEdgeIds } from "../utils/physics/meshLevels";
-import { type Vec3 } from "../utils/physics/vec3";
-import { type LevelTopology } from "../utils/inflaterRun";
+import { type Shape } from "../net_builder/shapes";
+import { type NetSpec } from "../utils/physics/mesh";
 
 /**
  * The owner's connected group (the Python app's "active group"): the only shapes and connections
@@ -62,33 +59,4 @@ export function structureKey(shapes: Shape[], connections: Connection[]): string
   } catch {
     return null;
   }
-}
-
-/**
- * A lone piece has nothing to solve, so it is shown flat, as the Python app does: its own polygon,
- * fanned into triangles, lying in the plane z = 0. Scaled to unit edge length like the solver's
- * output, since the Viewer's camera clips anything tens of units away.
- */
-export function flatPiece(shape: Shape): { spec: NetSpec; topology: LevelTopology; positions: Map<number, Vec3> } {
-  const spec = netSpecFromBuilder([shape], [], "piece");
-  const base = loadNet(spec);
-  const fan = fanLevel0To1(base);
-  const corners = shapeVertices(shape);
-  const [[x0, y0], [x1, y1]] = corners;
-  const scale = 1 / Math.hypot(x1 - x0, y1 - y0);
-  const positions = new Map<number, Vec3>(corners.map(([x, y], i) => [i, [x * scale, y * scale, 0]]));
-  // A single face's fan centroid is the next vertex id after its corners, at their average.
-  const cx = corners.reduce((sum, [x]) => sum + x, 0) / corners.length;
-  const cy = corners.reduce((sum, [, y]) => sum + y, 0) / corners.length;
-  positions.set(corners.length, [cx * scale, cy * scale, 0]);
-  return {
-    spec,
-    topology: {
-      faces: fan.mesh.faces,
-      faceOfFine: fan.faceOfFine,
-      faceEdgeIds: fan.mesh.faceEdgeIds,
-      outlineEdgeIds: polygonOutlineEdgeIds(base, spec.source_polygon_id ?? [0]),
-    },
-    positions,
-  };
 }

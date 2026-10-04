@@ -12,6 +12,24 @@ export const DEFAULT_TARGET_RMS_PCT = 10.0;
 /** Open (boundary) nets default lower, matching the Python app. */
 export const OPEN_TARGET_RMS_PCT = 5.0;
 
+/**
+ * Per-corner repulsion multipliers for a level (the Python app's _repulsion_vertex_multipliers). A
+ * corner that touches a free base edge is "open" and keeps 1; a "closed" corner is scaled by
+ * 1 / 2^(level - 1), halved each level past Level 1, so the subdivided vertices don't swamp the springs.
+ */
+export function repulsionMultipliers(base: Mesh, level: number): Map<number, number> {
+  const uses = new Map<number, number>();
+  for (const id of base.faceEdgeIds.flat()) uses.set(id, (uses.get(id) ?? 0) + 1);
+  const open = new Set<number>();
+  for (const [id, count] of uses) {
+    if (count === 1) for (const v of base.edgeEnds[id]) open.add(v);
+  }
+  const factor = 1 / 2 ** Math.max(0, level - 1);
+  const multipliers = new Map<number, number>();
+  for (const v of new Set(base.faces.flat())) multipliers.set(v, open.has(v) ? 1 : factor);
+  return multipliers;
+}
+
 export function defaultTargetRmsPct(mesh: Mesh): number {
   return isOpenMesh(mesh) ? OPEN_TARGET_RMS_PCT : DEFAULT_TARGET_RMS_PCT;
 }
@@ -103,11 +121,14 @@ export async function fullInflate(
     level: 0, state: "running", steps: 0, optimality: null, gtol,
     rmsStretchPct: null, pressure: null, simTimeS: 0,
   });
+  // Repulsion acts on the original net's own corners only, as the Python app's release path does.
+  const repulsionCorners = [...new Set(baseFaces.flat())];
   const level0 = await relaxInitialConfigurationWithOrientationRetry(
     topology.mesh,
     LEVEL0_SEED,
     baseFaces,
     {
+      repulsionVertexIds: repulsionCorners,
       maxNfev: LEVEL0_SAFETY_STEP_CAP,
       gtol,
       openFaces: topology.faceOpen,
@@ -135,15 +156,10 @@ export async function fullInflate(
     outlineEdgeIds,
   };
   const history: CalibratedLevel[] = [];
-  // Repulsion acts on the original net's own corners only, at a per-vertex strength halved per
-  // level past Level 1 (mirrors inflate_polyhedron_app's _repulsion_vertex_ids/_multipliers): all
-  // Subdivide-added vertices would otherwise swamp the springs and pressure.
-  const repulsionCorners = [...new Set(baseFaces.flat())];
   let calibration: Calibration | undefined;
   for (let level = 1; level <= MAX_LEVEL; level++) {
     if (level > 1) state = quarterTriangles(state);
-    const repulsionMultiplier = 1 / 2 ** (level - 1);
-    const repulsionVertexMultipliers = new Map(repulsionCorners.map((v) => [v, repulsionMultiplier]));
+    const repulsionVertexMultipliers = repulsionMultipliers(base, level);
     options.onTopology?.(level, state.mesh.faces, state.faceOfFine, state.mesh.faceEdgeIds, state.outlineEdgeIds);
 
     const targetRmsPct = options.targetRmsPctByLevel?.[level] ?? defaultTargetRmsPct(base);

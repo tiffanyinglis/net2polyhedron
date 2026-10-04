@@ -1,7 +1,7 @@
 import { type Vec3, add, scale as scaleVec } from "./vec3";
 import { type Mesh } from "./mesh";
 import { edgeSetup, openRmsMask, positionsToPts, ptsToPositions } from "./edgeSetup";
-import { pressureForce, repulsionForce, springForce, vertexOutwardNormals } from "./forces";
+import { pressureForce, REPULSION_STRENGTH, repulsionForce, springForce, vertexOutwardNormals } from "./forces";
 import { explicitRelaxLoop } from "./explicitRelaxLoop";
 import { CONVERGENCE_GTOL, positionsAndStretch } from "./convergence";
 
@@ -12,6 +12,8 @@ export const LEVEL0_PERIODIC_BURST_INTERVAL_STEPS = 50;
 export const LEVEL0_PERIODIC_BURST_DISTANCE_FRACTION = 0.6;
 
 export interface RelaxInitialOptions {
+  /** Vertices that repel each other (the original polygon corners, as the Python app does). Absent: every vertex. */
+  repulsionVertexIds?: number[];
   maxNfev?: number | null;
   gtol?: number;
   /** Per face: open wedge -- excluded from the periodic burst's outward normal and from RMS. */
@@ -71,10 +73,11 @@ export async function relaxInitialConfiguration(
   let stepCount = 0;
   let shouldBurstNext = false;
 
+  const repIndices = options.repulsionVertexIds?.filter((v) => setup.idx.has(v)).map((v) => setup.idx.get(v)!);
   const forceFn = (pts: Vec3[]) => {
     stepCount += 1;
     const spring = springForce(pts, setup.edgeA, setup.edgeB, setup.restLengths);
-    const repulsion = repulsionForce(pts);
+    const repulsion = repIndices ? repulsionForce(pts, REPULSION_STRENGTH, repIndices) : repulsionForce(pts);
     let force = spring.map((f, i) => add(f, repulsion[i]));
     if (shouldBurstNext && stepCount % LEVEL0_PERIODIC_BURST_INTERVAL_STEPS === 1) {
       const outward = vertexOutwardNormals(pts, facesIdx, open ? (i) => open[i] : undefined);

@@ -7,6 +7,7 @@ import { mountAppNav, revealPage } from "../utils/appNav";
 import { defaultTargetRmsPct } from "../utils/physics/pipeline";
 import { type ReplayFrame } from "../utils/physics/relaxOnce";
 import { loadNet, type NetSpec } from "../utils/physics/mesh";
+import { repulsionMultipliers } from "../utils/physics/pipeline";
 import { type Vec3 } from "../utils/physics/vec3";
 import {
   LEVELS,
@@ -370,6 +371,7 @@ function showLevel(level: number, positions: Map<number, Vec3>) {
   const topo = store.topology[level];
   if (!topo) return;
   viewers[level].setMesh(topo.faces, topo.faceEdgeIds, positions, topo.faceOfFine, currentBaseColors(), topo.outlineEdgeIds);
+  if (currentSpec) viewers[level].setRepulsion(repulsionMultipliers(loadNet(currentSpec), level));
 }
 
 function onLevelResult(level: number, positions: Map<number, Vec3>, frames: ReplayFrame[]) {
