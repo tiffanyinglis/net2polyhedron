@@ -106,6 +106,7 @@ export async function fullInflate(
       faceOfFine: number[],
       faceEdgeIds: number[][],
       outlineEdgeIds: Set<number>,
+      faceUV: number[][],
     ) => void;
     shouldStop?: () => boolean;
   } = {},
@@ -117,7 +118,7 @@ export async function fullInflate(
   const topology = fanLevel0To1(base);
   const outlineEdgeIds = polygonOutlineEdgeIds(base, spec.source_polygon_id ?? baseFaces.map((_, i) => i));
 
-  options.onTopology?.(0, topology.mesh.faces, topology.faceOfFine, topology.mesh.faceEdgeIds, outlineEdgeIds);
+  options.onTopology?.(0, topology.mesh.faces, topology.faceOfFine, topology.mesh.faceEdgeIds, outlineEdgeIds, topology.faceUV);
   const t0 = performance.now();
   options.onRecord?.({
     level: 0, state: "running", steps: 0, optimality: null, gtol,
@@ -152,6 +153,7 @@ export async function fullInflate(
     positions: level0.positions,
     faceOfFine: topology.faceOfFine,
     faceOpen: topology.faceOpen,
+    faceUV: topology.faceUV,
     outlineEdgeIds,
   };
   const history: CalibratedLevel[] = [];
@@ -159,7 +161,7 @@ export async function fullInflate(
   for (let level = 1; level <= MAX_LEVEL; level++) {
     if (level > 1) state = quarterTriangles(state);
     const repulsionVertexMultipliers = repulsionMultipliers(base, level);
-    options.onTopology?.(level, state.mesh.faces, state.faceOfFine, state.mesh.faceEdgeIds, state.outlineEdgeIds);
+    options.onTopology?.(level, state.mesh.faces, state.faceOfFine, state.mesh.faceEdgeIds, state.outlineEdgeIds, state.faceUV ?? []);
 
     const targetRmsPct = options.targetRmsPctByLevel?.[level] ?? defaultTargetRmsPct(base);
     const t = performance.now();

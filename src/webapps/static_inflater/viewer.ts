@@ -5,6 +5,23 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { type Vec3 } from "../utils/physics/vec3";
 import { REPULSION_STRENGTH, repulsionForce } from "../utils/physics/forces";
 import { EDGE_LENGTH } from "../utils/physics/mesh";
+import { africanFlowerTextures } from "./africanFlower";
+
+const WHITE = 0xffffff;
+/** How far the African Flower's stitch bump map pushes the shading. */
+const FLOWER_BUMP_SCALE = 0.6;
+
+function vsub(a: Vec3, b: Vec3): Vec3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+function vcross(a: Vec3, b: Vec3): Vec3 {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+/** Unit length, or the zero vector for a zero input. */
+function vunit(a: Vec3): Vec3 {
+  const len = Math.hypot(a[0], a[1], a[2]);
+  return len ? [a[0] / len, a[1] / len, a[2] / len] : [0, 0, 0];
+}
 
 /** [direction toward the light in camera space, intensity]: key, fill, headlight. */
 const LIGHT_RIG: [[number, number, number], number][] = [
@@ -242,6 +259,16 @@ export class Viewer {
   private triangleBaseFace: number[] = [];
   /** Per fine face of the current mesh: its base face. */
   private fineBaseFace: number[] = [];
+  /** Per triangle corner (3 per triangle, in draw order): the shared point it sits on. */
+  private corners: number[] = [];
+  /** The colour each base face draws with when not textured (setBaseColors / setMesh). */
+  private baseColors: number[] = [];
+  /** African Flower texture on (every base face carries its own copy of the motif). */
+  private textured = false;
+  /** Side count of each base face: sets how many petals its motif has. */
+  private baseSides: number[] = [];
+  /** Per triangle: the fine face it came from (its edge ids are on that face). */
+  private triangleFine: number[] = [];
   /** Highlight outlines on the current mesh (rebuilt when the mesh or the highlights change). */
   private highlightObjects: LineSegments2[] = [];
   /** Their materials, so a resize can keep the line width in pixels. */
@@ -388,7 +415,10 @@ export class Viewer {
     faceOfFine: number[],
     baseColors: number[],
     outlineEdgeIds: Set<number>,
+    baseSides: number[] = [],
+    faceUV: number[][] = [],
   ) {
+    this.baseSides = baseSides;
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -424,32 +454,51 @@ export class Viewer {
     });
 
     // Triangles are emitted grouped by original face, one geometry group (= one material) each.
-    const indexArray: number[] = [];
-    const geometry = new THREE.BufferGeometry();
+    // Every triangle corner gets its own vertex (a point shared by two faces can't carry both faces'
+    // texture coordinates), so the corners are filled from the shared points by writeCorners.
+    this.corners = [];
     this.triangleBaseFace = [];
+    this.triangleFine = [];
     this.fineBaseFace = faceOfFine.slice();
+    this.baseColors = baseColors;
+    const geometry = new THREE.BufferGeometry();
     baseColors.forEach((_, b) => {
-      const start = indexArray.length;
+      const start = this.corners.length;
       faces.forEach((face, f) => {
         if (faceOfFine[f] !== b) return;
         for (let i = 1; i < face.length - 1; i++) {
-          indexArray.push(idx.get(face[0])!, idx.get(face[i])!, idx.get(face[i + 1])!);
+          this.corners.push(idx.get(face[0])!, idx.get(face[i])!, idx.get(face[i + 1])!);
           this.triangleBaseFace.push(b);
+          this.triangleFine.push(f);
         }
       });
-      geometry.addGroup(start, indexArray.length - start, b);
+      geometry.addGroup(start, this.corners.length - start, b);
     });
-    geometry.setAttribute("position", new THREE.BufferAttribute(vertexArray, 3));
-    geometry.setIndex(indexArray);
-    if (this.smoothShading) geometry.computeVertexNormals();
+    const cornerCount = this.corners.length;
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(cornerCount * 3), 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(cornerCount * 3), 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(cornerCount * 2), 2));
+    const pts: Vec3[] = vertexIds.map(
+      (_, i) => [vertexArray[i * 3], vertexArray[i * 3 + 1], vertexArray[i * 3 + 2]] as Vec3,
+    );
+    this.writeCorners(geometry, pts);
+    // Texture coordinates: each corner's own, from the wedge its fine triangle carries (see faceUV).
+    const uvAttr = geometry.getAttribute("uv") as THREE.BufferAttribute;
+    this.triangleFine.forEach((f, t) => {
+      for (let k = 0; k < 3; k++) uvAttr.setXY(3 * t + k, faceUV[f]?.[2 * k] ?? 0.5, faceUV[f]?.[2 * k + 1] ?? 0.5);
+    });
+    uvAttr.needsUpdate = true;
 
     // Phong, like the Python app (specular 0.5, power 20, smooth_shading=False): flatShading
     // lights each triangle by its own face normal instead of the averaged per-vertex normals,
     // which blur neighbouring triangles together into one smooth blob. Smooth shading turns that off.
     const materials = baseColors.map(
-      (color) =>
+      (color, b) =>
         new THREE.MeshPhongMaterial({
-          color,
+          color: this.textured ? WHITE : color,
+          map: this.textured ? africanFlowerTextures(baseSides[b]).map : null,
+          bumpMap: this.textured ? africanFlowerTextures(baseSides[b]).bump : null,
+          bumpScale: FLOWER_BUMP_SCALE,
           specular: 0x808080,
           shininess: 20,
           flatShading: !this.smoothShading,
@@ -459,9 +508,8 @@ export class Viewer {
     this.mesh = new THREE.Mesh(geometry, materials);
     this.scene.add(this.mesh);
 
-    const wireGeometry = new THREE.WireframeGeometry(geometry);
     this.wireframe = new THREE.LineSegments(
-      wireGeometry,
+      this.wireframeGeometry(pts),
       new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.25, transparent: true }),
     );
     this.wireframe.visible = this.showSubdivisions;
@@ -501,12 +549,9 @@ export class Viewer {
       const p = positions.get(v)!;
       return [p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]] as Vec3;
     });
-    const attr = this.mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
-    pts.forEach((p, i) => attr.setXYZ(i, p[0], p[1], p[2]));
-    attr.needsUpdate = true;
-    if (this.smoothShading) this.mesh.geometry.computeVertexNormals();
+    this.writeCorners(this.mesh.geometry, pts);
     this.wireframe!.geometry.dispose();
-    this.wireframe!.geometry = new THREE.WireframeGeometry(this.mesh.geometry);
+    this.wireframe!.geometry = this.wireframeGeometry(pts);
     this.meshData.pts = pts;
     this.rebuildOutline();
     this.rebuildOverlays();
@@ -809,8 +854,8 @@ export class Viewer {
   /** Turns smooth shading on or off, in place: the mesh's vertex normals are averaged over its faces when on. */
   setSmoothShading(on: boolean) {
     this.smoothShading = on;
-    if (this.mesh) {
-      if (on) this.mesh.geometry.computeVertexNormals();
+    if (this.mesh && this.meshData) {
+      this.writeCorners(this.mesh.geometry, this.meshData.pts);
       (this.mesh.material as THREE.MeshPhongMaterial[]).forEach((m) => {
         m.flatShading = !on;
         m.needsUpdate = true;
@@ -821,9 +866,73 @@ export class Viewer {
 
   /** Recolours the current mesh in place (one colour per original face) without refitting the camera. */
   setBaseColors(baseColors: number[]) {
+    this.baseColors = baseColors;
     if (!this.mesh) return;
-    (this.mesh.material as THREE.MeshPhongMaterial[]).forEach((m, b) => m.color.set(baseColors[b]));
+    (this.mesh.material as THREE.MeshPhongMaterial[]).forEach((m, b) =>
+      m.color.set(this.textured ? WHITE : baseColors[b]),
+    );
     this.render();
+  }
+
+  /** Turns the African Flower texture on or off, in place. Off shows the base colours again. */
+  setTextured(on: boolean) {
+    if (on === this.textured) return;
+    this.textured = on;
+    if (this.mesh) {
+      (this.mesh.material as THREE.MeshPhongMaterial[]).forEach((m, b) => {
+        m.map = on ? africanFlowerTextures(this.baseSides[b]).map : null;
+        m.bumpMap = on ? africanFlowerTextures(this.baseSides[b]).bump : null;
+        m.bumpScale = FLOWER_BUMP_SCALE;
+        m.color.set(on ? WHITE : this.baseColors[b]);
+        m.needsUpdate = true;
+      });
+    }
+    this.render();
+  }
+
+  /**
+   * Fills the per-corner positions and normals from the shared points: each triangle's own normal
+   * when flat, or the average over the triangles meeting at each point when smooth.
+   */
+  private writeCorners(geometry: THREE.BufferGeometry, pts: Vec3[]) {
+    const pos = geometry.getAttribute("position") as THREE.BufferAttribute;
+    const nor = geometry.getAttribute("normal") as THREE.BufferAttribute;
+    const triCount = this.triangleBaseFace.length;
+
+    const triNormal: Vec3[] = [];
+    const pointNormal: Vec3[] = pts.map(() => [0, 0, 0]);
+    for (let t = 0; t < triCount; t++) {
+      const [a, b, c] = [0, 1, 2].map((k) => pts[this.corners[3 * t + k]]);
+      const n = vcross(vsub(b, a), vsub(c, a)); // area-weighted, as computeVertexNormals averages it
+      triNormal.push(n);
+      for (let k = 0; k < 3; k++) {
+        const i = this.corners[3 * t + k];
+        const sum = pointNormal[i];
+        pointNormal[i] = [sum[0] + n[0], sum[1] + n[1], sum[2] + n[2]];
+      }
+    }
+
+    for (let t = 0; t < triCount; t++) {
+      const flat = vunit(triNormal[t]);
+      for (let k = 0; k < 3; k++) {
+        const corner = 3 * t + k;
+        const i = this.corners[corner];
+        const p = pts[i];
+        pos.setXYZ(corner, p[0], p[1], p[2]);
+        const n = this.smoothShading ? vunit(pointNormal[i]) : flat;
+        nor.setXYZ(corner, n[0], n[1], n[2]);
+      }
+    }
+    pos.needsUpdate = true;
+    nor.needsUpdate = true;
+  }
+
+  /** The subdivision wireframe: one line per triangle edge, drawn from the shared points. */
+  private wireframeGeometry(pts: Vec3[]): THREE.WireframeGeometry {
+    const shared = new THREE.BufferGeometry();
+    shared.setAttribute("position", new THREE.Float32BufferAttribute(pts.flat(), 3));
+    shared.setIndex(this.corners);
+    return new THREE.WireframeGeometry(shared);
   }
 
   /** Distance that fits the mesh's bounding sphere, widened for a panel narrower than tall. */

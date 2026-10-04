@@ -26,6 +26,8 @@ export interface LevelTopology {
   faceOfFine: number[];
   faceEdgeIds: number[][];
   outlineEdgeIds: Set<number>;
+  /** Per fine triangle: its corners' texture coordinates (see Level1Topology.faceUV). */
+  faceUV?: number[][];
 }
 
 /** Everything a Level 0-3 panel and its history row need, indexed by level. */
@@ -105,8 +107,8 @@ export async function runFullInflate(spec: NetSpec, opts: RunOptions): Promise<R
       gtol: opts.gtol,
       seed: opts.seed,
       onRecord: (record) => onRecord(record, opts),
-      onTopology: (level, faces, faceOfFine, faceEdgeIds, outlineEdgeIds) => {
-        store.topology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds };
+      onTopology: (level, faces, faceOfFine, faceEdgeIds, outlineEdgeIds, faceUV) => {
+        store.topology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds, faceUV };
       },
       onLevelResult: (level, positions, frames) => {
         store.positions[level] = positions;

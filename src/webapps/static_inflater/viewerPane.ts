@@ -142,7 +142,10 @@ export class ViewerPane {
         topology.faceOfFine,
         this.colorsOf(file),
         topology.outlineEdgeIds,
+        file.baseFaces.map((f) => f.length),
+        topology.faceUV,
       );
+      this.viewers![level].setTextured(file.colors.mode === "african");
     });
     this.renderAll();
     this.endLoading();
@@ -310,7 +313,10 @@ export class ViewerPane {
   private applyColors(file: ViewedFile) {
     if (!this.viewers) return;
     const colors = this.colorsOf(file);
-    this.viewers.forEach((v) => v.setBaseColors(colors));
+    this.viewers.forEach((v) => {
+      v.setTextured(file.colors.mode === "african");
+      v.setBaseColors(colors);
+    });
     this.renderAll();
   }
 

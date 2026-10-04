@@ -30,6 +30,16 @@ export interface Level1Topology {
   faceOfFine: number[];
   /** Per fine triangle: its rim edge is an open boundary edge (see fanLevel0To1). */
   faceOpen: boolean[];
+  /** Per fine triangle: the texture coordinates of its three corners, as [u0, v0, u1, v1, u2, v2]. */
+  faceUV: number[][];
+}
+
+/** Texture coordinates of a base polygon's corner k (of n): on the flower's edge, on its spoke. The
+ * centre of the texture is the polygon's centroid, so a triangle's wedge runs from the centre out to
+ * its two corners. */
+function wedgeCornerUV(k: number, n: number): [number, number] {
+  const a = (2 * Math.PI * k) / n;
+  return [0.5 + 0.5 * Math.cos(a), 0.5 + 0.5 * Math.sin(a)];
 }
 
 /** Triangulates every base face via a centroid fan (mirrors mesh_levels._fan_level_0_to_1). Base
@@ -44,6 +54,7 @@ export function fanLevel0To1(base: Mesh): Level1Topology {
   const faceEdgeIds: number[][] = [];
   const faceOfFine: number[] = [];
   const faceOpen: boolean[] = [];
+  const faceUV: number[][] = [];
   const uses = new Map<number, number>();
   for (const id of base.faceEdgeIds.flat()) uses.set(id, (uses.get(id) ?? 0) + 1);
   base.faces.forEach((face, faceIdx) => {
@@ -65,6 +76,7 @@ export function fanLevel0To1(base: Mesh): Level1Topology {
     for (const [p, q] of entries.map((e) => [e[0], e[1]] as [number, number])) {
       if (centroid === null) centroid = nextVertex++;
       faces.push([face[p], face[q], centroid]);
+      faceUV.push([...wedgeCornerUV(p, n), ...wedgeCornerUV(q, n), 0.5, 0.5]);
       faceEdgeIds.push([baseIds[p], spokeOf(q), spokeOf(p)]);
       faceOfFine.push(faceIdx);
       // A wedge is open when its own rim (base edge p) has only one face using it, as in
@@ -72,7 +84,7 @@ export function fanLevel0To1(base: Mesh): Level1Topology {
       faceOpen.push(uses.get(baseIds[p]) === 1);
     }
   });
-  return { mesh: { faces, faceEdgeIds, edgeEnds, restLengths }, faceOfFine, faceOpen };
+  return { mesh: { faces, faceEdgeIds, edgeEnds, restLengths }, faceOfFine, faceOpen, faceUV };
 }
 
 export interface MeshState {
@@ -80,6 +92,8 @@ export interface MeshState {
   positions: Map<number, Vec3>;
   faceOfFine: number[];
   faceOpen: boolean[];
+  /** Per fine triangle: its corners' texture coordinates (see Level1Topology.faceUV); absent when not tracked. */
+  faceUV?: number[][];
   /** Edge ids lying on an original polygon's outer boundary (see polygonOutlineEdgeIds); halves of
    * a subdivided outline edge stay in the set. */
   outlineEdgeIds: Set<number>;
@@ -127,6 +141,7 @@ export function quarterTriangles(state: MeshState): MeshState {
   const faces: number[][] = [];
   const faceEdgeIds: number[][] = [];
   const faceOfFine: number[] = [];
+  const faceUV: number[][] = [];
   const faceOpen: boolean[] = [];
   mesh.faces.forEach((face, f) => {
     const [a, b, c] = face;
@@ -138,6 +153,22 @@ export function quarterTriangles(state: MeshState): MeshState {
     const Y = addEdge(mbc, mca, mesh.restLengths[eab] / 2);
     const Z = addEdge(mca, mab, mesh.restLengths[ebc] / 2);
     faces.push([a, mab, mca], [mab, b, mbc], [mca, mbc, c], [mab, mbc, mca]);
+    // Each child's texture corners are the midpoints of its parent's, so a wedge is quartered along with its triangle.
+    const parentUV = state.faceUV?.[f];
+    if (!parentUV) faceUV.push([], [], [], []);
+    else {
+      const [uvA, uvB, uvC] = [0, 1, 2].map((i) => [parentUV[2 * i], parentUV[2 * i + 1]]);
+      const mid = (p: number[], q: number[]) => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+      const uvAB = mid(uvA, uvB);
+      const uvBC = mid(uvB, uvC);
+      const uvCA = mid(uvC, uvA);
+      faceUV.push(
+        [...uvA, ...uvAB, ...uvCA],
+        [...uvAB, ...uvB, ...uvBC],
+        [...uvCA, ...uvBC, ...uvC],
+        [...uvAB, ...uvBC, ...uvCA],
+      );
+    }
     faceEdgeIds.push(
       [halfAt(eab, a), Z, halfAt(eca, a)],
       [halfAt(eab, b), halfAt(ebc, b), X],
@@ -154,6 +185,7 @@ export function quarterTriangles(state: MeshState): MeshState {
     positions,
     faceOfFine,
     faceOpen,
+    faceUV,
     outlineEdgeIds,
   };
 }

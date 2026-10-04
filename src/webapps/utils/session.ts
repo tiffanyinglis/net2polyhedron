@@ -1,4 +1,5 @@
 import type { NetSpec } from "./physics/mesh";
+import type { ColorMode } from "./colors";
 import type { LevelRecord } from "./physics/pipeline";
 import type { ReplayFrame } from "./physics/relaxOnce";
 import type { Vec3 } from "./physics/vec3";
@@ -20,6 +21,8 @@ export interface LevelSnapshot {
   faceOfFine: number[];
   faceEdgeIds: number[][];
   outlineEdgeIds: number[];
+  /** Absent in sessions saved before the texture coordinates were stored. */
+  faceUV?: number[][];
   positions: [number, Vec3][];
   /** Absent when the session was saved without replay frames (or the level has none). */
   replay?: ReplaySnapshot;
@@ -29,7 +32,7 @@ export interface LevelSnapshot {
 export interface SessionData {
   netName: string;
   netSpec: NetSpec;
-  colorMode: "polygon" | "multi";
+  colorMode: ColorMode;
   multiColors: number[];
   /** Index 0 is Level 1, matching the Setup box's Target RMS fields. */
   targetRmsPct: number[];
@@ -42,7 +45,7 @@ export interface SessionData {
 }
 
 export function snapshotLevel(
-  topology: { faces: number[][]; faceOfFine: number[]; faceEdgeIds: number[][]; outlineEdgeIds: Set<number> },
+  topology: { faces: number[][]; faceOfFine: number[]; faceEdgeIds: number[][]; outlineEdgeIds: Set<number>; faceUV?: number[][] },
   positions: Map<number, Vec3>,
   frames?: ReplayFrame[],
 ): LevelSnapshot {
@@ -54,6 +57,7 @@ export function snapshotLevel(
     outlineEdgeIds: [...topology.outlineEdgeIds],
     positions: [...positions.entries()],
   };
+  if (topology.faceUV) snap.faceUV = topology.faceUV;
   if (frames && frames.length) {
     snap.replay = {
       vertexIds,
@@ -77,6 +81,7 @@ export function restoreLevel(snap: LevelSnapshot) {
       faceOfFine: snap.faceOfFine,
       faceEdgeIds: snap.faceEdgeIds,
       outlineEdgeIds: new Set(snap.outlineEdgeIds),
+      faceUV: snap.faceUV ?? [],
     },
     positions: new Map(snap.positions) as Map<number, Vec3>,
     frames,

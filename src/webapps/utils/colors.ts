@@ -1,6 +1,6 @@
 import { type NetLayoutEntry, type NetSpec } from "./physics/mesh";
 
-export type ColorMode = "polygon" | "multi";
+export type ColorMode = "polygon" | "multi" | "african";
 
 /** The Colour menu's state for one view: the mode, plus the Multi-colour palette (one colour per base face). */
 export interface ColorState {
@@ -12,6 +12,8 @@ export interface ColorState {
 const BRIGHT = [0x003a7d, 0x008dff, 0xff73b6, 0xc701ff, 0x4ecb8d, 0xff9d3a, 0xf9e858, 0xd83034];
 const ALTERNATING_LIGHT_DARK = [0x8fd7d7, 0x00b0be, 0xff8ca1, 0xf45f74, 0xbdd373, 0x98c127, 0xffcd8e, 0xffb255];
 export const FACE_COLORS = [...BRIGHT, ...ALTERNATING_LIGHT_DARK];
+/** African Flower draws its own texture over every polygon, so the base colour is just white under it. */
+const AFRICAN_BASE_COLOR = 0xffffff;
 
 /** Two base faces are neighbors iff they share an edge (mirrors mesh_topology.base_face_neighbors). */
 export function baseFaceNeighbors(baseFaces: number[][]): Map<number, Set<number>> {
@@ -87,6 +89,7 @@ export function displayColors(
   baseFaces: number[][],
   spec: Pick<NetSpec, "source_polygon_id" | "net_layout"> | null,
 ): number[] {
+  if (colors.mode === "african") return baseFaces.map(() => AFRICAN_BASE_COLOR);
   return colors.mode === "polygon"
     ? polygonFaceColors(baseFaces, spec?.source_polygon_id, spec?.net_layout)
     : colors.multiColors;

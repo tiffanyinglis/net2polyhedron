@@ -1,5 +1,5 @@
 import { type BuilderConnection, type NetSpec } from "../utils/physics/mesh";
-import { polygonColor } from "../utils/colors";
+import { polygonColor, type ColorMode } from "../utils/colors";
 import { type NetView } from "./editState";
 import { type CameraHooks } from "./viewer";
 
@@ -183,9 +183,9 @@ export class NetPanel {
     this.redraw();
   }
 
-  private lastColors: { mode: "polygon" | "multi"; multi: number[] } | null = null;
+  private lastColors: { mode: ColorMode; multi: number[] } | null = null;
 
-  setColors(mode: "polygon" | "multi", multiColors: number[]) {
+  setColors(mode: ColorMode, multiColors: number[]) {
     this.lastColors = { mode, multi: multiColors };
     this.redraw();
   }

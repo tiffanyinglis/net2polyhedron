@@ -235,7 +235,10 @@ function currentBaseColors(): number[] {
 function applyInflaterColors() {
   fitMultiColors(inflaterColors, baseFaces);
   const colors = currentBaseColors();
-  viewers.forEach((v, level) => store.positions[level] && v.setBaseColors(colors));
+  viewers.forEach((v, level) => {
+    v.setTextured(inflaterColors.mode === "african");
+    if (store.positions[level]) v.setBaseColors(colors);
+  });
   netPanel.setColors(inflaterColors.mode, inflaterColors.multiColors);
 }
 
@@ -380,7 +383,7 @@ function clearReplays() {
 function showLevel(level: number, positions: Map<number, Vec3>) {
   const topo = store.topology[level];
   if (!topo) return;
-  viewers[level].setMesh(topo.faces, topo.faceEdgeIds, positions, topo.faceOfFine, currentBaseColors(), topo.outlineEdgeIds);
+  viewers[level].setMesh(topo.faces, topo.faceEdgeIds, positions, topo.faceOfFine, currentBaseColors(), topo.outlineEdgeIds, baseFaces.map((f) => f.length), topo.faceUV);
   if (currentSpec) viewers[level].setRepulsion(repulsionMultipliers(loadNet(currentSpec), level));
 }
 
@@ -889,6 +892,7 @@ function onKeydown(e: KeyboardEvent) {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (key === "p") setColorMode("polygon");
   else if (key === "m") setColorMode("multi");
+  else if (key === "a" && view !== "viewer") setColorMode("african");
   else if (key === "r") randomize();
   else if (view === "viewer" && (key === "a" || e.key === "ArrowLeft")) void viewer.navigate(-1);
   else if (view === "viewer" && (key === "d" || e.key === "ArrowRight")) void viewer.navigate(1);
