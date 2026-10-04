@@ -259,11 +259,33 @@
   border-top: none;
 }
 
-/* The replay label sits on the same line as its slider. */
+/* The replay label sits on the same line as its slider, right-aligned under the 3D view. */
 .replay-control {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* The 3D view's status line, with the replay slider laid over its right end. The slider is out of the flow,
+ * so the footer is the status line's height in both modes; the status leaves room for it in debug mode. */
+.inflater-footer {
+  position: relative;
+  min-width: 0;
+}
+
+.inflater-footer .replay-control {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.inflater-footer:has(.replay-control:not([hidden])) #inflater-status {
+  padding-right: 210px;
+}
+
+.replay-control[hidden] {
+  display: none;
 }
 
 .nav-button[hidden],

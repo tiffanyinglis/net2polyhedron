@@ -259,6 +259,8 @@ export class Viewer {
   private builtOutlineRadius = 0;
   private showOutline = true;
   private showSubdivisions = false;
+  /** Smooth shading: lights each vertex with the average of its faces' normals, instead of each face by its own. */
+  private smoothShading = false;
 
   constructor(
     container: HTMLElement,
@@ -439,17 +441,18 @@ export class Viewer {
     });
     geometry.setAttribute("position", new THREE.BufferAttribute(vertexArray, 3));
     geometry.setIndex(indexArray);
+    if (this.smoothShading) geometry.computeVertexNormals();
 
     // Phong, like the Python app (specular 0.5, power 20, smooth_shading=False): flatShading
     // lights each triangle by its own face normal instead of the averaged per-vertex normals,
-    // which blur neighbouring triangles together into one smooth blob.
+    // which blur neighbouring triangles together into one smooth blob. Smooth shading turns that off.
     const materials = baseColors.map(
       (color) =>
         new THREE.MeshPhongMaterial({
           color,
           specular: 0x808080,
           shininess: 20,
-          flatShading: true,
+          flatShading: !this.smoothShading,
           side: THREE.DoubleSide,
         }),
     );
@@ -501,6 +504,7 @@ export class Viewer {
     const attr = this.mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
     pts.forEach((p, i) => attr.setXYZ(i, p[0], p[1], p[2]));
     attr.needsUpdate = true;
+    if (this.smoothShading) this.mesh.geometry.computeVertexNormals();
     this.wireframe!.geometry.dispose();
     this.wireframe!.geometry = new THREE.WireframeGeometry(this.mesh.geometry);
     this.meshData.pts = pts;
@@ -799,6 +803,19 @@ export class Viewer {
       this.highlightObjects.push(line);
     }
     this.updateHighlightResolution();
+    this.render();
+  }
+
+  /** Turns smooth shading on or off, in place: the mesh's vertex normals are averaged over its faces when on. */
+  setSmoothShading(on: boolean) {
+    this.smoothShading = on;
+    if (this.mesh) {
+      if (on) this.mesh.geometry.computeVertexNormals();
+      (this.mesh.material as THREE.MeshPhongMaterial[]).forEach((m) => {
+        m.flatShading = !on;
+        m.needsUpdate = true;
+      });
+    }
     this.render();
   }
 

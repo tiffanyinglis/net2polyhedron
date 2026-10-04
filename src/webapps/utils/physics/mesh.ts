@@ -1,4 +1,5 @@
 import { type Vec3 } from "./vec3";
+import { numpyRandom } from "./numpyRng";
 
 /** One placed polygon of the builder's flat layout (pixels, y down; edge length 70). */
 export interface NetLayoutEntry {
@@ -173,33 +174,23 @@ export function vertexIdsOf(faces: number[][]): number[] {
   return [...ids].sort((a, b) => a - b);
 }
 
-function mulberry32(seed: number) {
-  let a = seed >>> 0;
-  return function next(): number {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 /** Independent uniform-random position for every vertex `faces` references -- deliberately not a
  * meaningful embedding, just a starting cloud for relaxInitialConfiguration's spring force to
- * pull apart (mirrors stretchy_mesh.random_initial_positions; not bit-compatible with its numpy
- * RNG, just the same idea, since this is a from-scratch reimplementation). */
+ * pull apart. Bit-compatible with stretchy_mesh.random_initial_positions: same numpy RNG
+ * (numpyRng.ts), same sorted vertex order, same draws, so a seed gives the same cloud here as in
+ * the Python app. */
 export function randomInitialPositions(
   faces: number[][],
   spread = 5.0,
   seed = 0,
 ): Map<number, Vec3> {
-  const rand = mulberry32(seed * 2654435761 + 1);
+  const rand = numpyRandom(seed);
   const positions = new Map<number, Vec3>();
   for (const v of vertexIdsOf(faces)) {
     positions.set(v, [
-      (rand() - 0.5) * spread,
-      (rand() - 0.5) * spread,
-      (rand() - 0.5) * spread,
+      -spread / 2 + spread * rand(),
+      -spread / 2 + spread * rand(),
+      -spread / 2 + spread * rand(),
     ]);
   }
   return positions;

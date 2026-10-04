@@ -158,6 +158,22 @@ legend {
   display: none;
 }
 
+/* One line of checkboxes: each group's items sit directly in the row, and a hidden group takes no room. */
+.check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 32px;
+  margin-top: 10px;
+}
+
+.check-group {
+  display: contents;
+}
+
+.check-group[hidden] {
+  display: none;
+}
+
 .param-group {
   display: flex;
   align-items: center;

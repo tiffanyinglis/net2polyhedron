@@ -80,6 +80,8 @@ export interface RunOptions {
   label: string;
   targetRmsPctByLevel: Record<number, number>;
   gtol: number;
+  /** Level 0's starting seed; defaults to LEVEL0_SEED. */
+  seed?: number;
   store: LevelStore;
   /** Polled by the solver between steps. True ends the run as "stopped". */
   shouldStop: () => boolean;
@@ -101,6 +103,7 @@ export async function runFullInflate(spec: NetSpec, opts: RunOptions): Promise<R
     const result = await fullInflate(spec, {
       targetRmsPctByLevel: opts.targetRmsPctByLevel,
       gtol: opts.gtol,
+      seed: opts.seed,
       onRecord: (record) => onRecord(record, opts),
       onTopology: (level, faces, faceOfFine, faceEdgeIds, outlineEdgeIds) => {
         store.topology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds };

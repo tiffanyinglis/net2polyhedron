@@ -63,16 +63,21 @@
               <label>Level 3: <input id="target-3" size="4" value="10%" /></label>
             </div>
             <label>Tolerance: <input id="tolerance" size="10" value="1e-04" /></label>
+            <label id="seed-item" hidden>Seed: <input id="seed" size="6" value="0" /></label>
             <button id="inflate-btn" disabled>Run Simulation</button>
           </div>
-          <div id="layer-row" class="debug-row">
-            <label><input type="checkbox" id="show-polygon-outlines" checked /> Show polygon outlines</label>
-            <label><input type="checkbox" id="show-subdivisions" /> Show subdivisions</label>
-          </div>
-          <div id="debug-row" class="debug-row" hidden>
-            <label><input type="checkbox" id="show-face-normals" /> Show face normals</label>
-            <label><input type="checkbox" id="show-vertex-normals" /> Show vertex normals</label>
-            <label><input type="checkbox" id="show-repulsive-forces" /> Show repulsive forces</label>
+          <!-- All the checkboxes on one line: the debug group's items join the layer group's (display: contents). -->
+          <div class="check-row">
+            <div id="layer-row" class="check-group">
+              <label><input type="checkbox" id="show-polygon-outlines" checked /> Show polygon outlines</label>
+              <label><input type="checkbox" id="show-subdivisions" /> Show subdivisions</label>
+            </div>
+            <div id="debug-row" class="check-group" hidden>
+              <label><input type="checkbox" id="show-face-normals" /> Show face normals</label>
+              <label><input type="checkbox" id="show-vertex-normals" /> Show vertex normals</label>
+              <label><input type="checkbox" id="show-repulsive-forces" /> Show repulsive forces</label>
+              <label><input type="checkbox" id="smooth-shading" /> Show smooth shading</label>
+            </div>
           </div>
         </fieldset>
 

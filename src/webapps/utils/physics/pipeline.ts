@@ -94,6 +94,8 @@ export async function fullInflate(
     /** Target RMS stretch % per level (1..MAX_LEVEL); missing levels use DEFAULT_TARGET_RMS_PCT. */
     targetRmsPctByLevel?: Record<number, number>;
     gtol?: number;
+    /** Level 0's starting seed (the orientation retry tries seed, seed+1, ...). Defaults to LEVEL0_SEED. */
+    seed?: number;
     /** A level's solved positions, plus the replay snapshots of the trial that produced them. */
     onLevelResult?: (level: number, positions: Map<number, Vec3>, frames: ReplayFrame[]) => void;
     onRecord?: (record: LevelRecord) => void;
@@ -121,14 +123,11 @@ export async function fullInflate(
     level: 0, state: "running", steps: 0, optimality: null, gtol,
     rmsStretchPct: null, pressure: null, simTimeS: 0,
   });
-  // Repulsion acts on the original net's own corners only, as the Python app's release path does.
-  const repulsionCorners = [...new Set(baseFaces.flat())];
   const level0 = await relaxInitialConfigurationWithOrientationRetry(
     topology.mesh,
-    LEVEL0_SEED,
+    options.seed ?? LEVEL0_SEED,
     baseFaces,
     {
-      repulsionVertexIds: repulsionCorners,
       maxNfev: LEVEL0_SAFETY_STEP_CAP,
       gtol,
       openFaces: topology.faceOpen,

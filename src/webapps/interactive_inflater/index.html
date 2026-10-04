@@ -56,7 +56,7 @@
             <label><input type="checkbox" id="show-face-normals" /> Face normals</label>
             <label><input type="checkbox" id="show-vertex-normals" /> Vertex normals</label>
             <label><input type="checkbox" id="show-repulsive-forces" /> Repulsive forces</label>
-            <div class="replay-control"><span>Replay</span><input type="range" id="replay-slider" min="0" max="0" value="0" disabled /></div>
+            <label><input type="checkbox" id="smooth-shading" /> Smooth shading</label>
           </div>
         </fieldset>
 
@@ -64,7 +64,11 @@
         <div id="viewer" class="drawing"></div>
 
         <div id="builder-status" class="status"></div>
-        <div id="inflater-status" class="status"></div>
+        <!-- The 3D view's status line, with the debug-mode replay slider right-aligned on the same line. -->
+        <div id="inflater-footer" class="inflater-footer">
+          <div id="inflater-status" class="status"></div>
+          <div class="replay-control"><span>Replay</span><input type="range" id="replay-slider" min="0" max="0" value="0" disabled /></div>
+        </div>
       </div>
     </div>
     <dialog id="reject-dialog" class="reject-dialog">

@@ -64,6 +64,7 @@ const debugBoxes = {
   vertexNormals: $<HTMLInputElement>("show-vertex-normals"),
   repulsiveForces: $<HTMLInputElement>("show-repulsive-forces"),
 };
+const smoothBox = $<HTMLInputElement>("smooth-shading");
 
 const builder = new Builder();
 // Combined Move/Join: no mode switch, the canvas picks join or move per press (as the Python builder's Edit mode).
@@ -138,7 +139,7 @@ function setInflaterStatus(text: string, kind: StatusKind = "info") {
 function hintText(): string {
   if (running) return "The net is locked while it inflates.";
   if (builder.armedN !== null) return "Click the drawing area to place the shape.";
-  return "Drag shapes to move them. Click an edge handle, then another, to join them.";
+  return "Drag shapes to move them. Drag from an edge handle to another, then release, to join them.";
 }
 
 /** The owner's connected group: the only pieces that are inflated (the Python app's "active group"). */
@@ -754,6 +755,8 @@ function setDebugMode(on: boolean) {
   undoBtn.hidden = redoBtn.hidden = on;
   // Leaving debug mode clears the overlays, as in the Static Inflater, and goes back to the finished result.
   for (const box of Object.values(debugBoxes)) box.checked = false;
+  smoothBox.checked = false;
+  viewer.setSmoothShading(false);
   applyOverlays();
   if (!on) redrawFinest();
   updateReplayControl();
@@ -795,6 +798,7 @@ function applyOverlays() {
 }
 
 for (const box of Object.values(debugBoxes)) box.addEventListener("change", applyOverlays);
+smoothBox.addEventListener("change", () => viewer.setSmoothShading(smoothBox.checked));
 
 // ---- Setup fields -------------------------------------------------------------------------------
 

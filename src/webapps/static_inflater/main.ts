@@ -63,6 +63,8 @@ const statusRowEl = document.getElementById("status-row")!;
 const spinnerEl = document.getElementById("spinner")!;
 const targetInputs = [1, 2, 3].map((level) => document.getElementById(`target-${level}`) as HTMLInputElement);
 const toleranceInput = document.getElementById("tolerance") as HTMLInputElement;
+const seedItem = document.getElementById("seed-item")!;
+const seedInput = document.getElementById("seed") as HTMLInputElement;
 const historyBody = document.querySelector<HTMLTableSectionElement>("#history tbody")!;
 const debugRow = document.getElementById("debug-row")!;
 const debugBoxes = {
@@ -70,6 +72,7 @@ const debugBoxes = {
   vertexNormals: document.getElementById("show-vertex-normals") as HTMLInputElement,
   repulsiveForces: document.getElementById("show-repulsive-forces") as HTMLInputElement,
 };
+const smoothShadingBox = document.getElementById("smooth-shading") as HTMLInputElement;
 /** Shown in both modes; not reset when debug mode is toggled. */
 const layerBoxes = {
   polygonOutlines: document.getElementById("show-polygon-outlines") as HTMLInputElement,
@@ -309,18 +312,25 @@ function applyDebugOverlays() {
     : { faceNormals: false, vertexNormals: false, repulsiveForces: false };
   viewers.forEach((v) => v.setOverlays(flags));
   viewers.forEach((v) => v.setLayers(layerBoxes.polygonOutlines.checked, layerBoxes.subdivisions.checked));
+  // Smooth shading is a debug option too: it's only on in debug mode, and leaving debug mode turns it off.
+  viewers.forEach((v) => v.setSmoothShading(debugMode && smoothShadingBox.checked));
 }
 
 function setDebugMode(on: boolean) {
   debugMode = on;
+  // The status line sits right after Run Simulation in debug mode, and above Convergence History in release.
+  if (on) inflateBtn.after(statusRowEl);
+  else document.getElementById("history-box")!.before(statusRowEl);
   applyStatus();
   applySpinner();
   debugRow.hidden = !on;
+  seedItem.hidden = !on;
   netSpacer.hidden = !on;
   // Leaving debug mode clears the overlays; the layer checkboxes keep their state.
   debugBoxes.faceNormals.checked = false;
   debugBoxes.vertexNormals.checked = false;
   debugBoxes.repulsiveForces.checked = false;
+  smoothShadingBox.checked = false;
   applyDebugOverlays();
   replays.forEach((r, level) => {
     r.wrap.hidden = !on;
@@ -411,6 +421,15 @@ for (const input of targetInputs) {
 }
 wireParamInput(toleranceInput, () => readTolerance(toleranceInput));
 
+/** Level 0's starting seed (debug mode only). Whole numbers; anything else falls back to 0. */
+function readSeed(): number {
+  const parsed = parseInt(seedInput.value, 10);
+  const seed = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  seedInput.value = String(seed);
+  return seed;
+}
+wireParamInput(seedInput, () => readSeed());
+
 // ---- Inflate -------------------------------------------------------------------------------
 
 function setRunning(value: boolean) {
@@ -425,6 +444,7 @@ function setRunning(value: boolean) {
 async function runSimulation(): Promise<RunOutcome> {
   const targetRmsPctByLevel = Object.fromEntries(targetInputs.map((input, i) => [i + 1, readTargetRms(input)]));
   const gtol = readTolerance(toleranceInput);
+  const seed = readSeed();
   clearComputedLevels();
   setBusy(1);
   try {
@@ -432,6 +452,7 @@ async function runSimulation(): Promise<RunOutcome> {
       label: "Full Inflate",
       targetRmsPctByLevel,
       gtol,
+      seed,
       store,
       shouldStop: runInterrupted,
       hooks: {
@@ -908,7 +929,7 @@ async function init() {
   window.addEventListener("beforeunload", (e) => {
     if (viewer.dirtyNames().length) e.preventDefault(); // the browser's own "leave page?" prompt
   });
-  for (const box of [...Object.values(debugBoxes), ...Object.values(layerBoxes)]) {
+  for (const box of [...Object.values(debugBoxes), smoothShadingBox, ...Object.values(layerBoxes)]) {
     box.addEventListener("change", applyDebugOverlays);
   }
   // Set the layer checkboxes from their intended defaults, not whatever the browser restored on reload,
