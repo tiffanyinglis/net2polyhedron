@@ -69,6 +69,19 @@ describe("junction and terminal placement", () => {
     expect(Math.hypot(b[0] - a[0], b[1] - a[1])).toBeCloseTo(1);
   });
 
+  it("textures a lone piece with its own African Flower hexagon, one set of corner UVs per triangle", () => {
+    const square: Shape = { id: 7, n: 4, cx: 10, cy: 20, rotation: 0, flipped: false };
+    const plan = planPlacement([square], [], 7, { 7: { cell: 5, start: 2 } });
+    const display = buildDisplay(plan, NO_SOLVE_TOPOLOGY, plan.seedPositions!);
+    expect(display.faceUV).toHaveLength(display.faces.length);
+    for (const uv of display.faceUV) expect(uv).toHaveLength(6);
+    // Cell 5 is column 1, row 1 of the 4 x 4 atlas, so every corner of the piece lies inside that cell.
+    for (const uv of display.faceUV) for (let k = 0; k < 6; k += 2) {
+      expect(uv[k]).toBeGreaterThanOrEqual(0.25);
+      expect(uv[k]).toBeLessThanOrEqual(0.5);
+    }
+  });
+
   it("attaches a second square on the far side of the shared edge, in the same plane", () => {
     const left: Shape = { id: 0, n: 4, cx: 0, cy: 0, rotation: 0, flipped: false };
     const right: Shape = { id: 1, n: 4, cx: 100, cy: 0, rotation: 0, flipped: false };

@@ -33,6 +33,8 @@ export interface LevelSnapshot {
 export interface SessionData {
   netName: string;
   netSpec: NetSpec;
+  /** The net as a .poly (the Net Builder's format), so the Interactive Inflater can rebuild its 2D view. Absent in Static Inflater sessions. */
+  netFile?: unknown;
   colorMode: ColorMode;
   /** The African Flower hexagon choice the saved textures were made with. Absent in older sessions. */
   atlasChoice?: AtlasChoice;
@@ -41,6 +43,8 @@ export interface SessionData {
   targetRmsPct: number[];
   tolerance: number;
   camera: { orientation: [number, number, number, number]; zoom: number; pan: [number, number] };
+  /** The Interactive Inflater's 2D view: zoom and pan of the net canvas. Absent in Static Inflater sessions. */
+  view2d?: { scale: number; offset: [number, number] };
   /** Indexed by level (0..3). */
   history: (LevelRecord | null)[];
   /** Indexed by level (0..3); null for a level that was never computed. */

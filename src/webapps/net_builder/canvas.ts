@@ -159,6 +159,17 @@ export class BuilderCanvas {
     this.redraw();
   }
 
+  /** Where the drawing sits on the canvas (the pan), in CSS pixels. Saved with a model so it reopens in the same place. */
+  get viewOffset(): [number, number] {
+    return [this.offsetX, this.offsetY];
+  }
+
+  setViewOffset(x: number, y: number) {
+    this.offsetX = x;
+    this.offsetY = y;
+    this.redraw();
+  }
+
   /** Drops a join that's waiting for its second edge (Escape, or a mode change). */
   cancelPending() {
     this.pending = null;

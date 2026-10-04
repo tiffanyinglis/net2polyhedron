@@ -6,7 +6,7 @@
  * interpolation, and one pressure calibration runs there, starting from the last pressure.
  */
 import { loadNet, type NetSpec } from "../utils/physics/mesh";
-import { fanLevel0To1, polygonOutlineEdgeIds, quarterTriangles, type MeshState } from "../utils/physics/meshLevels";
+import { fanLevel0To1, groupingOfSpec, polygonOutlineEdgeIds, quarterTriangles, type AtlasChoice, type MeshState } from "../utils/physics/meshLevels";
 import { repulsionMultipliers } from "../utils/physics/pipeline";
 import { type ReplayFrame } from "../utils/physics/relaxOnce";
 import { estimatePressureForTargetStretch } from "../utils/physics/pressureCalibration";
@@ -73,10 +73,10 @@ export async function diffInflate(
   spec: NetSpec,
   slots: Map<string, number>,
   last: LastSolve,
-  options: { targetRmsPct: number; gtol: number; shouldStop: () => boolean; sourceOfFace: number[]; shapes?: Shape[] },
+  options: { targetRmsPct: number; gtol: number; shouldStop: () => boolean; sourceOfFace: number[]; shapes?: Shape[]; atlasChoice?: AtlasChoice },
 ): Promise<DiffResult> {
   const base = loadNet(spec);
-  const fan = fanLevel0To1(base);
+  const fan = fanLevel0To1(base, options.atlasChoice, groupingOfSpec(spec, base.faces));
   const { positions, pinned } = seedPositions(base.faces, slots, last);
 
   // A piece with no corner in the last solve is new to the junctions (it was a terminal). It starts laid flat
@@ -105,6 +105,7 @@ export async function diffInflate(
     positions,
     faceOfFine: fan.faceOfFine,
     faceOpen: fan.faceOpen,
+    faceUV: fan.faceUV,
     outlineEdgeIds: polygonOutlineEdgeIds(base, spec.source_polygon_id ?? base.faces.map((_, f) => f)),
   };
   state = quarterTriangles(quarterTriangles(state));
@@ -139,6 +140,8 @@ export async function diffInflate(
       faceOfFine: state.faceOfFine,
       faceEdgeIds: state.mesh.faceEdgeIds,
       outlineEdgeIds: state.outlineEdgeIds,
+      faceUV: state.faceUV ?? [],
+      atlas: options.atlasChoice,
     },
     positions: calibration.positions,
     pressure: calibration.pressure,

@@ -215,8 +215,8 @@ function paintIcon(icon: HTMLCanvasElement, n: number) {
     ctx.fillStyle = colors.mode === "multi" ? cssColour(piece.multi) : shapeCssColor(n);
     ctx.fill();
   }
-  if (colors.mode === "african") {
-    // A white outline keeps the textured icons readable against the palette.
+  if (colors.mode === "african" || colors.mode === "multi") {
+    // A white outline keeps the textured icons, and the Multi-colour ones, readable against the palette.
     ctx.beginPath();
     points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
     ctx.closePath();

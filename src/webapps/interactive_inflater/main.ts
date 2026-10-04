@@ -1,12 +1,16 @@
 import { mountAppNav, revealPage } from "../utils/appNav";
 import { regularPolygonVertices } from "../utils/geometry";
 import { Builder, POLYGON_NS, shapeCssColor } from "../net_builder/builder";
-import { type Shape } from "../net_builder/shapes";
 import { BuilderCanvas } from "../net_builder/canvas";
 import { NetValidationError } from "../net_builder/netExport";
-import { shapesFrom } from "../net_builder/netFile";
-import { SharedCamera, Viewer, type DebugOverlays } from "../static_inflater/viewer";
-import { displayColors, FACE_COLORS, polygonColor, type ColorMode, type ColorState } from "../utils/colors";
+import { defaultNetColors, netFileFrom, shapesFrom, type NetColors } from "../net_builder/netFile";
+import { parseSession, restoreLevel, serializeSession, snapshotLevel, SESSION_EXTENSION, type SessionData } from "../utils/session";
+import { OPEN_EDGE_COLOR, SharedCamera, Viewer, type DebugOverlays } from "../static_inflater/viewer";
+import { displayColors, polygonColor, type ColorMode, type ColorState } from "../utils/colors";
+import { fillMissingColours, nextPiece, neighboursOf, randomize as randomizeShapes } from "../net_builder/colours";
+import { hexAtlasImage, hexAtlasLoaded } from "../static_inflater/hexAtlas";
+import { drawAtlasTriangle } from "../utils/atlasDraw";
+import { atomCornerUV, cellUV, retargetFaceUV, type AtlasChoice } from "../utils/physics/meshLevels";
 import { type ReplayFrame } from "../utils/physics/relaxOnce";
 import { defaultTargetRmsPct, repulsionMultipliers } from "../utils/physics/pipeline";
 import { loadNet } from "../utils/physics/mesh";
@@ -78,15 +82,13 @@ builder.onRejected = (message) => {
 $("reject-ok").addEventListener("click", () => rejectDialog.close());
 const canvas = new BuilderCanvas(canvasEl, builder, () => refresh(), true);
 canvas.onHoverPiece = () => syncHighlights();
-// The 2D pieces use the Colour menu too: the polygon colour, or each piece's own Multi-colour.
-canvas.fillOf = (shape) => `#${pieceColor(shape).toString(16).padStart(6, "0")}`;
 
 /** The one canvas on the right: the finest level computed so far. */
 const camera = new SharedCamera();
 const viewer = new Viewer($("viewer"), camera, () => viewer.render());
 
-/** Polygon-specific colouring, the default in the Python app. */
-const colors: ColorState = { mode: "polygon", multiColors: [] };
+/** The Colour menu's state: the mode, and each piece's Multi-colour and African Flower texture by shape id. Polygon-specific by default, as in the Python app. */
+const colors: NetColors = defaultNetColors();
 const store = new LevelStore();
 
 let running = false;
@@ -113,9 +115,17 @@ let seenKey: string | null = null;
 let autoTimer: number | null = null;
 /** An edit that needs a new inflate is waiting to start: a spinner shows over the 3D view until it does. */
 let inflatePending = false;
-/** The red selection as it was last drawn with something selected. Kept while an inflate is pending, so
- * a deleted selection still reads as there until the new result replaces the old one. */
-let lastRed: { faces: Set<number>; edges: Vec3[][] } | null = null;
+/** The red selection: faces (base-face indices of the shown mesh), edge paths, the selected shapes, and every
+ * edge path of the selected pieces (world positions, so they stay put when the mesh is redrawn). */
+interface RedSelection {
+  faces: Set<number>;
+  edges: Vec3[][];
+  shapes: Set<number>;
+  pieces: Vec3[][];
+}
+/** The red selection as it was last drawn with something selected. Kept while an inflate is pending or running, so a
+ * deleted selection stays red until the new result replaces the old one. */
+let lastRed: RedSelection | null = null;
 /** The display on screen (its piece corners and positions), for picking edges. */
 let shownDisplay: Display | null = null;
 /** The full net's source piece per face, for the display on screen. */
@@ -123,8 +133,6 @@ let shownSource: number[] | null = null;
 /** Each edge's real path on the display on screen, by "piece:edge". Filled on demand. */
 let shownPaths = new Map<string, Vec3[]>();
 
-/** Multi-colour: each piece's own colour (0xRRGGBB), kept as pieces are added. The 2D view and the 3D model both use it. */
-const pieceColors = new Map<number, number>();
 /** The replay frames of the result on screen (debug mode's slider), and the level they belong to. */
 let replayFrames: ReplayFrame[] = [];
 let replayLevel = 3;
@@ -156,6 +164,8 @@ function currentKey(): string | null {
 
 /** Keeps menus, palette, the Reinflate button and the builder hint in line with the builder. */
 function refresh() {
+  ensureColors();
+  updatePalette();
   const key = currentKey();
   if (key !== seenKey) {
     seenKey = key;
@@ -165,6 +175,9 @@ function refresh() {
   undoItem.disabled = undoBtn.disabled = !editable || !builder.canUndo;
   redoItem.disabled = redoBtn.disabled = !editable || !builder.canRedo;
   loadItem.disabled = !editable;
+  newItem.disabled = !editable;
+  load3dItem.disabled = !editable;
+  save3dItem.disabled = !editable || builder.shapes.length === 0;
   canvasEl.style.pointerEvents = editable ? "" : "none";
   for (const button of paletteEl.querySelectorAll<HTMLButtonElement>("button")) {
     button.disabled = !editable;
@@ -173,7 +186,6 @@ function refresh() {
   inflateBtn.disabled = !running && activeNet().shapes.length === 0;
   builderStatusEl.textContent = hintText();
   builderStatusEl.style.color = "var(--info)";
-  syncPieceColors();
   if (builder.selected.size) canvas.selectedEdge = null;
   refreshColorMenu();
   canvas.redraw();
@@ -187,6 +199,8 @@ function refresh() {
  */
 function netChanged(key: string | null) {
   cancelAutoInflate();
+  // A queued solve that never started is dropped; whatever this change needs is decided again below.
+  if (!running) inflatePending = false;
   if (key === null) {
     if (running) {
       stopRequested = true;
@@ -217,7 +231,7 @@ function netChanged(key: string | null) {
 function tryPlan(): Placement | null {
   const active = activeNet();
   try {
-    return planPlacement(active.shapes, active.connections, builder.ownerShapeId());
+    return planPlacement(active.shapes, active.connections, builder.ownerShapeId(), colors.african);
   } catch (err) {
     const message = err instanceof NetValidationError ? err.message : String(err);
     setInflaterStatus(`The net is not a valid mesh yet: ${message}`, "error");
@@ -288,12 +302,15 @@ function setRunning(on: boolean) {
 const ICON_SIZE = 54;
 const ICON_RADIUS = 20;
 
-function drawIcon(n: number): HTMLCanvasElement {
-  const icon = document.createElement("canvas");
-  icon.width = ICON_SIZE * devicePixelRatio;
-  icon.height = ICON_SIZE * devicePixelRatio;
+/** The deck's icons, each repainted as the piece the deck would pull now (see paintIcon). */
+const icons: { n: number; canvas: HTMLCanvasElement }[] = [];
+
+/** Paints one deck icon for `n` sides, as the next piece would look in the current colour mode. */
+function paintIcon(icon: HTMLCanvasElement, n: number) {
   const ctx = icon.getContext("2d")!;
-  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, icon.width, icon.height);
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   const edge = 2 * ICON_RADIUS * Math.sin(Math.PI / n);
   // Centre the icon on its bounding box, not its circumcentre: a triangle's visual middle is below its circumcentre.
   const verts = regularPolygonVertices(n, edge);
@@ -301,24 +318,43 @@ function drawIcon(n: number): HTMLCanvasElement {
   const ys = verts.map(([, y]) => y);
   const offsetX = -(Math.min(...xs) + Math.max(...xs)) / 2;
   const offsetY = -(Math.min(...ys) + Math.max(...ys)) / 2;
-  ctx.beginPath();
-  verts.forEach(([x, y], i) => {
-    const px = ICON_SIZE / 2 + x + offsetX;
-    const py = ICON_SIZE / 2 + y + offsetY;
-    if (i) ctx.lineTo(px, py);
-    else ctx.moveTo(px, py);
-  });
-  ctx.closePath();
-  ctx.fillStyle = shapeCssColor(n);
-  ctx.fill();
-  return icon;
+  const points = verts.map(([x, y]) => [ICON_SIZE / 2 + x + offsetX, ICON_SIZE / 2 + y + offsetY] as [number, number]);
+  const piece = pending;
+  const atlas = hexAtlasImage();
+  if (colors.mode === "african" && atlas) {
+    drawAfrican(ctx, atlas, piece.african, points);
+  } else {
+    ctx.beginPath();
+    points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.fillStyle = colors.mode === "multi" ? cssColour(piece.multi) : shapeCssColor(n);
+    ctx.fill();
+  }
+  if (colors.mode === "african" || colors.mode === "multi") {
+    // A white outline keeps the textured icons, and the Multi-colour ones, readable against the palette.
+    ctx.beginPath();
+    points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1.25;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+}
+
+function updatePalette() {
+  for (const { n, canvas: icon } of icons) paintIcon(icon, n);
 }
 
 for (const n of POLYGON_NS) {
   const button = document.createElement("button");
   button.dataset.n = String(n);
   button.title = `${n}-gon`;
-  button.append(drawIcon(n));
+  const icon = document.createElement("canvas");
+  icon.width = ICON_SIZE * devicePixelRatio;
+  icon.height = ICON_SIZE * devicePixelRatio;
+  icons.push({ n, canvas: icon });
+  button.append(icon);
   button.addEventListener("click", () => {
     builder.toggleArmed(n);
     refresh();
@@ -344,8 +380,13 @@ netFileInput.addEventListener("change", async () => {
   netFileInput.value = "";
   if (!file) return;
   try {
-    const { shapes, connections } = shapesFrom(JSON.parse(await file.text()));
+    const { shapes, connections, colors: fileColors } = shapesFrom(JSON.parse(await file.text()));
     builder.loadShapes(shapes, connections);
+    // The file's own colours (its Colour menu state), or the defaults for a file saved without them.
+    const saved = fileColors ?? defaultNetColors();
+    colors.mode = saved.mode;
+    colors.multi = saved.multi;
+    colors.african = saved.african;
     // A load always runs a Full Inflate (Python's on_load_success): a new net has nothing to diff against.
     fullyInflated = false;
     // A load always inflates, even when the active group is unchanged (as the Python app does).
@@ -357,47 +398,81 @@ netFileInput.addEventListener("change", async () => {
   refresh();
 });
 
-/** Colour > Polygon-specific / Multi-colour (and P / M). Recolours the 2D pieces and the shown result. */
+/** The piece the deck pulls next: the least used colour and texture among the pieces on the canvas. Kept until those change, so the deck doesn't reshuffle. */
+let pending = nextPiece([], colors);
+let pendingKey = "";
+/** The held piece (drawn as a ghost with id -1) is coloured as the next pull, not as a placed shape. */
+const GHOST_ID = -1;
+
+/** Gives every piece without a colour or texture the deck's next piece, and drops the colours of pieces that are gone. */
+function ensureColors() {
+  const ids = builder.shapes.map((shape) => shape.id);
+  const live = new Set(ids);
+  const maps: Record<number, unknown>[] = [colors.multi, colors.african];
+  for (const map of maps) for (const key of Object.keys(map)) if (!live.has(Number(key))) delete map[Number(key)];
+  // A newly placed piece takes the piece the deck was showing, so the one pulled is the one placed.
+  const unpainted = ids.filter((id) => colors.multi[id] === undefined || colors.african[id] === undefined);
+  if (unpainted.length === 1) {
+    colors.multi[unpainted[0]] ??= pending.multi;
+    colors.african[unpainted[0]] ??= pending.african;
+  }
+  fillMissingColours(ids, colors);
+  const key = ids.map((id) => `${id}:${colors.multi[id]}:${colors.african[id]?.cell}`).join(",");
+  if (key !== pendingKey) {
+    pending = nextPiece(ids, colors);
+    pendingKey = key;
+  }
+}
+
+const cssColour = (value: number) => `#${value.toString(16).padStart(6, "0")}`;
+
+// The 2D pieces use the Colour menu too: the polygon colour, each piece's own Multi-colour, or its African Flower texture.
+canvas.fillOf = (shape) => {
+  const multi = shape.id === GHOST_ID ? pending.multi : colors.multi[shape.id];
+  return colors.mode === "multi" && multi !== undefined ? cssColour(multi) : cssColour(polygonColor(shape.n));
+};
+canvas.fillTexture = (shape, verts, ctx) => {
+  const atlas = hexAtlasImage();
+  const choice = shape.id === GHOST_ID ? pending.african : colors.african[shape.id];
+  if (colors.mode !== "african" || !atlas || !choice) return false;
+  drawAfrican(ctx, atlas, choice, verts);
+  return true;
+};
+
+/** Paints a polygon's African Flower texture: one hexagon wedge per side, starting at atom `choice.start`, meeting at the centre. */
+function drawAfrican(ctx: CanvasRenderingContext2D, atlas: HTMLImageElement | HTMLCanvasElement, choice: AtlasChoice[number], points: [number, number][]) {
+  const n = points.length;
+  const centre: [number, number] = [
+    points.reduce((sum, [x]) => sum + x, 0) / n,
+    points.reduce((sum, [, y]) => sum + y, 0) / n,
+  ];
+  points.forEach((p, k) => {
+    const m = choice.start + k;
+    const uv = [...atomCornerUV(choice.cell, m), ...atomCornerUV(choice.cell, m + 1), ...cellUV(choice.cell, 0.5, 0.5)];
+    drawAtlasTriangle(ctx, atlas, uv, [p, points[(k + 1) % n], centre], devicePixelRatio);
+  });
+}
+
+/** Colour > Polygon-specific / Multi-colour / African Flower (and P / M / A). Recolours the 2D pieces and the shown result. */
 function setColorMode(mode: ColorMode) {
   colors.mode = mode;
-  canvas.redraw();
+  colourEdited = true;
+  refresh();
   applyColors();
-  refreshColorMenu();
 }
 
-/** Colour > Randomize (and R): re-rolls every piece's Multi-colour, keeping neighbours apart. */
+/** Colour > Randomize (and R): a fresh Multi-colour or African Flower texture for every piece, spread out and clear of its neighbours. */
 function randomize() {
-  if (colors.mode !== "multi") return;
-  pieceColors.clear();
-  syncPieceColors();
-  canvas.redraw();
+  if (colors.mode === "polygon" || running) return;
+  colourEdited = true;
+  randomizeShapes(builder.shapes.map((shape) => shape.id), neighboursOf(builder.connections), colors, colors.mode);
+  refresh();
   applyColors();
-}
-
-/** The colour a piece draws with under the current mode. */
-function pieceColor(shape: Shape): number {
-  return colors.mode === "multi" ? pieceColors.get(shape.id) ?? polygonColor(shape.n) : polygonColor(shape.n);
-}
-
-/** Gives every new piece a Multi-colour, and drops the colours of pieces that are gone. */
-function syncPieceColors() {
-  const ids = new Set(builder.shapes.map((shape) => shape.id));
-  for (const id of [...pieceColors.keys()]) if (!ids.has(id)) pieceColors.delete(id);
-  for (const shape of builder.shapes) if (!pieceColors.has(shape.id)) pieceColors.set(shape.id, freePieceColor(shape.id));
-}
-
-/** A palette colour that no touching piece already has, picked at random (any colour if they use them all). */
-function freePieceColor(id: number): number {
-  const touching = builder.connections.flatMap((c) => (c.aShape === id ? [c.bShape] : c.bShape === id ? [c.aShape] : []));
-  const taken = new Set(touching.map((other) => pieceColors.get(other)));
-  const free = FACE_COLORS.filter((color) => !taken.has(color));
-  const pool = free.length ? free : FACE_COLORS;
-  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function refreshColorMenu() {
   for (const item of colorItems) item.classList.toggle("selected", item.dataset.colorMode === colors.mode);
-  randomizeItem.disabled = colors.mode !== "multi" || running;
+  randomizeItem.disabled = colors.mode === "polygon" || running;
 }
 
 colorItems.forEach((item) => item.addEventListener("click", () => setColorMode(item.dataset.colorMode as ColorMode)));
@@ -433,6 +508,8 @@ window.addEventListener("keydown", (e) => {
     setColorMode("polygon");
   } else if (key === "m") {
     setColorMode("multi");
+  } else if (key === "a") {
+    setColorMode("african");
   } else if (key === "r") {
     randomize();
   } else if (key === "delete" || key === "backspace") {
@@ -493,7 +570,52 @@ function pickEdge(clientX: number, clientY: number): { shape: number; edge: numb
 /** The edge group's 3D paths: every edge of the group, as paths on the shown display. */
 function groupPaths(edge: { shape: number; edge: number }): Vec3[][] {
   const group = edgeGroup(builder.connections, edge.shape, edge.edge);
-  return group.edges.map((e) => pathOf(e.shape, e.edge)).filter((p): p is Vec3[] => p !== null);
+  return group.edges.filter((e) => !isOpenEdge(e.shape, e.edge)).map((e) => pathOf(e.shape, e.edge)).filter((p): p is Vec3[] => p !== null);
+}
+
+/** An edge no join uses: a free edge of the net. */
+function isOpenEdge(shape: number, edge: number): boolean {
+  return !builder.connections.some((c) => (c.aShape === shape && c.aEdge === edge) || (c.bShape === shape && c.bEdge === edge));
+}
+
+/** Every free edge on the shown display, as "shape:edge" keys. */
+function openEdgeKeys(): string[] {
+  if (!shownDisplay) return [];
+  const keys: string[] = [];
+  for (const [shape, ids] of shownDisplay.corners) {
+    for (let e = 0; e < ids.length; e++) if (isOpenEdge(shape, e)) keys.push(`${shape}:${e}`);
+  }
+  return keys;
+}
+
+/** The "shape:edge" keys of an edge's group (the edge alone when it's open). */
+function groupKeys(edge: { shape: number; edge: number }): Set<string> {
+  return new Set(edgeGroup(builder.connections, edge.shape, edge.edge).edges.map((e) => `${e.shape}:${e.edge}`));
+}
+
+/**
+ * The free edges as tubes. Each is red if it or its piece is selected, yellow if it or its piece is hovered, and dark
+ * otherwise. The edge's own selection or hover wins over its piece's, so pointing at one tube still shows that one.
+ */
+function openEdgePaths(skip: Set<number>): { path: Vec3[]; color: number }[] {
+  const hoverKeys = canvas.hoverEdge ? groupKeys(canvas.hoverEdge) : new Set<string>();
+  const selected = selectedEdgeGroup();
+  const selectKeys = selected ? groupKeys(selected) : new Set<string>();
+  if (pressEdge) selectKeys.add(`${pressEdge.shape}:${pressEdge.edge}`);
+  const out: { path: Vec3[]; color: number }[] = [];
+  for (const key of openEdgeKeys()) {
+    const [shape, edge] = key.split(":").map(Number);
+    if (skip.has(shape)) continue;
+    const path = pathOf(shape, edge);
+    if (!path || path.length < 2) continue;
+    let color = OPEN_EDGE_COLOR;
+    if (selectKeys.has(key)) color = SELECT_HIGHLIGHT;
+    else if (hoverKeys.has(key)) color = HOVER_HIGHLIGHT;
+    else if (builder.selected.has(shape)) color = SELECT_HIGHLIGHT;
+    else if (canvas.hoverPiece === shape && !canvas.hoverEdge) color = HOVER_HIGHLIGHT;
+    out.push({ path, color });
+  }
+  return out;
 }
 
 /**
@@ -502,6 +624,11 @@ function groupPaths(edge: { shape: number; edge: number }): Vec3[][] {
  * edge, or a set of pieces.
  */
 function syncHighlights() {
+  // A solve queued but not started freezes the picture: no highlight or tube changes until it starts or is dropped.
+  if (inflatePending && !running) {
+    viewerEl.classList.add("loading");
+    return;
+  }
   const hovered = canvas.hoverEdge
     ? { baseFaces: new Set<number>(), color: HOVER_HIGHLIGHT }
     : { baseFaces: facesOfPieces(canvas.hoverPiece === null || builder.selected.has(canvas.hoverPiece) ? [] : [canvas.hoverPiece]), color: HOVER_HIGHLIGHT };
@@ -523,10 +650,19 @@ function syncHighlights() {
       if (pa && pb && pa.length && pb.length) redEdges.push([middleOf(pa), middleOf(pb)]);
     }
   }
-  let red = { faces: facesOfPieces(builder.selected), edges: redEdges };
+  let red: RedSelection = { faces: facesOfPieces(builder.selected), edges: redEdges, shapes: new Set(builder.selected), pieces: [] };
   const empty = red.faces.size === 0 && red.edges.length === 0;
-  if (inflatePending && empty && lastRed) red = lastRed;
-  else lastRed = red;
+  // A deleted selection stays red while a solve is pending or running: its last edge paths, not the old face indices
+  // (those no longer match the mesh once a new solve is drawn).
+  const restored = inflatePending && empty && lastRed !== null;
+  if (restored) {
+    red = { faces: new Set(), edges: lastRed!.edges, shapes: lastRed!.shapes, pieces: lastRed!.pieces };
+  } else {
+    red.pieces = [...builder.selected].flatMap((shape) =>
+      (shownDisplay?.corners.get(shape) ?? []).map((_, e) => pathOf(shape, e)).filter((p): p is Vec3[] => p !== null && p.length > 1),
+    );
+    lastRed = red;
+  }
 
   viewer.setHighlights([
     { baseFaces: red.faces, color: SELECT_HIGHLIGHT },
@@ -535,11 +671,19 @@ function syncHighlights() {
   const edges: { path: Vec3[]; color: number }[] = [];
   if (canvas.hoverEdge) for (const path of groupPaths(canvas.hoverEdge)) edges.push({ path, color: HOVER_HIGHLIGHT });
   // The edge a drag started on stays red until the drag ends.
-  if (pressEdge) {
+  if (pressEdge && !isOpenEdge(pressEdge.shape, pressEdge.edge)) {
     const path = pathOf(pressEdge.shape, pressEdge.edge);
     if (path) edges.push({ path, color: SELECT_HIGHLIGHT });
   }
   for (const path of red.edges) edges.push({ path, color: SELECT_HIGHLIGHT });
+  if (colors.mode === "african") {
+    // While restored, the deleted pieces' edges are red tubes in place of their dark ones.
+    const restoredRed = restored ? red.pieces.map((path) => ({ path, color: SELECT_HIGHLIGHT })) : [];
+    viewer.setOpenEdges([...openEdgePaths(restored ? red.shapes : new Set()), ...restoredRed]);
+  } else {
+    viewer.setOpenEdges([]);
+    if (restored) for (const path of red.pieces) edges.push({ path, color: SELECT_HIGHLIGHT });
+  }
   viewer.setEdgeHighlights(edges);
   viewerEl.classList.toggle("loading", inflatePending || running);
 }
@@ -755,8 +899,8 @@ function setDebugMode(on: boolean) {
   undoBtn.hidden = redoBtn.hidden = on;
   // Leaving debug mode clears the overlays, as in the Static Inflater, and goes back to the finished result.
   for (const box of Object.values(debugBoxes)) box.checked = false;
-  smoothBox.checked = false;
-  viewer.setSmoothShading(false);
+  // Smooth shading is the default; leaving debug mode keeps whatever the box says.
+  viewer.setSmoothShading(smoothBox.checked);
   applyOverlays();
   if (!on) redrawFinest();
   updateReplayControl();
@@ -813,7 +957,10 @@ function drawLevel(plan: Placement, level: number, positions: Map<number, Vec3>)
   shownDisplay = display;
   shownSource = plan.full.source_polygon_id!;
   shownPaths = new Map();
-  viewer.setMesh(display.faces, display.faceEdgeIds, display.positions, display.faceOfFine, faceColorsOf(plan), display.outlineEdgeIds);
+  viewer.setMesh(display.faces, display.faceEdgeIds, display.positions, display.faceOfFine, faceColorsOf(plan), display.outlineEdgeIds, display.faceUV);
+  // African Flower hides the polygon outlines (they'd read as gaps between textured polygons), as in the Static Inflater.
+  viewer.setTextured(colors.mode === "african");
+  viewer.setLayers(colors.mode !== "african", false);
   // Repulsion arrows only where the solver repels: the junction corners, with the level's multipliers.
   viewer.setRepulsion(plan.solve ? repulsionMultipliers(loadNet(plan.solve), level) : null);
   viewer.render();
@@ -824,17 +971,36 @@ function drawLevel(plan: Placement, level: number, positions: Map<number, Vec3>)
 function faceColorsOf(plan: Placement): number[] {
   const state: ColorState = {
     mode: colors.mode,
-    multiColors: plan.full.source_polygon_id!.map((id) => pieceColors.get(id) ?? polygonColor(3)),
+    multiColors: plan.full.source_polygon_id!.map((id) => colors.multi[id] ?? polygonColor(3)),
   };
   return displayColors(state, plan.full.faces, plan.full);
 }
 
-/** Recolours the shown result in place, so a colour change keeps the camera where it is. */
+/**
+ * Recolours the shown result, so a colour change keeps the camera where it is. The African Flower textures are baked
+ * into the solve, so the shown result is re-pointed at the current choices first, and its mesh is rebuilt from them.
+ */
 function applyColors() {
   if (running || !resultPlan) return;
+  const fresh = tryPlan();
+  if (fresh && junctionKey(fresh) === junctionTarget) {
+    resultPlan = fresh;
+    resultSpec = fresh.full;
+    retexture(fresh.solveChoice);
+    redrawFinest();
+  }
   viewer.setBaseColors(faceColorsOf(resultPlan));
   viewer.render();
   refreshColorMenu();
+}
+
+/** Re-points each shown level's texture from the choice it was baked with to `next` (no re-solve needed). */
+function retexture(next: AtlasChoice) {
+  for (const level of LEVELS) {
+    const topo = store.topology[level];
+    if (!topo?.faceUV || !topo.atlas || topo.atlas.length !== next.length) continue;
+    store.topology[level] = { ...topo, faceUV: retargetFaceUV(topo.faceUV, topo.faceOfFine, topo.atlas, next), atlas: next };
+  }
 }
 
 /** Shows the finest level still in the store, or clears the viewer if there is none. */
@@ -903,6 +1069,7 @@ async function runDiff(plan: Placement, targetRmsPct: number, gtol: number): Pro
       shouldStop: () => stopRequested,
       sourceOfFace: sourceOfFace(plan),
       shapes: plan.shapes,
+      atlasChoice: plan.solveChoice,
     });
     store.clear();
     store.topology[3] = result.topo;
@@ -971,6 +1138,7 @@ async function inflate(forceFull = false) {
           label: "Full Inflate",
           targetRmsPctByLevel,
           gtol,
+          atlasChoice: plan.solveChoice,
           store,
           shouldStop: () => stopRequested,
           hooks: {
@@ -1028,6 +1196,205 @@ async function inflate(forceFull = false) {
   syncHighlights();
 }
 
+// ---- File: New, Load 3D Model, Save 3D Model ----------------------------------------------------
+
+const newItem = $<HTMLButtonElement>("new-item");
+const load3dItem = $<HTMLButtonElement>("load-3d-item");
+const save3dItem = $<HTMLButtonElement>("save-3d-item");
+const unsavedDialog = $<HTMLDialogElement>("unsaved-dialog");
+const modelFileInput = $<HTMLInputElement>("model-file");
+
+/** The slice of the File System Access API used for Save 3D Model (not in every TS DOM lib). */
+type SaveWindow = Window & {
+  showSaveFilePicker?: (options: {
+    suggestedName: string;
+    startIn: "downloads";
+    types: { description: string; accept: Record<string, string[]> }[];
+  }) => Promise<{ name: string; createWritable(): Promise<{ write(data: string): Promise<void>; close(): Promise<void> }> }>;
+};
+
+/** The model's name (its file name without the extension). "untitled" until one is saved or loaded. */
+let modelName = "untitled";
+/** Set when a colour changes after the last save or load. The builder tracks the net itself; colours it doesn't. */
+let colourEdited = false;
+
+/** The model on screen differs from the one last saved or loaded (the net, or its colours). */
+function hasUnsavedChanges(): boolean {
+  return builder.isDirty || colourEdited;
+}
+
+/** Asks Save / Don't save / Cancel before throwing away unsaved changes. Resolves true when it's safe to go on. */
+async function confirmSaved(): Promise<boolean> {
+  if (!hasUnsavedChanges()) return true;
+  const choice = await new Promise<string>((resolve) => {
+    unsavedDialog.addEventListener("close", () => resolve(unsavedDialog.returnValue), { once: true });
+    unsavedDialog.showModal();
+  });
+  if (choice === "save") return saveModel();
+  return choice === "discard";
+}
+
+/**
+ * The model as a .hippo session: the active group's net (as a .poly, so it reloads into the 2D view), its colours, and
+ * each solved level with its positions, topology and history (the pressure a Diff Inflate starts from).
+ */
+function buildModel(): string {
+  const plan = tryPlan();
+  if (!plan) throw new Error("The net is not a valid mesh yet.");
+  const active = activeNet();
+  const levels = LEVELS.map((level) => {
+    const topo = store.topology[level];
+    const positions = store.positions[level];
+    if (!topo || !positions || topo.faces.length === 0) return null;
+    return snapshotLevel(topo, positions);
+  });
+  const atlasChoice = LEVELS.map((level) => store.topology[level]?.atlas).find((choice) => choice !== undefined);
+  const target = defaultTargetFor(plan.full);
+  const data: SessionData = {
+    netName: modelName,
+    netSpec: plan.full,
+    netFile: netFileFrom(active.shapes, active.connections, modelName, canvas.viewScale, colors),
+    colorMode: colors.mode,
+    atlasChoice,
+    multiColors: [],
+    targetRmsPct: [target, target, target],
+    tolerance: CONVERGENCE_GTOL,
+    camera: camera.snapshot(),
+    view2d: { scale: canvas.viewScale, offset: canvas.viewOffset },
+    history: LEVELS.map((level) => store.history[level]),
+    levels,
+  };
+  return serializeSession(data);
+}
+
+/** File > Save 3D Model: writes the .hippo through the save dialog (a download where there's none). True once saved. */
+async function saveModel(): Promise<boolean> {
+  let text: string;
+  try {
+    text = buildModel();
+  } catch (err) {
+    setInflaterStatus(`Could not save: ${err instanceof Error ? err.message : String(err)}`, "error");
+    return false;
+  }
+  const suggestedName = `${modelName}${SESSION_EXTENSION}`;
+  try {
+    const picker = (window as SaveWindow).showSaveFilePicker;
+    if (picker) {
+      const handle = await picker({
+        suggestedName,
+        startIn: "downloads",
+        types: [{ description: "Inflate Polyhedron model", accept: { "application/json": [SESSION_EXTENSION] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(text);
+      await writable.close();
+      modelName = handle.name.replace(/\.[^.]+$/, "");
+    } else {
+      // No save dialog here, so ask for the name; a download can't be named any other way.
+      const name = window.prompt("Name for the model:", modelName);
+      if (name === null) return false;
+      modelName = name.trim() || modelName;
+      const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${modelName}${SESSION_EXTENSION}`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") return false; // cancelled in the save dialog
+    setInflaterStatus(`Could not save: ${err instanceof Error ? err.message : String(err)}`, "error");
+    return false;
+  }
+  builder.markSaved();
+  colourEdited = false;
+  setInflaterStatus(`Saved ${modelName}${SESSION_EXTENSION}.`, "success");
+  refresh();
+  return true;
+}
+
+/** File > New: asks about unsaved changes, then clears the canvas and forgets the solve (so the next net runs a Full Inflate). */
+async function newNet() {
+  if (running || !(await confirmSaved())) return;
+  cancelAutoInflate();
+  builder.loadShapes([], []);
+  Object.assign(colors, defaultNetColors());
+  colourEdited = false;
+  modelName = "untitled";
+  fullyInflated = false;
+  inflatePending = false;
+  junctionTarget = null;
+  lastSolve = null;
+  seenKey = null;
+  clearResults();
+  setInflaterStatus("");
+  refresh();
+}
+
+/**
+ * File > Load 3D Model: a .hippo's net goes into the 2D view and its solved levels into the 3D view, with the pressure and
+ * history a Diff Inflate needs. Nothing is re-solved, so the shown result is the saved one.
+ */
+async function loadModel(file: File) {
+  if (running) return;
+  try {
+    const data = parseSession(await file.text());
+    // A Static Inflater session keeps the net's layout and joins in its netSpec (the same keys as a .poly); ours in netFile.
+    const { shapes, connections, colors: fileColors } = shapesFrom(data.netFile ?? data.netSpec);
+    builder.loadShapes(shapes, connections);
+    if (data.view2d) {
+      canvas.setViewScale(data.view2d.scale);
+      canvas.setViewOffset(...data.view2d.offset);
+    }
+    if (data.camera) camera.apply(data.camera);
+    Object.assign(colors, fileColors ?? defaultNetColors());
+    colourEdited = false;
+    modelName = file.name.replace(/\.[^.]+$/, "");
+    const plan = tryPlan();
+    if (!plan) throw new Error("its net is not a valid mesh.");
+    store.clear();
+    LEVELS.forEach((level) => {
+      store.history[level] = data.history[level];
+      const snap = data.levels[level];
+      if (!snap) return;
+      const restored = restoreLevel(snap);
+      store.topology[level] = { ...restored.topology, atlas: data.atlasChoice };
+      store.positions[level] = restored.positions;
+    });
+    setReplay(3, []);
+    // A Diff Inflate needs the level-3 solve, its corner slots, and its pressure, all from the file.
+    const solved = store.positions[3] && store.topology[3] && store.history[3]?.pressure != null ? store.positions[3]! : null;
+    fullyInflated = solved !== null;
+    junctionTarget = plan.solve ? junctionKey(plan) : null;
+    lastSolve = plan.slots && solved
+      ? {
+          slots: plan.slots,
+          positions: solved,
+          pressure: store.history[3]!.pressure!,
+          triangles: surfaceTriangles(store.topology[3]!, solved, sourceOfFace(plan)),
+        }
+      : null;
+    inflatePending = false;
+    // The net and its solve are already in place, so the refresh below must not start a new run.
+    seenKey = currentKey();
+    if (plan.solve) showPlan(plan);
+    else showNoSolve(plan);
+    setInflaterStatus(`Loaded ${file.name}.`, "success");
+  } catch (err) {
+    setInflaterStatus(`Could not load ${file.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+  }
+  refresh();
+}
+
+newItem.addEventListener("click", () => void newNet());
+load3dItem.addEventListener("click", () => modelFileInput.click());
+modelFileInput.addEventListener("change", () => {
+  const file = modelFileInput.files?.[0];
+  modelFileInput.value = "";
+  if (file) void loadModel(file);
+});
+save3dItem.addEventListener("click", () => void saveModel());
+
 inflateBtn.addEventListener("click", () => {
   if (running) {
     // A user Stop ends this run and does not restart it for the same net.
@@ -1045,3 +1412,5 @@ redoBtn.addEventListener("click", () => redoItem.click());
 setDebugMode(false);
 refresh();
 revealPage();
+// The hexagon atlas loads after the first draw; redraw once it's there so African pieces and icons appear.
+void hexAtlasLoaded().then(() => refresh());

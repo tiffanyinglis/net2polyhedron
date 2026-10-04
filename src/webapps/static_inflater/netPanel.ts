@@ -199,7 +199,7 @@ export class NetPanel {
 
   private lastColors: { mode: ColorMode; multi: number[] } | null = null;
   /** The level-0 texture coordinates and the atlas, when the net should be drawn textured. */
-  private texture: { faces: number[][]; faceOfFine: number[]; faceUV: number[][]; atlas: HTMLImageElement } | null = null;
+  private texture: { faces: number[][]; faceOfFine: number[]; faceUV: number[][]; atlas: HTMLImageElement | HTMLCanvasElement } | null = null;
 
   setVertexLabels(mode: VertexLabelMode) {
     this.vertexLabels = mode;
@@ -212,7 +212,7 @@ export class NetPanel {
 
   /** Textures the net with the same wedges as the 3D mesh (level 0's per-triangle coordinates), or
    * draws it plain when `source` or `atlas` is null. */
-  setTexture(source: { faces: number[][]; faceOfFine: number[]; faceUV: number[][] } | null, atlas: HTMLImageElement | null) {
+  setTexture(source: { faces: number[][]; faceOfFine: number[]; faceUV: number[][] } | null, atlas: HTMLImageElement | HTMLCanvasElement | null) {
     this.texture = source && atlas && source.faceUV.length ? { ...source, atlas } : null;
     this.redraw();
   }

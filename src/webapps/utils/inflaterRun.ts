@@ -29,6 +29,8 @@ export interface LevelTopology {
   outlineEdgeIds: Set<number>;
   /** Per fine triangle: its corners' texture coordinates (see Level1Topology.faceUV). */
   faceUV?: number[][];
+  /** The African Flower choice the faceUV were made with (per solve face), so a colour change can re-point them. */
+  atlas?: AtlasChoice;
 }
 
 /** Everything a Level 0-3 panel and its history row need, indexed by level. */
@@ -112,7 +114,7 @@ export async function runFullInflate(spec: NetSpec, opts: RunOptions): Promise<R
       atlasChoice: opts.atlasChoice,
       onRecord: (record) => onRecord(record, opts),
       onTopology: (level, faces, faceOfFine, faceEdgeIds, outlineEdgeIds, faceUV) => {
-        store.topology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds, faceUV };
+        store.topology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds, faceUV, atlas: opts.atlasChoice };
       },
       onLevelResult: (level, positions, frames) => {
         store.positions[level] = positions;

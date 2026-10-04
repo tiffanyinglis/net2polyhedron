@@ -8,7 +8,7 @@ type Point = [number, number];
  * triangle is clipped to itself grown by a pixel, so neighbouring triangles overlap and no background shows through a seam.
  * `dpr` is the device pixel ratio the caller's transform is scaled by.
  */
-export function drawAtlasTriangle(ctx: CanvasRenderingContext2D, atlas: HTMLImageElement, uv: number[], dst: Point[], dpr: number) {
+export function drawAtlasTriangle(ctx: CanvasRenderingContext2D, atlas: HTMLImageElement | HTMLCanvasElement, uv: number[], dst: Point[], dpr: number) {
   const { width: W, height: H } = atlas;
   const src: Point[] = [0, 1, 2].map((k) => [uv[2 * k] * W, (1 - uv[2 * k + 1]) * H] as Point);
   const [s0, s1, s2] = src;

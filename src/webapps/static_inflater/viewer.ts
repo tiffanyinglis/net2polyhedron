@@ -1,7 +1,4 @@
 import * as THREE from "three";
-import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
-import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
-import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { type Vec3 } from "../utils/physics/vec3";
 import { REPULSION_STRENGTH, repulsionForce } from "../utils/physics/forces";
 import { EDGE_LENGTH } from "../utils/physics/mesh";
@@ -158,12 +155,13 @@ function vertexNormalSegments(pts: Vec3[], faces: number[][]): number[] {
   return out;
 }
 
-/** Width in CSS pixels of the 3D hover and selection outlines. */
-const HIGHLIGHT_LINE_WIDTH = 4;
 /** How far a highlight outline is lifted off the surface, as a fraction of the mesh's radius. */
 const HIGHLIGHT_LIFT_FRACTION = 0.005;
 /** Radius of an edge's tube, as a fraction of the mesh's radius. */
 const EDGE_TUBE_RADIUS_FRACTION = 0.012;
+/** Open (free) edges of an African Flower net: a thick tube, dark unless it is selected or hovered. */
+const OPEN_EDGE_TUBE_RADIUS_FRACTION = 0.014;
+export const OPEN_EDGE_COLOR = 0x151515;
 
 /** Unit normal of a polygon (Newell's method), for any winding of its points. */
 function unitNormal(points: Vec3[]): Vec3 {
@@ -285,11 +283,13 @@ export class Viewer {
   /** Per triangle: the fine face it came from (its edge ids are on that face). */
   private triangleFine: number[] = [];
   /** Highlight outlines on the current mesh (rebuilt when the mesh or the highlights change). */
-  private highlightObjects: LineSegments2[] = [];
+  private highlightObjects: THREE.Group[] = [];
+  private highlightGeometries: THREE.BufferGeometry[] = [];
   /** Their materials, so a resize can keep the line width in pixels. */
-  private highlightMaterials: LineMaterial[] = [];
   private edgeHighlightObjects: THREE.Group[] = [];
   private edgeHighlightGeometries: THREE.BufferGeometry[] = [];
+  private openEdgeObjects: THREE.Group[] = [];
+  private openEdgeGeometries: THREE.BufferGeometry[] = [];
   private repulsion: Map<number, number> | null = null;
   private center: Vec3 = [0, 0, 0];
   private outlineEdges: [number, number][] = [];
@@ -416,14 +416,7 @@ export class Viewer {
     this.renderer.setSize(w, h);
     this.camera.aspect = w / (h || 1);
     this.camera.updateProjectionMatrix();
-    this.updateHighlightResolution();
     this.render();
-  }
-
-  /** Line materials measure their width in pixels of the drawing buffer, so they follow its size. */
-  private updateHighlightResolution() {
-    const { width, height } = this.renderer.domElement;
-    for (const material of this.highlightMaterials) material.resolution.set(width, height);
   }
 
   /** `faceOfFine[i]` is the original (un-subdivided) face that `faces[i]` belongs to, and
@@ -750,24 +743,64 @@ export class Viewer {
    * test hides whichever part is behind the surface.
    */
   setEdgeHighlights(paths: { path: Vec3[]; color: number }[]) {
-    for (const group of this.edgeHighlightObjects) this.scene.remove(group);
-    for (const geometry of this.edgeHighlightGeometries) geometry.dispose();
-    this.edgeHighlightObjects = [];
-    this.edgeHighlightGeometries = [];
-    const radius = this.maxRadius * EDGE_TUBE_RADIUS_FRACTION;
+    this.drawTubes(paths, this.maxRadius * EDGE_TUBE_RADIUS_FRACTION, this.edgeHighlightObjects, this.edgeHighlightGeometries, false);
+  }
+
+  /** Open edges: a thick tube along each path, shaded so it reads as yarn rather than a flat line. Replaces the last set. */
+  setOpenEdges(paths: { path: Vec3[]; color: number }[]) {
+    this.drawTubes(paths, this.maxRadius * OPEN_EDGE_TUBE_RADIUS_FRACTION, this.openEdgeObjects, this.openEdgeGeometries, true);
+  }
+
+  /**
+   * Replaces the tubes in `objects` with one tube per path (a sphere at every joint and end, so joints and caps are
+   * round), lifted toward the camera by the radius so it sits in front of the surface it runs along.
+   */
+  private drawTubes(
+    paths: { path: Vec3[]; color: number }[],
+    radius: number,
+    objects: THREE.Group[],
+    geometries: THREE.BufferGeometry[],
+    shaded: boolean,
+  ) {
+    for (const group of objects) {
+      group.traverse((o) => {
+        if (o instanceof THREE.Mesh) (o.material as THREE.Material).dispose();
+      });
+      this.scene.remove(group);
+    }
+    for (const geometry of geometries) geometry.dispose();
+    const built = this.tubesFor(paths, radius, shaded);
+    for (const group of built.groups) this.scene.add(group);
+    objects.splice(0, objects.length, ...built.groups);
+    geometries.splice(0, geometries.length, ...built.geometries);
+    this.render();
+  }
+
+  /**
+   * One tube per path, as groups not yet in the scene: a sphere at every joint and end, so joints and caps are round.
+   * Tubes are lifted toward the camera by their radius so they sit in front of the surface they run along, except open
+   * edges (dark, shaded), which stay on the surface.
+   */
+  private tubesFor(
+    paths: { path: Vec3[]; color: number }[],
+    radius: number,
+    shaded: boolean,
+  ): { groups: THREE.Group[]; geometries: THREE.BufferGeometry[] } {
     const sphere = new THREE.SphereGeometry(radius, 10, 8);
     const tube = new THREE.CylinderGeometry(radius, radius, 1, 10, 1, false);
-    this.edgeHighlightGeometries.push(sphere, tube);
     const c = this.camera.position;
+    const onSurface = (p: Vec3): THREE.Vector3 => new THREE.Vector3(p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]);
     const toward = (p: Vec3): THREE.Vector3 => {
-      const q = new THREE.Vector3(p[0] - this.center[0], p[1] - this.center[1], p[2] - this.center[2]);
+      const q = onSurface(p);
       return q.add(c.clone().sub(q).normalize().multiplyScalar(radius));
     };
+    const groups: THREE.Group[] = [];
     for (const { path, color } of paths) {
       if (path.length < 2) continue;
-      const material = new THREE.MeshBasicMaterial({ color });
+      const material = shaded ? new THREE.MeshPhongMaterial({ color, shininess: 0, specular: 0x000000 }) : new THREE.MeshBasicMaterial({ color });
       const group = new THREE.Group();
-      const points = path.map(toward);
+      const lift = !(shaded && color === OPEN_EDGE_COLOR);
+      const points = path.map(lift ? toward : onSurface);
       for (const p of points) {
         const m = new THREE.Mesh(sphere, material);
         m.position.copy(p);
@@ -784,10 +817,9 @@ export class Viewer {
         m.scale.set(1, len, 1);
         group.add(m);
       }
-      this.scene.add(group);
-      this.edgeHighlightObjects.push(group);
+      groups.push(group);
     }
-    this.render();
+    return { groups, geometries: [sphere, tube] };
   }
 
   /** The point on the mesh under a screen point (client coordinates), in setMesh's coordinates, or null. */
@@ -819,55 +851,43 @@ export class Viewer {
    * A region's outline is the edges its own fine triangles share with a triangle outside it.
    */
   setHighlights(layers: { baseFaces: Set<number>; color: number }[]) {
-    for (const obj of this.highlightObjects) {
-      this.scene.remove(obj);
-      obj.geometry.dispose();
-    }
-    for (const material of this.highlightMaterials) material.dispose();
-    this.highlightObjects = [];
-    this.highlightMaterials = [];
-    if (!this.meshData) return;
-    const { pts, faces } = this.meshData;
-    for (const { baseFaces, color } of layers) {
-      if (baseFaces.size === 0) continue;
-      const inside = faces.map((_, f) => baseFaces.has(this.fineBaseFace[f]));
-      const edgeCount = new Map<string, { a: number; b: number; n: number; normal: Vec3 }>();
-      faces.forEach((face, f) => {
-        if (!inside[f]) return;
-        const normal = unitNormal(face.map((v) => pts[v]));
-        face.forEach((a, i) => {
-          const b = face[(i + 1) % face.length];
-          const key = a < b ? `${a},${b}` : `${b},${a}`;
-          const entry = edgeCount.get(key);
-          if (entry) entry.n += 1;
-          else edgeCount.set(key, { a, b, n: 1, normal });
+    const paths: { path: Vec3[]; color: number }[] = [];
+    if (this.meshData) {
+      const { pts, faces } = this.meshData;
+      for (const { baseFaces, color } of layers) {
+        if (baseFaces.size === 0) continue;
+        const inside = faces.map((_, f) => baseFaces.has(this.fineBaseFace[f]));
+        const edgeCount = new Map<string, { a: number; b: number; n: number; normal: Vec3 }>();
+        faces.forEach((face, f) => {
+          if (!inside[f]) return;
+          const normal = unitNormal(face.map((v) => pts[v]));
+          face.forEach((a, i) => {
+            const b = face[(i + 1) % face.length];
+            const key = a < b ? `${a},${b}` : `${b},${a}`;
+            const entry = edgeCount.get(key);
+            if (entry) entry.n += 1;
+            else edgeCount.set(key, { a, b, n: 1, normal });
+          });
         });
-      });
-      // The outline is real 3D geometry, depth-tested, so the surface hides whatever is behind it. It's
-      // lifted a little off the surface along its own face's normal, so it doesn't fight the faces for depth.
-      const lift = this.maxRadius * HIGHLIGHT_LIFT_FRACTION;
-      const segments: number[] = [];
-      for (const { a, b, n, normal } of edgeCount.values()) {
-        if (n !== 1) continue;
-        const up = (p: Vec3): Vec3 => [p[0] + normal[0] * lift, p[1] + normal[1] * lift, p[2] + normal[2] * lift];
-        pushSegment(segments, up(pts[a]), up(pts[b]));
+        // The outline is real 3D geometry, depth-tested, so the surface hides whatever is behind it. It's
+        // lifted a little off the surface along its own face's normal, so it doesn't fight the faces for depth.
+        const lift = this.maxRadius * HIGHLIGHT_LIFT_FRACTION;
+        for (const { a, b, n, normal } of edgeCount.values()) {
+          if (n !== 1) continue;
+          // pts are centred on the mesh; the tube builder expects world coordinates (it subtracts the centre itself).
+          const up = (p: Vec3): Vec3 => [
+            p[0] + normal[0] * lift + this.center[0],
+            p[1] + normal[1] * lift + this.center[1],
+            p[2] + normal[2] * lift + this.center[2],
+          ];
+          paths.push({ path: [up(pts[a]), up(pts[b])], color });
+        }
       }
-      if (!segments.length) continue;
-      // WebGL draws plain lines one pixel wide, so the highlight is a fat line measured in device pixels.
-      const geometry = new LineSegmentsGeometry().setPositions(segments);
-      const material = new LineMaterial({
-        color,
-        linewidth: HIGHLIGHT_LINE_WIDTH * this.renderer.getPixelRatio(),
-        depthTest: true,
-      });
-      this.highlightMaterials.push(material);
-      const line = new LineSegments2(geometry, material);
-      this.scene.add(line);
-      this.highlightObjects.push(line);
     }
-    this.updateHighlightResolution();
-    this.render();
+    // The outline is a tube as thick as the edge highlights (setEdgeHighlights), so faces and edges read alike.
+    this.drawTubes(paths, this.maxRadius * EDGE_TUBE_RADIUS_FRACTION, this.highlightObjects, this.highlightGeometries, false);
   }
+
 
   /** Turns smooth shading on or off, in place: the mesh's vertex normals are averaged over its faces when on. */
   setSmoothShading(on: boolean) {

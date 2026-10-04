@@ -15,7 +15,7 @@
 import { shapeVertices, type Shape } from "../net_builder/shapes";
 import { type Connection } from "../net_builder/joins";
 import { loadNet, type NetSpec } from "../utils/physics/mesh";
-import { fanLevel0To1 } from "../utils/physics/meshLevels";
+import { fanLevel0To1, type AtlasChoice } from "../utils/physics/meshLevels";
 import { type Vec3 } from "../utils/physics/vec3";
 import { netSpecFromBuilder } from "./bridge";
 import { type LevelTopology } from "../utils/inflaterRun";
@@ -46,6 +46,8 @@ export interface Placement {
   flats: FlatPiece[];
   /** Positions of the seed's corners when there is no solve (keyed by full-net vertex id); null otherwise. */
   seedPositions: Map<number, Vec3> | null;
+  /** African Flower texture per solve face (parallel to `solve.faces`); empty when there is no solve. */
+  solveChoice: AtlasChoice;
   /**
    * Each junction corner's solver vertex id, keyed by its slot "shapeId:corner" (the Python app's
    * atomic slots). Diff Inflate matches a new solve to the old one through these. Null when a folded
@@ -60,10 +62,19 @@ export const NO_SOLVE_TOPOLOGY: LevelTopology = {
   faceOfFine: [],
   faceEdgeIds: [],
   outlineEdgeIds: new Set(),
+  faceUV: [],
 };
 
-/** Splits the active group into junctions and terminals, and works out how each is laid out. Throws if the net isn't a valid mesh. */
-export function planPlacement(shapes: Shape[], connections: Connection[], ownerId: number | null): Placement {
+/**
+ * Splits the active group into junctions and terminals, and works out how each is laid out. Throws if the net isn't a
+ * valid mesh. `african` gives each shape's African Flower texture (hexagon cell and starting atom), keyed by shape id.
+ */
+export function planPlacement(
+  shapes: Shape[],
+  connections: Connection[],
+  ownerId: number | null,
+  african: Record<number, AtlasChoice[number]> = {},
+): Placement {
   const full = netSpecFromBuilder(shapes, connections, "net");
   const degree = new Map(shapes.map((s) => [s.id, 0]));
   for (const c of connections) {
@@ -92,9 +103,13 @@ export function planPlacement(shapes: Shape[], connections: Connection[], ownerI
         faces: solveToFull.map((f) => full.faces[f]),
         face_edge_ids: solveToFull.map((f) => renumbered(full.face_edge_ids![f])),
         source_polygon_id: solveToFull.map((f) => full.source_polygon_id![f]),
+        // Indexed by net_layout entry, not by face, so it's the full net's list as it is.
+        source_polygon: full.source_polygon,
         net_layout: full.net_layout,
       }
     : null;
+  const choiceOf = (shapeId: number) => african[shapeId] ?? { cell: 0, start: 0 };
+  const solveChoice: AtlasChoice = solveToFull.map((f) => choiceOf(full.source_polygon_id![f]));
 
   // With no solve, the seed is the lone junction if there is one, else the owner.
   const seedId = solved ? null : (junctionIds[0] ?? ownerId);
@@ -106,7 +121,7 @@ export function planPlacement(shapes: Shape[], connections: Connection[], ownerI
         : connections
             .filter((c) => c.aShape === shape.id || c.bShape === shape.id)
             .map((c) => (c.aShape === shape.id ? c.bShape : c.aShape))[0] ?? null;
-    return flatPiece(shape, full, neighbour);
+    return flatPiece(shape, full, neighbour, choiceOf(shape.id));
   });
 
   const seed = flats.find((f) => f.neighbour === null) ?? null;
@@ -117,6 +132,7 @@ export function planPlacement(shapes: Shape[], connections: Connection[], ownerI
     solveToFull,
     flats,
     seedPositions: solved || !seed ? null : seedPositions(seed),
+    solveChoice,
     // A self-joined (folded) piece is always a Full Inflate, never a Diff: its fan of triangles distorts far
     // too much for a diff to start from, so it gets no slots, which makes every edit involving it a full solve.
     slots: solve && folded.size === 0 ? junctionSlots(shapes, solve, solveToFull, full) : null,
@@ -149,8 +165,8 @@ function junctionSlots(shapes: Shape[], solve: NetSpec, solveToFull: number[], f
   return slots;
 }
 
-/** The piece's own face in the full net, its corner ids, and its fan. */
-function flatPiece(shape: Shape, full: NetSpec, neighbour: number | null): FlatPiece {
+/** The piece's own face in the full net, its corner ids, and its fan (textured with its own hexagon). */
+function flatPiece(shape: Shape, full: NetSpec, neighbour: number | null, choice: AtlasChoice[number]): FlatPiece {
   const n = shape.n;
   const fullFace = full.faces.findIndex((face, f) => full.source_polygon_id![f] === shape.id && face.length === n);
   if (fullFace < 0) throw new Error(`piece ${shape.id} has no face in the net`);
@@ -161,7 +177,7 @@ function flatPiece(shape: Shape, full: NetSpec, neighbour: number | null): FlatP
     faces: [Array.from({ length: n }, (_, k) => k)],
     face_edge_ids: [Array.from({ length: n }, (_, k) => k)],
   });
-  return { shape, cornerIds, fullFace, neighbour, fan: fanLevel0To1(own) };
+  return { shape, cornerIds, fullFace, neighbour, fan: fanLevel0To1(own, [choice]) };
 }
 
 /**
@@ -313,6 +329,8 @@ export interface Display {
   positions: Map<number, Vec3>;
   faceOfFine: number[];
   outlineEdgeIds: Set<number>;
+  /** Per fine triangle: its corners' texture coordinates (African Flower); an empty entry where not tracked. */
+  faceUV: number[][];
 }
 
 /** The largest value in `values`, or -1 when there are none (no spread, so a big mesh can't overflow the stack). */
@@ -332,6 +350,7 @@ export function buildDisplay(plan: Placement, topo: LevelTopology, positions: Ma
   const faces: number[][] = [];
   const faceEdgeIds: number[][] = [];
   const faceOfFine: number[] = [];
+  const faceUV: number[][] = [];
   const outlineEdgeIds = new Set<number>();
   let nextVertex = Math.max(maxOf(pos.keys()), maxOf(topo.faces.flat())) + 1;
   let nextEdge = Math.max(maxOf(topo.faceEdgeIds.flat()), maxOf(topo.outlineEdgeIds)) + 1;
@@ -340,6 +359,7 @@ export function buildDisplay(plan: Placement, topo: LevelTopology, positions: Ma
     faces.push(face);
     faceEdgeIds.push(topo.faceEdgeIds[f]);
     faceOfFine.push(plan.solveToFull[topo.faceOfFine[f]]);
+    faceUV.push(topo.faceUV?.[f] ?? []);
   });
   for (const e of topo.outlineEdgeIds) outlineEdgeIds.add(e);
 
@@ -365,6 +385,7 @@ export function buildDisplay(plan: Placement, topo: LevelTopology, positions: Ma
       faces.push(face.map(vertexOf));
       faceEdgeIds.push(flat.fan.mesh.faceEdgeIds[f].map((e) => edgeBase + e));
       faceOfFine.push(flat.fullFace);
+      faceUV.push(flat.fan.faceUV[f]);
     });
     for (let k = 0; k < n; k++) outlineEdgeIds.add(edgeBase + k);
     nextEdge += flat.fan.mesh.edgeEnds.length;
@@ -376,7 +397,7 @@ export function buildDisplay(plan: Placement, topo: LevelTopology, positions: Ma
       if (ids) corners.set(shape.id, ids);
     }
   }
-  return { corners, faces, faceEdgeIds, positions: pos, faceOfFine, outlineEdgeIds };
+  return { corners, faces, faceEdgeIds, positions: pos, faceOfFine, outlineEdgeIds, faceUV };
 }
 
 /**

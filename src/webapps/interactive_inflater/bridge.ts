@@ -43,6 +43,7 @@ export function netSpecFromBuilder(shapes: Shape[], connections: Connection[], n
     faces: mesh.faces,
     face_edge_ids: mesh.face_edge_ids,
     source_polygon_id: mesh.source_polygon_id,
+    source_polygon: mesh.source_polygon,
     // Side count per shape, so the solver colours each face by its own polygon, as the builder draws it.
     net_layout: shapes.map((shape) => ({ shape_id: shape.id, n: shape.n, cx: shape.cx, cy: shape.cy, rotation: shape.rotation })),
   };
