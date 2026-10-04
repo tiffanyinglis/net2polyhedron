@@ -64,8 +64,12 @@ the repo is split). Each `utils/physics/*.ts` header names the Python module it 
   orientationRetry, seedSelecter, insideOutChecker, convergence, kabsch (rigid-motion removal),
   pressureCalibration.
 - **Viewer** (`viewer.ts`): Three.js, drag-orbit (camera-axis quaternion), wheel zoom, key/fill/
-  headlight rig matching Python plotter_lighting, per-base-face colors (`setBaseColors`
-  recolours in place) + wireframe.
+  headlight rig matching Python plotter_lighting (same in every colour mode), per-base-face colors
+  (`setBaseColors` recolours in place) + wireframe.
+- **African Flower material** (`viewer.ts` `setTextured`, `hexAtlas.ts`): atlas texture (rim-darkened)
+  plus a procedural normal map (`reliefNormalMap`: atlas brightness as height, 3x3 smoothed, slope
+  `RELIEF_SLOPE`), same UVs. Shading: `CROCHET_BUMP` normal scale, dim specular/shininess
+  (`CROCHET_SPECULAR`/`CROCHET_SHININESS`). Outline hidden in this mode.
 - **Nets** (`data/inputs/`, copied from `data/input/stretchy_nets/`; `.poly` == `.json` format):
   5 Platonic, cone, tube, ravioli, samosa, spider_leg, turtle, goose, cannoli_open, cannoli_semiclosed.
   goose is open; runs like the other nets (open wedges excluded from pressure and RMS).
