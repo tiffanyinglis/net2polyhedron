@@ -9,6 +9,7 @@ const ATLAS_URL = new URL("./hexatlas.png", import.meta.url).href;
 
 const ATLAS_GRID = 4;
 let texture: THREE.Texture | null = null;
+let normalTexture: THREE.Texture | null = null;
 let loaded = false;
 /** The atlas after darkening (see darkenBlackCells), the picture both the 3D texture and the 2D canvas draw from. */
 let processed: HTMLCanvasElement | null = null;
@@ -75,18 +76,81 @@ function darkenRim(image: HTMLImageElement): HTMLCanvasElement {
   return canvas;
 }
 
+/** How steeply the stitch relief tilts: the normal map's slope per unit of brightness change between neighbouring pixels. */
+const RELIEF_SLOPE = 4;
+
+/**
+ * A normal map for the atlas, laid out exactly like the colour atlas so the same UVs pick it. Brightness is
+ * read as height (lit stitch tops are high, shadowed gaps low), smoothed over 3 x 3 so the photo's grain
+ * doesn't show, and each pixel's slope becomes its normal. The result is faked bump mapping, not measured relief.
+ */
+function reliefNormalMap(source: HTMLCanvasElement): HTMLCanvasElement {
+  const W = source.width;
+  const H = source.height;
+  const src = source.getContext("2d", { willReadFrequently: true })!.getImageData(0, 0, W, H).data;
+  const clampX = (x: number) => Math.min(W - 1, Math.max(0, x));
+  const clampY = (y: number) => Math.min(H - 1, Math.max(0, y));
+  const height = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let sum = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const p = (clampY(y + dy) * W + clampX(x + dx)) * 4;
+          sum += 0.299 * src[p] + 0.587 * src[p + 1] + 0.114 * src[p + 2];
+        }
+      }
+      height[y * W + x] = sum / 9 / 255;
+    }
+  }
+  const out = document.createElement("canvas");
+  out.width = W;
+  out.height = H;
+  const octx = out.getContext("2d")!;
+  const img = octx.createImageData(W, H);
+  const d = img.data;
+  const at = (x: number, y: number) => height[clampY(y) * W + clampX(x)];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const gx = ((at(x + 1, y) - at(x - 1, y)) * RELIEF_SLOPE) / 2;
+      const gy = ((at(x, y + 1) - at(x, y - 1)) * RELIEF_SLOPE) / 2;
+      // Image rows run downward while texture v runs upward, so the green (y) slope keeps its sign and x flips.
+      const nx = -gx;
+      const ny = gy;
+      const len = Math.hypot(nx, ny, 1);
+      const p = (y * W + x) * 4;
+      d[p] = ((nx / len) * 0.5 + 0.5) * 255;
+      d[p + 1] = ((ny / len) * 0.5 + 0.5) * 255;
+      d[p + 2] = (0.5 / len + 0.5) * 255;
+      d[p + 3] = 255;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  return out;
+}
+
 export function hexAtlasTexture(): THREE.Texture {
   if (!texture) {
+    // The normal map is created with the colour texture and filled in when the atlas loads, like it.
+    normalTexture = new THREE.Texture();
     texture = new THREE.TextureLoader().load(ATLAS_URL, (loadedTexture) => {
       processed = darkenRim(loadedTexture.image as HTMLImageElement);
       texture!.image = processed;
       texture!.needsUpdate = true;
+      normalTexture!.image = reliefNormalMap(processed);
+      normalTexture!.needsUpdate = true;
       loaded = true;
       listeners.forEach((listener) => listener());
     });
     texture.colorSpace = THREE.SRGBColorSpace;
   }
   return texture;
+}
+
+/** The atlas's fake stitch relief as a normal map, for the African Flower material to light with. */
+export function hexAtlasNormalMap(): THREE.Texture {
+  hexAtlasTexture();
+  return normalTexture!;
 }
 
 export function hexAtlasReady(): boolean {

@@ -2,14 +2,15 @@ import * as THREE from "three";
 import { type Vec3 } from "../utils/physics/vec3";
 import { REPULSION_STRENGTH, repulsionForce } from "../utils/physics/forces";
 import { EDGE_LENGTH } from "../utils/physics/mesh";
-import { hexAtlasTexture, onHexAtlasLoaded } from "./hexAtlas";
+import { hexAtlasNormalMap, hexAtlasTexture, onHexAtlasLoaded } from "./hexAtlas";
 
 const WHITE = 0xffffff;
 const PLAIN_SPECULAR = 0x808080;
 const PLAIN_SHININESS = 20;
-const CROCHET_SPECULAR = 0x000000; // a highlight would add white on top of the texture
-const CROCHET_SHININESS = 4;
+const CROCHET_SPECULAR = 0x282828; // a highlight adds white on top of the texture, so keep it dim
+const CROCHET_SHININESS = 30; // tighter than before, so each stitch's relief breaks up the highlight
 /** How far the African Flower's stitch bump map pushes the shading. */
+const CROCHET_BUMP = 1;
 
 function vsub(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -30,14 +31,7 @@ const LIGHT_RIG: [[number, number, number], number][] = [
   [[0, 0, 1], 2.2],
 ];
 
-/**
- * African Flower lighting. The brightest lit face gets exactly the texture's own colour (total light 1),
- * and everything dimmer is the texture dimmed. Nothing is lit past 1, so nothing washes out to white.
- * Key and headlight are sized so their combined peak with the ambient light is 1 (fill is off).
- */
-const CROCHET_LIGHT_INTENSITIES = [1.4, 0, 0.9];
 const PLAIN_AMBIENT = 0.4;
-const CROCHET_AMBIENT = 0.6;
 
 export interface DebugOverlays {
   faceNormals: boolean;
@@ -256,8 +250,6 @@ export class Viewer {
   private maxRadius = 1;
   private lights: { light: THREE.DirectionalLight; dir: THREE.Vector3 }[] = [];
   private ambient!: THREE.AmbientLight;
-  /** African Flower's lights: one point light per rig direction, so brightness falls off with distance. */
-  private points: THREE.PointLight[] = [];
   private dragging = false;
   /** Whether a press on the view orbits, pans or zooms. Turned off for presses that start a join. */
   private orbitEnabled = true;
@@ -327,12 +319,6 @@ export class Viewer {
       const light = new THREE.DirectionalLight(0xffffff, intensity);
       this.scene.add(light);
       this.lights.push({ light, dir: new THREE.Vector3(...dir) });
-    }
-    for (let i = 0; i < LIGHT_RIG.length; i++) {
-      const point = new THREE.PointLight(0xffffff, 0, 0, 2);
-      point.visible = false;
-      this.scene.add(point);
-      this.points.push(point);
     }
     this.ambient = new THREE.AmbientLight(0xffffff, PLAIN_AMBIENT);
     this.scene.add(this.ambient);
@@ -510,6 +496,8 @@ export class Viewer {
         new THREE.MeshPhongMaterial({
           color: this.textured ? WHITE : color,
           map: this.textured ? hexAtlasTexture() : null,
+          normalMap: this.textured ? hexAtlasNormalMap() : null,
+          normalScale: new THREE.Vector2(CROCHET_BUMP, CROCHET_BUMP),
           specular: this.textured ? CROCHET_SPECULAR : PLAIN_SPECULAR,
           shininess: this.textured ? CROCHET_SHININESS : PLAIN_SHININESS,
           flatShading: !this.smoothShading,
@@ -921,6 +909,7 @@ export class Viewer {
     if (this.mesh) {
       (this.mesh.material as THREE.MeshPhongMaterial[]).forEach((m, b) => {
         m.map = on ? hexAtlasTexture() : null;
+        m.normalMap = on ? hexAtlasNormalMap() : null;
         m.color.set(on ? WHITE : this.baseColors[b]);
         // Yarn is matte: a faint, broad highlight instead of the plain shading's tight shine.
         m.specular.setHex(on ? CROCHET_SPECULAR : PLAIN_SPECULAR);
@@ -968,23 +957,13 @@ export class Viewer {
     nor.needsUpdate = true;
   }
 
-  /** Lighting for the current mode: African Flower gets stronger shading and less fill (no shine is set on the material). */
+  /** Lighting is the same rig in every mode; African Flower differs only in its material (texture, no shine). */
   private applyLighting() {
-    this.ambient.intensity = this.textured ? CROCHET_AMBIENT : PLAIN_AMBIENT;
+    this.ambient.intensity = PLAIN_AMBIENT;
     this.lights.forEach(({ light }, i) => {
-      light.intensity = this.textured ? 0 : LIGHT_RIG[i][1];
-      light.visible = !this.textured;
-    });
-    this.points.forEach((point, i) => {
-      point.visible = this.textured;
-      point.intensity = this.textured ? CROCHET_LIGHT_INTENSITIES[i] * this.lightDistance() ** 2 : 0;
+      light.intensity = LIGHT_RIG[i][1];
     });
     this.render();
-  }
-
-  /** How far the African Flower point lights sit from the mesh's centre: far enough that their falloff shows across the shape. */
-  private lightDistance(): number {
-    return Math.max(1, 5 * this.maxRadius);
   }
 
   /** Points the texture coordinates at new wedges (same mesh, no rebuild): Colour > Randomize in African Flower. */
@@ -1028,11 +1007,6 @@ export class Viewer {
     for (const { light, dir } of this.lights) {
       light.position.copy(dir).normalize().multiplyScalar(10).applyQuaternion(orientation);
     }
-    const distance = this.lightDistance();
-    this.lights.forEach(({ dir }, i) => {
-      this.points[i].position.copy(dir).normalize().multiplyScalar(distance).applyQuaternion(orientation);
-      if (this.textured) this.points[i].intensity = CROCHET_LIGHT_INTENSITIES[i] * distance ** 2;
-    });
     this.renderer.render(this.scene, this.camera);
   }
 }
