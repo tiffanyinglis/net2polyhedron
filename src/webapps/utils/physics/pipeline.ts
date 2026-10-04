@@ -1,13 +1,13 @@
 import { type Vec3 } from "./vec3";
 import { isOpenMesh, loadNet, type Mesh, type NetSpec } from "./mesh";
-import { fanLevel0To1, polygonOutlineEdgeIds, quarterTriangles, type MeshState } from "./meshLevels";
+import { fanLevel0To1, groupingOfSpec, polygonOutlineEdgeIds, quarterTriangles, type AtlasChoice, type MeshState } from "./meshLevels";
 import { relaxInitialConfigurationWithOrientationRetry } from "./orientationRetry";
 import { type ReplayFrame } from "./relaxOnce";
 import { estimatePressureForTargetStretch } from "./pressureCalibration";
 import { CONVERGENCE_GTOL } from "./convergence";
 
 export const LEVEL0_SEED = 0;
-export const LEVEL0_SAFETY_STEP_CAP = 50_000;
+export const LEVEL0_SAFETY_STEP_CAP = 20_000;
 export const DEFAULT_TARGET_RMS_PCT = 10.0;
 /** Open (boundary) nets default lower, matching the Python app. */
 export const OPEN_TARGET_RMS_PCT = 5.0;
@@ -96,6 +96,8 @@ export async function fullInflate(
     gtol?: number;
     /** Level 0's starting seed (the orientation retry tries seed, seed+1, ...). Defaults to LEVEL0_SEED. */
     seed?: number;
+    /** The African Flower hexagons and atoms per base face; random if omitted. */
+    atlasChoice?: AtlasChoice;
     /** A level's solved positions, plus the replay snapshots of the trial that produced them. */
     onLevelResult?: (level: number, positions: Map<number, Vec3>, frames: ReplayFrame[]) => void;
     onRecord?: (record: LevelRecord) => void;
@@ -115,7 +117,7 @@ export async function fullInflate(
   const baseFaces = base.faces;
   const gtol = options.gtol ?? CONVERGENCE_GTOL;
   const elapsed = (since: number) => (performance.now() - since) / 1000;
-  const topology = fanLevel0To1(base);
+  const topology = fanLevel0To1(base, options.atlasChoice, groupingOfSpec(spec, baseFaces));
   const outlineEdgeIds = polygonOutlineEdgeIds(base, spec.source_polygon_id ?? baseFaces.map((_, i) => i));
 
   options.onTopology?.(0, topology.mesh.faces, topology.faceOfFine, topology.mesh.faceEdgeIds, outlineEdgeIds, topology.faceUV);

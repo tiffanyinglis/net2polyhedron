@@ -127,9 +127,21 @@ function vertexIdsFor(roots: Map<Slot, Slot>) {
 }
 
 /** Each face's vertex-id loop, ready to store as `faces`. */
-function facesFromShapes(shapes: MeshShape[], connections: MeshConnection[]): number[][] {
-  const { idOf } = vertexIdsFor(vertexRoots(shapes, connections));
+function facesFromShapes(shapes: MeshShape[], idOf: (s: Slot) => number): number[][] {
   return shapes.map((shape) => faceCornerOrder(shape).map((corner) => idOf(slot(shape.id, corner))));
+}
+
+/**
+ * Each source polygon's vertex ids in its own corner order (its net_layout corners): a plain shape's own corners, or for a
+ * folded shape the rim corner of each of its triangles, so the square reads as its four corners.
+ */
+function sourcePolygonsFrom(shapes: Shape[], foldIds: Set<number>, idOf: (s: Slot) => number): number[][] {
+  return shapes.map((shape) => {
+    const corners = Array.from({ length: shape.n }, (_, k) =>
+      foldIds.has(shape.id) ? idOf(slot(`${shape.id}.${k}`, 0)) : idOf(slot(String(shape.id), k)),
+    );
+    return corners;
+  });
 }
 
 /** Every genuine mesh edge as a vertex-id pair: each join once, then each free edge. Duplicate pairs are deliberate. */
@@ -286,16 +298,22 @@ export interface MeshExport {
   edges: number[][];
   face_edge_ids: number[][];
   source_polygon_id: number[];
+  /** Each source polygon's vertex ids in corner order, one list per source polygon (same order as net_layout). */
+  source_polygon: number[][];
 }
 
 /** Builds the mesh for a net. Throws NetValidationError if the joins don't form a valid mesh. */
 export function exportMesh(shapes: Shape[], connections: Connection[]): MeshExport {
   const { meshShapes, meshConnections, sourcePolygonId } = expandFoldedShapes(shapes, connections);
   validateConnections(meshShapes, meshConnections);
+  // Faces take their ids first, so the source polygons (which only look ids up) agree with them.
+  const { idOf } = vertexIdsFor(vertexRoots(meshShapes, meshConnections));
+  const foldIds = new Set(connections.filter((c) => c.aShape === c.bShape).map((c) => c.aShape));
   return {
-    faces: facesFromShapes(meshShapes, meshConnections),
+    faces: facesFromShapes(meshShapes, idOf),
     edges: edgesFromShapes(meshShapes, meshConnections),
     face_edge_ids: faceEdgeIdsFor(meshShapes, meshConnections),
     source_polygon_id: sourcePolygonId,
+    source_polygon: sourcePolygonsFrom(shapes, foldIds, idOf),
   };
 }

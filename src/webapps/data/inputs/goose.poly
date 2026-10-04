@@ -1,5 +1,5 @@
 {
-  "name": "three_hex_semiclosed",
+  "name": "goose",
   "faces": [
     [
       0,
@@ -184,29 +184,55 @@
     2,
     3
   ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    [
+      2,
+      6,
+      8,
+      6,
+      2,
+      3
+    ],
+    [
+      4,
+      3,
+      2,
+      9,
+      10,
+      11
+    ]
+  ],
   "net_layout": [
     {
       "shape_id": 1,
       "n": 6,
-      "cx": -179.0,
-      "cy": -140.0,
-      "rotation": 0.0,
+      "cx": -179,
+      "cy": -140,
+      "rotation": 0,
       "flipped": false
     },
     {
       "shape_id": 2,
       "n": 6,
-      "cx": -46.0,
-      "cy": -58.0,
-      "rotation": 0.0,
+      "cx": -46,
+      "cy": -58,
+      "rotation": 0,
       "flipped": false
     },
     {
       "shape_id": 3,
       "n": 6,
-      "cx": -182.0,
-      "cy": 21.0,
-      "rotation": 0.0,
+      "cx": -182,
+      "cy": 21,
+      "rotation": 0,
       "flipped": false
     }
   ],
@@ -231,7 +257,7 @@
       "b_shape_id": 3,
       "b_edge": 0,
       "a_handle": {
-        "t": 1.0,
+        "t": 1,
         "n": 13.25214782339286
       },
       "b_handle": {
@@ -259,11 +285,11 @@
       "b_shape_id": 2,
       "b_edge": 3,
       "a_handle": {
-        "t": 0.0,
+        "t": 0,
         "n": -40.41451884327381
       },
       "b_handle": {
-        "t": -0.0,
+        "t": 0,
         "n": -40.41451884327382
       }
     },
@@ -283,6 +309,6 @@
     }
   ],
   "view": {
-    "scale": 1.0
+    "scale": 1
   }
 }

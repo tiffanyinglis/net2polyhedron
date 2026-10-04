@@ -34,23 +34,37 @@ export function baseFaceNeighbors(baseFaces: number[][]): Map<number, Set<number
   return neighbors;
 }
 
-/** One palette color per base face, random order, avoiding already-colored neighbors where possible
- * (mirrors graph_face_coloring.random_graph_coloring). */
-export function randomFaceColors(baseFaces: number[][], palette: number[] = FACE_COLORS): number[] {
+/**
+ * Picks one of `count` items for each base face, spreading them out: a face avoids the items its
+ * neighbours already have where it can, then takes the item used least so far, so as many different
+ * items as possible appear. Random order and random tie-breaks. Returns the item index per face.
+ */
+export function spreadPick(baseFaces: number[][], count: number): number[] {
   const neighbors = baseFaceNeighbors(baseFaces);
   const order = baseFaces.map((_, i) => i);
   for (let i = order.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [order[i], order[j]] = [order[j], order[i]];
   }
-  const colors: number[] = new Array(baseFaces.length);
+  const picked: number[] = new Array(baseFaces.length);
+  const uses = new Array<number>(count).fill(0);
   for (const i of order) {
-    const used = new Set([...neighbors.get(i)!].map((j) => colors[j]).filter((c) => c !== undefined));
-    const free = palette.filter((c) => !used.has(c));
-    const candidates = free.length ? free : palette;
-    colors[i] = candidates[Math.floor(Math.random() * candidates.length)];
+    const clash = new Set([...neighbors.get(i)!].map((j) => picked[j]).filter((c) => c !== undefined));
+    const all = [...uses.keys()];
+    const free = all.filter((c) => !clash.has(c));
+    const pool = free.length ? free : all;
+    const least = Math.min(...pool.map((c) => uses[c]));
+    const best = pool.filter((c) => uses[c] === least);
+    const choice = best[Math.floor(Math.random() * best.length)];
+    picked[i] = choice;
+    uses[choice]++;
   }
-  return colors;
+  return picked;
+}
+
+/** One palette color per base face, spread out so neighbours differ and as many colors as possible appear. */
+export function randomFaceColors(baseFaces: number[][], palette: number[] = FACE_COLORS): number[] {
+  return spreadPick(baseFaces, palette.length).map((k) => palette[k]);
 }
 
 /** Fixed colour per polygon side count (mirrors utils/polygon_colors.POLYGON_COLORS); sides >8 reuse 8's. */

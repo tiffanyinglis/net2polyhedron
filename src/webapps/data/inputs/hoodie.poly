@@ -1,5 +1,5 @@
 {
-  "name": "three_poly_pinch2",
+  "name": "hoodie",
   "faces": [
     [
       0,
@@ -136,29 +136,52 @@
     3,
     3
   ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    [
+      4,
+      3,
+      2,
+      0,
+      5
+    ],
+    [
+      3,
+      2,
+      7,
+      2
+    ]
+  ],
   "net_layout": [
     {
       "shape_id": 1,
       "n": 6,
-      "cx": -137.0,
-      "cy": -202.0,
-      "rotation": 0.0,
+      "cx": -137,
+      "cy": -202,
+      "rotation": 0,
       "flipped": false
     },
     {
       "shape_id": 2,
       "n": 5,
-      "cx": -175.0,
-      "cy": -49.0,
-      "rotation": 0.0,
+      "cx": -175,
+      "cy": -49,
+      "rotation": 0,
       "flipped": false
     },
     {
       "shape_id": 3,
       "n": 4,
-      "cx": -26.0,
-      "cy": -53.0,
-      "rotation": 0.0,
+      "cx": -26,
+      "cy": -53,
+      "rotation": 0,
       "flipped": false
     }
   ],
@@ -249,6 +272,6 @@
     }
   ],
   "view": {
-    "scale": 1.0
+    "scale": 1
   }
 }

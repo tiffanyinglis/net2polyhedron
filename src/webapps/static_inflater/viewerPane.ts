@@ -109,6 +109,7 @@ export class ViewerPane {
       return;
     }
     this.beginLoading();
+    this.setMessage(`Loading ${name}...`);
     let file: ViewedFile;
     try {
       file = await this.load(name);
@@ -142,10 +143,9 @@ export class ViewerPane {
         topology.faceOfFine,
         this.colorsOf(file),
         topology.outlineEdgeIds,
-        file.baseFaces.map((f) => f.length),
         topology.faceUV,
       );
-      this.viewers![level].setTextured(file.colors.mode === "african");
+      this.styleViewer(this.viewers![level], file.colors.mode === "african");
     });
     this.renderAll();
     this.endLoading();
@@ -314,10 +314,16 @@ export class ViewerPane {
     if (!this.viewers) return;
     const colors = this.colorsOf(file);
     this.viewers.forEach((v) => {
-      v.setTextured(file.colors.mode === "african");
+      this.styleViewer(v, file.colors.mode === "african");
       v.setBaseColors(colors);
     });
     this.renderAll();
+  }
+
+  /** African Flower hides the polygon outlines (they'd read as gaps between textured polygons). The Viewer has no subdivision toggle, so subdivisions stay off. */
+  private styleViewer(v: Viewer, african: boolean) {
+    v.setTextured(african);
+    v.setLayers(!african, false);
   }
 
   private colorsOf(file: ViewedFile): number[] {

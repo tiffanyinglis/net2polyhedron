@@ -1,5 +1,5 @@
 {
-  "name": "cannoli",
+  "name": "cannoli_open",
   "faces": [
     [
       0,
@@ -118,13 +118,23 @@
     1,
     1
   ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      3,
+      1,
+      0,
+      4
+    ]
+  ],
   "net_layout": [
     {
       "shape_id": 1,
       "n": 6,
-      "cx": -194.0,
-      "cy": -101.0,
-      "rotation": 0.0,
+      "cx": -194,
+      "cy": -101,
+      "rotation": 0,
       "flipped": false
     }
   ],
@@ -135,16 +145,16 @@
       "b_shape_id": 1,
       "b_edge": 3,
       "a_handle": {
-        "t": 0.0,
+        "t": 0,
         "n": -40.41451884327381
       },
       "b_handle": {
-        "t": -0.0,
+        "t": 0,
         "n": -40.41451884327382
       }
     }
   ],
   "view": {
-    "scale": 1.0
+    "scale": 1
   }
 }

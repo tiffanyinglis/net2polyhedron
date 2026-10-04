@@ -36,6 +36,8 @@ export interface NetSpec {
   face_edge_ids?: number[][];
   net_layout?: NetLayoutEntry[];
   source_polygon_id?: number[];
+  /** Each source polygon's vertex ids in its net_layout corner order. */
+  source_polygon?: number[][];
   builder_connections?: BuilderConnection[];
 }
 

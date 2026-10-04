@@ -104,6 +104,9 @@ export class NetPanel {
   private canvas = document.createElement("canvas");
   private polygons: PlacedPolygon[] = [];
   private curves: Point[][] = [];
+  private spec: NetSpec | null = null;
+  /** Debug vertex labels: none, one per corner as the file names it ("raw"), or one per distinct vertex ("deduped"). */
+  private vertexLabels: VertexLabelMode = "off";
   /** Right-drag pan offset in CSS pixels and wheel zoom factor; middle-click resets both. */
   private pan: [number, number] = [0, 0];
   private zoom = 1;
@@ -111,11 +114,20 @@ export class NetPanel {
   private lastXY: [number, number] = [0, 0];
 
   /** `hooks` report the start and end of a pan, and each zoom or reset, so the owner can record undo steps. */
+  /** Shown while the texture atlas loads (switching to African Flower). */
+  private spinner = Object.assign(document.createElement("span"), { className: "spinner", hidden: true });
+
   constructor(
     private container: HTMLElement,
     private hooks: CameraHooks = {},
   ) {
     container.appendChild(this.canvas);
+    container.style.position ||= "relative";
+    Object.assign(this.spinner.style, {
+      position: "absolute", left: "50%", top: "50%", width: "24px", height: "24px",
+      margin: "-12px 0 0 -12px",
+    });
+    container.appendChild(this.spinner);
     new ResizeObserver(() => this.redraw()).observe(container);
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault()); // right-drag pans, no menu
     this.canvas.addEventListener("pointerdown", (e) => {
@@ -173,6 +185,7 @@ export class NetPanel {
   }
 
   setNet(spec: NetSpec | null) {
+    this.spec = spec;
     this.polygons = spec ? placePolygons(spec) : [];
     this.curves = spec
       ? (spec.builder_connections ?? [])
@@ -184,10 +197,142 @@ export class NetPanel {
   }
 
   private lastColors: { mode: ColorMode; multi: number[] } | null = null;
+  /** The level-0 texture coordinates and the atlas, when the net should be drawn textured. */
+  private texture: { faces: number[][]; faceOfFine: number[]; faceUV: number[][]; atlas: HTMLImageElement } | null = null;
+
+  setVertexLabels(mode: VertexLabelMode) {
+    this.vertexLabels = mode;
+    this.redraw();
+  }
+
+  setLoading(on: boolean) {
+    this.spinner.hidden = !on;
+  }
+
+  /** Textures the net with the same wedges as the 3D mesh (level 0's per-triangle coordinates), or
+   * draws it plain when `source` or `atlas` is null. */
+  setTexture(source: { faces: number[][]; faceOfFine: number[]; faceUV: number[][] } | null, atlas: HTMLImageElement | null) {
+    this.texture = source && atlas && source.faceUV.length ? { ...source, atlas } : null;
+    this.redraw();
+  }
 
   setColors(mode: ColorMode, multiColors: number[]) {
     this.lastColors = { mode, multi: multiColors };
     this.redraw();
+  }
+
+  /**
+   * Fills one net polygon with the atlas, one fine triangle at a time, each placed on the net at its own vertices.
+   * False if the net isn't textured or the polygon has no triangles.
+   */
+  private fillTextured(ctx: CanvasRenderingContext2D, polyIndex: number, toPx: (p: Point) => Point, dpr: number): boolean {
+    const tex = this.texture;
+    if (!tex || !this.spec) return false;
+    const triangles = tex.faceOfFine.flatMap((base, k) => (this.polygonOfBase(base) === polyIndex ? [k] : []));
+    if (!triangles.length) return false;
+    const placed = new Map<number, Map<number, Point>>();
+    const { width: W, height: H } = tex.atlas;
+    for (const k of triangles) {
+      const base = tex.faceOfFine[k];
+      if (!placed.has(base)) placed.set(base, this.baseCornersOnNet(base, polyIndex, toPx));
+      const at = placed.get(base)!;
+      const ids = tex.faces[k];
+      const dst = ids.map((v) => at.get(v) ?? at.get(-1)!);
+      if (dst.some((p) => !p)) continue;
+      this.drawAtlasTriangle(ctx, tex.atlas, tex.faceUV[k], dst as Point[], W, H, dpr);
+    }
+    return true;
+  }
+
+  /** The polygon a base face belongs to (its net_layout index), or -1 if none. */
+  private polygonOfBase(base: number): number {
+    const spec = this.spec!;
+    const shape = spec.source_polygon_id ? spec.source_polygon_id[base] : base;
+    return this.polygons.findIndex((poly) => poly.shapeId === shape);
+  }
+
+  /**
+   * Where a base face's own vertices sit on the net, keyed by mesh vertex id (-1 is the fine centroid, which
+   * sits at the average of the three). A polygon's own corners follow source_polygon. A face that is one of
+   * several (a split self-joined shape) takes the two of its rim vertices that are consecutive on the
+   * source outline, and its remaining vertex is the polygon's centre.
+   */
+  private baseCornersOnNet(base: number, polyIndex: number, toPx: (p: Point) => Point): Map<number, Point> {
+    const spec = this.spec!;
+    const face = spec.faces[base];
+    const poly = this.polygons[polyIndex];
+    const outline = spec.source_polygon?.[polyIndex] ?? null;
+    const corners = poly.points.map(toPx);
+    const centre: Point = [
+      corners.reduce((sum, p) => sum + p[0], 0) / corners.length,
+      corners.reduce((sum, p) => sum + p[1], 0) / corners.length,
+    ];
+    const at = new Map<number, Point>();
+    if (face.length === corners.length) {
+      face.forEach((v, k) => at.set(v, corners[k]));
+    } else if (outline) {
+      const n = outline.length;
+      for (let i = 0; i < face.length; i++) {
+        const a = face[i];
+        const b = face[(i + 1) % face.length];
+        const k = outline.findIndex((v: number, idx: number) => v === a && outline[(idx + 1) % n] === b);
+        const rev = outline.findIndex((v: number, idx: number) => v === b && outline[(idx + 1) % n] === a);
+        if (k >= 0) {
+          at.set(a, corners[k]);
+          at.set(b, corners[(k + 1) % n]);
+          break;
+        }
+        if (rev >= 0) {
+          at.set(b, corners[rev]);
+          at.set(a, corners[(rev + 1) % n]);
+          break;
+        }
+      }
+      for (const v of face) if (!at.has(v)) at.set(v, centre);
+    }
+    const average: Point = [0, 0];
+    for (const v of face) {
+      const p = at.get(v);
+      if (p) {
+        average[0] += p[0] / face.length;
+        average[1] += p[1] / face.length;
+      }
+    }
+    at.set(-1, average);
+    return at;
+  }
+
+  /** Paints one atlas triangle (uv in the atlas) onto the net triangle dst, clipped and grown by a pixel so seams don't show. */
+  private drawAtlasTriangle(ctx: CanvasRenderingContext2D, atlas: HTMLImageElement, uv: number[], dst: Point[], W: number, H: number, dpr: number) {
+    const src: Point[] = [0, 1, 2].map((k) => [uv[2 * k] * W, (1 - uv[2 * k + 1]) * H] as Point);
+    const [s0, s1, s2] = src;
+    const [d0, d1, d2] = dst;
+    const e1x = s1[0] - s0[0], e1y = s1[1] - s0[1], e2x = s2[0] - s0[0], e2y = s2[1] - s0[1];
+    const f1x = d1[0] - d0[0], f1y = d1[1] - d0[1], f2x = d2[0] - d0[0], f2y = d2[1] - d0[1];
+    const det = e1x * e2y - e2x * e1y || 1e-9;
+    const a = (f1x * e2y - f2x * e1y) / det;
+    const b = (f1y * e2y - f2y * e1y) / det;
+    const c = (f2x * e1x - f1x * e2x) / det;
+    const d = (f2y * e1x - f1y * e2x) / det;
+    const e = d0[0] - a * s0[0] - c * s0[1];
+    const g = d0[1] - b * s0[0] - d * s0[1];
+    const mid: Point = [(d0[0] + d1[0] + d2[0]) / 3, (d0[1] + d1[1] + d2[1]) / 3];
+    const grown = dst.map(([x, y]) => {
+      const dx = x - mid[0];
+      const dy = y - mid[1];
+      const len = Math.hypot(dx, dy) || 1;
+      return [x + (dx / len) * 1.5, y + (dy / len) * 1.5] as Point;
+    });
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(grown[0][0], grown[0][1]);
+    ctx.lineTo(grown[1][0], grown[1][1]);
+    ctx.lineTo(grown[2][0], grown[2][1]);
+    ctx.closePath();
+    ctx.clip();
+    ctx.setTransform(dpr * a, dpr * b, dpr * c, dpr * d, dpr * e, dpr * g);
+    ctx.drawImage(atlas, 0, 0);
+    ctx.restore();
   }
 
   private redraw() {
@@ -216,7 +361,7 @@ export class NetPanel {
     ];
 
     ctx.lineJoin = "round";
-    for (const poly of this.polygons) {
+    for (const [polyIndex, poly] of this.polygons.entries()) {
       const color =
         this.lastColors?.mode === "multi"
           ? (this.lastColors.multi[poly.faceIndex] ?? polygonColor(poly.sides))
@@ -224,10 +369,16 @@ export class NetPanel {
       ctx.beginPath();
       poly.points.map(toPx).forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.closePath();
-      ctx.globalAlpha = 0.9;
-      ctx.fillStyle = hex(color);
-      ctx.fill();
-      ctx.globalAlpha = 1;
+      if (!this.fillTextured(ctx, polyIndex, toPx, dpr)) {
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = hex(color);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      // The textured fill starts its own paths, so trace the polygon again before outlining it.
+      ctx.beginPath();
+      poly.points.map(toPx).forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath();
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 1;
       ctx.stroke();
@@ -241,5 +392,94 @@ export class NetPanel {
       curve.map(toPx).forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.stroke();
     }
+
+    if (this.spec && this.vertexLabels !== "off") this.drawVertexLabels(ctx, toPx);
   }
+
+  /** White id on a black disc at each corner. "raw" shows the id the file gives that corner; "deduped" shows the
+   * joined vertex's id (the smallest among the corners the builder connections join), so joined corners match. */
+  private drawVertexLabels(ctx: CanvasRenderingContext2D, toPx: (p: Point) => Point) {
+    const spec = this.spec!;
+    if (this.vertexLabels === "raw") {
+      for (const poly of this.polygons) {
+        cornerVertexIds(spec, poly).forEach((id, i) => drawLabel(ctx, String(id), toPx(poly.points[i])));
+      }
+      return;
+    }
+    // Every corner is labelled at its own position with its joined vertex's id, so joined corners show the same number.
+    const { classOf, count } = joinedVertexClasses(this.polygons, spec.builder_connections ?? []);
+    const members: number[][] = Array.from({ length: count }, () => []);
+    this.polygons.forEach((poly, p) => {
+      cornerVertexIds(spec, poly).forEach((id, i) => members[classOf[p][i]].push(id));
+    });
+    this.polygons.forEach((poly, p) => {
+      poly.points.forEach((at, i) => drawLabel(ctx, String(Math.min(...members[classOf[p][i]])), toPx(at)));
+    });
+  }
+}
+
+/**
+ * Groups every polygon corner into the vertex it is joined to: corners that a builder connection glues
+ * together (the two edges' ends meet, reversed) share a class. classOf[p][i] is corner i of polygon p's class.
+ */
+function joinedVertexClasses(polygons: PlacedPolygon[], connections: BuilderConnection[]) {
+  const offset: number[] = [];
+  let total = 0;
+  for (const poly of polygons) {
+    offset.push(total);
+    total += poly.points.length;
+  }
+  const parent = Array.from({ length: total }, (_, k) => k);
+  const find = (k: number): number => (parent[k] === k ? k : (parent[k] = find(parent[k])));
+  const union = (a: number, b: number) => {
+    parent[find(a)] = find(b);
+  };
+  const polyOf = (shapeId: number | undefined) => polygons.findIndex((poly) => poly.shapeId === shapeId);
+  for (const conn of connections) {
+    const a = polyOf(conn.a_shape_id);
+    const b = polyOf(conn.b_shape_id);
+    if (a < 0 || b < 0) continue;
+    const na = polygons[a].points.length;
+    const nb = polygons[b].points.length;
+    // Edge e joins corner e to corner e+1; glued edges meet end to end, so the ends cross over.
+    const aEnd = (conn.a_edge + 1) % na;
+    const bEnd = (conn.b_edge + 1) % nb;
+    union(offset[a] + conn.a_edge, offset[b] + bEnd);
+    union(offset[a] + aEnd, offset[b] + conn.b_edge);
+  }
+  const roots = new Map<number, number>();
+  const classOf = polygons.map((poly, p) =>
+    poly.points.map((_, i) => {
+      const root = find(offset[p] + i);
+      if (!roots.has(root)) roots.set(root, roots.size);
+      return roots.get(root)!;
+    }),
+  );
+  return { classOf, count: roots.size };
+}
+
+export type VertexLabelMode = "off" | "raw" | "deduped";
+
+/** The mesh vertex id at each corner of a placed polygon: its face's vertex list, in corner order. */
+function cornerVertexIds(spec: NetSpec, poly: PlacedPolygon): number[] {
+  const faceIds = spec.source_polygon_id
+    ? spec.faces.flatMap((_, f) => (spec.source_polygon_id![f] === poly.shapeId ? [f] : []))
+    : [poly.faceIndex];
+  const n = poly.points.length;
+  if (faceIds.length === 1 && spec.faces[faceIds[0]].length === n) return spec.faces[faceIds[0]];
+  // A polygon split into several faces has no single corner order, so its vertices are listed in the order they first appear.
+  return [...new Set(faceIds.flatMap((f) => spec.faces[f]))].slice(0, n);
+}
+
+function drawLabel(ctx: CanvasRenderingContext2D, text: string, [x, y]: Point) {
+  const radius = 9;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = "#000";
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x, y);
 }

@@ -1,5 +1,6 @@
 import { SharedCamera, Viewer, type CameraHooks, type DebugOverlays } from "./viewer";
 import { NetPanel } from "./netPanel";
+import { hexAtlasImage, hexAtlasLoaded, hexAtlasReady, hexAtlasTexture } from "./hexAtlas";
 import { displayColors, fitMultiColors, randomFaceColors, type ColorMode, type ColorState } from "../utils/colors";
 import { copyColors, sameCamera, sameNetView, UndoStack, type EditSnapshot } from "./editState";
 import { ViewerPane } from "./viewerPane";
@@ -8,6 +9,7 @@ import { defaultTargetRmsPct } from "../utils/physics/pipeline";
 import { type ReplayFrame } from "../utils/physics/relaxOnce";
 import { loadNet, type NetSpec } from "../utils/physics/mesh";
 import { repulsionMultipliers } from "../utils/physics/pipeline";
+import { fanLevel0To1, groupingOfSpec, randomAtlasChoice, retargetFaceUV, type AtlasChoice } from "../utils/physics/meshLevels";
 import { type Vec3 } from "../utils/physics/vec3";
 import {
   LEVELS,
@@ -71,6 +73,9 @@ const debugBoxes = {
   faceNormals: document.getElementById("show-face-normals") as HTMLInputElement,
   vertexNormals: document.getElementById("show-vertex-normals") as HTMLInputElement,
   repulsiveForces: document.getElementById("show-repulsive-forces") as HTMLInputElement,
+  noVertexIds: document.getElementById("vertex-ids-none") as HTMLInputElement,
+  vertexIds: document.getElementById("show-vertex-ids") as HTMLInputElement,
+  dedupedVertexIds: document.getElementById("show-deduped-vertex-ids") as HTMLInputElement,
 };
 const smoothShadingBox = document.getElementById("smooth-shading") as HTMLInputElement;
 /** Shown in both modes; not reset when debug mode is toggled. */
@@ -203,11 +208,94 @@ function setStatus(text: string, kind: StatusKind = "info") {
 }
 
 /** Info (blue) messages are debug-only; errors, warnings, and success always show. */
+/** True while the hexagon atlas is loading for African Flower (shows the spinner, even in release). */
+let atlasLoading = false;
+
+/** Runs `then` once the atlas has loaded, showing the spinner until then, so the model never shows unpainted. */
+async function whenAtlasReady(then: () => void) {
+  if (hexAtlasReady()) return then();
+  atlasLoading = true;
+  applyStatus();
+  applySpinner();
+  netPanel.setLoading(true);
+  await hexAtlasLoaded();
+  atlasLoading = false;
+  netPanel.setLoading(false);
+  applyStatus();
+  applySpinner();
+  then();
+}
+
+let choiceSpec: NetSpec | null = null;
+let choice: AtlasChoice = [];
+let previewTexture: { faces: number[][]; faceOfFine: number[]; faceUV: number[][] } | null = null;
+
+/** The net's African Flower choice: picked once per net, so every run and the net preview agree. */
+function atlasChoiceFor(spec: NetSpec): AtlasChoice {
+  if (spec !== choiceSpec) {
+    choiceSpec = spec;
+    choice = randomAtlasChoice(loadNet(spec).faces, groupingOfSpec(spec, loadNet(spec).faces));
+    previewTexture = null;
+  }
+  return choice;
+}
+
+/** Before any run, the net's own wedges: a fan of the net with its African Flower choice. */
+function previewTextureOf(spec: NetSpec) {
+  if (!previewTexture || spec !== choiceSpec) {
+    const fan = fanLevel0To1(loadNet(spec), atlasChoiceFor(spec), groupingOfSpec(spec, loadNet(spec).faces));
+    previewTexture = { faces: fan.mesh.faces, faceOfFine: fan.faceOfFine, faceUV: fan.faceUV };
+  }
+  return previewTexture;
+}
+
+/** Colour > Randomize in African Flower: new hexagons and atoms for every face, applied to the levels
+ * and the net in place (no re-run). */
+function reshuffleAfrican() {
+  if (!currentSpec) return;
+  const from = atlasChoiceFor(currentSpec);
+  const to = randomAtlasChoice(baseFaces, currentSpec ? groupingOfSpec(currentSpec, baseFaces) : undefined);
+  choice = to;
+  previewTexture = null;
+  for (const level of LEVELS) {
+    const topo = store.topology[level];
+    if (!topo?.faceUV) continue;
+    topo.faceUV = retargetFaceUV(topo.faceUV, topo.faceOfFine, from, to);
+    viewers[level].setFaceUV(topo.faceUV);
+  }
+  syncNetTexture();
+}
+
+/** Gives the net panel its texture in African Flower mode (the run's wedges once there's a run, else a preview), else plain colours. */
+function syncNetTexture() {
+  const african = inflaterColors.mode === "african";
+  if (!african) {
+    netPanel.setLoading(false);
+    netPanel.setTexture(null, null);
+    return;
+  }
+  if (!hexAtlasReady()) {
+    // Once the atlas arrives, draw the texture (the net shows plain under the spinner until then, never black).
+    netPanel.setLoading(true);
+    void hexAtlasLoaded().then(syncNetTexture);
+    netPanel.setTexture(null, null);
+    return;
+  }
+  netPanel.setLoading(false);
+  const topo = store.topology[0];
+  const source = topo
+    ? { faces: topo.faces, faceOfFine: topo.faceOfFine, faceUV: topo.faceUV ?? [] }
+    : currentSpec
+      ? previewTextureOf(currentSpec)
+      : null;
+  netPanel.setTexture(source, hexAtlasImage());
+}
+
 function applyStatus() {
   statusEl.textContent = lastStatus.text;
   statusEl.className = lastStatus.kind;
   // Release mode: only errors stay visible; the row is hidden entirely otherwise (no empty gap).
-  statusRowEl.hidden = lastStatus.kind !== "error" && !debugMode;
+  statusRowEl.hidden = lastStatus.kind !== "error" && !debugMode && !atlasLoading;
 }
 
 function setBusy(delta: number) {
@@ -217,7 +305,7 @@ function setBusy(delta: number) {
 
 /** The status-row spinner is debug-only, like the blue info message it sits beside. */
 function applySpinner() {
-  spinnerEl.hidden = busyCount <= 0 || !debugMode;
+  spinnerEl.hidden = !atlasLoading && (busyCount <= 0 || !debugMode);
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
@@ -240,15 +328,23 @@ function applyInflaterColors() {
     if (store.positions[level]) v.setBaseColors(colors);
   });
   netPanel.setColors(inflaterColors.mode, inflaterColors.multiColors);
+  syncNetTexture();
 }
 
 /** Colour > Polygon-specific / Multi-colour (and P / M). Undoable, and in the Viewer it applies to the file on screen. */
 function setColorMode(mode: ColorMode) {
+  if (mode === "african" && !hexAtlasReady()) {
+    void whenAtlasReady(() => setColorMode(mode));
+    return;
+  }
   if (view === "viewer") {
     viewer.setColorMode(mode);
   } else if (inflaterColors.mode !== mode) {
     inflaterUndo.push(inflaterSnapshot());
     inflaterColors.mode = mode;
+    // African Flower hides the polygon outlines (they'd read as gaps between textured polygons); other modes show them again.
+    layerBoxes.polygonOutlines.checked = mode !== "african";
+    applyDebugOverlays();
     applyInflaterColors();
   }
   refreshMenus();
@@ -256,6 +352,10 @@ function setColorMode(mode: ColorMode) {
 
 /** Colour > Randomize (and R): re-rolls the Multi-colour palette. Only does anything in Multi-colour mode. */
 function randomize() {
+  if (view !== "viewer" && inflaterColors.mode === "african") {
+    reshuffleAfrican();
+    return;
+  }
   if (view === "viewer") {
     viewer.randomize();
   } else if (inflaterColors.mode === "multi" && baseFaces.length) {
@@ -314,6 +414,7 @@ function applyDebugOverlays() {
       }
     : { faceNormals: false, vertexNormals: false, repulsiveForces: false };
   viewers.forEach((v) => v.setOverlays(flags));
+  netPanel.setVertexLabels(!debugMode ? "off" : debugBoxes.dedupedVertexIds.checked ? "deduped" : debugBoxes.vertexIds.checked ? "raw" : "off");
   viewers.forEach((v) => v.setLayers(layerBoxes.polygonOutlines.checked, layerBoxes.subdivisions.checked));
   // Smooth shading is a debug option too: it's only on in debug mode, and leaving debug mode turns it off.
   viewers.forEach((v) => v.setSmoothShading(debugMode && smoothShadingBox.checked));
@@ -333,6 +434,7 @@ function setDebugMode(on: boolean) {
   debugBoxes.faceNormals.checked = false;
   debugBoxes.vertexNormals.checked = false;
   debugBoxes.repulsiveForces.checked = false;
+  debugBoxes.noVertexIds.checked = true; // a radio group: checking "none" unchecks the other two
   smoothShadingBox.checked = false;
   applyDebugOverlays();
   replays.forEach((r, level) => {
@@ -383,11 +485,12 @@ function clearReplays() {
 function showLevel(level: number, positions: Map<number, Vec3>) {
   const topo = store.topology[level];
   if (!topo) return;
-  viewers[level].setMesh(topo.faces, topo.faceEdgeIds, positions, topo.faceOfFine, currentBaseColors(), topo.outlineEdgeIds, baseFaces.map((f) => f.length), topo.faceUV);
+  viewers[level].setMesh(topo.faces, topo.faceEdgeIds, positions, topo.faceOfFine, currentBaseColors(), topo.outlineEdgeIds, topo.faceUV);
   if (currentSpec) viewers[level].setRepulsion(repulsionMultipliers(loadNet(currentSpec), level));
 }
 
 function onLevelResult(level: number, positions: Map<number, Vec3>, frames: ReplayFrame[]) {
+  if (level === 0) syncNetTexture(); // level 0's wedges are known from the start of the run
   showLevel(level, positions);
   setReplayFrames(level, frames);
 }
@@ -456,6 +559,7 @@ async function runSimulation(): Promise<RunOutcome> {
       targetRmsPctByLevel,
       gtol,
       seed,
+      atlasChoice: currentSpec ? atlasChoiceFor(currentSpec) : undefined,
       store,
       shouldStop: runInterrupted,
       hooks: {
@@ -556,6 +660,9 @@ async function runBatch(save: boolean, pause: boolean) {
       }
       if (outcome === "error") {
         failed.push(name);
+      } else if (save && !store.positions.every((p) => p !== null)) {
+        // A run that ended without all four levels would save a file the Viewer can only half draw.
+        failed.push(name);
       } else if (save) {
         try {
           await saveToOutputs(name);
@@ -630,6 +737,7 @@ function installNet(spec: NetSpec, net: NetIndexEntry) {
   for (const input of targetInputs) input.value = `${defaultTargetRms}%`;
   inflaterColors.multiColors = randomFaceColors(baseFaces);
   netPanel.setNet(spec);
+  syncNetTexture();
   applyInflaterColors();
   clearComputedLevels();
   showNetInSelect(net);
@@ -690,6 +798,12 @@ async function loadSessionFile(file: File) {
 
 function restoreSession(data: SessionData, fileName: string) {
   installNet(data.netSpec, { label: data.netName, file: "" });
+  // The saved textures were made with this hexagon choice: keep it, so the net, Randomize and any re-run agree.
+  if (data.atlasChoice?.length === data.netSpec.faces.length) {
+    choiceSpec = data.netSpec;
+    choice = data.atlasChoice;
+    previewTexture = null;
+  }
   inflaterColors.mode = data.colorMode;
   inflaterColors.multiColors = [...data.multiColors];
   applyInflaterColors();
@@ -725,6 +839,7 @@ function buildSessionData(): SessionData {
   return {
     netName: sessionFileName().replace(SESSION_EXTENSION, ""),
     netSpec: currentSpec!,
+    atlasChoice: atlasChoiceFor(currentSpec!),
     colorMode: inflaterColors.mode,
     multiColors: inflaterColors.multiColors,
     targetRmsPct: targetInputs.map((input) => readTargetRms(input)),
@@ -832,7 +947,7 @@ async function thenInInflater(action: () => void) {
 function refreshMenus() {
   const colors = view === "viewer" ? viewer.colors() : inflaterColors;
   colorItems.forEach((item) => item.classList.toggle("selected", item.dataset.colorMode === colors?.mode));
-  randomizeItem.disabled = colors?.mode !== "multi";
+  randomizeItem.disabled = colors?.mode !== "multi" && colors?.mode !== "african";
   viewItems.forEach((item) => item.classList.toggle("selected", item.dataset.view === view));
 
   const canUndo = view === "viewer" ? viewer.canUndo() : inflaterUndo.canUndo;
@@ -903,6 +1018,9 @@ function onKeydown(e: KeyboardEvent) {
 
 async function init() {
   mountAppNav("static_inflater");
+  hexAtlasTexture(); // start loading the hexagon atlas now, so African Flower rarely has to wait
+  // A fresh seed each time the app starts (still editable in debug mode).
+  seedInput.value = String(Math.floor(Math.random() * 1_000_000));
   renderHistory();
   inflateBtn.addEventListener("click", onInflateButton);
   colorItems.forEach((item) => item.addEventListener("click", () => setColorMode(item.dataset.colorMode as ColorMode)));

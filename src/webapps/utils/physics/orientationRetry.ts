@@ -4,6 +4,9 @@ import { relaxInitialConfiguration, type RelaxInitialOptions, type RelaxInitialR
 import { type ReplayFrame } from "./relaxOnce";
 import { DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_SEARCH_TIME, SeedSelecter } from "./seedSelecter";
 
+/** An attempt whose share of inward-facing faces is above this is retried with the next seed. */
+const MAX_INWARD_FRACTION = 0.3;
+
 function fractionFlipped(signs: number[]): number {
   const nonzero = signs.filter((s) => s !== 0);
   if (!nonzero.length) return 0;
@@ -51,11 +54,15 @@ export async function relaxInitialConfigurationWithOrientationRetry(
   };
 
   const scoreFn = (attempt: { relaxResult: RelaxInitialResult; signs: number[]; frames: ReplayFrame[] }): [boolean, number] => {
-    const signs = new Set(attempt.signs.filter((s) => s !== 0));
-    // Only all-outward (+1) counts: an all-inward (-1) shell is inside-out, not consistent
-    // (mirrors stretchy_mesh._is_orientation_consistent: signs <= {+1}).
-    const accepted = [...signs].every((s) => s === 1);
-    return [accepted, fractionFlipped(attempt.signs)];
+    // Accepted when converged and at most MAX_INWARD_FRACTION of faces point inward. This is looser
+    // than Python's all-outward rule (stretchy_mesh._is_orientation_consistent); a few inward faces
+    // are tolerated. An unconverged attempt never counts, so the retry moves on to the next seed.
+    const inward = fractionFlipped(attempt.signs);
+    const converged = attempt.relaxResult.converged;
+    const accepted = converged && inward <= MAX_INWARD_FRACTION;
+    // Lower rank is better. A converged attempt always outranks an unconverged one, so when the
+    // time or count budget runs out the fallback is the best converged attempt, if there is one.
+    return [accepted, (converged ? 0 : 1) + inward];
   };
 
   const { result, seedUsed } = await selecter.select(seed, attemptFn, scoreFn, {

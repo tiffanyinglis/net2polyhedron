@@ -170,6 +170,12 @@ legend {
   display: contents;
 }
 
+/* Forces the next item onto a new line of the wrapping .check-row. */
+.line-break {
+  flex-basis: 100%;
+  height: 0;
+}
+
 .check-group[hidden] {
   display: none;
 }

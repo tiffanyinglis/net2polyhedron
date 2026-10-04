@@ -1,5 +1,6 @@
 import type { NetSpec } from "./physics/mesh";
 import type { ColorMode } from "./colors";
+import type { AtlasChoice } from "./physics/meshLevels";
 import type { LevelRecord } from "./physics/pipeline";
 import type { ReplayFrame } from "./physics/relaxOnce";
 import type { Vec3 } from "./physics/vec3";
@@ -33,6 +34,8 @@ export interface SessionData {
   netName: string;
   netSpec: NetSpec;
   colorMode: ColorMode;
+  /** The African Flower hexagon choice the saved textures were made with. Absent in older sessions. */
+  atlasChoice?: AtlasChoice;
   multiColors: number[];
   /** Index 0 is Level 1, matching the Setup box's Target RMS fields. */
   targetRmsPct: number[];
@@ -103,7 +106,9 @@ export function parseSession(text: string): SessionData {
   if (raw?.format !== SESSION_FORMAT) throw new Error("Not a session file (missing or wrong format tag).");
   if (raw.version !== SESSION_VERSION) throw new Error(`Unsupported session version ${raw.version}.`);
   if (!Array.isArray(raw.netSpec?.faces)) throw new Error("Session file has no net faces.");
-  if (raw.colorMode !== "polygon" && raw.colorMode !== "multi") throw new Error("Session file has an unknown colour mode.");
+  if (raw.colorMode !== "polygon" && raw.colorMode !== "multi" && raw.colorMode !== "african") {
+    throw new Error("Session file has an unknown colour mode.");
+  }
   if (!Array.isArray(raw.multiColors) || !Array.isArray(raw.targetRmsPct) || !Array.isArray(raw.history) || !Array.isArray(raw.levels)) {
     throw new Error("Session file is missing required fields.");
   }

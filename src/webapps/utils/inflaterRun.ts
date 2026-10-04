@@ -1,3 +1,4 @@
+import type { AtlasChoice } from "./physics/meshLevels";
 /**
  * The Setup-box, Convergence History and Full Inflate run shared by static_inflater and
  * interactive_inflater. Both pages draw the same Level 0-3 results and table, so the per-level
@@ -84,6 +85,8 @@ export interface RunOptions {
   gtol: number;
   /** Level 0's starting seed; defaults to LEVEL0_SEED. */
   seed?: number;
+  /** The African Flower texture choice for the net (see fullInflate). */
+  atlasChoice?: AtlasChoice;
   store: LevelStore;
   /** Polled by the solver between steps. True ends the run as "stopped". */
   shouldStop: () => boolean;
@@ -106,6 +109,7 @@ export async function runFullInflate(spec: NetSpec, opts: RunOptions): Promise<R
       targetRmsPctByLevel: opts.targetRmsPctByLevel,
       gtol: opts.gtol,
       seed: opts.seed,
+      atlasChoice: opts.atlasChoice,
       onRecord: (record) => onRecord(record, opts),
       onTopology: (level, faces, faceOfFine, faceEdgeIds, outlineEdgeIds, faceUV) => {
         store.topology[level] = { faces, faceOfFine, faceEdgeIds, outlineEdgeIds, faceUV };
