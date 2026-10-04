@@ -1,7 +1,7 @@
 import { SharedCamera, Viewer, type CameraHooks, type DebugOverlays } from "./viewer";
 import { NetPanel } from "./netPanel";
 import { hexAtlasImage, hexAtlasLoaded, hexAtlasReady, hexAtlasTexture } from "./hexAtlas";
-import { displayColors, fitMultiColors, randomFaceColors, type ColorMode, type ColorState } from "../utils/colors";
+import { colorsFromFile, displayColors, fitMultiColors, randomFaceColors, type ColorMode, type ColorState } from "../utils/colors";
 import { copyColors, sameCamera, sameNetView, UndoStack, type EditSnapshot } from "./editState";
 import { ViewerPane } from "./viewerPane";
 import { mountAppNav, revealPage } from "../utils/appNav";
@@ -234,7 +234,9 @@ let previewTexture: { faces: number[][]; faceOfFine: number[]; faceUV: number[][
 function atlasChoiceFor(spec: NetSpec): AtlasChoice {
   if (spec !== choiceSpec) {
     choiceSpec = spec;
-    choice = randomAtlasChoice(loadNet(spec).faces, groupingOfSpec(spec, loadNet(spec).faces));
+    const baseFaces = loadNet(spec).faces;
+    // A saved net keeps the African choices it was saved with; other nets get a fresh random one.
+    choice = colorsFromFile(spec, baseFaces)?.choice ?? randomAtlasChoice(baseFaces, groupingOfSpec(spec, baseFaces));
     previewTexture = null;
   }
   return choice;
@@ -342,8 +344,7 @@ function setColorMode(mode: ColorMode) {
   } else if (inflaterColors.mode !== mode) {
     inflaterUndo.push(inflaterSnapshot());
     inflaterColors.mode = mode;
-    // African Flower hides the polygon outlines (they'd read as gaps between textured polygons); other modes show them again.
-    layerBoxes.polygonOutlines.checked = mode !== "african";
+    syncOutlinesToMode();
     applyDebugOverlays();
     applyInflaterColors();
   }
@@ -404,6 +405,12 @@ function redo() {
 }
 
 // ---- Debug mode ----------------------------------------------------------------------------
+
+/** African Flower hides the polygon outlines (they'd read as gaps between textured polygons); other modes show them again. */
+function syncOutlinesToMode() {
+  layerBoxes.polygonOutlines.checked = inflaterColors.mode !== "african";
+  applyDebugOverlays();
+}
 
 function applyDebugOverlays() {
   const flags: DebugOverlays = debugMode
@@ -735,10 +742,20 @@ function installNet(spec: NetSpec, net: NetIndexEntry) {
   if (!running) setRunning(false); // Run All installs each net while `running` is held for the whole batch
   defaultTargetRms = defaultTargetRmsPct(mesh);
   for (const input of targetInputs) input.value = `${defaultTargetRms}%`;
-  inflaterColors.multiColors = randomFaceColors(baseFaces);
+  // A saved net opens in the mode and colours it was saved with.
+  const fileColors = colorsFromFile(spec, baseFaces);
+  inflaterColors.multiColors = fileColors?.multiColors ?? randomFaceColors(baseFaces);
+  if (fileColors) {
+    inflaterColors.mode = fileColors.mode;
+    syncOutlinesToMode();
+  }
   netPanel.setNet(spec);
   syncNetTexture();
   applyInflaterColors();
+  if (inflaterColors.mode === "african") void hexAtlasLoaded().then(() => {
+    syncNetTexture();
+    applyInflaterColors();
+  });
   clearComputedLevels();
   showNetInSelect(net);
   setStatus(`Loaded ${net.label}.`);
@@ -805,6 +822,7 @@ function restoreSession(data: SessionData, fileName: string) {
     previewTexture = null;
   }
   inflaterColors.mode = data.colorMode;
+  syncOutlinesToMode();
   inflaterColors.multiColors = [...data.multiColors];
   applyInflaterColors();
   targetInputs.forEach((input, i) => (input.value = `${data.targetRmsPct[i]}%`));

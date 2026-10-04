@@ -112,6 +112,8 @@ export class BuilderCanvas {
   onSelectEdge: ((edge: { shape: number; edge: number }) => void) | null = null;
   /** A piece's fill colour as a CSS colour. Set by the page (its Colour menu); the default is the polygon colour. */
   fillOf: (shape: Shape) => string = (shape) => shapeCssColor(shape.n);
+  /** Paints a shape's texture if it has one; returns false to fall back to fillOf. */
+  fillTexture: (shape: Shape, verts: [number, number][], ctx: CanvasRenderingContext2D) => boolean = () => false;
   /** Each piece's reachable/role classification for this redraw. Empty outside combined mode. */
   private faces: Map<number, FaceInfo> = new Map();
 
@@ -291,7 +293,7 @@ export class BuilderCanvas {
         ctx.stroke();
       }
       ctx.restore();
-    } else {
+    } else if (!this.fillTexture(shape, verts, ctx)) {
       ctx.fillStyle = fill;
       ctx.fill();
     }

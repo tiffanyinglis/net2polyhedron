@@ -64,6 +64,9 @@ export class ViewerPane {
     },
   };
 
+  /** The file being loaded, shown under the grid until it's drawn. */
+  private loadingName: string | null = null;
+
   constructor(
     private grid: HTMLElement[],
     private message: HTMLElement,
@@ -109,13 +112,15 @@ export class ViewerPane {
       return;
     }
     this.beginLoading();
-    this.setMessage(`Loading ${name}...`);
+    this.loadingName = name; // shown at the bottom, not in the middle of the grid
+    this.host.onChange();
     let file: ViewedFile;
     try {
       file = await this.load(name);
     } catch (err) {
       if (seq !== this.showSeq) return;
       this.endLoading();
+      this.loadingName = null;
       this.setMessage(`Could not read ${name}: ${err instanceof Error ? err.message : String(err)}`);
       this.host.onChange();
       return;
@@ -149,6 +154,7 @@ export class ViewerPane {
     });
     this.renderAll();
     this.endLoading();
+    this.loadingName = null;
     this.host.onChange();
   }
 
@@ -169,9 +175,11 @@ export class ViewerPane {
     return this.current() !== undefined;
   }
 
-  /** "m / n" under the grid: which file is on screen out of how many were found. */
+  /** The line under the grid: "Loading <name>..." while a file loads, else the file on screen and its place (m / n). */
   counterText(): string {
-    return this.names.length ? `${this.index + 1} / ${this.names.length}` : "";
+    if (this.loadingName) return `Loading ${this.loadingName}...`;
+    const name = this.currentName();
+    return name === undefined ? "" : `${name}  (${this.index + 1} / ${this.names.length})`;
   }
 
   /** "name.hippo*" while the file on screen has unsaved changes, for the window title. */

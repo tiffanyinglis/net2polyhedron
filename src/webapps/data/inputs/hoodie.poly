@@ -273,5 +273,30 @@
   ],
   "view": {
     "scale": 1
+  },
+  "colors": {
+    "mode": "african",
+    "multi_colors": [
+      14973,
+      36351,
+      16741302
+    ],
+    "african": [
+      {
+        "shape_id": 1,
+        "cell": 4,
+        "start": 0
+      },
+      {
+        "shape_id": 2,
+        "cell": 11,
+        "start": 1
+      },
+      {
+        "shape_id": 3,
+        "cell": 0,
+        "start": 4
+      }
+    ]
   }
 }

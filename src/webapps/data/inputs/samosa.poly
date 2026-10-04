@@ -20,31 +20,108 @@
       4
     ]
   ],
+  "edges": [
+    [
+      0,
+      1
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      3,
+      0
+    ],
+    [
+      1,
+      4
+    ],
+    [
+      4,
+      3
+    ]
+  ],
+  "face_edge_ids": [
+    [
+      0,
+      1,
+      2,
+      3
+    ],
+    [
+      2,
+      1,
+      4,
+      5
+    ],
+    [
+      0,
+      3,
+      5,
+      4
+    ]
+  ],
+  "source_polygon_id": [
+    1,
+    2,
+    3
+  ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2,
+      3
+    ],
+    [
+      3,
+      2,
+      1,
+      4
+    ],
+    [
+      1,
+      0,
+      3,
+      4
+    ]
+  ],
   "net_layout": [
     {
+      "shape_id": 1,
+      "n": 4,
       "cx": 3.552713678800501e-15,
-      "cy": 0.0,
-      "rotation": 0.0,
+      "cy": 0,
+      "rotation": 0,
       "flipped": false
     },
     {
-      "cx": 140.0,
+      "shape_id": 2,
+      "n": 4,
+      "cx": 140,
       "cy": 7.105427357601002e-15,
       "rotation": 3.141592653589793,
       "flipped": false
     },
     {
+      "shape_id": 3,
+      "n": 4,
       "cx": -3.552713678800501e-15,
-      "cy": -140.0,
+      "cy": -140,
       "rotation": 3.141592653589793,
       "flipped": false
     }
   ],
   "builder_connections": [
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 0,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 0,
       "a_handle": {
         "t": -2.368475785867e-15,
@@ -56,9 +133,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 1,
-      "b_face": 1,
+      "b_shape_id": 2,
       "b_edge": 1,
       "a_handle": {
         "t": 4.736951571734001e-15,
@@ -70,9 +147,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 2,
-      "b_face": 1,
+      "b_shape_id": 2,
       "b_edge": 0,
       "a_handle": {
         "t": -45.66666666666668,
@@ -84,9 +161,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 3,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 1,
       "a_handle": {
         "t": 11.666666666666686,
@@ -98,9 +175,9 @@
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 2,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 3,
       "a_handle": {
         "t": 0.6666666666666985,
@@ -112,9 +189,9 @@
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 3,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 2,
       "a_handle": {
         "t": -116.66666666666669,
@@ -127,6 +204,31 @@
     }
   ],
   "view": {
-    "scale": 1.0
+    "scale": 1
+  },
+  "colors": {
+    "mode": "african",
+    "multi_colors": [
+      14973,
+      36351,
+      16741302
+    ],
+    "african": [
+      {
+        "shape_id": 1,
+        "cell": 5,
+        "start": 2
+      },
+      {
+        "shape_id": 2,
+        "cell": 3,
+        "start": 1
+      },
+      {
+        "shape_id": 3,
+        "cell": 4,
+        "start": 4
+      }
+    ]
   }
 }

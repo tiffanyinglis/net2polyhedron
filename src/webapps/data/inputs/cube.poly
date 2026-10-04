@@ -38,49 +38,195 @@
       6
     ]
   ],
+  "edges": [
+    [
+      0,
+      1
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      3,
+      0
+    ],
+    [
+      4,
+      1
+    ],
+    [
+      0,
+      5
+    ],
+    [
+      5,
+      4
+    ],
+    [
+      3,
+      6
+    ],
+    [
+      6,
+      5
+    ],
+    [
+      4,
+      7
+    ],
+    [
+      7,
+      2
+    ],
+    [
+      7,
+      6
+    ]
+  ],
+  "face_edge_ids": [
+    [
+      0,
+      1,
+      2,
+      3
+    ],
+    [
+      4,
+      0,
+      5,
+      6
+    ],
+    [
+      5,
+      3,
+      7,
+      8
+    ],
+    [
+      1,
+      4,
+      9,
+      10
+    ],
+    [
+      2,
+      10,
+      11,
+      7
+    ],
+    [
+      9,
+      6,
+      8,
+      11
+    ]
+  ],
+  "source_polygon_id": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2,
+      3
+    ],
+    [
+      4,
+      1,
+      0,
+      5
+    ],
+    [
+      5,
+      0,
+      3,
+      6
+    ],
+    [
+      2,
+      1,
+      4,
+      7
+    ],
+    [
+      3,
+      2,
+      7,
+      6
+    ],
+    [
+      7,
+      4,
+      5,
+      6
+    ]
+  ],
   "net_layout": [
     {
+      "shape_id": 1,
+      "n": 4,
       "cx": 3.552713678800501e-15,
-      "cy": 0.0,
-      "rotation": 0.0,
+      "cy": 0,
+      "rotation": 0,
       "flipped": false
     },
     {
-      "cx": 0.0,
-      "cy": -140.0,
+      "shape_id": 2,
+      "n": 4,
+      "cx": 0,
+      "cy": -140,
       "rotation": 1.5707963267948966,
       "flipped": false
     },
     {
-      "cx": -140.0,
-      "cy": 0.0,
-      "rotation": 0.0,
+      "shape_id": 3,
+      "n": 4,
+      "cx": -140,
+      "cy": 0,
+      "rotation": 0,
       "flipped": false
     },
     {
-      "cx": 140.0,
+      "shape_id": 4,
+      "n": 4,
+      "cx": 140,
       "cy": 3.552713678800501e-15,
       "rotation": 4.71238898038469,
       "flipped": false
     },
     {
+      "shape_id": 5,
+      "n": 4,
       "cx": 3.552713678800501e-15,
-      "cy": 140.0,
-      "rotation": 0.0,
+      "cy": 140,
+      "rotation": 0,
       "flipped": false
     },
     {
-      "cx": 0.0,
-      "cy": -280.0,
+      "shape_id": 6,
+      "n": 4,
+      "cx": 0,
+      "cy": -280,
       "rotation": 1.5707963267948966,
       "flipped": false
     }
   ],
   "builder_connections": [
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 0,
-      "b_face": 1,
+      "b_shape_id": 2,
       "b_edge": 1,
       "a_handle": {
         "t": -2.368475785867e-15,
@@ -92,9 +238,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 1,
-      "b_face": 3,
+      "b_shape_id": 4,
       "b_edge": 0,
       "a_handle": {
         "t": 2.3684757858670005e-15,
@@ -106,41 +252,41 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 2,
-      "b_face": 4,
+      "b_shape_id": 5,
       "b_edge": 0,
       "a_handle": {
-        "t": 0.0,
+        "t": 0,
         "n": 23.33333333333333
       },
       "b_handle": {
-        "t": 0.0,
+        "t": 0,
         "n": 23.333333333333343
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 3,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 1,
       "a_handle": {
-        "t": -0.0,
+        "t": 0,
         "n": 23.333333333333343
       },
       "b_handle": {
-        "t": 0.0,
+        "t": 0,
         "n": 23.333333333333343
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 0,
-      "b_face": 3,
+      "b_shape_id": 4,
       "b_edge": 1,
       "a_handle": {
         "t": 10.333333333333314,
-        "n": 67.0
+        "n": 67
       },
       "b_handle": {
         "t": -6.999999999999991,
@@ -148,40 +294,40 @@
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 2,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 0,
       "a_handle": {
         "t": 0.6666666666666856,
-        "n": 63.0
+        "n": 63
       },
       "b_handle": {
-        "t": 9.0,
+        "t": 9,
         "n": 61.666666666666686
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 3,
-      "b_face": 5,
+      "b_shape_id": 6,
       "b_edge": 1,
       "a_handle": {
-        "t": 0.0,
+        "t": 0,
         "n": 23.333333333333343
       },
       "b_handle": {
-        "t": 0.0,
+        "t": 0,
         "n": 23.333333333333343
       }
     },
     {
-      "a_face": 2,
+      "a_shape_id": 3,
       "a_edge": 2,
-      "b_face": 4,
+      "b_shape_id": 5,
       "b_edge": 3,
       "a_handle": {
-        "t": -11.0,
+        "t": -11,
         "n": 58.333333333333314
       },
       "b_handle": {
@@ -190,9 +336,9 @@
       }
     },
     {
-      "a_face": 2,
+      "a_shape_id": 3,
       "a_edge": 3,
-      "b_face": 5,
+      "b_shape_id": 6,
       "b_edge": 2,
       "a_handle": {
         "t": 119.99666666666666,
@@ -204,23 +350,23 @@
       }
     },
     {
-      "a_face": 3,
+      "a_shape_id": 4,
       "a_edge": 2,
-      "b_face": 5,
+      "b_shape_id": 6,
       "b_edge": 0,
       "a_handle": {
         "t": -82.66666666666669,
-        "n": 71.0
+        "n": 71
       },
       "b_handle": {
         "t": 15.333333333333314,
-        "n": 162.0
+        "n": 162
       }
     },
     {
-      "a_face": 3,
+      "a_shape_id": 4,
       "a_edge": 3,
-      "b_face": 4,
+      "b_shape_id": 5,
       "b_edge": 1,
       "a_handle": {
         "t": -0.999999999999988,
@@ -228,13 +374,13 @@
       },
       "b_handle": {
         "t": 13.333333333333314,
-        "n": 47.0
+        "n": 47
       }
     },
     {
-      "a_face": 4,
+      "a_shape_id": 5,
       "a_edge": 2,
-      "b_face": 5,
+      "b_shape_id": 6,
       "b_edge": 3,
       "a_handle": {
         "t": -345.40740399999993,
@@ -248,5 +394,48 @@
   ],
   "view": {
     "scale": 0.5644739300537773
+  },
+  "colors": {
+    "mode": "african",
+    "multi_colors": [
+      14973,
+      36351,
+      16741302,
+      13042175,
+      5163917,
+      16751930
+    ],
+    "african": [
+      {
+        "shape_id": 1,
+        "cell": 10,
+        "start": 3
+      },
+      {
+        "shape_id": 2,
+        "cell": 2,
+        "start": 4
+      },
+      {
+        "shape_id": 3,
+        "cell": 6,
+        "start": 4
+      },
+      {
+        "shape_id": 4,
+        "cell": 0,
+        "start": 2
+      },
+      {
+        "shape_id": 5,
+        "cell": 7,
+        "start": 0
+      },
+      {
+        "shape_id": 6,
+        "cell": 8,
+        "start": 5
+      }
+    ]
   }
 }

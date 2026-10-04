@@ -2,7 +2,15 @@ import { mountAppNav, revealPage } from "../utils/appNav";
 import { regularPolygonVertices } from "../utils/geometry";
 import { Builder, POLYGON_NS, type BuilderMode } from "./builder";
 import { BuilderCanvas } from "./canvas";
-import { netFileFrom, shapesFrom } from "./netFile";
+import { defaultNetColors, netFileFrom, shapesFrom, type NetColors } from "./netFile";
+import { type ColorMode } from "../utils/colors";
+import { atomCornerUV, cellUV } from "../utils/physics/meshLevels";
+import { drawAtlasTriangle } from "../utils/atlasDraw";
+import { hexAtlasImage, hexAtlasLoaded } from "../static_inflater/hexAtlas";
+import { neighboursOf, nextPiece, randomize } from "./colours";
+
+/** The Colour menu state. Each shape has its own colours; a new shape gets them on its next redraw. */
+let colors: NetColors = defaultNetColors();
 import { shapeCssColor } from "./shapes";
 
 mountAppNav("net_builder");
@@ -65,6 +73,8 @@ function hintText(hasSelection: boolean): string {
  */
 function refresh(keepNotice = false) {
   if (!keepNotice) notice = null;
+  ensureColors();
+  updatePalette();
   undoItem.disabled = !builder.canUndo;
   redoItem.disabled = !builder.canRedo;
   const hasSelection = builder.selected.size > 0;
@@ -92,32 +102,133 @@ function refresh(keepNotice = false) {
 
 const canvas = new BuilderCanvas(canvasEl, builder, () => refresh());
 
+// ---- Colour -------------------------------------------------------------------------------------
+
+const colorItems = [...document.querySelectorAll<HTMLButtonElement>("[data-color-mode]")];
+const colourRandomizeItem = document.getElementById("colour-randomize-item") as HTMLButtonElement;
+
+/**
+ * The piece the next pull from the deck makes. It stays the same until the shapes or their colours change, so the
+ * palette icons don't reshuffle on every redraw.
+ */
+let pending = nextPiece([], colors);
+let pendingKey = "";
+
+/** Gives every shape without a colour or texture the pending piece, then picks the next one. */
+function ensureColors() {
+  const ids = builder.shapes.map((s) => s.id);
+  for (const id of ids) {
+    if (colors.multi[id] !== undefined && colors.african[id] !== undefined) continue;
+    colors.multi[id] ??= pending.multi;
+    colors.african[id] ??= pending.african;
+    pendingKey = "";
+  }
+  const key = ids.map((id) => `${id}:${colors.multi[id]}:${colors.african[id]?.cell}`).join(",");
+  if (key !== pendingKey) {
+    pending = nextPiece(ids, colors);
+    pendingKey = key;
+  }
+}
+
+function cssColour(value: number): string {
+  return `#${value.toString(16).padStart(6, "0")}`;
+}
+
+/** The held piece (drawn as a ghost with id -1) is coloured as the next pull, not as a placed shape. */
+const GHOST_ID = -1;
+
+canvas.fillOf = (shape) => {
+  const multi = shape.id === GHOST_ID ? pending.multi : colors.multi[shape.id];
+  return colors.mode === "multi" && multi !== undefined ? cssColour(multi) : shapeCssColor(shape.n);
+};
+
+/** The African Flower texture of a shape: its n wedges, each one hexagon wedge, in the atlas hexagon the shape was given. */
+canvas.fillTexture = (shape, verts, ctx) => {
+  const atlas = hexAtlasImage();
+  const choice = shape.id === GHOST_ID ? pending.african : colors.african[shape.id];
+  if (colors.mode !== "african" || !atlas || !choice) return false;
+  const n = verts.length;
+  const centre: [number, number] = [
+    verts.reduce((sum, [x]) => sum + x, 0) / n,
+    verts.reduce((sum, [, y]) => sum + y, 0) / n,
+  ];
+  for (let k = 0; k < n; k++) {
+    const m = choice.start + k;
+    const uv = [...atomCornerUV(choice.cell, m), ...atomCornerUV(choice.cell, m + 1), ...cellUV(choice.cell, 0.5, 0.5)];
+    drawAtlasTriangle(ctx, atlas, uv, [verts[k], verts[(k + 1) % n], centre], devicePixelRatio);
+  }
+  return true;
+};
+// The atlas loads after the first draw; redraw once it's there so African shapes appear.
+void hexAtlasLoaded().then(() => refresh());
+
+function setColourMode(mode: ColorMode) {
+  colors.mode = mode;
+  ensureColors();
+  for (const item of colorItems) item.classList.toggle("selected", item.dataset.colorMode === mode);
+  colourRandomizeItem.disabled = mode === "polygon";
+  refresh();
+}
+
+/** Colour > Randomize (R): every shape gets a new colour or texture, spread out and clear of its neighbours. */
+function randomizeColours() {
+  randomize(
+    builder.shapes.map((s) => s.id),
+    neighboursOf(builder.connections),
+    colors,
+    colors.mode,
+  );
+  refresh();
+}
+
 // ---- palette ----------------------------------------------------------------------------------
 
 /** Palette icons share one circumradius whatever their side count, so the row reads as evenly sized. */
 const ICON_SIZE = 42;
 const ICON_RADIUS = 16;
 
-function drawIcon(n: number): HTMLCanvasElement {
-  const icon = document.createElement("canvas");
-  icon.width = ICON_SIZE * devicePixelRatio;
-  icon.height = ICON_SIZE * devicePixelRatio;
-  icon.style.width = `${ICON_SIZE}px`;
-  icon.style.height = `${ICON_SIZE}px`;
+/** The palette icons, each drawn as the piece it would be if pulled now (see updatePalette). */
+const icons: { n: number; canvas: HTMLCanvasElement }[] = [];
+
+/** Paints one palette icon for `n` sides, as the piece pulled from the deck would look in the current colour mode. */
+function paintIcon(icon: HTMLCanvasElement, n: number) {
   const ctx = icon.getContext("2d")!;
-  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, icon.width, icon.height);
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   const edge = 2 * ICON_RADIUS * Math.sin(Math.PI / n);
-  ctx.beginPath();
-  regularPolygonVertices(n, edge).forEach(([x, y], i) => {
-    const px = ICON_SIZE / 2 + x;
-    const py = ICON_SIZE / 2 + y;
-    if (i) ctx.lineTo(px, py);
-    else ctx.moveTo(px, py);
-  });
-  ctx.closePath();
-  ctx.fillStyle = shapeCssColor(n);
-  ctx.fill();
-  return icon;
+  const points = regularPolygonVertices(n, edge).map(([x, y]) => [ICON_SIZE / 2 + x, ICON_SIZE / 2 + y] as [number, number]);
+  const piece = pending;
+  if (colors.mode === "african" && piece.african && hexAtlasImage()) {
+    const atlas = hexAtlasImage()!;
+    const centre: [number, number] = [ICON_SIZE / 2, ICON_SIZE / 2];
+    points.forEach((p, k) => {
+      const q = points[(k + 1) % n];
+      const m = piece.african!.start + k;
+      const uv = [...atomCornerUV(piece.african!.cell, m), ...atomCornerUV(piece.african!.cell, m + 1), ...cellUV(piece.african!.cell, 0.5, 0.5)];
+      drawAtlasTriangle(ctx, atlas, uv, [p, q, centre], devicePixelRatio);
+    });
+  } else {
+    ctx.beginPath();
+    points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.fillStyle = colors.mode === "multi" ? cssColour(piece.multi) : shapeCssColor(n);
+    ctx.fill();
+  }
+  if (colors.mode === "african") {
+    // A white outline keeps the textured icons readable against the palette.
+    ctx.beginPath();
+    points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1.25;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+}
+
+function updatePalette() {
+  for (const { n, canvas: icon } of icons) paintIcon(icon, n);
 }
 
 for (const n of POLYGON_NS) {
@@ -125,7 +236,13 @@ for (const n of POLYGON_NS) {
   button.type = "button";
   button.dataset.n = String(n);
   button.title = `${n}-gon`;
-  button.append(drawIcon(n));
+  const icon = document.createElement("canvas");
+  icon.width = ICON_SIZE * devicePixelRatio;
+  icon.height = ICON_SIZE * devicePixelRatio;
+  icon.style.width = `${ICON_SIZE}px`;
+  icon.style.height = `${ICON_SIZE}px`;
+  icons.push({ n, canvas: icon });
+  button.append(icon);
   button.addEventListener("click", () => {
     builder.toggleArmed(n);
     refresh();
@@ -167,6 +284,8 @@ function redo() {
 }
 
 undoItem.addEventListener("click", undo);
+for (const item of colorItems) item.addEventListener("click", () => setColourMode(item.dataset.colorMode as ColorMode));
+colourRandomizeItem.addEventListener("click", randomizeColours);
 redoItem.addEventListener("click", redo);
 
 // ---- files -------------------------------------------------------------------------------------
@@ -179,6 +298,8 @@ function confirmDiscard(): boolean {
 function newNet() {
   if (!confirmDiscard()) return;
   builder.loadShapes([], []);
+  colors = defaultNetColors();
+  setColourMode("polygon");
   fileName = null;
   saveHandle = null;
   setStatus("New net.");
@@ -186,8 +307,11 @@ function newNet() {
 
 async function loadNet(name: string, text: string) {
   try {
-    const { shapes, connections, viewScale } = shapesFrom(JSON.parse(text));
-    builder.loadShapes(shapes, connections);
+    const parsed = shapesFrom(JSON.parse(text));
+    builder.loadShapes(parsed.shapes, parsed.connections);
+    colors = parsed.colors ?? defaultNetColors();
+    setColourMode(colors.mode);
+    const viewScale = parsed.viewScale;
     if (viewScale !== null) canvas.setViewScale(viewScale);
     fileName = name.replace(/\.[^.]+$/, "");
     saveHandle = null;
@@ -203,7 +327,8 @@ async function saveNet(askForFile: boolean) {
   let text: string;
   try {
     const name = fileName ?? "net";
-    text = JSON.stringify(netFileFrom(builder.shapes, builder.connections, name, canvas.viewScale), null, 2);
+    ensureColors();
+    text = JSON.stringify(netFileFrom(builder.shapes, builder.connections, name, canvas.viewScale, colors), null, 2);
   } catch (err) {
     setStatus(err instanceof Error ? err.message : String(err), "error");
     return;
@@ -317,6 +442,14 @@ window.addEventListener("keydown", (e) => {
   if (e.altKey) return;
   if (key === "delete" || key === "backspace") {
     builder.deleteSelected();
+  } else if (e.shiftKey && key === "m") {
+    setColourMode("multi");
+  } else if (key === "p") {
+    setColourMode("polygon");
+  } else if (key === "a") {
+    setColourMode("african");
+  } else if (key === "r") {
+    randomizeColours();
   } else if (key === "m") {
     setMode("move");
   } else if (key === "j") {

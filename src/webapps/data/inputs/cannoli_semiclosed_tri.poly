@@ -106,38 +106,90 @@
       7
     ]
   ],
+  "source_polygon_id": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      2,
+      3,
+      1
+    ],
+    [
+      4,
+      2,
+      0
+    ],
+    [
+      1,
+      3,
+      2
+    ],
+    [
+      0,
+      2,
+      4
+    ],
+    [
+      2,
+      1,
+      0
+    ]
+  ],
   "net_layout": [
     {
-      "cx": -64.0,
-      "cy": -130.0,
-      "rotation": 0.0,
+      "shape_id": 1,
+      "n": 3,
+      "cx": -64,
+      "cy": -130,
+      "rotation": 0,
       "flipped": false
     },
     {
-      "cx": -16.0,
-      "cy": -49.0,
-      "rotation": 0.0,
+      "shape_id": 2,
+      "n": 3,
+      "cx": -16,
+      "cy": -49,
+      "rotation": 0,
       "flipped": false
     },
     {
+      "shape_id": 3,
+      "n": 3,
       "cx": -109.42749812171296,
       "cy": -48.45529676934637,
-      "rotation": 0.0,
+      "rotation": 0,
       "flipped": false
     },
     {
+      "shape_id": 4,
+      "n": 3,
       "cx": -12.306536438767836,
       "cy": -105.35386927122462,
       "rotation": 1.0410334058871196,
       "flipped": false
     },
     {
+      "shape_id": 5,
+      "n": 3,
       "cx": -115.7866265965439,
       "cy": -105.90383170548458,
       "rotation": 1.0410334058871196,
       "flipped": false
     },
     {
+      "shape_id": 6,
+      "n": 3,
       "cx": -60.73929376408711,
       "cy": -13.290758827948906,
       "rotation": 1.0410334058871196,
@@ -146,9 +198,9 @@
   ],
   "builder_connections": [
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 2,
-      "b_face": 5,
+      "b_shape_id": 6,
       "b_edge": 0,
       "a_handle": {
         "t": -2.810301142749804,
@@ -160,9 +212,9 @@
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 0,
-      "b_face": 3,
+      "b_shape_id": 4,
       "b_edge": 1,
       "a_handle": {
         "t": 1.2726744186002157,
@@ -174,9 +226,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 1,
-      "b_face": 3,
+      "b_shape_id": 4,
       "b_edge": 2,
       "a_handle": {
         "t": -1.4593322566452787,
@@ -188,9 +240,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 2,
-      "b_face": 4,
+      "b_shape_id": 5,
       "b_edge": 0,
       "a_handle": {
         "t": 1.716659705308307,
@@ -202,9 +254,9 @@
       }
     },
     {
-      "a_face": 4,
+      "a_shape_id": 5,
       "a_edge": 1,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 0,
       "a_handle": {
         "t": -2.043149494092639,
@@ -216,9 +268,9 @@
       }
     },
     {
-      "a_face": 2,
+      "a_shape_id": 3,
       "a_edge": 1,
-      "b_face": 5,
+      "b_shape_id": 6,
       "b_edge": 2,
       "a_handle": {
         "t": 2.07794689511584,
@@ -230,9 +282,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 0,
-      "b_face": 5,
+      "b_shape_id": 6,
       "b_edge": 1,
       "a_handle": {
         "t": 1.128421976827127,
@@ -244,9 +296,9 @@
       }
     },
     {
-      "a_face": 3,
+      "a_shape_id": 4,
       "a_edge": 0,
-      "b_face": 1,
+      "b_shape_id": 2,
       "b_edge": 1,
       "a_handle": {
         "t": 21.44160118230089,
@@ -260,5 +312,48 @@
   ],
   "view": {
     "scale": 1.3310000000000004
+  },
+  "colors": {
+    "mode": "african",
+    "multi_colors": [
+      14973,
+      36351,
+      16741302,
+      13042175,
+      5163917,
+      16751930
+    ],
+    "african": [
+      {
+        "shape_id": 1,
+        "cell": 2,
+        "start": 4
+      },
+      {
+        "shape_id": 2,
+        "cell": 9,
+        "start": 0
+      },
+      {
+        "shape_id": 3,
+        "cell": 13,
+        "start": 2
+      },
+      {
+        "shape_id": 4,
+        "cell": 0,
+        "start": 1
+      },
+      {
+        "shape_id": 5,
+        "cell": 10,
+        "start": 4
+      },
+      {
+        "shape_id": 6,
+        "cell": 1,
+        "start": 1
+      }
+    ]
   }
 }

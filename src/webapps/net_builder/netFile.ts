@@ -1,6 +1,25 @@
 import { countPieces, exportMesh, type MeshExport } from "./netExport";
 import { defaultHandles, type Connection, type Handle } from "./joins";
 import { POLYGON_NS, type Shape } from "./shapes";
+import { FACE_COLORS, type ColorMode } from "../utils/colors";
+
+/** The Colour menu state: the mode, each shape's Multi-colour (0xRRGGBB), and its African Flower choice (hexagon cell and starting atom), keyed by shape id. */
+export interface NetColors {
+  mode: ColorMode;
+  multi: Record<number, number>;
+  african: Record<number, { cell: number; start: number }>;
+}
+
+export function defaultNetColors(): NetColors {
+  return { mode: "polygon", multi: {}, african: {} };
+}
+
+/** The `colors` block of a `.poly`: the mode and the colours in use, in net_layout order (one entry per shape). */
+export interface NetColorsFile {
+  mode: ColorMode;
+  multi_colors: number[];
+  african: { shape_id: number; cell: number; start: number }[];
+}
 
 /** A `.poly` net file, in the same layout the Python builder writes. */
 export interface NetFile extends MeshExport {
@@ -15,13 +34,20 @@ export interface NetFile extends MeshExport {
     b_handle: Handle;
   }[];
   view: { scale: number };
+  colors: NetColorsFile;
 }
 
 /**
  * Serialises the net. Only one connected piece can be saved: a plain net file has no way to say which piece
  * is the centre, so separate pieces are refused. Validation of the joins happens in exportMesh.
  */
-export function netFileFrom(shapes: Shape[], connections: Connection[], name: string, viewScale: number): NetFile {
+export function netFileFrom(
+  shapes: Shape[],
+  connections: Connection[],
+  name: string,
+  viewScale: number,
+  colors: NetColors = defaultNetColors(),
+): NetFile {
   if (shapes.length === 0) throw new Error("There's nothing to save yet.");
   const pieces = countPieces(shapes, connections);
   if (pieces > 1) {
@@ -47,6 +73,7 @@ export function netFileFrom(shapes: Shape[], connections: Connection[], name: st
       b_handle: { ...c.bHandle },
     })),
     view: { scale: viewScale },
+    colors: colorsFileFrom(shapes, colors),
   };
 }
 
@@ -54,8 +81,19 @@ export function netFileFrom(shapes: Shape[], connections: Connection[], name: st
  * Reads a net back. Shape ids are kept as saved, since the joins refer to them. Joins without handles get the
  * straight-line defaults, as in the Python builder.
  */
-export function shapesFrom(raw: unknown): { shapes: Shape[]; connections: Connection[]; viewScale: number | null } {
-  const file = raw as { faces?: unknown; net_layout?: unknown; builder_connections?: unknown; view?: { scale?: unknown } };
+export function shapesFrom(raw: unknown): {
+  shapes: Shape[];
+  connections: Connection[];
+  viewScale: number | null;
+  colors: NetColors | null;
+} {
+  const file = raw as {
+    faces?: unknown;
+    net_layout?: unknown;
+    builder_connections?: unknown;
+    view?: { scale?: unknown };
+    colors?: unknown;
+  };
   if (!Array.isArray(file?.net_layout)) throw new Error("This file has no net layout to load.");
   const faces = Array.isArray(file.faces) ? (file.faces as unknown[]) : [];
   // Older files have no shape_id or n: their layout entries and joins are indexed by face, and each face is one shape.
@@ -93,5 +131,31 @@ export function shapesFrom(raw: unknown): { shapes: Shape[]; connections: Connec
   });
 
   const scale = file.view?.scale;
-  return { shapes, connections, viewScale: typeof scale === "number" ? scale : null };
+  return { shapes, connections, viewScale: typeof scale === "number" ? scale : null, colors: colorsFrom(file.colors, shapes) };
+}
+
+/** The colour block for a file: one multi-colour per shape in net_layout order, and every shape's African choice. */
+function colorsFileFrom(shapes: Shape[], colors: NetColors): NetColorsFile {
+  return {
+    mode: colors.mode,
+    multi_colors: shapes.map((s, i) => colors.multi[s.id] ?? FACE_COLORS[i % FACE_COLORS.length]),
+    african: shapes.map((s) => ({ shape_id: s.id, ...(colors.african[s.id] ?? { cell: 0, start: 0 }) })),
+  };
+}
+
+/** Reads a file's colour block back, or null if it has none (an older file). */
+function colorsFrom(raw: unknown, shapes: Shape[]): NetColors | null {
+  if (!raw || typeof raw !== "object") return null;
+  const block = raw as Partial<NetColorsFile>;
+  const modes: ColorMode[] = ["polygon", "multi", "african"];
+  const colors = defaultNetColors();
+  colors.mode = modes.includes(block.mode as ColorMode) ? (block.mode as ColorMode) : "polygon";
+  shapes.forEach((s, i) => {
+    const multi = block.multi_colors?.[i];
+    if (typeof multi === "number") colors.multi[s.id] = multi;
+  });
+  for (const entry of block.african ?? []) {
+    colors.african[Number(entry.shape_id)] = { cell: Number(entry.cell), start: Number(entry.start) };
+  }
+  return colors;
 }

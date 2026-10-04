@@ -118,52 +118,84 @@
     5,
     6
   ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      2,
+      3,
+      1
+    ],
+    [
+      4,
+      2,
+      0
+    ],
+    [
+      1,
+      3,
+      2
+    ],
+    [
+      2,
+      1,
+      0
+    ],
+    [
+      0,
+      2,
+      4
+    ]
+  ],
   "net_layout": [
     {
       "shape_id": 1,
       "n": 3,
-      "cx": -93.0,
-      "cy": -107.0,
-      "rotation": 0.0,
+      "cx": -93,
+      "cy": -107,
+      "rotation": 0,
       "flipped": false
     },
     {
       "shape_id": 2,
       "n": 3,
-      "cx": -47.0,
-      "cy": -25.0,
-      "rotation": 0.0,
+      "cx": -47,
+      "cy": -25,
+      "rotation": 0,
       "flipped": false
     },
     {
       "shape_id": 3,
       "n": 3,
-      "cx": -133.0,
-      "cy": -23.0,
-      "rotation": 0.0,
+      "cx": -133,
+      "cy": -23,
+      "rotation": 0,
       "flipped": false
     },
     {
       "shape_id": 4,
       "n": 3,
-      "cx": -46.0,
-      "cy": -78.0,
+      "cx": -46,
+      "cy": -78,
       "rotation": 1.0151503992701965,
       "flipped": false
     },
     {
       "shape_id": 5,
       "n": 3,
-      "cx": -88.0,
-      "cy": 12.0,
+      "cx": -88,
+      "cy": 12,
       "rotation": 1.0151503992701965,
       "flipped": false
     },
     {
       "shape_id": 6,
       "n": 3,
-      "cx": -138.0,
-      "cy": -79.0,
+      "cx": -138,
+      "cy": -79,
       "rotation": 1.0151503992701965,
       "flipped": false
     }
@@ -269,6 +301,49 @@
     }
   ],
   "view": {
-    "scale": 1.0
+    "scale": 1
+  },
+  "colors": {
+    "mode": "african",
+    "multi_colors": [
+      14973,
+      36351,
+      16741302,
+      13042175,
+      5163917,
+      16751930
+    ],
+    "african": [
+      {
+        "shape_id": 1,
+        "cell": 4,
+        "start": 1
+      },
+      {
+        "shape_id": 2,
+        "cell": 2,
+        "start": 5
+      },
+      {
+        "shape_id": 3,
+        "cell": 7,
+        "start": 2
+      },
+      {
+        "shape_id": 4,
+        "cell": 3,
+        "start": 5
+      },
+      {
+        "shape_id": 5,
+        "cell": 10,
+        "start": 1
+      },
+      {
+        "shape_id": 6,
+        "cell": 14,
+        "start": 3
+      }
+    ]
   }
 }

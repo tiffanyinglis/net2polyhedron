@@ -22,26 +22,110 @@
       3
     ]
   ],
+  "edges": [
+    [
+      0,
+      1
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      2,
+      0
+    ],
+    [
+      3,
+      1
+    ],
+    [
+      0,
+      3
+    ],
+    [
+      2,
+      3
+    ]
+  ],
+  "face_edge_ids": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      3,
+      0,
+      4
+    ],
+    [
+      2,
+      5,
+      4
+    ],
+    [
+      1,
+      3,
+      5
+    ]
+  ],
+  "source_polygon_id": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      3,
+      1,
+      0
+    ],
+    [
+      0,
+      2,
+      3
+    ],
+    [
+      2,
+      1,
+      3
+    ]
+  ],
   "net_layout": [
     {
+      "shape_id": 1,
+      "n": 3,
       "cx": 3.1933676382085948e-15,
       "cy": -2.3684757858670005e-15,
-      "rotation": 0.0,
+      "rotation": 0,
       "flipped": false
     },
     {
+      "shape_id": 2,
+      "n": 3,
       "cx": 2.6053233644537006e-14,
       "cy": -110.41451884327381,
       "rotation": 1.0471975511965985,
       "flipped": false
     },
     {
+      "shape_id": 3,
+      "n": 3,
       "cx": -95.62177826491073,
       "cy": 55.20725942163688,
       "rotation": 1.0471975511965976,
       "flipped": false
     },
     {
+      "shape_id": 4,
+      "n": 3,
       "cx": 95.6217782649107,
       "cy": 55.20725942163691,
       "rotation": 5.235987755982988,
@@ -50,9 +134,9 @@
   ],
   "builder_connections": [
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 0,
-      "b_face": 1,
+      "b_shape_id": 2,
       "b_edge": 1,
       "a_handle": {
         "t": -5.921189464667502e-15,
@@ -64,9 +148,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 1,
-      "b_face": 3,
+      "b_shape_id": 4,
       "b_edge": 0,
       "a_handle": {
         "t": 8.881784197001252e-15,
@@ -78,9 +162,9 @@
       }
     },
     {
-      "a_face": 0,
+      "a_shape_id": 1,
       "a_edge": 2,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 0,
       "a_handle": {
         "t": 8.881784197001252e-15,
@@ -92,9 +176,9 @@
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 0,
-      "b_face": 3,
+      "b_shape_id": 4,
       "b_edge": 1,
       "a_handle": {
         "t": 58.72500925240678,
@@ -106,9 +190,9 @@
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 2,
-      "b_face": 2,
+      "b_shape_id": 3,
       "b_edge": 2,
       "a_handle": {
         "t": -38.992958444838095,
@@ -120,9 +204,9 @@
       }
     },
     {
-      "a_face": 2,
+      "a_shape_id": 3,
       "a_edge": 1,
-      "b_face": 3,
+      "b_shape_id": 4,
       "b_edge": 2,
       "a_handle": {
         "t": -59.62177826491073,
@@ -135,6 +219,37 @@
     }
   ],
   "view": {
-    "scale": 1.0
+    "scale": 1
+  },
+  "colors": {
+    "mode": "african",
+    "multi_colors": [
+      14973,
+      36351,
+      16741302,
+      13042175
+    ],
+    "african": [
+      {
+        "shape_id": 1,
+        "cell": 2,
+        "start": 1
+      },
+      {
+        "shape_id": 2,
+        "cell": 5,
+        "start": 0
+      },
+      {
+        "shape_id": 3,
+        "cell": 4,
+        "start": 1
+      },
+      {
+        "shape_id": 4,
+        "cell": 0,
+        "start": 2
+      }
+    ]
   }
 }

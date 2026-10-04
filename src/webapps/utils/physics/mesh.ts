@@ -38,6 +38,8 @@ export interface NetSpec {
   source_polygon_id?: number[];
   /** Each source polygon's vertex ids in its net_layout corner order. */
   source_polygon?: number[][];
+  /** The colours and textures the net builder saved: mode, Multi-colour per shape (net_layout order), African choice per shape. */
+  colors?: { mode: string; multi_colors: number[]; african: { shape_id: number; cell: number; start: number }[] };
   builder_connections?: BuilderConnection[];
 }
 

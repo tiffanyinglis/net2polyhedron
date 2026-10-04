@@ -114,3 +114,31 @@ export function displayColors(
 export function fitMultiColors(colors: ColorState, baseFaces: number[][]) {
   if (colors.multiColors.length !== baseFaces.length) colors.multiColors = randomFaceColors(baseFaces);
 }
+
+/**
+ * The colour state a `.poly` saved (the net builder's `colors` block), mapped onto each base face through its source
+ * polygon. Null if the file has no colours or they don't cover every face.
+ */
+export function colorsFromFile(
+  spec: NetSpec,
+  baseFaces: number[][],
+): { mode: ColorMode; multiColors: number[]; choice: { cell: number; start: number }[] } | null {
+  const block = spec.colors;
+  if (!block) return null;
+  const layout = spec.net_layout ?? [];
+  const shapeOf = (f: number) => spec.source_polygon_id?.[f] ?? layout[f]?.shape_id ?? f;
+  const layoutIndexOf = (shape: number) => layout.findIndex((entry, i) => (entry.shape_id ?? i) === shape);
+  const multiColors: number[] = [];
+  const choice: { cell: number; start: number }[] = [];
+  for (let f = 0; f < baseFaces.length; f++) {
+    const shape = shapeOf(f);
+    const index = layoutIndexOf(shape);
+    const multi = index >= 0 ? block.multi_colors?.[index] : undefined;
+    const african = block.african?.find((a) => a.shape_id === shape);
+    if (typeof multi !== "number" || !african) return null;
+    multiColors.push(multi);
+    choice.push({ cell: african.cell, start: african.start });
+  }
+  const mode: ColorMode = block.mode === "multi" || block.mode === "african" ? block.mode : "polygon";
+  return { mode, multiColors, choice };
+}

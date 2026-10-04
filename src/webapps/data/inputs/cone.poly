@@ -42,15 +42,35 @@
       3
     ]
   ],
+  "source_polygon_id": [
+    1,
+    2
+  ],
+  "source_polygon": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      1,
+      0,
+      2
+    ]
+  ],
   "net_layout": [
     {
-      "cx": -200.0,
-      "cy": 13.0,
-      "rotation": 0.0,
+      "shape_id": 1,
+      "n": 3,
+      "cx": -200,
+      "cy": 13,
+      "rotation": 0,
       "flipped": false
     },
     {
-      "cx": -199.0,
+      "shape_id": 2,
+      "n": 3,
+      "cx": -199,
       "cy": -48.79274057836311,
       "rotation": 3.141592653589793,
       "flipped": false
@@ -58,9 +78,9 @@
   ],
   "builder_connections": [
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 0,
-      "b_face": 0,
+      "b_shape_id": 1,
       "b_edge": 0,
       "a_handle": {
         "t": 0.3333333333333421,
@@ -72,9 +92,9 @@
       }
     },
     {
-      "a_face": 1,
+      "a_shape_id": 2,
       "a_edge": 1,
-      "b_face": 0,
+      "b_shape_id": 1,
       "b_edge": 2,
       "a_handle": {
         "t": -23.838027703441327,
@@ -87,6 +107,25 @@
     }
   ],
   "view": {
-    "scale": 1.0
+    "scale": 1
+  },
+  "colors": {
+    "mode": "african",
+    "multi_colors": [
+      14973,
+      36351
+    ],
+    "african": [
+      {
+        "shape_id": 1,
+        "cell": 4,
+        "start": 0
+      },
+      {
+        "shape_id": 2,
+        "cell": 8,
+        "start": 1
+      }
+    ]
   }
 }

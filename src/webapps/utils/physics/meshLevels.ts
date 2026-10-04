@@ -42,14 +42,14 @@ const ATLAS_GRID = 4;
 const HEX_ATOMS = 6;
 
 /** Texture coordinates of a point (u, v in the hexagon's own square, v up) inside atlas cell `cell`. */
-function cellUV(cell: number, u: number, v: number): [number, number] {
+export function cellUV(cell: number, u: number, v: number): [number, number] {
   const col = cell % ATLAS_GRID;
   const row = Math.floor(cell / ATLAS_GRID);
   return [(col + u) / ATLAS_GRID, (ATLAS_GRID - 1 - row + v) / ATLAS_GRID];
 }
 
 /** A hexagon's corner number m (of 6, at angle 60 degrees * m) inside atlas cell `cell`. */
-function atomCornerUV(cell: number, m: number): [number, number] {
+export function atomCornerUV(cell: number, m: number): [number, number] {
   const a = (Math.PI / 3) * (m % HEX_ATOMS);
   return cellUV(cell, 0.5 + 0.5 * Math.cos(a), 0.5 + 0.5 * Math.sin(a));
 }
@@ -175,26 +175,16 @@ export function fanLevel0To1(base: Mesh, choice?: AtlasChoice, grouping?: Groupi
     const baseIds = base.faceEdgeIds[faceIdx];
     const hub = grouping?.hubIdx[faceIdx];
     const wedge = grouping?.wedgeOf[faceIdx];
+    // A triangle of a self-joined polygon is subdivided like any other triangle, but its texture is its own wedge
+    // of the polygon's hexagon: one corner per triangle corner, and each new centroid at the average of the three.
+    let wedgeUV: number[][] | null = null;
     if (hub !== null && hub !== undefined && wedge !== null && wedge !== undefined) {
-      // A wedge of a self-joined polygon is already a fan triangle: its own vertices and spokes, one fine triangle.
       const m = start + wedge;
       const rimA = (hub + 1) % 3;
       const rimB = (hub + 2) % 3;
-      const uvOf = (corner: number): [number, number] =>
-        corner === rimA ? atomCornerUV(cell, m) : corner === rimB ? atomCornerUV(cell, m + 1) : cellUV(cell, 0.5, 0.5);
-      // The hub spokes get the same rest length as a fan's spokes for this polygon's size.
-      const size = grouping!.groupOf.filter((g) => g === grouping!.groupOf[faceIdx]).length;
-      const spokeLen = spokeRestLength(size, EDGE_LENGTH);
-      face.forEach((v, i) => {
-        if (v === face[hub] || face[(i + 1) % 3] === face[hub]) restLengths[baseIds[i]] = spokeLen;
-      });
-      faces.push([...face]);
-      faceEdgeIds.push([...baseIds]);
-      faceUV.push([0, 1, 2].flatMap((corner) => [...uvOf(corner)]));
-      faceOfFine.push(faceIdx);
-      // Open like the fan's wedges: its rim edge (the one not touching the hub) has only one face using it.
-      faceOpen.push(uses.get(baseIds[rimA]) === 1);
-      return;
+      wedgeUV = [0, 1, 2].map((c) =>
+        c === rimA ? [...atomCornerUV(cell, m)] : c === rimB ? [...atomCornerUV(cell, m + 1)] : [...cellUV(cell, 0.5, 0.5)],
+      );
     }
     const entries = SUBDIVISIONS[n];
     if (!entries) throw new Error(`no hardcoded subdivision for a ${n}-gon`);
@@ -212,8 +202,13 @@ export function fanLevel0To1(base: Mesh, choice?: AtlasChoice, grouping?: Groupi
     entries.map((e) => [e[0], e[1]] as [number, number]).forEach(([p, q], i) => {
       if (centroid === null) centroid = nextVertex++;
       faces.push([face[p], face[q], centroid]);
-      const m = start + i; // this triangle's atom: the hexagon's wedge m, between corners m and m + 1
-      faceUV.push([...atomCornerUV(cell, m), ...atomCornerUV(cell, m + 1), ...cellUV(cell, 0.5, 0.5)]);
+      if (wedgeUV) {
+        const centreUV = [0, 1].map((k) => (wedgeUV![0][k] + wedgeUV![1][k] + wedgeUV![2][k]) / 3);
+        faceUV.push([...wedgeUV[p], ...wedgeUV[q], ...centreUV]);
+      } else {
+        const m = start + i; // this triangle's atom: the hexagon's wedge m, between corners m and m + 1
+        faceUV.push([...atomCornerUV(cell, m), ...atomCornerUV(cell, m + 1), ...cellUV(cell, 0.5, 0.5)]);
+      }
       faceEdgeIds.push([baseIds[p], spokeOf(q), spokeOf(p)]);
       faceOfFine.push(faceIdx);
       // A wedge is open when its own rim (base edge p) has only one face using it, as in
