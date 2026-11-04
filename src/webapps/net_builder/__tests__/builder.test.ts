@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Builder, PASTE_OFFSET, shapeVertices, type Shape } from "../builder";
+import { edgeMidpoints } from "../joins";
 import { netFileFrom, shapesFrom } from "../netFile";
+import { DEFAULT_SHAPE_EDGE_LENGTH } from "../shapes";
 
 function withShapes(...shapes: Partial<Shape>[]): Builder {
   const b = new Builder();
@@ -68,6 +70,90 @@ describe("Builder: undo and redo", () => {
     b.clickShape(b.shapes[0], false);
     b.toggleFlipSelected();
     expect(b.canRedo).toBe(false);
+  });
+});
+
+describe("Builder: slow untangle", () => {
+  function chainOf3(): Builder {
+    const b = new Builder();
+    const shapes: Shape[] = [1, 2, 3].map((id) => ({ id, n: 4, cx: 0, cy: 0, rotation: 0, flipped: false }));
+    const connections = [
+      { id: 1, aShape: 1, aEdge: 1, bShape: 2, bEdge: 3, aHandle: { t: 0, n: 0 }, bHandle: { t: 0, n: 0 } },
+      { id: 2, aShape: 2, aEdge: 1, bShape: 3, bEdge: 3, aHandle: { t: 0, n: 0 }, bHandle: { t: 0, n: 0 } },
+    ];
+    b.loadShapes(shapes, connections);
+    return b;
+  }
+
+  it("leaves every piece exactly where it was until its own step runs", () => {
+    const b = chainOf3();
+    const order = b.beginSlowUntangle()!;
+    expect(order).toHaveLength(3);
+    for (const shape of b.shapes) expect([shape.cx, shape.cy]).toEqual([0, 0]);
+  });
+
+  it("reveals pieces strictly in the returned order, leaving the rest untouched at each step", () => {
+    const b = chainOf3();
+    const order = b.beginSlowUntangle()!;
+    for (let i = 0; i < order.length; i++) {
+      b.applyUntangleStep(i);
+      const stillAtOrigin = order.slice(i + 1).every((id) => {
+        const s = b.shapeById(id)!;
+        return s.cx === 0 && s.cy === 0;
+      });
+      expect(stillAtOrigin).toBe(true);
+    }
+    b.finishSlowUntangle();
+    for (let i = 0; i < b.shapes.length; i++) {
+      for (let j = i + 1; j < b.shapes.length; j++) {
+        const a = b.shapes[i];
+        const c = b.shapes[j];
+        expect(Math.hypot(a.cx - c.cx, a.cy - c.cy)).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("settles each join's gap towards one polygon edge apart as every piece is revealed", () => {
+    // Nothing else forces a particular spacing here (a simple chain, nothing to dodge), so the spring
+    // relaxation each step runs (see relax.ts) should leave both joins close to the fold-line ideal gap.
+    const b = chainOf3();
+    const order = b.beginSlowUntangle()!;
+    for (let i = 0; i < order.length; i++) b.applyUntangleStep(i);
+    for (const conn of b.connections) {
+      const a = b.shapeById(conn.aShape)!;
+      const other = b.shapeById(conn.bShape)!;
+      const [ax, ay] = edgeMidpoints(a)[conn.aEdge];
+      const [bx, by] = edgeMidpoints(other)[conn.bEdge];
+      expect(Math.hypot(bx - ax, by - ay)).toBeCloseTo(DEFAULT_SHAPE_EDGE_LENGTH, -1);
+    }
+  });
+
+  it("is a single undo step, same as untangle()", () => {
+    const b = chainOf3();
+    const order = b.beginSlowUntangle()!;
+    for (let i = 0; i < order.length; i++) b.applyUntangleStep(i);
+    b.finishSlowUntangle();
+    expect(b.canUndo).toBe(true);
+    b.undoStep();
+    for (const shape of b.shapes) expect([shape.cx, shape.cy]).toEqual([0, 0]);
+  });
+
+  it("hides every piece until beginSlowUntangle, reveals only what's been stepped to, and shows everyone again once finished", () => {
+    const b = chainOf3();
+    for (const shape of b.shapes) expect(b.isRevealed(shape.id)).toBe(true);
+
+    const order = b.beginSlowUntangle()!;
+    for (const shape of b.shapes) expect(b.isRevealed(shape.id)).toBe(false);
+
+    b.applyUntangleStep(0);
+    expect(b.isRevealed(order[0])).toBe(true);
+    for (const id of order.slice(1)) expect(b.isRevealed(id)).toBe(false);
+
+    for (let i = 1; i < order.length; i++) b.applyUntangleStep(i);
+    for (const id of order) expect(b.isRevealed(id)).toBe(true);
+
+    b.finishSlowUntangle();
+    for (const shape of b.shapes) expect(b.isRevealed(shape.id)).toBe(true);
   });
 });
 

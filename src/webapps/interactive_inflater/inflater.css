@@ -93,16 +93,23 @@
   display: none;
 }
 
-/* All six shapes on one row, at their set size (54px icons). */
+/* The shape deck on the left, Untangle on the right, both on the same row above the 2D canvas. */
 #palette {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+/* All six shapes on one row, at their set size (54px icons). */
+#palette-shapes {
   display: grid;
   grid-template-columns: repeat(6, max-content);
-  justify-content: center;
   align-items: center;
   gap: 2px;
 }
 
-#palette button {
+#palette-shapes button {
   width: 58px;
   height: 58px;
   padding: 0;
@@ -112,18 +119,44 @@
   cursor: pointer;
 }
 
-#palette button:hover {
+#palette-shapes button:hover {
   background: var(--menu-active);
 }
 
-#palette button.armed {
+#palette-shapes button.armed {
   border-color: white;
 }
 
-#palette canvas {
+#palette-shapes canvas {
   display: block;
   width: 54px;
   height: 54px;
+}
+
+#untangle-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.untangle-btn {
+  height: 42px;
+  padding: 0 14px;
+  background: var(--panel);
+  color: #e6e6e6;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.untangle-btn:hover:not(:disabled) {
+  background: var(--menu-active);
+}
+
+.untangle-btn:disabled {
+  color: #5a5a5a;
+  cursor: default;
 }
 
 .reject-dialog {
@@ -163,6 +196,22 @@
 .status.success { color: var(--success); }
 .status.error { color: var(--error); }
 .status.warn { color: var(--warn); }
+
+/* The hint on the left, the live crossing count on the right, on the 2D view's own status line. */
+#builder-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+#crossing-count {
+  white-space: nowrap;
+  color: var(--menu-disabled);
+}
+
+#crossing-count.zero { color: var(--success); }
+#crossing-count.nonzero { color: var(--warn); }
 
 /* The line drawn while dragging a join in 3D: covers the view and never takes the pointer. */
 .drag-line {

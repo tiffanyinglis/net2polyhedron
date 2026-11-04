@@ -26,7 +26,9 @@ function orientation(a: Point, b: Point, c: Point): number {
   return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }
 
-function segmentsCross(a: Point, b: Point, c: Point, d: Point): boolean {
+/** Whether segment ab properly crosses segment cd (a transversal intersection; touching endpoints or
+ * overlapping collinear segments don't count). */
+export function segmentsCross(a: Point, b: Point, c: Point, d: Point): boolean {
   const d1 = orientation(c, d, a);
   const d2 = orientation(c, d, b);
   const d3 = orientation(a, b, c);

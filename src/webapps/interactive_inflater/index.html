@@ -41,7 +41,13 @@
 
       <!-- Each pane's parts are direct grid items, so the two drawing areas share rows and line up exactly. -->
       <div id="interactive">
-        <aside id="palette" class="pane-header" aria-label="Shapes"></aside>
+        <aside id="palette" class="pane-header">
+          <div id="palette-shapes" aria-label="Shapes"></div>
+          <div id="untangle-controls">
+            <button id="untangle-btn" class="untangle-btn" type="button" title="Untangle the net layout">Untangle</button>
+            <button id="slow-untangle-btn" class="untangle-btn" type="button" title="Untangle the net layout one piece at a time: places the first piece, then Space places each next one">Slow untangle</button>
+          </div>
+        </aside>
         <fieldset id="setup" class="pane-header">
           <legend>Setup</legend>
           <!-- Browser-style controls above the 3D view: Back (undo), Forward (redo), Refresh (full inflate). -->
@@ -68,7 +74,11 @@
         <div id="canvas-area" class="drawing"><canvas id="net-canvas"></canvas></div>
         <div id="viewer" class="drawing"></div>
 
-        <div id="builder-status" class="status"></div>
+        <!-- The 2D view's status line, with the live crossing count right-aligned on the same line. -->
+        <div id="builder-status" class="status">
+          <span id="builder-hint"></span>
+          <span id="crossing-count"></span>
+        </div>
         <!-- The 3D view's status line, with the debug-mode replay slider right-aligned on the same line. -->
         <div id="inflater-footer" class="inflater-footer">
           <div id="inflater-status" class="status"></div>

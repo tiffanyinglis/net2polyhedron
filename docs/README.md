@@ -142,6 +142,19 @@ convex hull.
   collapses a face's own two corners into one point) is refused with an
   error message naming the exact conflict.
 
+## Web app
+
+A pure client-side (Vite + TypeScript + three.js) port of the inflater lives in
+`src/webapps/`. From that directory:
+
+```bash
+npm install
+npm run dev
+```
+
+This starts a dev server (prints a `localhost` URL to open in your browser).
+Also available: `npm test` (vitest) and `npm run build` (production build).
+
 ## Running the tests
 
 ```bash

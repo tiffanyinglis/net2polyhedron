@@ -76,8 +76,31 @@ function darkenRim(image: HTMLImageElement): HTMLCanvasElement {
   return canvas;
 }
 
-/** How steeply the stitch relief tilts: the normal map's slope per unit of brightness change between neighbouring pixels. */
-const RELIEF_SLOPE = 4;
+/** How steeply the stitch relief tilts: the normal map's slope per unit of local contrast between neighbouring pixels. */
+const RELIEF_SLOPE = 2;
+/** Radius in pixels of the window used to measure local contrast, so dark stitches get relief as strong as bright ones. */
+const RELIEF_WINDOW = 8;
+
+/** Mean of each pixel's (2r+1)-square neighbourhood, clamped at the edges. */
+function boxBlur(src: Float32Array, W: number, H: number, r: number): Float32Array {
+  const tmp = new Float32Array(W * H);
+  const out = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[y * W + Math.min(W - 1, Math.max(0, x + k))];
+      tmp[y * W + x] = sum / (2 * r + 1);
+    }
+  }
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += tmp[Math.min(H - 1, Math.max(0, y + k)) * W + x];
+      out[y * W + x] = sum / (2 * r + 1);
+    }
+  }
+  return out;
+}
 
 /**
  * A normal map for the atlas, laid out exactly like the colour atlas so the same UVs pick it. Brightness is
@@ -90,7 +113,7 @@ function reliefNormalMap(source: HTMLCanvasElement): HTMLCanvasElement {
   const src = source.getContext("2d", { willReadFrequently: true })!.getImageData(0, 0, W, H).data;
   const clampX = (x: number) => Math.min(W - 1, Math.max(0, x));
   const clampY = (y: number) => Math.min(H - 1, Math.max(0, y));
-  const height = new Float32Array(W * H);
+  const smooth = new Float32Array(W * H);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       let sum = 0;
@@ -100,9 +123,19 @@ function reliefNormalMap(source: HTMLCanvasElement): HTMLCanvasElement {
           sum += 0.299 * src[p] + 0.587 * src[p + 1] + 0.114 * src[p + 2];
         }
       }
-      height[y * W + x] = sum / 9 / 255;
+      smooth[y * W + x] = sum / 9 / 255;
     }
   }
+  // Remove the broad brightness so only the stitch-scale detail is left, then divide by its local
+  // size: a dark rim's faint texture ends up with as much relief as a bright petal's.
+  const mean = boxBlur(smooth, W, H, RELIEF_WINDOW);
+  const detail = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) detail[i] = smooth[i] - mean[i];
+  const squared = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) squared[i] = detail[i] * detail[i];
+  const amplitude = boxBlur(squared, W, H, RELIEF_WINDOW);
+  const height = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) height[i] = detail[i] / (Math.sqrt(amplitude[i]) + 0.05);
   const out = document.createElement("canvas");
   out.width = W;
   out.height = H;

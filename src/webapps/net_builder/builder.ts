@@ -1,9 +1,12 @@
 import { pointInPolygon, rectIntersectsPolygon, type Point } from "../utils/geometry";
 import { UndoStack } from "../utils/undoStack";
+import { curveConnectionsToMinimizeCrossings } from "./curve";
 import { defaultHandles, handleFromWorld, type Connection, type End } from "./joins";
 import { isValidNet, pickOwner } from "./faceTypes";
 import { exportMesh, NetValidationError } from "./netExport";
+import { relaxSprings } from "./relax";
 import { DEFAULT_SHAPE_EDGE_LENGTH, shapeVertices, type Shape } from "./shapes";
+import { untangledLayout } from "./untangle";
 
 export { DEFAULT_SHAPE_EDGE_LENGTH, POLYGON_NS, shapeCssColor, shapeVertices, type Shape } from "./shapes";
 
@@ -418,6 +421,144 @@ export class Builder {
     this.connections.push(...pasted.connections);
     this.selected = new Set(pasted.shapes.map((s) => s.id));
     this.selectedConnection = null;
+  }
+
+  /**
+   * Breadth-first greedily places every piece (see untangle.ts, greedyPlace.ts) -- each one tried at
+   * several candidate positions and rotations together and kept at whichever adds the fewest crossings
+   * against everything placed so far, a crossings tie going to whichever leaves its own joins shortest and
+   * squarest to their edges -- to untangle a tangled net, then a final pass guarantees no two pieces are
+   * left overlapping. Every join's curve is then reset to the straight line between its two edges (any
+   * bezier handle a user dragged is cleared first) -- a curve bowed out for the old layout and rotation
+   * would read as tangled again on the new one. Finally, whichever straight lines still cross something
+   * are bowed back out, but deliberately this time, to dodge around whatever they cross wherever that
+   * helps (see curve.ts) -- the placement already removes most crossings a straight line can't avoid; this
+   * last step mops up the rest. Flipped side and the joins themselves are unchanged. One undo step
+   * restores the layout, every piece's rotation, and every curve as they were before.
+   */
+  untangle() {
+    if (this.shapes.length < 2 || !this.canMove) return;
+    this.pushUndo();
+    const { positions, rotations } = untangledLayout(this.shapes, this.connections);
+    for (const shape of this.shapes) {
+      const p = positions.get(shape.id);
+      if (p) {
+        shape.cx = p[0];
+        shape.cy = p[1];
+      }
+      shape.rotation = rotations.get(shape.id) ?? shape.rotation;
+    }
+    this.relaxVisible(this.shapes.map((s) => s.id));
+    for (const conn of this.connections) {
+      const a = this.shapeById(conn.aShape);
+      const b = this.shapeById(conn.bShape);
+      if (!a || !b) continue;
+      const handles = defaultHandles(a, conn.aEdge, b, conn.bEdge);
+      conn.aHandle = handles.aHandle;
+      conn.bHandle = handles.bHandle;
+    }
+    curveConnectionsToMinimizeCrossings(this.shapes, this.connections);
+  }
+
+  /** Layout computed by beginSlowUntangle, not yet applied past whatever applyUntangleStep has revealed.
+   * `visible` is every id revealed so far -- see isRevealed. */
+  private slowUntangle: {
+    order: number[];
+    positions: Map<number, [number, number]>;
+    rotations: Map<number, number>;
+    visible: Set<number>;
+  } | null = null;
+
+  /**
+   * The same breadth-first greedy placement untangle() uses, but not applied yet: the caller reveals it
+   * one piece at a time with applyUntangleStep, so an animation can show the net being built up the way
+   * greedy placement itself builds it, ring by ring, instead of jumping straight to the finished layout.
+   * Every piece starts hidden (see isRevealed) -- nothing is moved or drawn until its own step runs.
+   * Pushes the one undo step the whole animation restores, same as untangle() does; returns the order
+   * applyUntangleStep's own index argument walks, or null if there's nothing to untangle (see untangle()).
+   */
+  beginSlowUntangle(): number[] | null {
+    if (this.shapes.length < 2 || !this.canMove) return null;
+    this.pushUndo();
+    const { positions, rotations, order } = untangledLayout(this.shapes, this.connections);
+    this.slowUntangle = { order, positions, rotations, visible: new Set() };
+    return order;
+  }
+
+  /**
+   * Reveals the piece at `order[index]` (the order beginSlowUntangle returned) at its greedily-chosen
+   * position and rotation, then relaxes the whole revealed-so-far group (see relaxVisible) -- so each new
+   * piece's spring can pull on its already-placed neighbours too, not just settle on its own -- and
+   * straightens every join between two revealed pieces to match wherever relaxing left them.
+   */
+  applyUntangleStep(index: number) {
+    if (!this.slowUntangle) return;
+    const { order, positions, rotations, visible } = this.slowUntangle;
+    const id = order[index];
+    const shape = this.shapeById(id);
+    if (!shape) return;
+    const p = positions.get(id);
+    if (p) {
+      shape.cx = p[0];
+      shape.cy = p[1];
+    }
+    shape.rotation = rotations.get(id) ?? shape.rotation;
+    visible.add(id);
+
+    this.relaxVisible([...visible]);
+
+    for (const conn of this.connections) {
+      if (!visible.has(conn.aShape) || !visible.has(conn.bShape)) continue;
+      const a = this.shapeById(conn.aShape);
+      const b = this.shapeById(conn.bShape);
+      if (!a || !b) continue;
+      const handles = defaultHandles(a, conn.aEdge, b, conn.bEdge);
+      conn.aHandle = handles.aHandle;
+      conn.bHandle = handles.bHandle;
+    }
+  }
+
+  /** Settles `ids`' pieces like a mass-spring model, pulling each real join between two of them towards
+   * sitting one polygon edge apart and square to its neighbour (see relaxSprings in relax.ts) -- a physical
+   * correction layered on top of whatever position and rotation greedy placement (or Undo/a previous call)
+   * already chose, not a replacement for its own crossing-aware search. Mutates those pieces' cx/cy/rotation
+   * in place. */
+  private relaxVisible(ids: number[]) {
+    const positions = new Map<number, [number, number]>(
+      ids.map((id) => {
+        const s = this.shapeById(id)!;
+        return [id, [s.cx, s.cy] as [number, number]];
+      }),
+    );
+    const rotations = new Map<number, number>(ids.map((id) => [id, this.shapeById(id)!.rotation]));
+    relaxSprings(this.shapes, ids, positions, rotations, this.connections);
+    for (const id of ids) {
+      const s = this.shapeById(id)!;
+      const [x, y] = positions.get(id)!;
+      s.cx = x;
+      s.cy = y;
+      s.rotation = rotations.get(id)!;
+    }
+  }
+
+  /**
+   * The last step, once every applyUntangleStep has run: bows out whichever straight joins still cross
+   * something (see curve.ts), same as untangle()'s own last step, and clears the state beginSlowUntangle
+   * started -- including the hidden/revealed distinction isRevealed uses, so every piece draws again.
+   */
+  finishSlowUntangle() {
+    curveConnectionsToMinimizeCrossings(this.shapes, this.connections);
+    this.slowUntangle = null;
+  }
+
+  /**
+   * Whether `id`'s piece should currently be drawn. Always true outside a slow untangle; during one, only
+   * once applyUntangleStep has revealed it. This is purely a 2D drawing concern -- shapes and connections
+   * themselves are never removed, so nothing that reads the net's actual structure (the 3D view among it)
+   * sees any change while a slow untangle is in progress, only the 2D canvas, which checks this itself.
+   */
+  isRevealed(id: number): boolean {
+    return this.slowUntangle === null || this.slowUntangle.visible.has(id);
   }
 
   undoStep() {

@@ -98,6 +98,10 @@ export class BuilderCanvas {
   private centred = false;
   /** Debug mode (the page's D key): shows the owner's anchor glyph. Only the combined page uses it. */
   debug = false;
+  /** While true (e.g. a Slow untangle in progress, or the 3D view running), every edit gesture -- drag,
+   * rotate, join, marquee-select, dropping an armed shape -- is refused, but panning (right-drag) and
+   * zooming (the wheel) still work: those only move the camera, not the net. */
+  locked = false;
   /** The piece under the pointer (drawn with a yellow outline), or null. Set by the pointer; the page can set it too. */
   hoverPiece: number | null = null;
   /** Called when the piece under the pointer changes (null when the pointer leaves the pieces). */
@@ -191,12 +195,16 @@ export class BuilderCanvas {
     this.dropStalePending();
 
     this.faces = this.combined ? faceInfo(builder.shapes, builder.connections, builder.ownerShapeId()) : new Map();
+    // A slow untangle in progress hides whatever it hasn't revealed yet (see Builder.isRevealed) -- a
+    // purely 2D drawing concern, so builder.shapes/connections themselves are untouched.
     for (const shape of builder.shapes) {
+      if (!builder.isRevealed(shape.id)) continue;
       this.drawShape(shape, builder.selected.has(shape.id));
     }
 
     const joined = builder.joinedEdges();
     for (const conn of builder.connections) {
+      if (!builder.isRevealed(conn.aShape) || !builder.isRevealed(conn.bShape)) continue;
       const touchesSelection = builder.selected.has(conn.aShape) || builder.selected.has(conn.bShape);
       this.drawConnection(conn, conn.id === builder.selectedConnection || touchesSelection);
     }
@@ -449,6 +457,7 @@ export class BuilderCanvas {
     const radius = this.edgeHandleRadius();
     if (radius < MIN_DRAWN_RADIUS) return;
     for (const shape of this.builder.shapes) {
+      if (!this.builder.isRevealed(shape.id)) continue;
       edgeMidpoints(shape).forEach((mid, edge) => {
         const [sx, sy] = this.toScreen(...mid);
         const lit =
@@ -567,7 +576,10 @@ export class BuilderCanvas {
     const sy = e.offsetY;
     this.canvas.setPointerCapture(e.pointerId);
     if (e.button === 0) {
-      if (this.combined) {
+      // Locked: a left press neither edits nor selects -- only panning and zooming stay live.
+      if (this.locked) {
+        // empty
+      } else if (this.combined) {
         const line = this.isJoinPress(sx, sy) ? null : this.polygonEdgeHit(sx, sy);
         if (this.isJoinPress(sx, sy)) this.onJoinPress(sx, sy);
         else if (line) {
@@ -579,7 +591,8 @@ export class BuilderCanvas {
       } else if (this.builder.mode === "join") this.onJoinPress(sx, sy);
       else this.onMovePress(e, sx, sy);
     } else if (e.button === 2) {
-      const centre = this.showsMoveRotate() ? this.builder.selectionCentre() : null;
+      // Locked: never rotate the selection, right-drag always just pans.
+      const centre = !this.locked && this.showsMoveRotate() ? this.builder.selectionCentre() : null;
       if (centre) {
         const [cx, cy] = this.toScreen(centre[0], centre[1]);
         this.builder.beginGesture();
@@ -728,7 +741,12 @@ export class BuilderCanvas {
   private onPointerMove(e: PointerEvent) {
     const sx = e.offsetX;
     const sy = e.offsetY;
-    if (!this.drag && !this.handleDrag && this.builder.armedN === null) {
+    if (this.locked) {
+      // Locked: nothing to select or edit, and hit-testing doesn't know about hidden pieces (e.g. a Slow
+      // untangle not yet revealed them), so leave whatever's hovered alone rather than lighting up one.
+      this.setHoverPiece(null);
+      this.setHoverEdge(null);
+    } else if (!this.drag && !this.handleDrag && this.builder.armedN === null) {
       const shape = this.builder.hitTest(...this.toWorld(sx, sy));
       this.setHoverPiece(shape ? shape.id : null);
       this.setHoverEdge(this.edgeUnder(sx, sy));

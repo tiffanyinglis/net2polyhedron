@@ -31,3 +31,10 @@ export function shapeVertices(shape: Shape): Point[] {
 export function shapeCssColor(n: number): string {
   return `#${polygonColor(n).toString(16).padStart(6, "0")}`;
 }
+
+/** Radius of the circle every n-gon's corners sit on, at the shared default edge length. A piece never
+ * reaches further than this from its own centre, whatever it's rotated to (used by untangle.ts and
+ * tutte.ts to guarantee pieces can't overlap from centre distance alone). */
+export function circumradius(n: number): number {
+  return DEFAULT_SHAPE_EDGE_LENGTH / (2 * Math.sin(Math.PI / n));
+}

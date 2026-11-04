@@ -99,6 +99,28 @@ export function handleFromWorld(shape: Shape, edge: number, world: Point): Handl
 }
 
 /**
+ * How well a join's two edges are squared up to each other, judged purely from their current positions and
+ * rotations (no handles or curve involved): `length` is the straight-line distance between the two edges'
+ * midpoints -- the shortest a join can usefully be is close to one edge's own length (DEFAULT_SHAPE_EDGE_LENGTH
+ * in shapes.ts), since going shorter starts to need the two faces overlapping -- and `squareness` is 0 when
+ * the straight line between them leaves BOTH edges exactly perpendicular (the fold-line ideal a real paper
+ * join needs) and rises towards 1 as that line runs closer to parallel with either edge instead (the worst
+ * case: the join reads as a crease along a piece's own side, not a connector to the next piece).
+ */
+export function connectorQuality(a: Shape, aEdge: number, b: Shape, bEdge: number): { length: number; squareness: number } {
+  const fa = edgeFrame(a, aEdge);
+  const fb = edgeFrame(b, bEdge);
+  const dx = fb.origin[0] - fa.origin[0];
+  const dy = fb.origin[1] - fa.origin[1];
+  const length = Math.hypot(dx, dy);
+  if (length < 1e-9) return { length, squareness: 0 };
+  const ux = dx / length;
+  const uy = dy / length;
+  const squareness = (ux * fa.tangent[0] + uy * fa.tangent[1]) ** 2 + (ux * fb.tangent[0] + uy * fb.tangent[1]) ** 2;
+  return { length, squareness };
+}
+
+/**
  * Starting handles for a new join: the two control points sit a third and two thirds of the way along the
  * straight line between the edges' midpoints, so a fresh connection draws as that straight line.
  */
@@ -123,11 +145,11 @@ export function connectionGeometry(conn: Connection, shapeById: (id: number) => 
   ];
 }
 
-/** A cubic bezier sampled into a polyline. */
-export function sampleCubic(p0: Point, p1: Point, p2: Point, p3: Point): Point[] {
+/** A cubic bezier sampled into a polyline, at `steps` segments (the curve's own draw resolution by default). */
+export function sampleCubic(p0: Point, p1: Point, p2: Point, p3: Point, steps: number = CURVE_STEPS): Point[] {
   const points: Point[] = [];
-  for (let i = 0; i <= CURVE_STEPS; i++) {
-    const t = i / CURVE_STEPS;
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
     const u = 1 - t;
     const w0 = u * u * u;
     const w1 = 3 * u * u * t;

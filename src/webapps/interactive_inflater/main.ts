@@ -26,6 +26,7 @@ import {
 import { activeGroup, structureKey } from "./bridge";
 import { buildDisplay, edgePath, junctionKey, NO_SOLVE_TOPOLOGY, planPlacement, type Display, type Placement } from "./placement";
 import { edgeGroup } from "../net_builder/joins";
+import { countConnectionCrossings } from "../net_builder/crossings";
 import { rigidTransformFrom } from "../utils/physics/kabsch";
 import { CONVERGENCE_GTOL } from "../utils/physics/convergence";
 import { surfaceTriangles } from "./diffInflate";
@@ -46,8 +47,11 @@ const AUTO_INFLATE_DELAY_MS = 300;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvasEl = $<HTMLCanvasElement>("net-canvas");
-const paletteEl = $("palette");
-const builderStatusEl = $("builder-status");
+const paletteEl = $("palette-shapes");
+const untangleBtn = $<HTMLButtonElement>("untangle-btn");
+const slowUntangleBtn = $<HTMLButtonElement>("slow-untangle-btn");
+const builderHintEl = $("builder-hint");
+const crossingCountEl = $("crossing-count");
 const inflaterStatusEl = $("inflater-status");
 const inflateBtn = $<HTMLButtonElement>("inflate-btn");
 const undoBtn = $<HTMLButtonElement>("undo-btn");
@@ -93,6 +97,8 @@ const store = new LevelStore();
 
 let running = false;
 let stopRequested = false;
+/** A Slow untangle animation is revealing pieces one at a time; the net is locked while it runs. */
+let slowUntangling = false;
 /** A net edit arrived while a run was going: run again on the new net once this one stops. */
 let rerunPending = false;
 let debugMode = false;
@@ -144,8 +150,20 @@ function setInflaterStatus(text: string, kind: StatusKind = "info") {
   inflaterStatusEl.className = `status ${kind}`;
 }
 
+/** Live count of where the net's join curves cross each other, always shown under the 2D view. Counted
+ * over only what's currently drawn (see Builder.isRevealed) -- mid Slow untangle, a piece not yet placed
+ * is still sitting at its old position, and counting it in would show crossings for joins no one can see. */
+function updateCrossingCount() {
+  const shapes = builder.shapes.filter((s) => builder.isRevealed(s.id));
+  const connections = builder.connections.filter((c) => builder.isRevealed(c.aShape) && builder.isRevealed(c.bShape));
+  const n = countConnectionCrossings(shapes, connections);
+  crossingCountEl.textContent = n === 1 ? "1 crossing" : `${n} crossings`;
+  crossingCountEl.className = n === 0 ? "zero" : "nonzero";
+}
+
 function hintText(): string {
   if (running) return "The net is locked while it inflates.";
+  if (slowUntangleStep) return "Press Space to place the next piece.";
   if (builder.armedN !== null) return "Click the drawing area to place the shape.";
   return "Drag shapes to move them. Drag from an edge handle to another, then release, to join them.";
 }
@@ -171,21 +189,25 @@ function refresh() {
     seenKey = key;
     netChanged(key);
   }
-  const editable = !running;
+  const editable = !running && !slowUntangling;
   undoItem.disabled = undoBtn.disabled = !editable || !builder.canUndo;
   redoItem.disabled = redoBtn.disabled = !editable || !builder.canRedo;
   loadItem.disabled = !editable;
   newItem.disabled = !editable;
   load3dItem.disabled = !editable;
   save3dItem.disabled = !editable || builder.shapes.length === 0;
-  canvasEl.style.pointerEvents = editable ? "" : "none";
+  // The 2D canvas stays interactive even when locked: panning and zooming are still allowed (see
+  // BuilderCanvas.locked), only edit gestures are refused.
+  canvas.locked = !editable;
   for (const button of paletteEl.querySelectorAll<HTMLButtonElement>("button")) {
     button.disabled = !editable;
     button.classList.toggle("armed", Number(button.dataset.n) === builder.armedN);
   }
   inflateBtn.disabled = !running && activeNet().shapes.length === 0;
-  builderStatusEl.textContent = hintText();
-  builderStatusEl.style.color = "var(--info)";
+  untangleBtn.disabled = slowUntangleBtn.disabled = !editable || builder.shapes.length < 2;
+  builderHintEl.textContent = hintText();
+  builderHintEl.style.color = "var(--info)";
+  updateCrossingCount();
   if (builder.selected.size) canvas.selectedEdge = null;
   refreshColorMenu();
   canvas.redraw();
@@ -372,6 +394,41 @@ redoItem.addEventListener("click", () => {
   builder.redoStep();
   refresh();
 });
+untangleBtn.addEventListener("click", () => {
+  builder.untangle();
+  refresh();
+});
+
+/** A Slow untangle in progress: the order it's revealing, and how many pieces are down so far. */
+let slowUntangleStep: { order: number[]; placed: number } | null = null;
+
+slowUntangleBtn.addEventListener("click", () => {
+  const order = builder.beginSlowUntangle();
+  if (!order) return;
+  slowUntangling = true;
+  builder.applyUntangleStep(0);
+  if (order.length > 1) {
+    slowUntangleStep = { order, placed: 1 };
+  } else {
+    builder.finishSlowUntangle();
+    slowUntangling = false;
+  }
+  refresh();
+});
+
+/** Space, mid Slow untangle: places the next piece, or finishes up (the crossing-minimising bow-out,
+ * see Builder.finishSlowUntangle) once the last one is down. */
+function advanceSlowUntangle() {
+  if (!slowUntangleStep) return;
+  builder.applyUntangleStep(slowUntangleStep.placed);
+  slowUntangleStep.placed++;
+  if (slowUntangleStep.placed >= slowUntangleStep.order.length) {
+    builder.finishSlowUntangle();
+    slowUntangleStep = null;
+    slowUntangling = false;
+  }
+  refresh();
+}
 
 const netFileInput = $<HTMLInputElement>("net-file");
 loadItem.addEventListener("click", () => netFileInput.click());
@@ -483,9 +540,14 @@ window.addEventListener("keydown", (e) => {
   if (rejectDialog.open) return;
   // Typing in the Setup fields must not delete shapes or switch colours.
   if (e.target instanceof HTMLInputElement) return;
+  if (e.key === " " && slowUntangleStep) {
+    e.preventDefault(); // space otherwise scrolls the page, or re-clicks a focused button
+    advanceSlowUntangle();
+    return;
+  }
   const key = e.key.toLowerCase();
   if (e.ctrlKey || e.metaKey) {
-    if (running) return;
+    if (running || slowUntangling) return;
     if (key === "z") {
       builder.undoStep();
       refresh();
@@ -513,7 +575,7 @@ window.addEventListener("keydown", (e) => {
   } else if (key === "r") {
     randomize();
   } else if (key === "delete" || key === "backspace") {
-    if (running) return;
+    if (running || slowUntangling) return;
     builder.deleteSelected();
     refresh();
   }
