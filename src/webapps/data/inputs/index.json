@@ -1,0 +1,23 @@
+[
+  { "label": "Cannoli Open", "file": "cannoli_open.poly" },
+  { "label": "Cannoli Open Tri", "file": "cannoli_open_tri.poly" },
+  { "label": "Cannoli Semiclosed", "file": "cannoli_semiclosed.poly" },
+  { "label": "Cannoli Semiclosed Tri", "file": "cannoli_semiclosed_tri.poly" },
+  { "label": "Cone", "file": "cone.poly" },
+  { "label": "Cube", "file": "cube.poly" },
+  { "label": "Dodecahedron", "file": "dodecahedron.poly" },
+  { "label": "Giraffe", "file": "giraffe.poly" },
+  { "label": "Goose", "file": "goose.poly" },
+  { "label": "Hippo", "file": "hippo.poly" },
+  { "label": "Hoodie", "file": "hoodie.poly" },
+  { "label": "Horse", "file": "horse.poly" },
+  { "label": "Icosahedron", "file": "icosahedron.poly" },
+  { "label": "Octahedron", "file": "octahedron.poly" },
+  { "label": "Ravioli", "file": "ravioli.poly" },
+  { "label": "Samosa", "file": "samosa.poly" },
+  { "label": "Spider Leg", "file": "spider_leg.poly" },
+  { "label": "Spider Leg Tri", "file": "spider_leg_tri.poly" },
+  { "label": "Tetrahedron", "file": "tetrahedron.poly" },
+  { "label": "Tube", "file": "tube.poly" },
+  { "label": "Turtle", "file": "turtle.poly" }
+]
